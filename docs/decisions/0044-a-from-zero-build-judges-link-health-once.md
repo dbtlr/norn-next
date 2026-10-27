@@ -79,11 +79,12 @@ link's health by:
   a link to it is missing. The predicate tests `body IS NULL` by one primary-key seek per
   judged link and target pair, never a count of zero headings and blocks, which a readable
   document can hold too;
-- a path-addressed link whose spelled path lies beneath a directory marked unreadable
-  ([ADR 0046](0046-one-unreadable-path-never-breaks-the-vault.md)) is not judged, because its
-  target is unknown rather than absent, and the directory's finding states why. A
-  suffix-addressed link cannot be tied to one directory, so it is judged over the names the
-  store holds, and the directory's finding marks the gap those names may have.
+- a path-addressed link beneath a directory marked unreadable
+  ([ADR 0046](0046-one-unreadable-path-never-breaks-the-vault.md)) that resolves to no held
+  name is not judged: its target is unknown rather than absent. A link resolving to a held
+  name resolves as any link to that name does. Its anchor is unjudged where the names-only
+  row holds no body. A suffix-addressed link cannot be tied to one directory, so it is judged
+  over the names the store holds, and the directory's finding marks the gap those names may have.
 
 An embed is a link and carries the same kinds. Every link-health finding has warning
 severity.
@@ -247,8 +248,9 @@ same tree, finding order included, so incremental equals rebuild holds for every
 reader can adopt, apart from the accepted delay in refreshing a still-broken document's
 cause (ADR 0046). Every broken document has the same names-only state in a maintained
 store and a build from zero, with an unreadable-document finding. The exception ADR 0046 carves is beneath an
-unlistable directory: a maintained store keeps the facts it held beneath it, where a
-build from zero holds none. The directory's finding marks that gap until it lists again.
+unlistable directory: a maintained store keeps only names, ids and keys beneath it, where a
+build from zero holds none. Byte-derived facts and content-side findings are cleared in the
+transaction filing the directory's finding. That finding marks the gap until it lists again.
 
 **The four obligations hold for the pass as a from-zero build has them.** Atomicity protects
 a reader from a tear between a row and the findings judged over it. A from-zero build admits

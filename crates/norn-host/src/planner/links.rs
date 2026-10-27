@@ -1382,7 +1382,8 @@ impl<'a> Named<'a> {
         match &change.before {
             Resolves::One { path } => Named::One(path),
             Resolves::None {}
-                if LinkHealth::of_address(change.address, 0) == LinkHealth::Broken =>
+                if LinkHealth::of_address(change.address, 0, norn_wire::TargetGap::None)
+                    == LinkHealth::Broken =>
             {
                 Named::Broken(&change.before_targets)
             }
@@ -1715,7 +1716,7 @@ impl Judged {
                 Resolves::One { .. } => 1,
                 Resolves::Several {} => 2,
             };
-            LinkHealth::of_address(self.address, targets)
+            LinkHealth::of_address(self.address, targets, norn_wire::TargetGap::None)
         };
         match (health(&self.before), health(&self.after)) {
             (LinkHealth::Healthy | LinkHealth::Ambiguous, LinkHealth::Broken) => {

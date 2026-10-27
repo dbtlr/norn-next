@@ -20,13 +20,14 @@
 //! ([`DocumentPath::suffix_spellings`]) whose class holds that candidate
 //! alone. One statement answers it for every candidate a read names, each
 //! range of each spelling's class stopping at its second document; a candidate
-//! no suffix names alone is named by its path. So what a read of targets runs
-//! is a fixed number of statements, however many links or candidates it names.
+//! no suffix names alone is named by its path. Naming targets runs a fixed
+//! number of statements, however many links or candidates it names. With marks
+//! present, zero-target path links additionally probe their ancestors.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use norn_db::rusqlite::types::Value;
-use norn_wire::{Anchor, Candidate, CandidateHead, LinkRow};
+use norn_wire::{Anchor, Candidate, CandidateHead, LinkAddress, LinkRow, TargetGap};
 
 use super::Ran;
 use crate::error::{self, StoreError};
@@ -154,10 +155,13 @@ impl Snapshot {
     /// What they name is read in two statements, whatever their number: what
     /// every link names ([`FindStatement::LinkTargets`]), and the candidates'
     /// suffixes ([`FindStatement::CandidateSuffixes`]), which no link naming
-    /// no document runs. A heading or block anchor is carried as written and
+    /// no document runs. With directory marks present, a zero-target path
+    /// link additionally probes its ancestors before choosing its health.
+    /// A heading or block anchor is carried as written and
     /// not checked: the row's health is about which document the link names.
     /// The candidate rows what every link names was read as are added to
-    /// `candidates_read`.
+    /// `candidates_read`. Only zero-target path forms probe directory ancestors,
+    /// and only while the snapshot's establishing read found a mark.
     pub(crate) fn link_rows(
         &self,
         links: Vec<(i64, LinkFact)>,
@@ -175,7 +179,32 @@ impl Snapshot {
         links
             .into_iter()
             .zip(targets)
-            .map(|((_, link), targets)| {
+            .map(|((id, link), targets)| {
+                let path_form = matches!(
+                    LinkAddress::of(link.family.wire(), link.protocol.as_deref(), &link.target),
+                    LinkAddress::Rooted(_) | LinkAddress::Relative(_) | LinkAddress::RootedName(_)
+                );
+                let gap = if self.directory_marks_present && targets.total() == 0 && path_form {
+                    let marked = self
+                        .run_statement(
+                            record,
+                            Ran::new(
+                                crate::ResolutionStatement::DirectoryMarks,
+                                crate::health::statement::stored_directory_probe(id),
+                            ),
+                            |row| row.get::<_, bool>(0),
+                        )
+                        .map_err(|problem| {
+                            error::sql("probing directory marks for a link row", problem)
+                        })?;
+                    if marked.first() == Some(&true) {
+                        TargetGap::Marked
+                    } else {
+                        TargetGap::None
+                    }
+                } else {
+                    TargetGap::None
+                };
                 let anchor = link.anchor.map(|anchor| match anchor {
                     LinkAnchor::Heading { written, .. } => Anchor::heading(written),
                     LinkAnchor::Block { id } => Anchor::block(id),
@@ -190,6 +219,7 @@ impl Snapshot {
                     link.span.map(wire_span),
                     targets,
                 )
+                .map(|row| row.with_target_gap(gap))
                 .map_err(|problem| StoreError::Damaged {
                     what: format!("a link addressed elsewhere named a document: {problem}"),
                 })

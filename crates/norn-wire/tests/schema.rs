@@ -793,7 +793,8 @@ fn a_finding_kind_advertises_its_flat_namespaced_string() {
             "field/too-long",
             "field/type-mismatch",
             "field/shape-mismatch",
-            "field/rules-conflict"
+            "field/rules-conflict",
+            "directory/unreadable"
         ])
     );
     // The derived schema enumerates the enum itself, so holding ALL equal to

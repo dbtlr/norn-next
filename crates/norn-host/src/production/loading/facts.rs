@@ -16,14 +16,7 @@ pub(in crate::production) fn load_fact(
 ) -> Result<Option<String>, JobFailure> {
     match fact {
         norn_fs::WalkFact::Unreadable(unreadable) => {
-            if unreadable.kind_unknown() {
-                pending.withhold_entry(unreadable.path().as_path());
-            }
-            pending.unreadable(
-                unreadable.path().as_path(),
-                unreadable.operation(),
-                unreadable.cause(),
-            )?;
+            pending.unreadable_fact(&unreadable, None)?;
         }
         norn_fs::WalkFact::Skipped(skip) => {
             if files {
@@ -52,6 +45,10 @@ pub(in crate::production) fn load_fact(
                 norn_fs::Opened::Read(read) => read,
                 norn_fs::Opened::Nothing => {
                     pending.withhold_entry(&path);
+                    return Ok(None);
+                }
+                norn_fs::Opened::UnreadableFolder { folder, cause, .. } => {
+                    pending.unlistable(&folder, &cause)?;
                     return Ok(None);
                 }
                 norn_fs::Opened::Unreadable { operation, cause } => {

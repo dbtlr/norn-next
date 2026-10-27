@@ -26,6 +26,12 @@
 //! [`Stage::Page`] stands between a listing and a listed name's stat.
 //! [`Stage::Open`] stands at a document's contained final-component open;
 //! strict control-file readers leave this stage unarmed.
+//! [`Stage::List`] supplies a directory open failure (`denied`, `exhausted`)
+//! or a stream failure after a dirent (`failing`). The first non-root directory
+//! spends the arm unless `NORN_FS_WALK_LIST_AT` selects an exact vault-relative
+//! directory; an empty selector reaches root listing failures, which remain
+//! environmental. Contained file opens and scoped descent spend it at the
+//! selected folder component because they hold no directory stream.
 //!
 //! - [`Answer::Vanishes`] supplies `ENOENT`, so the name reaches no file.
 //! - [`Answer::Replaced`] supplies a changed kind at a page, or `ENXIO` at an
@@ -58,16 +64,19 @@
 //!
 //! One stage of widening is taken and no more: under the `induced-failure`
 //! feature, a walk arms itself from this process's environment rather than
-//! carrying an empty arm. Two variables carry it, both read once per process:
+//! carrying an empty arm. These settings are read once per process:
 //!
 //! - `NORN_FS_WALK_ARMED_STAGES` — the arm, as comma-separated `stage=answer`
-//!   pairs, spelled `page` or `open` and `vanishes`, `replaced`, `denied`,
+//!   pairs, spelled `page`, `open` or `list` and `vanishes`, `replaced`, `denied`,
 //!   `failing` or `exhausted`. A pair this
 //!   module cannot read — an unknown name, or one stage armed twice — is a
 //!   mistake in the harness rather than a stage nothing is armed at, so it
-//!   panics. An arm spelled through the environment stands over a regular file:
-//!   the other reach is a shape this crate's own suite reads a page off, not one
-//!   a host case states.
+//!   panics.
+//! - `NORN_FS_WALK_REACH` — `file` (the default) or `directory`, selecting the
+//!   listed entry class a `page` arm waits for. A denied paging stat still
+//!   answers unknown kind: the listing's hint cannot prove what stands there
+//!   when the stat fails. The directory reach lets host cases construct a
+//!   stat-denied non-document name without relying on account permissions.
 //! - `NORN_FS_ARM_HITS` — the record file the other two seams write, and the
 //!   same one here. A fired arm appends `seam=norn-fs/walk stage=<stage>
 //!   answer=<name>` to it before it answers, so a harness reads which window the
@@ -256,7 +265,7 @@ pub(crate) const ARMED_STAGES: &str = "NORN_FS_WALK_ARMED_STAGES";
 #[cfg(any(test, feature = "induced-failure"))]
 const SEAM: &str = "norn-fs/walk";
 
-/// A stat or contained document open whose observation can be supplied by a test.
+/// A filesystem observation whose result can be supplied by a test.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Stage {
     /// Between the listing that names a directory's entries and the stat of one
@@ -264,6 +273,8 @@ pub(crate) enum Stage {
     Page,
     /// Before the contained open of a document's final name.
     Open,
+    /// Opening or listing a directory.
+    List,
 }
 
 // The stage vocabulary — the roster and the names — is what a harness arms and
@@ -274,7 +285,7 @@ pub(crate) enum Stage {
 impl Stage {
     /// Every stage the walk holds.
     #[cfg(any(test, feature = "induced-failure"))]
-    pub(crate) const ALL: [Stage; 2] = [Stage::Page, Stage::Open];
+    pub(crate) const ALL: [Stage; 3] = [Stage::Page, Stage::Open, Stage::List];
 
     /// The name a harness arms this stage under, which is also the name a
     /// record of it carries.
@@ -283,6 +294,7 @@ impl Stage {
         match self {
             Stage::Page => "page",
             Stage::Open => "open",
+            Stage::List => "list",
         }
     }
 
@@ -359,14 +371,12 @@ impl Answer {
 /// A directory that leaves one is a root the walk never enters: nothing under it
 /// is read, so what is stored beneath it converges while the findings there stay
 /// withheld.
-// The reach a harness spells is the file one, so the other is constructed by
-// this crate's own cases alone. Both belong to the seam even so: the class an
-// arm stands over is what a case is stated about, and a build carrying one of
-// them would answer a different question.
+// A reach selects the listing hint the arm waits for, not evidence the failed
+// stat established. A denied directory name therefore still answers Unknown.
 #[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum Reach {
-    /// A regular file. What an arm spelled through the environment stands over.
+    /// A regular file, the default for an arm spelled through the environment.
     #[default]
     File,
     /// A directory, and with it the subtree the walk would have entered.
@@ -416,6 +426,8 @@ pub(crate) struct WalkFaults {
     armed: &'static [(Stage, Answer)],
     /// The class of entry the arm stands over.
     reach: Reach,
+    /// An exact vault-relative directory, including the empty spelling for the root.
+    list_at: Option<std::path::PathBuf>,
     /// The file a fired arm records itself in, where anything named one.
     #[cfg(any(test, feature = "induced-failure"))]
     hits: Option<std::path::PathBuf>,
@@ -474,6 +486,59 @@ impl WalkFaults {
         })
     }
 
+    /// Supplies a directory failure once. Device failure is delivered while
+    /// listing, so tests reach a stream failure as well as a failed open.
+    pub(crate) fn listing(&self, relative: &std::path::Path, reading: bool) -> Option<Errno> {
+        let answer = self.answer(Stage::List)?;
+        if self
+            .list_at
+            .as_deref()
+            .map_or(relative.as_os_str().is_empty(), |at| at != relative)
+            || reading != (answer == Answer::Failing)
+        {
+            return None;
+        }
+        if self
+            .spent
+            .as_ref()
+            .is_none_or(|spent| spent.swap(true, Ordering::AcqRel))
+        {
+            return None;
+        }
+        #[cfg(any(test, feature = "induced-failure"))]
+        crate::faults::record_or_abort(
+            self.hits.as_deref(),
+            SEAM,
+            Stage::List.name(),
+            answer.name(),
+        );
+        Some(match answer {
+            Answer::Denied => Errno::ACCESS,
+            Answer::Failing => Errno::IO,
+            Answer::Exhausted => Errno::MFILE,
+            Answer::Vanishes => Errno::NOENT,
+            Answer::Replaced => Errno::NOTDIR,
+        })
+    }
+
+    /// Avoid building a folder prefix on an unarmed document-read path.
+    pub(crate) fn opening_folder(&self, names: &[&std::ffi::OsStr]) -> Option<Errno> {
+        self.answer(Stage::List)?;
+        let folder: std::path::PathBuf = names.iter().collect();
+        self.listing(&folder, false)
+            .or_else(|| self.listing(&folder, true))
+    }
+
+    /// Only an exact selector makes a link operation stand in for a directory
+    /// operation; an ordinary list arm still waits for a directory.
+    pub(crate) fn inspecting_link(&self, relative: &std::path::Path) -> Option<Errno> {
+        if self.list_at.as_deref() != Some(relative) {
+            return None;
+        }
+        self.listing(relative, false)
+            .or_else(|| self.listing(relative, true))
+    }
+
     /// A walk that answers each named stage the named way, recording nothing.
     ///
     /// An arm spelled in code is held to the same reading as one spelled through
@@ -490,6 +555,15 @@ impl WalkFaults {
             armed,
             spent: Some(Arc::default()),
             ..WalkFaults::default()
+        }
+    }
+
+    /// Select an exact directory so root and later-directory failures are deterministic.
+    #[cfg(test)]
+    pub(crate) fn at_directory(self, relative: &std::path::Path) -> WalkFaults {
+        WalkFaults {
+            list_at: Some(relative.to_owned()),
+            ..self
         }
     }
 
@@ -531,9 +605,10 @@ impl WalkFaults {
             }
             WalkFaults {
                 armed: stages,
+                reach: armed::reach(),
+                list_at: armed::list_at().cloned(),
                 hits: crate::faults::armed_hits().cloned(),
                 spent: Some(armed::spent()),
-                ..WalkFaults::default()
             }
         }
         #[cfg(not(feature = "induced-failure"))]
@@ -610,7 +685,7 @@ impl WalkFaults {
 
 /// The arm this process was started under.
 ///
-/// Both readings happen once and are then held: a heal-scale walk asks the seam
+/// Settings are read once and then held: a heal-scale walk asks the seam
 /// once per entry, so re-reading the environment there would make the feature's
 /// cost a function of how many documents the vault holds.
 #[cfg(feature = "induced-failure")]
@@ -619,7 +694,7 @@ mod armed {
     use std::sync::OnceLock;
     use std::sync::atomic::AtomicBool;
 
-    use super::{ARMED_STAGES, Answer, Stage};
+    use super::{ARMED_STAGES, Answer, Reach, Stage};
 
     /// The stages this process is armed at, in the order they were named.
     pub(super) fn stages() -> &'static [(Stage, Answer)] {
@@ -632,6 +707,24 @@ mod armed {
                     .unwrap_or_else(|| panic!("{ARMED_STAGES} is not UTF-8")),
             ),
         })
+    }
+
+    /// Page arms default to files; a directory reach retains unknown-kind evidence.
+    pub(super) fn reach() -> Reach {
+        static REACH: OnceLock<Reach> = OnceLock::new();
+        *REACH.get_or_init(|| match std::env::var("NORN_FS_WALK_REACH") {
+            Err(std::env::VarError::NotPresent) => Reach::File,
+            Ok(name) if name == "file" => Reach::File,
+            Ok(name) if name == "directory" => Reach::Directory,
+            _ => panic!("NORN_FS_WALK_REACH must be file or directory"),
+        })
+    }
+
+    /// Optional exact directory for the list stage. An empty value selects the root.
+    pub(super) fn list_at() -> Option<&'static std::path::PathBuf> {
+        static AT: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
+        AT.get_or_init(|| std::env::var_os("NORN_FS_WALK_LIST_AT").map(std::path::PathBuf::from))
+            .as_ref()
     }
 
     /// The one firing this process has, held across every walk it runs.

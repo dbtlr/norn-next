@@ -263,7 +263,7 @@
 //! range, and the path key `glossary/x.md` sorts inside the range the class
 //! `glossary/` opens, so a single membership table would let a class discard
 //! take a finding no member of its class can change. `finding_paths` is
-//! reached by equality alone, and a path key never ends in the separator, so
+//! reached by exact paths or directory ranges, and a path key never ends in the separator, so
 //! no path key is a class key either.
 //!
 //! The path-keyed findings are the link-health findings about a
@@ -284,6 +284,18 @@
 //! Every key that is present is a validated [`crate::ClassKey`]: a class key that
 //! is not separator-terminated names a range no probe opens, so the finding would
 //! be at rest and permanently invisible to the maintenance that owns it.
+//!
+//! # Directory marks are indexed by their subject's comparison key
+//!
+//! `directory_marks` holds one key beside each `directory/unreadable` finding.
+//! An unresolved path link probes its directory ancestors by equality; ending
+//! the finding cascades its mark away in the same transaction. Mark changes
+//! re-decide the path-link range `[key/, key0)` through `finding_paths` and
+//! the path-only link index.
+//!
+//! Content withdrawal also reaches rowless quarantines through the subject's
+//! filesystem-ordered range. The partial content-path index supports its folded
+//! arm while excluding spelling findings that the withdrawal must preserve.
 //!
 //! # Findings outlive their subject, and the class owns their lifecycle
 //!
@@ -414,6 +426,9 @@ fn findings() -> String {
 }
 
 const STATEMENTS: &[&str] = &[
+    // The mark-maintenance range must never step over suffix keys. Facts are
+    // created before findings, so this index can accompany its consuming mark.
+    "CREATE INDEX link_keys_path_key ON link_keys(key, document, link) WHERE segments IS NULL",
     "CREATE INDEX findings_fingerprint_kind_severity_nocase ON findings(
     vault_schema_fingerprint, kind, severity, path COLLATE NOCASE, path, position
 )",
@@ -436,7 +451,14 @@ const STATEMENTS: &[&str] = &[
     path_key TEXT    NOT NULL,
     PRIMARY KEY (finding, path_key)
 ) WITHOUT ROWID",
+    "CREATE INDEX findings_content_path_nocase ON findings(path COLLATE NOCASE)
+    WHERE kind NOT IN ('document/path-bytes-not-utf8', 'document/path-names-no-document')",
     "CREATE INDEX finding_paths_path_key ON finding_paths(path_key)",
+    "CREATE TABLE directory_marks (
+    finding INTEGER PRIMARY KEY REFERENCES findings(id) ON DELETE CASCADE,
+    path_key TEXT NOT NULL
+)",
+    "CREATE INDEX directory_marks_path_key ON directory_marks(path_key)",
     "CREATE TABLE finding_rules (
     finding                  INTEGER NOT NULL REFERENCES findings(id) ON DELETE CASCADE,
     rule                     TEXT    NOT NULL,

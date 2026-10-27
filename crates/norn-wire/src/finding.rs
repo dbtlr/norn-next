@@ -133,6 +133,10 @@ impl TryFrom<&str> for Severity {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[non_exhaustive]
 pub enum FindingKind {
+    /// `directory/unreadable` — the directory could not be listed. Names
+    /// beneath it remain resolvable, with their content unknown.
+    #[serde(rename = "directory/unreadable")]
+    UnreadableDirectory,
     /// `document/path-bytes-not-utf8` — the path's bytes are not UTF-8, so the
     /// document has no name derived state can hold.
     #[serde(rename = "document/path-bytes-not-utf8")]
@@ -294,7 +298,7 @@ impl FindingKind {
     /// Reading a kind back and enumerating the registry both walk this list,
     /// so a variant absent here is unreadable and unadvertisable — the schema
     /// suite holds this list equal to the enum itself.
-    pub const ALL: [FindingKind; 21] = [
+    pub const ALL: [FindingKind; 22] = [
         FindingKind::PathBytesNotUtf8,
         FindingKind::PathNamesNoDocument,
         FindingKind::BodyBytesNotUtf8,
@@ -316,6 +320,7 @@ impl FindingKind {
         FindingKind::TypeMismatch,
         FindingKind::ShapeMismatch,
         FindingKind::FieldRulesConflict,
+        FindingKind::UnreadableDirectory,
     ];
 
     /// The kind as the string it is on the wire.
@@ -325,6 +330,7 @@ impl FindingKind {
             FindingKind::PathNamesNoDocument => "document/path-names-no-document",
             FindingKind::BodyBytesNotUtf8 => "document/body-bytes-not-utf8",
             FindingKind::UnreadableDocument => "document/unreadable",
+            FindingKind::UnreadableDirectory => "directory/unreadable",
             FindingKind::FrontmatterTooLarge => "document/frontmatter-too-large",
             FindingKind::FrontmatterUnclosed => "document/frontmatter-unclosed",
             FindingKind::FrontmatterUnreadable => "document/frontmatter-unreadable",
@@ -361,6 +367,7 @@ impl FindingKind {
             | FindingKind::PathNamesNoDocument
             | FindingKind::BodyBytesNotUtf8
             | FindingKind::UnreadableDocument
+            | FindingKind::UnreadableDirectory
             | FindingKind::FrontmatterTooLarge
             | FindingKind::FrontmatterUnclosed
             | FindingKind::FrontmatterUnreadable => Severity::Error,
@@ -400,7 +407,8 @@ impl FindingKind {
             // no text to read facts out of.
             FindingKind::PathBytesNotUtf8
             | FindingKind::PathNamesNoDocument
-            | FindingKind::BodyBytesNotUtf8 => FindingScope::Place,
+            | FindingKind::BodyBytesNotUtf8
+            | FindingKind::UnreadableDirectory => FindingScope::Place,
             // The document is derived and its frontmatter block was read by
             // nothing, so the finding stands beside the row it is about.
             FindingKind::FrontmatterTooLarge

@@ -550,3 +550,450 @@ fn a_rolling_revisit_marks_a_document_broken_that_turned_unreadable_since_healin
     assert_eq!(broken[0].kind, "document/unreadable");
     ops.detach(&name, attachment);
 }
+
+#[cfg(unix)]
+#[test]
+fn an_unlistable_directory_is_withheld_and_marked_in_a_full_heal() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let f = Fixture::watcherless("directory-full-heal");
+    let root = f.vault();
+    fs::create_dir(root.join("locked")).unwrap();
+    fs::write(
+        root.join("locked/inside.md"),
+        "# Heading\n\n[[gone]] #tag\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("kept.md"),
+        "[path](/locked/gone.md) [[locked/gone.md]] [[inside]]\n",
+    )
+    .unwrap();
+    let mut store = Store::open(
+        f.root.join("directory.sqlite3"),
+        proven_order(&f),
+        crate::DERIVATION_VERSION,
+    )
+    .unwrap();
+    heal_from_zero(&mut store, &root, &[]).unwrap();
+    let locked = root.join("locked");
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    if fs::read_dir(&locked).is_ok() {
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        eprintln!("skipped: this account reads mode-000 directories; Stage::List carries denial");
+        return;
+    }
+    let progress = ProgressReporter::disconnected();
+    let healed = heal_documents(
+        &mut store,
+        &root,
+        &[],
+        ProductionPolicy::new(8, 2).unwrap(),
+        &progress.healing(),
+    );
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+    healed.expect("one unlistable directory does not refuse the heal");
+    let facts = store
+        .begin_request()
+        .stored_facts(&DocumentPath::new("locked/inside.md").unwrap())
+        .unwrap()
+        .expect("the name stands");
+    assert!(facts.document.content_hash.is_none() && facts.body.is_none());
+    assert!(facts.links.is_empty() && facts.headings.is_empty() && facts.tags.is_empty());
+    assert!(findings_at(&mut store, "locked/inside.md").is_empty());
+    let findings = findings_at(&mut store, "locked");
+    assert_eq!(findings.len(), 1);
+    assert_eq!(findings[0].kind, "directory/unreadable");
+    assert_eq!(findings[0].severity, "error");
+    assert!(
+        findings[0]
+            .detail
+            .as_deref()
+            .unwrap()
+            .contains("Permission denied")
+    );
+    assert!(
+        store
+            .begin_request()
+            .stored_tombstone(&DocumentPath::new("locked/inside.md").unwrap())
+            .unwrap()
+            .is_none()
+    );
+    let broken = findings_at(&mut store, "kept.md");
+    assert_eq!(
+        broken.len(),
+        1,
+        "only the suffix link remains broken: {broken:?}"
+    );
+    assert_eq!(broken[0].target.as_deref(), Some("locked/gone.md"));
+}
+
+#[test]
+fn a_still_unlistable_directory_writes_nothing() {
+    let f = Fixture::watcherless("still-unlistable");
+    let mut store = Store::open(
+        f.root.join("directory.sqlite3"),
+        proven_order(&f),
+        crate::DERIVATION_VERSION,
+    )
+    .unwrap();
+    let root = f.vault();
+    let mut account = Account::default();
+    let mut pending = Pending::new(&mut store, 8, &root, &[], &mut account).unwrap();
+    pending
+        .unlistable(Path::new("locked"), &std::io::Error::from_raw_os_error(13))
+        .unwrap();
+    pending.flush().unwrap();
+    let generation = pending.store.begin_request().write_generation().unwrap();
+    let counters = pending.counters.clone();
+    let findings = findings_at(pending.store, "locked");
+    assert_eq!(findings.len(), 1);
+    pending
+        .unlistable(Path::new("locked"), &std::io::Error::from_raw_os_error(5))
+        .unwrap();
+    assert!(pending.changes.is_empty() && pending.queued.is_empty());
+    pending.flush().unwrap();
+    assert_eq!(
+        pending.store.begin_request().write_generation().unwrap(),
+        generation
+    );
+    assert_eq!(pending.counters, counters);
+    assert_eq!(findings_at(pending.store, "locked"), findings);
+}
+
+fn directory_under_the_list_arm(test: &str, scope: &str) {
+    const ROOT: &str = "NORN_464_DIRECTORY_ROOT";
+    const DATABASE: &str = "NORN_464_DIRECTORY_DATABASE";
+    if let Some(root) = std::env::var_os(ROOT) {
+        let root = PathBuf::from(root);
+        let order = stored_path_order(norn_fs::Vault::open(&root, &[]).unwrap().case_sensitivity());
+        let mut store = Store::open(
+            PathBuf::from(std::env::var_os(DATABASE).unwrap()),
+            order,
+            crate::DERIVATION_VERSION,
+        )
+        .unwrap();
+        let progress = ProgressReporter::disconnected();
+        let policy = ProductionPolicy::new(8, 2).unwrap();
+        match scope {
+            "dirty" => scoped_increment(
+                &mut store,
+                &root,
+                &dirty_path(&root, "locked/inside.md"),
+                policy,
+                &progress.healing(),
+                &[],
+            )
+            .unwrap(),
+            "subtree" | "recovery" => scoped_increment(
+                &mut store,
+                &root,
+                &dirty_path(&root, "locked"),
+                policy,
+                &progress.healing(),
+                &[],
+            )
+            .unwrap(),
+            "applier" => {
+                commit_plan_changeset(
+                    &mut store,
+                    &root,
+                    &[],
+                    &[PlanEffect {
+                        path: DocumentPath::new("locked/inside.md").unwrap(),
+                        holds: Some(norn_fs::ContentHash::of(b"# Heading\n\n[[absent]] #tag\n")),
+                    }],
+                    IncrementProvenance::Composed,
+                )
+                .unwrap();
+            }
+            "fact" => {
+                let source = norn_fs::Vault::open(&root, &[]).unwrap();
+                let fact = source.fact(Path::new("locked/inside.md")).unwrap();
+                let mut account = Account::default();
+                let mut pending = Pending::new(&mut store, 8, &root, &[], &mut account).unwrap();
+                pending
+                    .unreadable_fact(
+                        match &fact {
+                            norn_fs::WalkFact::Unreadable(fact) => fact,
+                            other => panic!("expected unreadable folder: {other:?}"),
+                        },
+                        None,
+                    )
+                    .unwrap();
+                pending.flush().unwrap();
+            }
+            "stat" | "known" => {
+                heal_documents(&mut store, &root, &[], policy, &progress.healing()).unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let directory = if scope == "known" {
+            "locked.md"
+        } else {
+            "locked"
+        };
+        let findings = findings_at(&mut store, directory);
+        assert_eq!(findings.len(), 1, "{scope}: {findings:?}");
+        assert_eq!(findings[0].kind, "directory/unreadable");
+        if scope == "known" {
+            assert!(
+                store
+                    .begin_request()
+                    .stored_document(&DocumentPath::new(directory).unwrap())
+                    .unwrap()
+                    .is_none()
+            );
+        } else {
+            let held = store
+                .begin_request()
+                .stored_facts(&DocumentPath::new("locked/inside.md").unwrap())
+                .unwrap()
+                .expect("the name is held");
+            assert!(held.document.content_hash.is_none() && held.body.is_none());
+            assert!(findings_at(&mut store, "locked/inside.md").is_empty());
+            assert!(
+                store
+                    .begin_request()
+                    .stored_tombstone(&DocumentPath::new("locked/inside.md").unwrap())
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        // The one-shot arm is spent. A scoped listing ends its mark at job end.
+        scoped_increment(
+            &mut store,
+            &root,
+            &dirty_path(&root, directory),
+            policy,
+            &progress.healing(),
+            &[],
+        )
+        .unwrap();
+        assert!(findings_at(&mut store, directory).is_empty());
+        if scope != "known" {
+            assert!(
+                store
+                    .begin_request()
+                    .stored_document(&DocumentPath::new("locked/inside.md").unwrap())
+                    .unwrap()
+                    .unwrap()
+                    .content_hash
+                    .is_some()
+            );
+        }
+        let mut oracle = Store::open(
+            root.parent().unwrap().join("directory-oracle.sqlite3"),
+            order,
+            crate::DERIVATION_VERSION,
+        )
+        .unwrap();
+        heal_from_zero(&mut oracle, &root, &[]).unwrap();
+        norn_testkit::equivalence::StoreProjection::read(&mut store)
+            .unwrap()
+            .assert_equivalent(
+                &norn_testkit::equivalence::StoreProjection::read(&mut oracle).unwrap(),
+                "directory recovery at identical bytes",
+            );
+        return;
+    }
+    let f = Fixture::watcherless(test);
+    let root = f.vault();
+    if scope == "stat" {
+        // The paging arm selects the first directory. This fixture needs no control files.
+        fs::remove_dir_all(root.join(".norn")).unwrap();
+    }
+    if scope == "known" {
+        fs::write(root.join("locked.md"), "formerly a document\n").unwrap();
+    } else {
+        fs::create_dir(root.join("locked")).unwrap();
+        fs::write(
+            root.join("locked/inside.md"),
+            "# Heading\n\n[[absent]] #tag\n",
+        )
+        .unwrap();
+    }
+    fs::write(root.join("kept.md"), "[path](/locked/gone.md)\n").unwrap();
+    let database = f.root.join("directory.sqlite3");
+    let mut store = Store::open(&database, proven_order(&f), crate::DERIVATION_VERSION).unwrap();
+    heal_from_zero(&mut store, &root, &[]).unwrap();
+    drop(store);
+    if scope == "known" {
+        fs::remove_file(root.join("locked.md")).unwrap();
+        fs::create_dir(root.join("locked.md")).unwrap();
+        fs::write(root.join("locked.md/inside.md"), "new child\n").unwrap();
+    }
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            &format!("production::tests::broken_documents::{test}"),
+            "--nocapture",
+        ])
+        .env(ROOT, &root)
+        .env(DATABASE, database)
+        .env(
+            "NORN_FS_WALK_ARMED_STAGES",
+            if scope == "stat" {
+                "page=denied"
+            } else {
+                "list=denied"
+            },
+        )
+        .env("NORN_FS_WALK_REACH", "directory")
+        .env(
+            "NORN_FS_WALK_LIST_AT",
+            if scope == "known" {
+                "locked.md"
+            } else {
+                "locked"
+            },
+        )
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn an_unlistable_directory_is_withheld_and_marked_in_a_scoped_subtree_heal() {
+    directory_under_the_list_arm(
+        "an_unlistable_directory_is_withheld_and_marked_in_a_scoped_subtree_heal",
+        "subtree",
+    );
+}
+
+#[test]
+fn a_dirty_path_under_a_denied_folder_marks_the_folder() {
+    directory_under_the_list_arm(
+        "a_dirty_path_under_a_denied_folder_marks_the_folder",
+        "dirty",
+    );
+}
+
+#[test]
+fn a_stored_only_row_confirmation_marks_its_denied_folder() {
+    directory_under_the_list_arm(
+        "a_stored_only_row_confirmation_marks_its_denied_folder",
+        "fact",
+    );
+}
+
+#[test]
+fn an_appliers_post_write_reread_marks_its_denied_folder() {
+    directory_under_the_list_arm(
+        "an_appliers_post_write_reread_marks_its_denied_folder",
+        "applier",
+    );
+}
+
+#[test]
+fn a_stat_denied_other_name_takes_the_directory_posture() {
+    directory_under_the_list_arm(
+        "a_stat_denied_other_name_takes_the_directory_posture",
+        "stat",
+    );
+}
+
+#[test]
+fn a_relisted_directory_ends_its_mark_at_the_scoped_leg() {
+    directory_under_the_list_arm(
+        "a_relisted_directory_ends_its_mark_at_the_scoped_leg",
+        "recovery",
+    );
+}
+
+#[test]
+fn a_directory_row_at_a_known_directory_name_dies() {
+    directory_under_the_list_arm("a_directory_row_at_a_known_directory_name_dies", "known");
+}
+
+#[test]
+fn an_unlistable_directory_is_withheld_and_marked_at_first_build() {
+    const CHILD: &str = "NORN_464_FIRST_DIRECTORY_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "production::tests::broken_documents::an_unlistable_directory_is_withheld_and_marked_at_first_build", "--nocapture"])
+            .env(CHILD, "1").env("NORN_FS_WALK_ARMED_STAGES", "list=denied")
+            .env("NORN_FS_WALK_LIST_AT", "locked").output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let f = Fixture::new("directory-first-build");
+    fs::create_dir(f.vault().join("locked")).unwrap();
+    fs::write(f.vault().join("locked/inside.md"), "# Held\n").unwrap();
+    fs::write(f.vault().join("kept.md"), "kept\n").unwrap();
+    let (ops, name) = f.ops(8);
+    let progress = ProgressReporter::disconnected();
+    let mut attachment = ops
+        .attach(&f.registration(), &progress)
+        .expect("an unlistable directory does not refuse attach");
+    assert_eq!(ops.evidence.read().rebuilds_run, 0);
+    assert_eq!(
+        findings_at(&mut attachment.store, "locked")[0].kind,
+        "directory/unreadable"
+    );
+    assert_eq!(stored_paths(&mut attachment.store), ["kept.md"]);
+    ops.detach(&name, attachment);
+}
+
+#[cfg(unix)]
+#[test]
+fn marking_a_directory_leaves_its_readable_case_twin_untouched() {
+    const ROOT: &str = "NORN_464_TWIN_ROOT";
+    const DATABASE: &str = "NORN_464_TWIN_DATABASE";
+    if let Some(root) = std::env::var_os(ROOT) {
+        let root = PathBuf::from(root);
+        let order = stored_path_order(norn_fs::Vault::open(&root, &[]).unwrap().case_sensitivity());
+        let mut store = Store::open(PathBuf::from(std::env::var_os(DATABASE).unwrap()), order, crate::DERIVATION_VERSION).unwrap();
+        let sibling = DocumentPath::new("locked/b.md").unwrap();
+        let before = store.begin_request().stored_facts(&sibling).unwrap();
+        let findings = findings_at(&mut store, sibling.as_str());
+        let already_marked = store.begin_request().unreadable_directory_stands(&DocumentPath::new("Locked").unwrap()).unwrap();
+        let generation = store.begin_request().write_generation().unwrap();
+        let progress = ProgressReporter::disconnected();
+        heal_documents(&mut store, &root, &[], ProductionPolicy::new(8, 2).unwrap(), &progress.healing()).unwrap();
+        assert_eq!(store.begin_request().stored_facts(&sibling).unwrap(), before,
+            "the readable sibling's bytes remain known");
+        assert_eq!(findings_at(&mut store, sibling.as_str()), findings);
+        if already_marked {
+            assert_eq!(store.begin_request().write_generation().unwrap(), generation,
+                "the still-denied directory writes nothing");
+        }
+        assert_eq!(findings_at(&mut store, "Locked")[0].kind, "directory/unreadable");
+        assert!(store.begin_request().stored_document(&DocumentPath::new("Locked/inside.md").unwrap()).unwrap().unwrap().content_hash.is_none());
+        return;
+    }
+    let f = Fixture::watcherless("unlistable-case-twin");
+    let root = f.vault();
+    if !norn_testkit::churn::runs_where_the_volume_tells_case_apart(
+        norn_testkit::churn::folding(&root).unwrap(), "unlistable case twins",
+    ) {
+        return;
+    }
+    fs::create_dir(root.join("Locked")).unwrap();
+    fs::create_dir(root.join("locked")).unwrap();
+    fs::write(root.join("Locked/inside.md"), "unread later\n").unwrap();
+    fs::write(root.join("locked/b.md"), "# Heading\n\n#tag [[nowhere]]\n").unwrap();
+    let database = f.root.join("twins.sqlite3");
+    let mut store = Store::open(&database, proven_order(&f), crate::DERIVATION_VERSION).unwrap();
+    heal_from_zero(&mut store, &root, &[]).unwrap();
+    drop(store);
+    // Each enumerating heal gets one directory failure, including under root.
+    for _ in 0..2 {
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "production::tests::broken_documents::marking_a_directory_leaves_its_readable_case_twin_untouched", "--nocapture"])
+            .env(ROOT, &root).env(DATABASE, &database)
+            .env("NORN_FS_WALK_ARMED_STAGES", "list=denied")
+            .env("NORN_FS_WALK_LIST_AT", "Locked").output().unwrap();
+        assert!(child.status.success(), "{}\n{}", String::from_utf8_lossy(&child.stdout), String::from_utf8_lossy(&child.stderr));
+    }
+}

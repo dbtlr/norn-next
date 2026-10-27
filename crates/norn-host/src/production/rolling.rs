@@ -207,14 +207,7 @@ pub(super) fn slice(
                         }
                     }
                     norn_fs::WalkFact::Unreadable(unreadable) => {
-                        if unreadable.kind_unknown() {
-                            pending.withhold_entry(unreadable.path().as_path());
-                        }
-                        pending.unreadable(
-                            unreadable.path().as_path(),
-                            unreadable.operation(),
-                            unreadable.cause(),
-                        )?;
+                        pending.unreadable_fact(&unreadable, None)?;
                     }
                     norn_fs::WalkFact::Skipped(skip) => {
                         pending.passed_over(skip.path().as_path(), skip.reason())

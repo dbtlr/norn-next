@@ -216,6 +216,76 @@ fn an_entry_gone_before_its_stat_is_skipped_but_a_missing_root_is_reported() {
     );
 }
 
+#[test]
+fn a_polled_vault_with_a_denied_subdirectory_stays_live() {
+    let scratch = Scratch::new("norn-fs-polling-denied");
+    let vault = scratch.join("vault");
+    let denied = vault.join("D");
+    let clock = scratch.join("clock");
+    fs::create_dir_all(&denied).unwrap();
+    fs::create_dir(&clock).unwrap();
+    let hidden = denied.join("hidden.md");
+    let readable = vault.join("readable.md");
+    fs::write(&hidden, b"hidden").unwrap();
+    fs::write(&readable, b"before").unwrap();
+    fs::set_permissions(&denied, fs::Permissions::from_mode(0o000)).unwrap();
+    if fs::read_dir(&denied).is_ok() {
+        eprintln!("this account bypasses directory modes; polling denial is unasserted");
+        return;
+    }
+
+    let (tx, events) = mpsc::channel();
+    let mut watcher = PollWatcher::new(
+        tx,
+        Config::default()
+            .with_manual_polling()
+            .with_compare_contents(true),
+    )
+    .unwrap();
+    watcher.watch(&vault, RecursiveMode::Recursive).unwrap();
+    watcher.watch(&clock, RecursiveMode::NonRecursive).unwrap();
+    for number in 0..2 {
+        let reports = tick_reports(&watcher, &events, &clock, number);
+        assert!(reports.iter().all(Result::is_ok), "{reports:?}");
+        assert!(
+            reports
+                .iter()
+                .all(|report| !report.as_ref().unwrap().paths.contains(&hidden))
+        );
+    }
+
+    fs::write(&readable, b"after").unwrap();
+    assert!(tick(&watcher, &events, &clock, 2).contains(&readable));
+
+    let old = fs::metadata(&denied).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        fs::set_permissions(&denied, fs::Permissions::from_mode(0o755)).unwrap();
+        let new = fs::metadata(&denied).unwrap();
+        if (old.ctime(), old.ctime_nsec()) != (new.ctime(), new.ctime_nsec()) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "directory chmod did not move ctime"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let reports = tick_reports(&watcher, &events, &clock, 3);
+    let events: Vec<_> = reports.into_iter().collect::<notify::Result<_>>().unwrap();
+    assert!(
+        events.iter().any(|event| {
+            event.paths.contains(&denied)
+                && matches!(
+                    event.kind,
+                    notify::EventKind::Modify(notify::event::ModifyKind::Metadata(_))
+                )
+        }),
+        "the denied directory's own stat must survive: {events:?}"
+    );
+    assert!(events.iter().any(|event| event.paths.contains(&hidden)));
+}
+
 /// The one stat field a whole-second case changes.
 #[cfg(target_os = "macos")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

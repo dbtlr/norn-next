@@ -84,7 +84,7 @@ use std::time::Instant;
 
 use norn_db::EmittedPlan;
 use norn_db::rusqlite::types::Value;
-use norn_db::rusqlite::{self, Connection, Row, params_from_iter};
+use norn_db::rusqlite::{self, Connection, OptionalExtension, Row, params, params_from_iter};
 use norn_db::{Adoption, Database, OpenOutcome, RebuildReason, meta};
 use norn_wire::{FindingKind, LinkAddressKind, Severity};
 
@@ -535,7 +535,8 @@ impl ConnectionTurn {
             .database
             .as_mut()
             .expect("a turn holds the connection until it establishes or drops");
-        let reading = establish_on(database, &reader, &mut counters, self.deadline)?;
+        let (reading, directory_marks_present) =
+            establish_on(database, &reader, &mut counters, self.deadline)?;
         Ok(Snapshot {
             order: reader.order,
             reader,
@@ -543,6 +544,7 @@ impl ConnectionTurn {
             grant: RefCell::new(self.grant.take()),
             deadline: self.deadline,
             reading,
+            directory_marks_present,
             counters: Cell::new(counters),
         })
     }
@@ -594,7 +596,7 @@ fn establish_on(
     reader: &SnapshotReader,
     counters: &mut SnapshotCounters,
     deadline: Instant,
-) -> Result<StoreReading, StoreError> {
+) -> Result<(StoreReading, bool), StoreError> {
     let check_deadline = || {
         if Instant::now() >= deadline {
             Err(StoreError::Sql {
@@ -615,12 +617,35 @@ fn establish_on(
     counters.count_statement();
     check_deadline()?;
     database.bound_busy_waits_until(deadline)?;
-    let write_generation = last_write_generation(database.connection())?;
+    #[cfg(feature = "induced-failure")]
+    if norn_db::faults::meta_read_is_armed() {
+        // Keep the substrate's existing one-shot refusal at this establishing read.
+        last_write_generation(database.connection())?;
+    }
+    // This is still the one establishing read. The presence bit belongs to
+    // this snapshot, so link rows need no extra statement when no marks stand.
+    let (write_generation, directory_marks_present) = database
+        .connection()
+        .query_row(
+            "SELECT value, EXISTS(SELECT 1 FROM directory_marks WHERE path_key >= '')
+         FROM meta WHERE key = ?1",
+            params![meta::WRITE_GENERATION],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?)),
+        )
+        .optional()
+        .map_err(|error| crate::error::sql("establishing a read snapshot", error))?
+        .ok_or_else(|| StoreError::Damaged {
+            what: "the database records no write generation, so no read can say what it read"
+                .to_string(),
+        })?;
     check_deadline()?;
-    Ok(StoreReading {
-        epoch: reader.epoch.clone(),
-        write_generation,
-    })
+    Ok((
+        StoreReading {
+            epoch: reader.epoch.clone(),
+            write_generation,
+        },
+        directory_marks_present,
+    ))
 }
 
 /// The last write generation committed to the database on `connection`.
@@ -668,6 +693,8 @@ pub struct Snapshot {
     /// the reader at the drop that ends the snapshot.
     database: Option<Database>,
     reading: StoreReading,
+    /// Whether this snapshot holds any unreadable-directory mark.
+    pub(crate) directory_marks_present: bool,
     /// The case behaviour the rows this snapshot reads were derived under, as
     /// the handle it was established on carries it.
     order: StoredPathOrder,

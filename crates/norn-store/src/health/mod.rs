@@ -13,7 +13,9 @@
 //!
 //! - A link addressed elsewhere,
 //!   raise nothing.
-//! - A vault address resolving to no document or vault file is broken, with an empty head.
+//! - A vault address resolving to no document or vault file is broken, with an empty head,
+//!   except a path target beneath an unreadable-directory mark, which is unjudged.
+//!   Suffix links and links resolving to held names keep their ordinary judgment.
 //! - A link resolving to two or more is ambiguous: a head of at most
 //!   [`CANDIDATE_HEAD`] of them in the resolution ladder's order, each named by
 //!   its minimal disambiguating suffix, beside the exact total.
@@ -64,7 +66,7 @@
 //!
 //! The links are selected apart from their judgment ([`LinkSelection`]): by
 //! the documents holding them, by a class their suffix keys fall in, or by
-//! the path key they spell — the three ways the changeset reaches a link.
+//! the path key they spell, or a directory range of path keys.
 //! Each selection is one statement ([`statement::links_sql`]) reading the same
 //! rows, a link and every key it is held under, so a link is judged alike
 //! whichever selection reached it.
@@ -73,6 +75,9 @@
 //! links and their keys, the keys' heads, the filled heads' totals, the
 //! anchors of the links naming one document, and the suffixes of the
 //! candidates the findings carry. A statement with nothing to read is not run.
+//! With directory marks present, zero-target path links also probe their
+//! directory ancestors by indexed equality seeks. Selection carries the
+//! presence gate without an extra statement when no marks stand.
 //!
 //! # The changeset re-decides what it reaches
 //!
@@ -88,6 +93,10 @@
 //! asked about a chunk at a time first ([`statement::occupied_sql`]), so a
 //! mass delete's classes and paths that no link and no finding is held under
 //! cost a share of one statement each, and no walk.
+//! Filing or ending a directory mark discards the findings in its path-key
+//! range and re-judges the path links there in the same transaction. Ranges
+//! use the comparison key and segment boundaries, and the path-only link
+//! index excludes suffix keys that happen to sort inside them.
 //! [`crate::Request::judge_selected_links`] is the door that judges
 //! a selection and files nothing, and the plan seam bars each statement
 //! either runs.
@@ -106,11 +115,11 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use norn_db::rusqlite::types::Value;
 use norn_db::rusqlite::{Connection, Transaction, params_from_iter};
-use norn_wire::{FindingKind, LinkHealth, VAULT_PROTOCOL};
+use norn_wire::{FindingKind, LinkHealth, TargetGap, VAULT_PROTOCOL};
 
 use crate::error::StoreError;
 use crate::facts::{CANDIDATE_HEAD, CandidateFact, FindingFacts, LinkAnchor, LinkFact, StoredLink};
-use crate::path::{ClassKey, DocumentPath, PathKey, SuffixKey};
+use crate::path::{ClassKey, DirectoryPrefix, DocumentPath, PathKey, SuffixKey};
 use crate::read::SuffixSpellings;
 use crate::request::{self, ReadWork, Request, stored_link_row, unreadable};
 use crate::resolve::{self, AmbiguityIgnore};
@@ -139,8 +148,8 @@ const VAULT_SCHEME: &str = "the link resolves through `vault://`, a scheme Obsid
 
 /// Which links a judgment judges.
 ///
-/// The re-decision [ADR 0027] rules into the changeset reaches its links three
-/// ways, and each is a selection here: the links a written document holds, the
+/// The changeset reaches its links by documents, classes, paths or directory
+/// ranges, and each is a selection here: the links a written document holds, the
 /// suffix-addressed links whose keys fall in the class of a changed path, and
 /// the path-addressed links whose key is a changed path. Each is read by an
 /// index seek — [`crate::ExplainedStatement::LinkHealthLinks`],
@@ -166,6 +175,8 @@ pub enum LinkSelection<'a> {
     /// Every link held under exactly this path key: every path-addressed link
     /// spelling this path.
     Path(&'a PathKey),
+    /// Path-addressed links whose comparison keys lie beneath this directory.
+    Beneath(&'a DirectoryPrefix),
 }
 
 /// One key a link is held under, under the comparison key, beside its segment
@@ -177,6 +188,7 @@ type Key = (String, Option<u64>, bool);
 /// One link under judgment: where it is held, its row, and its keys.
 struct Held {
     holder: String,
+    marks_present: bool,
     /// The write generation the holding document was last written at.
     generation: i64,
     id: i64,
@@ -366,7 +378,7 @@ pub(crate) fn judge(
             let (links, _) = read_links(&writer, key, Selected::Documents, values)?;
             findings = judge_links(connection, work, ignore, &links, summaries)?;
         }
-        LinkSelection::Class(_) | LinkSelection::Path(_) => {
+        LinkSelection::Class(_) | LinkSelection::Path(_) | LinkSelection::Beneath(_) => {
             let mut pages = Pages::new(selection);
             while let Some(links) = pages.next(&OnWriter { connection, work }, key)? {
                 findings.extend(judge_links(connection, work, ignore, &links, summaries)?);
@@ -397,6 +409,8 @@ enum PagedBy<'a> {
     Written(i64),
     Class(&'a ClassKey),
     Path(&'a PathKey),
+    /// Path-addressed links whose comparison keys lie beneath this directory.
+    Beneath(&'a DirectoryPrefix),
     /// Exactly one key the link index holds, of either kind: a path key, or
     /// a suffix key, which the index holds as written as it holds a path. The
     /// resolution change set reads the links one changed key holds this way
@@ -410,6 +424,14 @@ impl<'a> Pages<'a> {
         let (by, after) = match selection {
             LinkSelection::Class(class) => (PagedBy::Class(class), After::class_start(class)),
             LinkSelection::Path(path) => (PagedBy::Path(path), After::path_start(path)),
+            LinkSelection::Beneath(prefix) => (
+                PagedBy::Beneath(prefix),
+                After {
+                    text: statement::directory_bounds(prefix).0,
+                    first: -1,
+                    second: -1,
+                },
+            ),
             LinkSelection::Documents(_) => unreachable!("a documents selection is read whole"),
         };
         Pages {
@@ -459,6 +481,9 @@ impl<'a> Pages<'a> {
             PagedBy::Class(class) => statement::class_parameters(class, &after, LINK_HEALTH_CHUNK),
             PagedBy::Path(path) => statement::path_parameters(path, &after, LINK_HEALTH_CHUNK),
             PagedBy::Key(key) => statement::key_parameters(key, &after, LINK_HEALTH_CHUNK),
+            PagedBy::Beneath(prefix) => {
+                statement::paged_directory_parameters(prefix, &after, LINK_HEALTH_CHUNK)
+            }
         };
         let (links, driven) = read_links(runner, key, self.selected, values)?;
         // A page whose driver read as many rows as its bound may have one
@@ -556,17 +581,30 @@ pub(crate) fn redecide(
     transaction: &Transaction<'_>,
     work: &ReadWork,
     ignore: &AmbiguityIgnore,
-    generation: i64,
+    generation: Option<i64>,
     classes: &BTreeSet<ClassKey>,
     paths: &BTreeSet<PathKey>,
+    directories: &BTreeSet<DirectoryPrefix>,
 ) -> Result<Redecided, StoreError> {
     let key = SuffixKey::Comparison;
     let writer = OnWriter {
         connection: transaction,
         work,
     };
+    let stamp = generation.unwrap_or(-1);
+    let mut range_discarded = 0;
+    for prefix in directories {
+        let (lower, upper) = statement::directory_bounds(prefix);
+        range_discarded += transaction.execute(
+            "DELETE FROM findings WHERE id IN (SELECT finding FROM finding_paths WHERE path_key >= ?1 AND path_key < ?2)",
+            norn_db::rusqlite::params![lower, upper],
+        ).map_err(|error| crate::error::sql("discarding findings beneath a directory", error))? as u64;
+    }
     let mut summaries = KeySummaries::default();
-    let mut redecided = Redecided::default();
+    let mut redecided = Redecided {
+        discarded: range_discarded,
+        ..Redecided::default()
+    };
     let mut file = |links: Vec<Held>, summaries: &mut KeySummaries| -> Result<(), StoreError> {
         if links.is_empty() {
             return Ok(());
@@ -589,9 +627,11 @@ pub(crate) fn redecide(
         Ok(())
     };
 
-    let mut written = Pages::written(generation);
-    while let Some(links) = written.next(&writer, key)? {
-        file(links, &mut summaries)?;
+    if let Some(generation) = generation {
+        let mut written = Pages::written(generation);
+        while let Some(links) = written.next(&writer, key)? {
+            file(links, &mut summaries)?;
+        }
     }
     // A pass runs only over a key it could read something under, a chunk of
     // the keys asked about at a time.
@@ -612,7 +652,7 @@ pub(crate) fn redecide(
                     params_from_iter(statement::class_findings_parameters(
                         class,
                         &after,
-                        generation,
+                        stamp,
                         LINK_HEALTH_CHUNK,
                     )),
                     |row| {
@@ -650,7 +690,7 @@ pub(crate) fn redecide(
             let mut pages = Pages::new(LinkSelection::Class(class));
             while let Some(mut links) = pages.next(&writer, key)? {
                 links.retain(|held| {
-                    held.generation != generation
+                    held.generation != stamp
                         && !held.keys.iter().any(|(text, segments, _)| {
                             segments.is_some()
                                 && class_of(text).is_some_and(|other| {
@@ -669,7 +709,7 @@ pub(crate) fn redecide(
             let mut pages = Pages::new(LinkSelection::Path(path));
             while let Some(mut links) = pages.next(&writer, key)? {
                 links.retain(|held| {
-                    held.generation != generation
+                    held.generation != stamp
                         && !held.keys.iter().any(|(text, segments, _)| {
                             segments.is_none()
                                 && text.as_str() < path.as_str()
@@ -678,6 +718,23 @@ pub(crate) fn redecide(
                 });
                 file(links, &mut summaries)?;
             }
+        }
+    }
+    for prefix in directories {
+        let mut pages = Pages::new(LinkSelection::Beneath(prefix));
+        while let Some(mut links) = pages.next(&writer, key)? {
+            links.retain(|held| {
+                held.generation != stamp
+                    && !reached_by_a_class(held, classes)
+                    && !held.keys.iter().any(|(text, segments, _)| {
+                        segments.is_none()
+                            && PathKey::new(text).is_ok_and(|path| paths.contains(&path))
+                    })
+                    && !directories
+                        .range(..prefix)
+                        .any(|earlier| beneath(held, earlier))
+            });
+            file(links, &mut summaries)?;
         }
     }
     redecided.keys_resolved = summaries.keys_resolved();
@@ -836,7 +893,7 @@ fn judge_links(
 
     let verdicts = links
         .iter()
-        .map(|held| verdict(held, summaries))
+        .map(|held| verdict(connection, work, held, summaries))
         .collect::<Result<Vec<Option<Verdict>>, StoreError>>()?;
     let missing = missing_anchors(connection, work, links, &verdicts)?;
 
@@ -914,6 +971,7 @@ fn read_links(
             let key: Option<String> = row.get(17)?;
             let segments: Option<i64> = row.get(18)?;
             let generation: i64 = row.get(19)?;
+            let marks_present: bool = row.get(23)?;
             let after = match row.get::<_, Option<String>>(20)? {
                 Some(text) => Some(After {
                     text,
@@ -933,6 +991,7 @@ fn read_links(
                     .transpose()?;
                 Ok((
                     holder,
+                    marks_present,
                     generation,
                     id,
                     ordinal,
@@ -947,11 +1006,12 @@ fn read_links(
     let mut links: Vec<Held> = Vec::new();
     let mut by_id: HashMap<i64, usize> = HashMap::new();
     let mut driven: BTreeSet<After> = BTreeSet::new();
-    for (holder, generation, id, ordinal, link, key, after) in rows {
+    for (holder, marks_present, generation, id, ordinal, link, key, after) in rows {
         driven.extend(after);
         let at = *by_id.entry(id).or_insert_with(|| {
             links.push(Held {
                 holder,
+                marks_present,
                 generation,
                 id,
                 ordinal,
@@ -1129,7 +1189,12 @@ fn resolve_keys(
 /// The exact path comes first: where the link's keys count members at their
 /// exact paths, the link names those alone, and its head is the exact members
 /// its keys' heads lead with.
-fn verdict(held: &Held, summaries: &KeySummaries) -> Result<Option<Verdict>, StoreError> {
+fn verdict(
+    connection: &Connection,
+    work: &ReadWork,
+    held: &Held,
+    summaries: &KeySummaries,
+) -> Result<Option<Verdict>, StoreError> {
     let read = held
         .keys
         .iter()
@@ -1154,18 +1219,40 @@ fn verdict(held: &Held, summaries: &KeySummaries) -> Result<Option<Verdict>, Sto
             .map(|named| (named.rung.as_str(), named.clone())),
     );
     head.sort_by(Named::ladder);
-    Ok(match LinkHealth::of_address(held.link.address, total) {
-        LinkHealth::Broken => Some(Verdict::Broken),
-        LinkHealth::Ambiguous => {
-            head.truncate(CANDIDATE_HEAD);
-            Some(Verdict::Ambiguous { head, total })
+    let mut gap = TargetGap::None;
+    if total == 0 && held.marks_present {
+        for (text, segments, _) in &held.keys {
+            if segments.is_none() && text.contains('/') {
+                let (sql, values) = statement::directory_probe(text)?;
+                let marked = Request::read_all_on(
+                    connection,
+                    work,
+                    &sql,
+                    params_from_iter(values),
+                    |row| Ok(Ok(row.get::<_, bool>(0)?)),
+                    "probing directory marks",
+                )?;
+                if marked.first() == Some(&true) {
+                    gap = TargetGap::Marked;
+                    break;
+                }
+            }
         }
-        LinkHealth::Healthy => head.into_iter().next().map(Verdict::One),
-        LinkHealth::NotJudged => None,
-        // The wire's health is non-exhaustive, so a health it adds compiles
-        // here; it stops the judgment rather than raising nothing.
-        unknown => unreachable!("a link health the judgment has no finding for: {unknown:?}"),
-    })
+    }
+    Ok(
+        match LinkHealth::of_address(held.link.address, total, gap) {
+            LinkHealth::Broken => Some(Verdict::Broken),
+            LinkHealth::Ambiguous => {
+                head.truncate(CANDIDATE_HEAD);
+                Some(Verdict::Ambiguous { head, total })
+            }
+            LinkHealth::Healthy => head.into_iter().next().map(Verdict::One),
+            LinkHealth::NotJudged => None,
+            // The wire's health is non-exhaustive, so a health it adds compiles
+            // here; it stops the judgment rather than raising nothing.
+            unknown => unreachable!("a link health the judgment has no finding for: {unknown:?}"),
+        },
+    )
 }
 
 /// The positions in `links` of every link naming one document that carries an
@@ -1328,6 +1415,14 @@ fn written(link: &LinkFact) -> String {
         None => String::new(),
     };
     format!("{protocol}{}{anchor}", link.target)
+}
+
+/// Whether a path key held by this link lies in the directory's indexed range.
+fn beneath(held: &Held, prefix: &DirectoryPrefix) -> bool {
+    let (lower, upper) = statement::directory_bounds(prefix);
+    held.keys
+        .iter()
+        .any(|(text, segments, _)| segments.is_none() && *text >= lower && *text < upper)
 }
 
 #[cfg(test)]

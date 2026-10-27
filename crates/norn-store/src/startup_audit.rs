@@ -64,6 +64,7 @@ const COLUMNS: &[(&str, &str)] = &[
     ),
     ("finding_classes", "finding class_key"),
     ("finding_paths", "finding path_key"),
+    ("directory_marks", "finding path_key"),
     (
         "finding_rules",
         "finding rule vault_schema_fingerprint kind severity path position",
@@ -85,6 +86,7 @@ const FINDING_CHILDREN: &[&str] = &[
     "finding_candidates",
     "finding_classes",
     "finding_paths",
+    "directory_marks",
     "finding_rules",
 ];
 const META_FILTER: &str =

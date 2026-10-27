@@ -126,11 +126,10 @@ pub enum Lane {
     /// where it does not. **Covered by a run on a folding volume and a run on a
     /// case-sensitive one**; either alone leaves the other answer unasserted.
     RealWatcherVolumeFoldingDecides,
-    /// A real watcher, and which of two refusals is required is the backend's:
-    /// a backend that adds a watch per directory (inotify) fails to install
-    /// coverage before the heal walks, and one that covers a tree without
-    /// reading each directory under it (FSEvents) leaves the walk to meet the
-    /// denial. **Covered by a run on each backend.**
+    /// A real watcher, with a directory denial met through two backend doors:
+    /// inotify withholds coverage there while covering the rest; FSEvents
+    /// leaves the walk to meet the denial. Both reach Ready with the directory
+    /// withheld and marked. **Covered by a run on each backend.**
     RealWatcherBackendDecides,
 }
 
@@ -501,14 +500,46 @@ pub const REQUIRED_CASES: &[Case] = &[
         feature: Some(INDUCED_FAILURE),
     },
     Case {
-        id: "induced-unreadable-subtree-refuses",
+        id: "induced-unreadable-subtree-recovers",
         suite: Suite::InducedFailure,
         lane: Lane::RealWatcherBackendDecides,
-        states: "a subtree whose mode is revoked leaves the entry untrusted naming the path, \
-                 through the refused heal or the lost watcher depending on which meets the denial \
-                 first",
+        states: "an unreadable subtree is withheld and marked through either native backend; \
+                 descendant rows hold names alone without tombstones, the vault reaches Ready, \
+                 and restoring access re-derives those rows and rejudges links beneath the mark",
         carrier: "crates/norn-host/tests/lockdown.rs::\
-                  an_unreadable_subtree_refuses_the_heal_rather_than_pruning_it",
+                  an_unreadable_subtree_is_withheld_and_marked_and_the_heal_reaches_ready",
+        feature: Some(INDUCED_FAILURE),
+    },
+    Case {
+        id: "induced-denied-directory-listing-recovers",
+        suite: Suite::InducedFailure,
+        lane: Lane::Any,
+        states: "a denied directory listing withholds names-only descendant rows and one directory \
+                 finding; Ready is reached without rebuild and recovery re-derives the row and rejudges \
+                 links",
+        carrier: "crates/norn-host/tests/lockdown.rs::\
+                  a_denied_directory_listing_is_marked_and_the_heal_reaches_ready",
+        feature: Some(INDUCED_FAILURE),
+    },
+    Case {
+        id: "induced-other-name-denied-stat-recovers",
+        suite: Suite::InducedFailure,
+        lane: Lane::Any,
+        states: "a stat denied at a directory name withholds names-only descendant rows beside one \
+                 directory finding; the heal reaches Ready and recovery ends the mark and rejudges links",
+        carrier: "crates/norn-host/tests/lockdown.rs::\
+                  a_stat_denied_other_name_is_marked_and_withheld",
+        feature: Some(INDUCED_FAILURE),
+    },
+    Case {
+        id: "induced-live-directory-revocation-recovers",
+        suite: Suite::InducedFailure,
+        lane: Lane::RealWatcher,
+        states: "a live directory revocation marks and withholds its subtree without withdrawing trust; \
+                 restoration re-derives its rows and a later write beneath it proves native coverage \
+                 returned",
+        carrier: "crates/norn-host/tests/lockdown.rs::\
+                  a_directory_revoked_while_attached_is_marked_and_relisted_while_attached",
         feature: Some(INDUCED_FAILURE),
     },
     Case {

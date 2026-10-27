@@ -16,13 +16,15 @@ use norn_wire::{FindingKind, fold_tag};
 use crate::counters::{Counter, DerivationCounters};
 use crate::ddl;
 use crate::error::{self, StoreError};
-use crate::facts::{DocumentFacts, FindingFacts, Invalidation, LinkAnchor, Provenance};
+use crate::facts::{
+    DocumentFacts, FindingFacts, Invalidation, LinkAnchor, Provenance, StoredPathOrder,
+};
 use crate::fields::{ContentModel, FieldRow, OffsetSpelling};
 use crate::hash;
 use crate::health::{self, Redecided};
 use crate::json;
 use crate::link::{address_kind, link_keys};
-use crate::path::{ClassKey, DocumentPath, PathKey, SuffixKey};
+use crate::path::{ClassKey, DirectoryPrefix, DocumentPath, PathKey, SuffixKey};
 use crate::request::{self, DiscardScope, ReadWork};
 use crate::store::Store;
 use crate::write_path::WriteStatement;
@@ -40,6 +42,10 @@ pub enum Change {
     /// A document whose bytes cannot be read. Its names stand and every
     /// content-derived fact is cleared in this transaction.
     Unreadable { path: DocumentPath },
+    /// Keep descendant names and keys while clearing every fact derived from bytes.
+    /// The range follows the store's filesystem path order, preserving readable
+    /// case-twin siblings on roots that tell case apart.
+    BeneathUnlistable { prefix: DirectoryPrefix },
     /// A vault file no longer admitted at this path. Its class and path keys
     /// re-judge the same link neighborhood a document death reaches.
     FileDeath { path: DocumentPath },
@@ -289,6 +295,7 @@ pub(crate) fn apply(
     // One clock reading for the changeset, as there is one generation. Nothing
     // orders by it; it is what a person reads in a report.
     let recorded_at = request::unix_seconds();
+    let path_order = store.path_order();
     // Findings and changed paths share one comparison key for both axes.
     let class_space = SuffixKey::Comparison;
     let transaction = store
@@ -307,6 +314,17 @@ pub(crate) fn apply(
         generation = Some(stamp);
         let mut statements = Statements::prepare(&transaction)?;
         for (index, change) in std::iter::once(first).chain(entries).enumerate() {
+            if let Change::BeneathUnlistable { prefix } = &change {
+                beneath_unlistable(
+                    &transaction,
+                    prefix,
+                    path_order,
+                    stamp,
+                    recorded_at,
+                    &mut tally,
+                )?;
+                continue;
+            }
             let subject = subject(&change);
             if matches!(&change, Change::FileBirth { path } if !path.is_vault_file()) {
                 continue;
@@ -371,6 +389,9 @@ pub(crate) fn apply(
                         },
                     )
                 }
+                Change::BeneathUnlistable { .. } => {
+                    unreachable!("directory ranges are handled above")
+                }
                 Change::Vacated { .. } => unreachable!("a vacated place is handled above"),
                 // The death's own provenance, which is a different thing from
                 // the changeset's mark this function was called with.
@@ -383,7 +404,13 @@ pub(crate) fn apply(
                     &mut tally,
                 ),
             }
-            .and_then(|()| discard_the_subject(&mut statements.discard_subject, subject));
+            .and_then(|()| {
+                discard_the_subject(
+                    &mut statements.discard_subject,
+                    subject,
+                    &mut tally.directories,
+                )
+            });
             tally.findings_discarded +=
                 applied.map_err(|problem| error::in_entry(index, subject, problem))?;
             // A document joining a class and one leaving it both name it, and
@@ -419,10 +446,19 @@ pub(crate) fn apply(
     } in findings
     {
         if let Some(scope) = replaces {
-            tally.findings_discarded +=
-                request::discard_about_in(&transaction, &facts.path, *scope)?;
+            tally.findings_discarded += request::discard_about_in(
+                &transaction,
+                &facts.path,
+                *scope,
+                &mut tally.directories,
+            )?;
         }
         request::write_finding(&transaction, facts)?;
+        request::note_directory(
+            facts.kind.as_str(),
+            facts.path.as_str(),
+            &mut tally.directories,
+        )?;
         if let Some(hash) = bytes_hash {
             request::record_content_quarantine(&transaction, facts, hash)?;
         }
@@ -434,20 +470,20 @@ pub(crate) fn apply(
     // changed, and the re-decision discards the findings under each class it
     // changed before it files one in that class.
     let run_health = !metadata;
-    let redecided = match generation.filter(|_| run_health) {
-        Some(generation) => {
-            #[cfg(feature = "induced-failure")]
-            let _timing = norn_db::profiling::span("store.link_health");
-            health::redecide(
-                &transaction,
-                work,
-                declared.ambiguity_ignore(),
-                generation,
-                &tally.affected_classes,
-                &tally.affected_paths,
-            )?
-        }
-        None => Redecided::default(),
+    let redecided = if run_health && (generation.is_some() || !tally.directories.is_empty()) {
+        #[cfg(feature = "induced-failure")]
+        let _timing = norn_db::profiling::span("store.link_health");
+        health::redecide(
+            &transaction,
+            work,
+            declared.ambiguity_ignore(),
+            generation,
+            &tally.affected_classes,
+            &tally.affected_paths,
+            &tally.directories,
+        )?
+    } else {
+        Redecided::default()
     };
 
     {
@@ -522,6 +558,7 @@ struct Tally {
     findings_discarded: u64,
     affected_classes: BTreeSet<ClassKey>,
     affected_paths: BTreeSet<PathKey>,
+    directories: BTreeSet<DirectoryPrefix>,
 }
 
 /// The statements one changeset runs, prepared once and reused for every entry.
@@ -572,7 +609,7 @@ enum FindingsDiscard {
 impl FindingsDiscard {
     fn sql(self) -> String {
         match self {
-            Self::Subject => request::SUBJECT_DISCARD_SQL.to_string(),
+            Self::Subject => format!("{} RETURNING kind, path", request::SUBJECT_DISCARD_SQL),
             Self::Path => request::PATH_DISCARD_SQL.to_string(),
             Self::Vacated => request::subject_discard_sql(VACATED_DISCARD),
         }
@@ -1088,6 +1125,9 @@ fn refuse_a_declaration_the_store_does_not_pin(
 /// under.
 fn subject(change: &Change) -> &DocumentPath {
     match change {
+        Change::BeneathUnlistable { .. } => {
+            unreachable!("a directory range has no document subject")
+        }
         Change::Upsert(facts) => &facts.path,
         Change::Death { path, .. }
         | Change::Vacated { path }
@@ -1111,10 +1151,9 @@ fn subject(change: &Change) -> &DocumentPath {
 fn discard_the_subject(
     statement: &mut CachedStatement<'_>,
     path: &DocumentPath,
+    directories: &mut BTreeSet<DirectoryPrefix>,
 ) -> Result<u64, StoreError> {
-    Ok(statement
-        .execute(params![path.as_str()])
-        .map_err(|error| error::sql("discarding a path's findings", error))? as u64)
+    request::collect_discarded_directories(statement, params![path.as_str()], directories)
 }
 
 /// What a vacated place's discard takes: the content findings its emptied bytes
@@ -1174,4 +1213,64 @@ fn discard_affected_paths(
             as u64;
     }
     Ok(discarded)
+}
+
+/// Withdraw all content beneath the denied directory with set-wise indexed writes.
+fn beneath_unlistable(
+    transaction: &Transaction<'_>,
+    prefix: &DirectoryPrefix,
+    order: StoredPathOrder,
+    generation: i64,
+    derived_at: i64,
+    tally: &mut Tally,
+) -> Result<(), StoreError> {
+    let lower = format!("{}/", prefix.as_str());
+    let upper = format!("{}0", prefix.as_str());
+    let folded = matches!(order, StoredPathOrder::AsciiCaseInsensitive);
+    for statement in [
+        WriteStatement::DiscardLinksBeneath,
+        WriteStatement::DiscardHeadingsBeneath,
+        WriteStatement::DiscardBlocksBeneath,
+        WriteStatement::DiscardTagsBeneath,
+        WriteStatement::DiscardFieldsBeneath,
+    ] {
+        tally.fact_rows_discarded += transaction
+            .execute(statement.sql(), params![lower, upper, folded])
+            .map_err(|error| {
+                error::sql("discarding content beneath an unlistable directory", error)
+            })? as u64;
+    }
+    // Quarantine of the spelling is still supported by the held name. Every
+    // other finding about these bytes, outgoing links or nested directories ends.
+    tally.findings_discarded += request::discard_collecting_directories(
+        transaction,
+        WriteStatement::DiscardContentBeneath.sql(),
+        params![lower, upper, folded],
+        &mut tally.directories,
+    )?;
+    tally.documents_upserted += transaction
+        .execute(
+            WriteStatement::WithholdDocuments.sql(),
+            params![lower, upper, folded, generation, derived_at],
+        )
+        .map_err(|error| error::sql("withdrawing content beneath an unlistable directory", error))?
+        as u64;
+    // Names did not move, but anchors on the held names must be re-judged.
+    let mut statement = transaction
+        .prepare(WriteStatement::WithheldPaths.sql())
+        .map_err(|error| error::sql("reading withheld names", error))?;
+    let paths = statement
+        .query_map(params![lower, upper, folded], |row| row.get::<_, String>(0))
+        .map_err(|error| error::sql("reading withheld names", error))?;
+    for path in paths {
+        let path =
+            DocumentPath::new(&path.map_err(|error| error::sql("reading withheld names", error))?)?;
+        tally
+            .affected_classes
+            .insert(path.class_key_in(SuffixKey::Comparison));
+        tally
+            .affected_paths
+            .insert(path.path_key_in(SuffixKey::Comparison));
+    }
+    Ok(())
 }

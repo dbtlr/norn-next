@@ -39,6 +39,8 @@ use crate::store::Snapshot;
 pub enum ResolutionStatement {
     /// Exact stored spellings replaced by the overlay, sought by path equality.
     StandingTargets,
+    /// Indexed ancestor probes for an unresolved path link.
+    DirectoryMarks,
     /// Which of a chunk of keys any link is held under: the path arm of
     /// [`crate::ExplainedStatement::LinkHealthOccupied`], an equality seek of
     /// the link index per key, each stopping at its first row.

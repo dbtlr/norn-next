@@ -67,7 +67,8 @@ use std::collections::BTreeSet;
 
 use norn_db::rusqlite::types::Value;
 use norn_db::rusqlite::{
-    self, Connection, OptionalExtension, Params, Row, StatementStatus, params, params_from_iter,
+    self, Connection, OptionalExtension, Params, Row, Statement, StatementStatus, params,
+    params_from_iter,
 };
 use norn_wire::{FindingKind, LinkAddressKind};
 
@@ -455,11 +456,31 @@ impl<'a> Request<'a> {
             .database
             .immediate_transaction("opening the finding transaction")?;
         write_finding(&transaction, finding)?;
+        let mut directories = BTreeSet::new();
+        note_directory(
+            finding.kind.as_str(),
+            finding.path.as_str(),
+            &mut directories,
+        )?;
+        let redecided = redecide_directories(&transaction, &self.read_work, &directories)?;
         transaction
             .commit()
             .map_err(|error| error::sql("committing a finding", error))?;
         self.counters.add(Counter::FindingsWritten, 1);
+        count_redecision(&mut self.counters, &redecided);
         Ok(())
+    }
+
+    /// Whether an unreadable-directory finding stands at this subject.
+    pub fn unreadable_directory_stands(&self, path: &DocumentPath) -> Result<bool, StoreError> {
+        self.store
+            .connection()
+            .query_row(
+                WriteStatement::DirectoryMarkAt.sql(),
+                params![path.as_str()],
+                |row| row.get(0),
+            )
+            .map_err(|error| error::sql("probing an unreadable-directory finding", error))
     }
 
     /// Discard every finding recorded **about** one path, and report what went.
@@ -494,18 +515,20 @@ impl<'a> Request<'a> {
         scope: DiscardScope<'_>,
     ) -> Result<Invalidation, StoreError> {
         check_callers_discard(scope)?;
-        let discarded = self
+        let transaction = self
             .store
-            .connection()
-            .execute(
-                &subject_discard_sql(scope),
-                params_from_iter(subject_discard_parameters(path, scope)),
-            )
-            .map_err(|error| error::sql("discarding a path's findings", error))?
-            as u64;
+            .database
+            .immediate_transaction("opening the findings discard")?;
+        let mut directories = BTreeSet::new();
+        let discarded = discard_about_in(&transaction, path, scope, &mut directories)?;
+        let redecided = redecide_directories(&transaction, &self.read_work, &directories)?;
+        transaction
+            .commit()
+            .map_err(|error| error::sql("committing findings discard", error))?;
         self.counters.add(Counter::FindingsDiscarded, discarded);
+        count_redecision(&mut self.counters, &redecided);
         Ok(Invalidation {
-            findings_discarded: discarded,
+            findings_discarded: discarded + redecided.discarded,
             typed_values_discarded: 0,
         })
     }
@@ -566,13 +589,14 @@ impl<'a> Request<'a> {
         )?;
         norn_db::meta::put_meta(&transaction, ddl::meta::VAULT_SCHEMA_GENERATION, generation)?;
 
-        let discarded = transaction
-            .execute(
-                WriteStatement::DiscardStaleFindings.sql(),
-                params![fingerprint],
-            )
-            .map_err(|error| error::sql("discarding schema-dependent state", error))?
-            as u64;
+        let mut directories = BTreeSet::new();
+        let discarded = discard_collecting_directories(
+            &transaction,
+            WriteStatement::DiscardStaleFindings.sql(),
+            params![fingerprint],
+            &mut directories,
+        )?;
+        let redecided = redecide_directories(&transaction, &self.read_work, &directories)?;
         let typed_discarded = transaction
             .execute(TYPED_VALUE_DISCARD_SQL, [])
             .map_err(|error| error::sql("clearing the typed field values", error))?
@@ -587,6 +611,7 @@ impl<'a> Request<'a> {
             .commit()
             .map_err(|error| error::sql("committing a schema pin", error))?;
         self.counters.add(Counter::VaultSchemaPins, 1);
+        count_redecision(&mut self.counters, &redecided);
         self.counters.add(Counter::FindingsDiscarded, discarded);
         self.counters
             .add(Counter::TypedValuesDiscarded, typed_discarded);
@@ -594,7 +619,7 @@ impl<'a> Request<'a> {
             generation,
             repinned: true,
             invalidated: Invalidation {
-                findings_discarded: discarded,
+                findings_discarded: discarded + redecided.discarded,
                 typed_values_discarded: typed_discarded,
             },
         })
@@ -1529,7 +1554,7 @@ impl<'a> Request<'a> {
         declared: &ContentModel,
     ) -> Result<Vec<FindingFacts>, StoreError> {
         match selection {
-            LinkSelection::Documents(_) => {}
+            LinkSelection::Documents(_) | LinkSelection::Beneath(_) => {}
             LinkSelection::Class(class) => {
                 refuse_outside_key_space(SuffixKey::Comparison.holds(class), "a judged class key")?
             }
@@ -1838,6 +1863,15 @@ pub(crate) fn check_callers_finding(finding: &FindingFacts) -> Result<(), StoreE
             what: "a finding about a link",
         });
     }
+    // A keyed discard does not re-decide the links beneath a mark, so a mark
+    // must be reachable by its subject alone.
+    if finding.kind == FindingKind::UnreadableDirectory
+        && (!finding.class_keys.is_empty() || !finding.path_keys.is_empty())
+    {
+        return Err(StoreError::KeySpace {
+            what: "an unreadable-directory finding keyed beyond its subject",
+        });
+    }
     Ok(())
 }
 
@@ -2017,6 +2051,17 @@ pub(crate) fn write_finding(
         }
     }
 
+    if finding.kind == FindingKind::UnreadableDirectory {
+        // Directories named `..md` or `...md` use rendered subject keys; path links
+        // beneath them keep `link/broken` while marked.
+        transaction
+            .prepare_cached(WriteStatement::InsertDirectoryMark.sql())
+            .and_then(|mut insert| {
+                insert.execute(params![id, crate::comparison_key(finding.path.as_str())])
+            })
+            .map_err(|error| error::sql("indexing an unreadable directory", error))?;
+    }
+
     {
         let mut insert = transaction
             .prepare_cached(WriteStatement::InsertFindingRule.sql())
@@ -2102,14 +2147,94 @@ pub(crate) fn discard_about_in(
     transaction: &rusqlite::Transaction<'_>,
     path: &DocumentPath,
     scope: DiscardScope<'_>,
+    directories: &mut BTreeSet<DirectoryPrefix>,
 ) -> Result<u64, StoreError> {
-    transaction
-        .execute(
-            &subject_discard_sql(scope),
-            params_from_iter(subject_discard_parameters(path, scope)),
-        )
-        .map(|discarded| discarded as u64)
-        .map_err(|error| error::sql("discarding a path's findings", error))
+    discard_collecting_directories(
+        transaction,
+        &subject_discard_sql(scope),
+        params_from_iter(subject_discard_parameters(path, scope)),
+        directories,
+    )
+}
+
+/// Remember each ended directory mark while its finding is still available.
+pub(crate) fn note_directory(
+    kind: &str,
+    path: &str,
+    directories: &mut BTreeSet<DirectoryPrefix>,
+) -> Result<(), StoreError> {
+    if kind == FindingKind::UnreadableDirectory.as_str() {
+        directories.insert(DirectoryPrefix::new(&crate::comparison_key(path))?);
+    }
+    Ok(())
+}
+
+/// Delete and capture the ended marks in one statement, including nested marks.
+pub(crate) fn discard_collecting_directories(
+    transaction: &rusqlite::Transaction<'_>,
+    sql: &str,
+    parameters: impl Params,
+    directories: &mut BTreeSet<DirectoryPrefix>,
+) -> Result<u64, StoreError> {
+    let mut statement = transaction
+        .prepare_cached(&format!("{sql} RETURNING kind, path"))
+        .map_err(|error| error::sql("preparing a findings discard", error))?;
+    collect_discarded_directories(&mut statement, parameters, directories)
+}
+
+pub(crate) fn collect_discarded_directories(
+    statement: &mut Statement<'_>,
+    parameters: impl Params,
+    directories: &mut BTreeSet<DirectoryPrefix>,
+) -> Result<u64, StoreError> {
+    let mut rows = statement
+        .query(parameters)
+        .map_err(|error| error::sql("discarding findings", error))?;
+    let mut count = 0;
+    while let Some(row) = rows
+        .next()
+        .map_err(|error| error::sql("reading discarded findings", error))?
+    {
+        let kind: String = row
+            .get(0)
+            .map_err(|error| error::sql("reading discarded kind", error))?;
+        let path: String = row
+            .get(1)
+            .map_err(|error| error::sql("reading discarded place", error))?;
+        note_directory(&kind, &path, directories)?;
+        count += 1;
+    }
+    Ok(count)
+}
+
+fn redecide_directories(
+    transaction: &rusqlite::Transaction<'_>,
+    work: &ReadWork,
+    directories: &BTreeSet<DirectoryPrefix>,
+) -> Result<health::Redecided, StoreError> {
+    if directories.is_empty() {
+        return Ok(health::Redecided::default());
+    }
+    // No declared ignore is needed here: a verdict reads each candidate's
+    // stored `admitting_segments`, which its derivation wrote under the
+    // declared ignore, so the ignore passed to the judgment is not consulted.
+    health::redecide(
+        transaction,
+        work,
+        &crate::AmbiguityIgnore::none(),
+        None,
+        &BTreeSet::new(),
+        &BTreeSet::new(),
+        directories,
+    )
+}
+
+fn count_redecision(counters: &mut DerivationCounters, redecided: &health::Redecided) {
+    counters.add(Counter::FindingsDiscarded, redecided.discarded);
+    counters.add(Counter::FindingsWritten, redecided.findings);
+    counters.add(Counter::LinksRedecided, redecided.links);
+    counters.add(Counter::LinkHealthKeysResolved, redecided.keys_resolved);
+    counters.add(Counter::LinkHealthCandidatesRead, redecided.candidates_read);
 }
 
 /// Where the next page of [`Request::stored_findings_after`] starts.

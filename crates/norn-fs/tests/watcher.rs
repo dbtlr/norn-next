@@ -706,3 +706,83 @@ fn a_subscription_reports_the_case_behaviour_its_root_proved() {
         .case_sensitivity();
     assert_eq!(subscription.case_sensitivity(), proven);
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_denied_subdirectory_withholds_native_coverage_there_only() {
+    use notify::Watcher;
+    use std::os::unix::fs::PermissionsExt;
+
+    let scratch = Scratch::new("denied-subdirectory");
+    let vault = scratch.vault();
+    let denied = vault.join("a-denied");
+    std::fs::create_dir(&denied).unwrap();
+    std::fs::create_dir(vault.join("z-open")).unwrap();
+    std::fs::write(vault.join("z-open/note.md"), b"before").unwrap();
+    std::fs::set_permissions(&denied, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read_dir(&denied).is_ok() {
+        eprintln!("this account bypasses directory modes; native denial is unasserted");
+        return;
+    }
+
+    let mut collector = Collector::start(&vault, &scratch.schema());
+    std::fs::write(vault.join("z-open/note.md"), b"after").unwrap();
+    collector.wait_for("the readable sibling to remain covered", |seen| {
+        assert!(seen.terminal.is_none(), "{}", seen.state());
+        if seen.reported(Path::new("z-open/note.md")) {
+            Observed::Met(())
+        } else {
+            Observed::Pending(seen.state())
+        }
+    });
+
+    let mut root_watcher = notify::INotifyWatcher::new(|_| {}, notify::Config::default()).unwrap();
+    let refusal = root_watcher
+        .watch(&denied, notify::RecursiveMode::Recursive)
+        .expect_err("denial at the watched root still refuses installation");
+    assert!(
+        matches!(&refusal.kind, notify::ErrorKind::Io(error)
+            if error.kind() == std::io::ErrorKind::PermissionDenied),
+        "{refusal:?}"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn restoring_a_denied_directory_reports_it_and_covers_it_again() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let scratch = Scratch::new("restored-subdirectory");
+    let vault = scratch.vault();
+    let denied = vault.join("D");
+    std::fs::create_dir_all(denied.join("nested")).unwrap();
+    let note = denied.join("nested/note.md");
+    std::fs::write(&note, b"before").unwrap();
+    std::fs::set_permissions(&denied, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read_dir(&denied).is_ok() {
+        eprintln!("this account bypasses directory modes; native restoration is unasserted");
+        return;
+    }
+
+    let mut collector = Collector::start(&vault, &scratch.schema());
+    std::fs::set_permissions(&denied, std::fs::Permissions::from_mode(0o755)).unwrap();
+    collector.wait_for("the parent's attribute report to requeue D", |seen| {
+        assert!(seen.terminal.is_none(), "{}", seen.state());
+        if seen.roots.contains(Path::new("D")) {
+            Observed::Met(())
+        } else {
+            Observed::Pending(seen.state())
+        }
+    });
+
+    collector.seen = Seen::default();
+    std::fs::write(&note, b"after").unwrap();
+    collector.wait_for("a later write beneath D to have native coverage", |seen| {
+        assert!(seen.terminal.is_none(), "{}", seen.state());
+        if seen.roots.contains(Path::new("D/nested/note.md")) {
+            Observed::Met(())
+        } else {
+            Observed::Pending(seen.state())
+        }
+    });
+}

@@ -963,7 +963,7 @@ impl DerivedRows {
 ///   applied.
 /// - **Every finding stands where its kind says it may.** A finding's kind
 ///   decides its scope, and the scope is a claim about the row beside it: a
-///   place-scoped finding — the three cause classes nothing is derivable from —
+///   place-scoped finding — a refused spelling, unreadable bytes or directory —
 ///   is withheld while a document row stands at its subject, and a
 ///   document-scoped finding — a frontmatter block nothing read — stands beside
 ///   the row it is about and is meaningless without one. So the pairing is
@@ -979,6 +979,9 @@ impl DerivedRows {
 ///   which is why the claim is asked here.
 ///
 ///   [ADR 0023]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0023-a-walk-refusal-that-stands-is-a-reading.md
+/// - Names-only descendants of an unreadable directory need no per-document
+///   finding: the place-scoped directory finding accounts for their unread bytes.
+///   Their retained names and empty content participate in the projection alike.
 /// - Every stored suffix key is the key its own path produces. The column is a
 ///   derived one the resolution ladder ranges over, and no read that answers a
 ///   caller's question compares it with the path beside it, so a row whose key

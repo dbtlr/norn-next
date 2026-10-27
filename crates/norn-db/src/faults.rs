@@ -70,6 +70,11 @@ pub fn fail_next_meta_read_as_busy() {
     NEXT_META_READ_FAILS.set(true);
 }
 
+/// Whether the calling thread's next pinned-scalar read is armed to fail.
+pub fn meta_read_is_armed() -> bool {
+    NEXT_META_READ_FAILS.get()
+}
+
 /// Take the busy arm back off the calling thread, consumed or not.
 ///
 /// The read the arm fails is what normally clears it. A case that armed one

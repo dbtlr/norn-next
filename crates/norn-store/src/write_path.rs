@@ -18,7 +18,7 @@
 //! The increment's prepared statements — the document upsert, the per-table fact
 //! discards and inserts, the stem-trigram insert a newly created row takes, the
 //! document delete, the tombstone record and the row probe — the findings
-//! writes, the rule-set writes a finding citing rules makes, the generation and
+//! writes and directory-mark probe, the rule-set writes a finding citing rules makes, the generation and
 //! pinned-scalar writes, and the discard a schema pin runs over findings
 //! stamped under another fingerprint. One registered
 //! statement is run by a trigger rather than prepared:
@@ -46,6 +46,16 @@
 //! are not write-path statements and are not registered.
 
 use norn_db::meta::{NEXT_GENERATION_SQL, PUT_META_SQL};
+
+// Both filesystem orders keep their indexed range; the folded arm runs only
+// for a store opened under ASCII-insensitive identity.
+macro_rules! directory_documents {
+    () => {
+        "SELECT id FROM documents WHERE path >= ?1 AND path < ?2
+         UNION ALL
+         SELECT id FROM documents WHERE ?3 AND path COLLATE NOCASE >= ?1 AND path COLLATE NOCASE < ?2"
+    };
+}
 
 /// Declares [`WriteStatement`] and its census from one list of variants, so a
 /// statement the enum names is in [`WriteStatement::all`] by construction.
@@ -101,6 +111,8 @@ registry! {
     RecordTombstone,
     /// Whether a document row stands at a path.
     RowAt,
+    /// Whether a directory's unreadable finding already stands at its subject.
+    DirectoryMarkAt,
     /// One finding row, stamped with the generation and fingerprint it lands
     /// under.
     InsertFinding,
@@ -110,6 +122,24 @@ registry! {
     InsertFindingClass,
     /// One path key a finding is held under.
     InsertFindingPath,
+    /// A directory finding indexed by its subject comparison key.
+    InsertDirectoryMark,
+    /// Set-wise content withdrawal in the store's filesystem path order.
+    WithholdDocuments,
+    /// Outgoing links held beneath the unlistable directory.
+    DiscardLinksBeneath,
+    /// Headings held beneath the unlistable directory.
+    DiscardHeadingsBeneath,
+    /// Block ids held beneath the unlistable directory.
+    DiscardBlocksBeneath,
+    /// Tags held beneath the unlistable directory.
+    DiscardTagsBeneath,
+    /// Fields held beneath the unlistable directory.
+    DiscardFieldsBeneath,
+    /// Content and outgoing-link findings; spelling findings survive.
+    DiscardContentBeneath,
+    /// Held names whose incoming links and anchors need re-decision.
+    WithheldPaths,
     /// The rule set of a fingerprint holding exactly the names a finding
     /// cites, where one stands.
     FindRuleSet,
@@ -265,6 +295,29 @@ impl WriteStatement {
             }
             Self::InsertFindingPath => {
                 "INSERT INTO finding_paths (finding, path_key) VALUES (?1, ?2)"
+            }
+            Self::WithholdDocuments => concat!(
+                "UPDATE documents SET content_hash=NULL, byte_length=NULL,
+                 body=NULL, body_hash=NULL, body_offset=NULL, frontmatter=NULL,
+                 frontmatter_projection_hash=NULL, frontmatter_diagnostic_count=0,
+                 generation=?4, derived_at=?5 WHERE id IN (", directory_documents!(), ")"),
+            Self::DiscardLinksBeneath => concat!("DELETE FROM links WHERE document IN (", directory_documents!(), ")"),
+            Self::DiscardHeadingsBeneath => concat!("DELETE FROM headings WHERE document IN (", directory_documents!(), ")"),
+            Self::DiscardBlocksBeneath => concat!("DELETE FROM blocks WHERE document IN (", directory_documents!(), ")"),
+            Self::DiscardTagsBeneath => concat!("DELETE FROM document_tags WHERE document IN (", directory_documents!(), ")"),
+            Self::DiscardFieldsBeneath => concat!("DELETE FROM document_fields WHERE document IN (", directory_documents!(), ")"),
+            Self::DiscardContentBeneath => {
+                "DELETE FROM findings WHERE id IN (
+                    SELECT id FROM findings WHERE path >= ?1 AND path < ?2
+                        AND kind NOT IN ('document/path-bytes-not-utf8', 'document/path-names-no-document')
+                    UNION ALL
+                    SELECT id FROM findings WHERE ?3 AND path COLLATE NOCASE >= ?1 AND path COLLATE NOCASE < ?2
+                        AND kind NOT IN ('document/path-bytes-not-utf8', 'document/path-names-no-document'))"
+            }
+            Self::WithheldPaths => concat!("SELECT path FROM documents WHERE id IN (", directory_documents!(), ")"),
+            Self::DirectoryMarkAt => "SELECT EXISTS (SELECT 1 FROM findings WHERE path = ?1 AND kind = 'directory/unreadable')",
+            Self::InsertDirectoryMark => {
+                "INSERT INTO directory_marks (finding, path_key) VALUES (?1, ?2)"
             }
             Self::FindRuleSet => {
                 "SELECT id FROM rule_sets WHERE vault_schema_fingerprint = ?1 AND rules = ?2"
