@@ -2633,6 +2633,47 @@ fn a_taken_destination_and_the_later_of_two_routes_to_one_skip_as_destination_ta
     assert!(stands(&vault, "loose/b.md") && stands(&vault, "y/a.md"));
 }
 
+/// An unreadable file still occupies a route's destination. That route is
+/// skipped while an independent route remains in the preview.
+#[cfg(feature = "induced-failure")]
+#[test]
+fn an_unreadable_destination_skips_only_its_route_as_destination_taken() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-route-unreadable-destination",
+        TASKED,
+        &[
+            ("loose/a.md", b"---\ntype: task\n---\n# Independent\n"),
+            ("loose/b.md", b"---\ntype: task\n---\n# Loose\n"),
+            ("tasks/b.md", b"---\ntype: task\n---\n# Placed\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let loose = misplaced_of(&host, &vault, "loose/b.md");
+    let _denied = norn_fs::deny_document_opens(&vault.path().join(FOLDER).join("tasks/b.md"));
+
+    let plan = previewed(host.repair(repairing_beneath(&vault, ApplyMode::Preview)));
+
+    assert_eq!(
+        kinds(&plan),
+        vec![OperationKind::move_document(
+            at("loose/a.md"),
+            at("tasks/a.md")
+        )]
+    );
+    let skipped: Vec<_> = provenance(&plan)
+        .skipped
+        .iter()
+        .map(|skip| (skip.finding, skip.reason))
+        .collect();
+    assert_eq!(skipped, [(loose, SkipReason::DestinationTaken)]);
+    assert_eq!(
+        written(&vault, "tasks/b.md"),
+        "---\ntype: task\n---\n# Placed\n"
+    );
+    assert!(stands(&vault, "loose/a.md") && stands(&vault, "loose/b.md"));
+    assert!(!stands(&vault, "tasks/a.md"));
+}
+
 /// A rule routing a `p` into `tasks/`, and one routing a `q` standing in
 /// `q/<area>/` into `tasks/<area>/`, so one route's destination can be a
 /// folder another names as a document.

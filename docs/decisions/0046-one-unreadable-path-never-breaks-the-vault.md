@@ -320,7 +320,9 @@ a content-hash condition on that document
 document holds no stored content hash and no bytes that read, so no such condition can be
 written. Repair skips that fix with `SkipReason::UnreadableTarget`, spelled
 `unreadable_target`, and the rest of the plan proceeds. A path failure while the planner
-reads a tree becomes `Before::Unread`, not a failed repair. A fix that reads no evidence
+reads a source document becomes `Before::Unread`. An unreadable destination is taken, so
+that route skips as `DestinationTaken` and independent fixes proceed; neither failure
+aborts the repair. A fix that reads no evidence
 from the broken document proceeds, and once the document reads again the skipped fix is proposed as any fix is. The
 write protocol's check of a target's before-state still refuses a write to the broken path
 itself. Preview and apply of an already-resolved plan keep the `vault/write-failed` code

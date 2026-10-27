@@ -458,32 +458,32 @@ impl<V: VaultView, I: Following + ?Sized> Reading for Over<'_, V, I> {
     fn destination(&self, path: &DocumentPath) -> Result<Destination, Self::Error> {
         let normalizer = self.view.normalizer();
         let place = identity_of(normalizer, path);
-        Ok(
-            match self.view.streamed_entry(&place).map_err(Unread::View)? {
-                Entry::Absent { at } => {
-                    // Every folder above the place, by the same identity
-                    // rule, so the batch's routes are judged against one
-                    // another's places above and beneath theirs.
-                    let spelled = at.as_str();
-                    let folders = spelled
-                        .match_indices('/')
-                        .filter_map(|(end, _)| {
-                            normalizer
-                                .normalize(std::path::Path::new(&spelled[..end]))
-                                .ok()
-                        })
-                        .collect();
-                    Destination::Free { at, place, folders }
-                }
-                Entry::Blocked {
-                    detail,
-                    barrier: Barrier::Closed,
-                } => Destination::Closed(detail),
-                Entry::Document { .. } | Entry::Folder | Entry::Blocked { .. } => {
-                    Destination::Taken
-                }
-            },
-        )
+        Ok(match self.view.streamed_entry(&place) {
+            Ok(Entry::Absent { at }) => {
+                // Every folder above the place, by the same identity
+                // rule, so the batch's routes are judged against one
+                // another's places above and beneath theirs.
+                let spelled = at.as_str();
+                let folders = spelled
+                    .match_indices('/')
+                    .filter_map(|(end, _)| {
+                        normalizer
+                            .normalize(std::path::Path::new(&spelled[..end]))
+                            .ok()
+                    })
+                    .collect();
+                Destination::Free { at, place, folders }
+            }
+            Ok(Entry::Blocked {
+                detail,
+                barrier: Barrier::Closed,
+            }) => Destination::Closed(detail),
+            Ok(Entry::Document { .. } | Entry::Folder | Entry::Blocked { .. }) => {
+                Destination::Taken
+            }
+            Err(error) if V::is_unreadable(&error) => Destination::Taken,
+            Err(error) => return Err(Unread::View(error)),
+        })
     }
 
     fn place(&self, path: &DocumentPath) -> NormalizedPath {

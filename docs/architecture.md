@@ -3152,8 +3152,9 @@ operation carries an author `content_hash` condition on the target with the snap
 hash, so changing that heading refuses apply and the fresh plan keeps the evidence on the
 unresolved operation. Evidence from a broken target cannot support a fix: repair skips it
 with `SkipReason::UnreadableTarget` (`unreadable_target`) and continues the rest of the
-plan. A path failure while the planner reads a tree becomes `Before::Unread`, rather than
-a failed repair. The applier's before-state check still refuses writing the broken path.
+plan. A path failure while the planner reads a source document becomes `Before::Unread`.
+An unreadable destination is taken: that route skips as `DestinationTaken`, and independent
+fixes proceed. Neither path failure aborts the repair. The applier's before-state check still refuses writing the broken path.
 Preview and apply of an already-resolved plan keep `vault/write-failed` when a target file
 cannot be read; path classification does not change their refusal codes.
 Block references and headings whose syntax's written form is empty or starts with `^` have no such suggestion. A target whose body the batch changes with
