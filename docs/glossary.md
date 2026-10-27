@@ -150,6 +150,10 @@ _Avoid_: Schema (unqualified), vault schema
 A group of document derivations and deaths submitted together for one atomic application.
 _Avoid_: Batch, diff
 
+**From-zero build**:
+The construction of a canonical store from empty: a vault's first build, and every rebuild of a store from zero. One construction path serves them all, and a store is under construction until that build ends.
+_Avoid_: Initial index, full reindex
+
 **Vault entry**:
 The host's runtime state for one attached vault, including the resources and trust state used to serve it.
 
