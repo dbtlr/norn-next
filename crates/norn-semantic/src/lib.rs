@@ -7,8 +7,8 @@
 //! 0027](../../../docs/decisions/0027-link-health-rides-the-changeset.md)).
 //! This crate is that shape, proven end to end with the deterministic stub
 //! embedder: it consumes the store's change feed through consumer-owned
-//! cursors, embeds changed bodies through [`norn_embed`], retracts deaths,
-//! and answers vector-nearest over what it holds.
+//! cursors, embeds changed bodies through [`norn_embed`], retracts deaths and
+//! unreadable content, and answers vector-nearest over what it holds.
 //!
 //! # The sidecar is a second database, not a second schema
 //!

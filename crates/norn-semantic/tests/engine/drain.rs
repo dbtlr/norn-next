@@ -352,3 +352,72 @@ fn a_death_mid_drain_defers_and_the_same_drain_retracts_it() {
         "the dropped reading converged as a retraction"
     );
 }
+
+/// A broken document has no bytes to embed. Its held vector is removed with
+/// feed progress, while a never-read document produces no vector at all.
+#[test]
+fn an_unreadable_document_retracts_its_embedding_and_recovery_reembeds() {
+    let scratch = Scratch::new("unreadable");
+    let mut store = scratch.store();
+    let original = document("docs/a.md", "hash-a", "alpha\n");
+    write_document(&mut store, &original);
+    write_document(&mut store, &document("docs/b.md", "hash-b", "bravo\n"));
+    let embedder = CountingEmbedder::new();
+    let mut engine = scratch.engine(embedder.clone());
+    engine
+        .drain(&mut store.feed_read())
+        .expect("the readable documents drain");
+    assert_eq!(embedder.calls(), 2);
+
+    crate::common::record_unreadable(&mut store, "docs/a.md");
+    crate::common::record_unreadable(&mut store, "docs/never-read.md");
+    let generation = store
+        .feed_read()
+        .write_generation()
+        .expect("the broken generation");
+    let report = engine
+        .drain(&mut store.feed_read())
+        .expect("broken documents drain");
+    assert_eq!(report.retracted, 1, "{report:?}");
+    assert_eq!(report.embedded, 0, "{report:?}");
+    assert_eq!(embedder.calls(), 2, "unknown content is never embedded");
+    let held = engine.projection().expect("the remaining vectors");
+    assert_eq!(held.len(), 1);
+    assert_eq!(held[0].path, "docs/b.md");
+    assert_eq!(held, recompute(&mut store, embedder.as_ref()));
+    assert_eq!(
+        engine
+            .watermarks()
+            .documents
+            .as_ref()
+            .expect("document progress")
+            .generation,
+        generation
+    );
+    let revision = engine.revision();
+    let watermarks = engine.watermarks().clone();
+    drop(engine);
+
+    let mut engine = scratch.engine(embedder.clone());
+    assert_eq!(engine.revision(), revision);
+    assert_eq!(engine.watermarks(), &watermarks);
+    assert_eq!(engine.projection().expect("persisted retraction"), held);
+    assert!(
+        engine
+            .drain(&mut store.feed_read())
+            .expect("no new work")
+            .is_settled()
+    );
+
+    let before = embedder.calls();
+    write_document(&mut store, &original);
+    let report = engine
+        .drain(&mut store.feed_read())
+        .expect("identical bytes recover");
+    assert_eq!(report.embedded, 1, "{report:?}");
+    assert_eq!(embedder.calls(), before + 1);
+    assert_eq!(
+        engine.projection().expect("recovered vectors"),
+        recompute(&mut store, embedder.as_ref())
+    );
+}

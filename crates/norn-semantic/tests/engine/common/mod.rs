@@ -282,15 +282,21 @@ pub fn recompute(store: &mut Store, embedder: &dyn Embedder) -> Vec<VectorRow> {
         cursor = Some(last.clone());
         let full = page.len() == PAGE;
         for (_, fed) in &page {
+            let Some(body_hash) = fed.body_hash.as_ref() else {
+                continue;
+            };
             let facts = store
                 .begin_request()
                 .stored_facts(&fed.path)
                 .expect("reading a document")
                 .expect("a document the feed just named");
-            let embedding = embedder.embed(&facts.body).expect("embedding a body");
+            let Some(body) = facts.body.as_deref() else {
+                continue;
+            };
+            let embedding = embedder.embed(body).expect("embedding a body");
             rows.push(VectorRow {
                 path: fed.path.as_str().to_string(),
-                input_hash: fed.body_hash.clone(),
+                input_hash: body_hash.clone(),
                 values: embedding.values().to_vec(),
             });
         }
@@ -300,4 +306,18 @@ pub fn recompute(store: &mut Store, embedder: &dyn Embedder) -> Vec<VectorRow> {
     }
     rows.sort_by(|a, b| a.path.cmp(&b.path));
     rows
+}
+
+/// Record a document whose names stand while its content is unreadable.
+pub fn record_unreadable(store: &mut Store, at: &str) {
+    let mut request = store.begin_request();
+    let declared = pinned_declaration(&request);
+    request
+        .apply_increment(
+            IncrementProvenance::Derived,
+            [Change::Unreadable { path: path(at) }],
+            &[],
+            &declared,
+        )
+        .expect("recording an unreadable document");
 }
