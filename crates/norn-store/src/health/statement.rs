@@ -216,12 +216,19 @@ pub(crate) fn every_parameters(after: &After, limit: usize) -> Vec<Value> {
 /// Discard only the link-health findings about a page's links, by the same
 /// fingerprint, path and ordinal that make each link's finding unique.
 pub(crate) fn judged_discard_sql() -> String {
-    "DELETE FROM findings WHERE id IN (
+    let kinds = crate::health::LINK_HEALTH_KINDS
+        .iter()
+        .map(|kind| format!("'{}'", kind.as_str()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "DELETE FROM findings WHERE id IN (
         SELECT f.id FROM json_each(?1) AS j CROSS JOIN findings AS f
         WHERE f.vault_schema_fingerprint = ?2
           AND f.path = json_extract(j.value, '$[0]')
           AND f.ordinal = json_extract(j.value, '$[1]')
-          AND f.kind IN ('link/broken', 'link/ambiguous', 'link/missing-anchor', 'link/vault-scheme'))".to_string()
+          AND f.kind IN ({kinds}))"
+    )
 }
 
 /// The links a page's discard replaces and the fingerprint they are filed under.

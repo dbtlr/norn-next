@@ -388,8 +388,3 @@ first build, as ADR 0045 rules.
 **Warm writes still re-decide by ADR 0027's set.** A write that changes no name, heading or
 block still re-decides every link the set names for the paths it writes. Narrowing that set
 for such writes is a separate decision, not taken here.
-
-## Changelog
-
-- 2026-10-27: Accepted. Corrected the four link-health kinds and recorded the retained
-  per-common-key totals in the judgment’s memory bound.
