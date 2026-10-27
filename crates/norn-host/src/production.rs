@@ -6258,6 +6258,10 @@ mod tests {
             },
         )
         .unwrap();
+        // FSEvents can deliver the fixture's own writes after the watch's
+        // history marker; a batch at attach would schedule maintenance the
+        // cases built on this host assert has not run.
+        norn_fs::watch::settle_prior_changes(f.root.root(), lifecycle_budget().work()).unwrap();
         let lease = host.demand(&name).unwrap();
         wait_state(&host, &name, norn_wire::TrustState::Ready);
         (host, name, lease)
