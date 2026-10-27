@@ -104,6 +104,7 @@ pub fn audit(
     database.open_snapshot()?;
     let connection = database.connection();
     validate_schema(connection)?;
+    refuse_unfinished(connection, path)?;
     let mut statement = read(
         connection.prepare("SELECT path, content_hash, byte_length FROM documents WHERE body IS NOT NULL ORDER BY path"),
     )?;
@@ -229,6 +230,24 @@ fn document_construction_digest(connection: &Connection) -> Result<String, Store
         hash_row(&mut digest, &json!([id, path, group]));
     }
     Ok(hex(&digest.finalize()))
+}
+
+/// A store whose from-zero build never ended is a partial derivation, so
+/// comparing it against another is comparing nothing the harness can vouch for.
+fn refuse_unfinished(connection: &Connection, path: &Path) -> Result<(), StoreError> {
+    let unfinished = read(connection.query_row(
+        "SELECT EXISTS (SELECT 1 FROM meta WHERE key = ?1)",
+        [ddl::meta::UNDER_CONSTRUCTION],
+        |row| row.get::<_, bool>(0),
+    ))?;
+    if unfinished {
+        return Err(StoreError::Lifecycle {
+            operation: "auditing persisted startup state",
+            path: path.to_path_buf(),
+            message: "the store is still under construction".to_string(),
+        });
+    }
+    Ok(())
 }
 
 fn read<T>(result: rusqlite::Result<T>) -> Result<T, StoreError> {
@@ -453,6 +472,7 @@ mod tests {
              UPDATE meta SET value={generation} WHERE key='write_generation';",
             a = offset + 1, b = offset + 2, time = generation * 100,
         )).expect("arrange identities and generations through the store seam");
+        store.finish_construction().expect("a finished store");
         drop(store);
         path
     }
@@ -483,6 +503,19 @@ mod tests {
                 ("b.md".into(), "source-b".into(), 5)
             ]
         );
+    }
+
+    #[test]
+    fn a_store_still_under_construction_is_refused() {
+        let scratch = Scratch::new("startup-audit-unfinished");
+        let path = fixture(&scratch, 0, 1);
+        change(
+            &path,
+            "INSERT INTO meta (key, value) VALUES ('under_construction', 1)",
+        );
+        let error = super::audit(&path, |_, _, _| Ok(()))
+            .expect_err("a store under construction was audited");
+        assert!(error.to_string().contains("under construction"), "{error}");
     }
 
     fn change(path: &std::path::Path, sql: &str) {

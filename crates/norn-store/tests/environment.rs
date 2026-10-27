@@ -125,6 +125,9 @@ fn a_full_disk_refuses_the_increment_and_is_never_typed_as_damage() {
         document(standing, "hash-1", "the row that was already there\n"),
     );
     let held = held_pages(&mut store);
+    store
+        .finish_construction()
+        .expect("finishing the seed's construction");
     drop(store);
 
     induced_failure::cap_the_pages(held);
@@ -194,6 +197,9 @@ fn a_database_that_reports_itself_busy_is_refused_rather_than_rebuilt() {
 
     let mut store = scratch.open();
     write_document(&mut store, document(subject, "hash-1", "a body\n"));
+    store
+        .finish_construction()
+        .expect("finishing the seed's construction");
     drop(store);
 
     induced_failure::fail_next_meta_read_as_busy();

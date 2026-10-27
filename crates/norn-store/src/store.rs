@@ -1039,6 +1039,10 @@ pub struct Store {
     order: StoredPathOrder,
     derivation: DerivationVersion,
     outcome: OpenOutcome,
+    /// Whether the build that fills this store has not ended: set from the open
+    /// outcome, because a create and a rebuild both record the mark and a reuse
+    /// found none.
+    under_construction: bool,
     torn_down: bool,
 }
 
@@ -1140,6 +1144,7 @@ impl Store {
         let database = Database::adopt(connection, path)?;
         refuse_loading_source(database.connection(), database.path())?;
         crate::resolve::register_functions(database.connection())?;
+        let under_construction = outcome != OpenOutcome::Reused;
         Ok(Store {
             intake_unsealed: false,
             metadata_intake: false,
@@ -1152,6 +1157,7 @@ impl Store {
             order,
             derivation,
             outcome,
+            under_construction,
             torn_down: false,
         })
     }
@@ -1205,6 +1211,36 @@ impl Store {
     /// casually.
     pub fn mode(&self) -> StoreMode {
         self.mode
+    }
+
+    /// Whether the build that fills this store has not ended.
+    ///
+    /// A store is under construction from the transaction that creates it, so
+    /// every open that created or rebuilt the database says so, and one that
+    /// reused a finished store does not.
+    pub fn under_construction(&self) -> bool {
+        self.under_construction
+    }
+
+    /// End the from-zero build that fills this store: delete the
+    /// under-construction mark in one transaction of its own.
+    ///
+    /// It is not a changeset, so neither the epoch nor the write generation
+    /// moves; on a finished store it deletes nothing. A build that fails never
+    /// reaches this, which is what leaves the mark for the next open to rebuild
+    /// over.
+    pub fn finish_construction(&mut self) -> Result<(), StoreError> {
+        let transaction = self
+            .database
+            .immediate_transaction("opening the construction-finish transaction")?;
+        norn_db::meta::delete_meta(&transaction, ddl::meta::UNDER_CONSTRUCTION)?;
+        transaction.commit().map_err(|error| StoreError::Sql {
+            operation: "finishing construction",
+            condition: None,
+            message: error.to_string(),
+        })?;
+        self.under_construction = false;
+        Ok(())
     }
 
     /// How the open ended up with this database.
@@ -2008,6 +2044,7 @@ impl norn_db::Client for StoreClient {
             ddl::meta::DERIVATION_VERSION,
             self.derivation.recorded().as_str(),
         )?;
+        norn_db::meta::put_meta(transaction, ddl::meta::UNDER_CONSTRUCTION, 1_i64)?;
         norn_db::meta::put_meta(transaction, meta::WRITE_GENERATION, 0_i64)?;
         Ok(())
     }
@@ -2024,6 +2061,7 @@ impl norn_db::Client for StoreClient {
         refuse_loading_source(connection, path)?;
         self.adopt_mode(connection, path)?;
         let details: Vec<String> = [
+            construction_unfinished(connection)?,
             self.path_order_moved(connection)?,
             self.derivation_moved(connection)?,
         ]
@@ -2144,6 +2182,20 @@ fn quoted<'a>(values: impl Iterator<Item = &'a str>) -> String {
         .map(|value| format!("'{value}'"))
         .collect::<Vec<String>>()
         .join(", ")
+}
+
+/// The reason the store owes a rebuild from zero because the build that filled
+/// it never ended, or `None` where it carries no mark.
+///
+/// The mark is judged by being set: any value, of any type, is a build that did
+/// not finish. This is the open's one added read of a finished store.
+fn construction_unfinished(connection: &Connection) -> Result<Option<String>, StoreError> {
+    Ok(
+        Recorded::read(connection, ddl::meta::UNDER_CONSTRUCTION)?.map(|_| {
+            "the store's construction never finished, so its rows are a partial derivation"
+                .to_string()
+        }),
+    )
 }
 
 fn refuse_loading_source(connection: &Connection, path: &Path) -> Result<(), StoreError> {

@@ -2275,6 +2275,9 @@ fn a_torn_changeset_leaves_the_previous_generation_whole() {
         .expect("recording a finding");
     request.finish();
     store.verify_integrity().expect("a store just written to");
+    store
+        .finish_construction()
+        .expect("finishing the seed's construction");
     drop(store);
 
     let child = Command::new(std::env::current_exe().expect("this suite's own executable"))
@@ -2672,6 +2675,9 @@ fn a_torn_changeset_holding_a_vacated_place_leaves_its_finding_standing() {
         .expect("recording a finding");
     let before = request.write_generation().expect("a generation");
     request.finish();
+    store
+        .finish_construction()
+        .expect("finishing the seed's construction");
     drop(store);
 
     let child = Command::new(std::env::current_exe().expect("this suite's own executable"))

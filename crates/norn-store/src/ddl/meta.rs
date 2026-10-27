@@ -24,8 +24,9 @@
 //! `vault_schema_generation` — the pinned vault-schema projection —
 //! `store_mode`, which is a fact about this crate's own two ways of opening
 //! rather than about running a database, `path_order`, the case behaviour
-//! every row was derived under, and `derivation_version`, the derivation every
-//! row was written by.
+//! every row was derived under, `derivation_version`, the derivation every
+//! row was written by, and `under_construction`, the mark a store carries from
+//! the transaction that creates it until the build that fills it ends.
 //!
 //! # The vault-schema projection is derived state
 //!
@@ -77,6 +78,17 @@ pub(crate) const PATH_ORDER: &str = "path_order";
 /// store that records none, or a value no build writes, is rebuilt as one that
 /// records another.
 pub(crate) const DERIVATION_VERSION: &str = "derivation_version";
+
+/// The mark of a from-zero build that has not ended.
+///
+/// It is a rebuild input beside the path order and the derivation version
+/// ([ADR 0026](../../../../docs/decisions/0026-a-derived-store-records-the-derivation-that-wrote-it.md),
+/// ADR 0045): [`crate::Store`] writes it in the transaction that creates the
+/// database and deletes it when the build that fills the store ends, and an open
+/// that finds the key set, whatever it holds, rebuilds from zero. A store that
+/// carries none is a finished one, so a build that was interrupted is never
+/// resumed over what it left.
+pub(crate) const UNDER_CONSTRUCTION: &str = "under_construction";
 
 /// An owned first-index projection cannot be adopted as an ordinary store.
 pub(crate) const LOADING_SOURCE: &str = "loading_source";

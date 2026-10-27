@@ -101,6 +101,7 @@ impl IntakeBuilder {
                 order,
                 derivation,
                 outcome: OpenOutcome::Created,
+                under_construction: true,
                 // TemporaryFile owns cleanup, including on failed construction.
                 torn_down: true,
             }),
@@ -357,8 +358,9 @@ mod tests {
     fn construction_refuses_existing_files_and_cleans_a_failed_schema() {
         let scratch = norn_testkit::scratch::Scratch::new("intake-create-failure");
         let path = scratch.join("lasting.sqlite3");
-        let store =
+        let mut store =
             Store::open(&path, StoredPathOrder::Sensitive, DerivationVersion::new(1)).unwrap();
+        store.finish_construction().unwrap();
         let epoch = store.epoch().to_string();
         assert!(
             IntakeBuilder::create(&path, StoredPathOrder::Sensitive, DerivationVersion::new(1))
@@ -638,6 +640,7 @@ mod intake_tests {
         let path = scratch.join("lasting.sqlite3");
         let mut store =
             Store::open(&path, StoredPathOrder::Sensitive, DerivationVersion::new(1)).unwrap();
+        store.finish_construction().unwrap();
         let epoch = store.epoch().to_string();
         let facts = DocumentFacts::new(DocumentPath::new("first.md").unwrap(), "hash", "body", 4);
         assert!(

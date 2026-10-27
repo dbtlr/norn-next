@@ -50,7 +50,7 @@ fn a_first_open_creates_and_a_second_reuses() {
     let database = scratch.database();
     assert!(!exists(&database), "the file exists before any open");
 
-    let store =
+    let mut store =
         Store::open(&database, StoredPathOrder::Sensitive, DERIVATION).expect("creating a store");
     assert_eq!(*store.open_outcome(), OpenOutcome::Created);
     assert_eq!(store.mode(), StoreMode::Durable);
@@ -64,6 +64,9 @@ fn a_first_open_creates_and_a_second_reuses() {
         "a database records the schema it was created holding"
     );
     store.verify_integrity().expect("a store it just created");
+    store
+        .finish_construction()
+        .expect("finishing the seed's construction");
     drop(store);
 
     assert!(exists(&database));
@@ -82,11 +85,14 @@ fn an_epoch_is_minted_at_create_and_survives_every_reopen() {
     let scratch = Scratch::new("epoch");
     let database = scratch.database();
 
-    let store =
+    let mut store =
         Store::open(&database, StoredPathOrder::Sensitive, DERIVATION).expect("creating a store");
     assert_eq!(*store.open_outcome(), OpenOutcome::Created);
     let minted = store.epoch().to_string();
     assert!(!minted.is_empty(), "a created store minted no epoch");
+    store
+        .finish_construction()
+        .expect("finishing the seed's construction");
     drop(store);
 
     let reopened =
@@ -460,6 +466,9 @@ fn a_corrupt_page_an_open_never_reads_is_damage_at_the_read_that_meets_it() {
         })
         .collect();
     write_documents(&mut store.begin_request(), &documents);
+    store
+        .finish_construction()
+        .expect("finishing the seed's construction");
     drop(store);
 
     // The store schema sits in the pages a database is created with, and the
@@ -568,9 +577,12 @@ fn a_path_that_looks_like_a_uri_is_a_filename() {
         .expect("a parent directory")
         .join("file:store.sqlite3?mode=memory&cache=shared");
 
-    let store = Store::open(&uri_shaped, StoredPathOrder::Sensitive, DERIVATION)
+    let mut store = Store::open(&uri_shaped, StoredPathOrder::Sensitive, DERIVATION)
         .expect("creating a store at a URI-shaped path");
     assert_eq!(*store.open_outcome(), OpenOutcome::Created);
+    store
+        .finish_construction()
+        .expect("finishing the seed's construction");
     drop(store);
     assert!(
         exists(&uri_shaped),
@@ -621,6 +633,9 @@ fn a_throwaway_store_refuses_to_adopt_a_durable_one() {
         &mut durable.begin_request(),
         &document(subject.as_str(), "hash-1", "a body\n"),
     );
+    durable
+        .finish_construction()
+        .expect("finishing the seed's construction");
     drop(durable);
 
     let error = Store::open_throwaway(&database, StoredPathOrder::Sensitive, DERIVATION)
@@ -663,6 +678,9 @@ fn a_throwaway_store_refuses_to_adopt_an_unrecorded_mode() {
     );
     induced_failure::execute_out_of_band(&mut store, "DELETE FROM meta WHERE key = 'store_mode'")
         .expect("deleting the store_mode row");
+    store
+        .finish_construction()
+        .expect("finishing the seed's construction");
     drop(store);
 
     let error = Store::open_throwaway(&database, StoredPathOrder::Sensitive, DERIVATION)
@@ -698,8 +716,11 @@ fn a_durable_store_adopts_the_leftovers_of_a_throwaway_one() {
     let database = scratch.database();
 
     // A process that died rather than closing leaves the file behind.
-    let leftover = Store::open_throwaway(&database, StoredPathOrder::Sensitive, DERIVATION)
+    let mut leftover = Store::open_throwaway(&database, StoredPathOrder::Sensitive, DERIVATION)
         .expect("creating a throwaway store");
+    leftover
+        .finish_construction()
+        .expect("finishing the leftover's construction");
     std::mem::forget(leftover);
 
     let adopted = Store::open(&database, StoredPathOrder::Sensitive, DERIVATION)
@@ -830,6 +851,9 @@ fn a_store_opened_under_another_path_order_is_rebuilt_from_zero() {
             stored_paths(&mut rebuilt).is_empty(),
             "the rebuild kept rows derived under the other order"
         );
+        rebuilt
+            .finish_construction()
+            .expect("finishing the seed's construction");
         drop(rebuilt);
 
         let reopened = Store::open(&database, proven, DERIVATION).expect("reopening a store");
@@ -853,6 +877,9 @@ fn a_store_opened_under_the_order_it_was_derived_under_is_reused() {
             &mut store.begin_request(),
             &document("a/Foo.md", "hash-1", "a body\n"),
         );
+        store
+            .finish_construction()
+            .expect("finishing the seed's construction");
         drop(store);
 
         let mut reopened = Store::open(&database, order, DERIVATION).expect("reopening a store");
@@ -905,6 +932,9 @@ fn a_store_recording_no_path_order_is_rebuilt_from_zero() {
             stored_paths(&mut rebuilt).is_empty(),
             "the rebuild kept rows no recorded order vouches for"
         );
+        rebuilt
+            .finish_construction()
+            .expect("finishing the seed's construction");
         drop(rebuilt);
 
         let reopened = Store::open(&database, proven, DERIVATION).expect("reopening a store");
@@ -979,6 +1009,9 @@ fn a_path_order_recorded_as_another_type_is_rebuilt_from_zero() {
         stored_paths(&mut rebuilt).is_empty(),
         "the rebuild kept rows no recorded order vouches for"
     );
+    rebuilt
+        .finish_construction()
+        .expect("finishing the seed's construction");
     drop(rebuilt);
 
     let reopened =
@@ -1006,6 +1039,9 @@ fn a_store_mode_recorded_as_another_type_reads_as_unrecognized() {
         "UPDATE meta SET value = 1 WHERE key = 'store_mode'",
     )
     .expect("recording a mode as an integer");
+    store
+        .finish_construction()
+        .expect("finishing the seed's construction");
     drop(store);
 
     let error = Store::open_throwaway(&database, StoredPathOrder::Sensitive, DERIVATION)
@@ -1040,6 +1076,9 @@ fn a_throwaway_open_under_another_order_is_refused_before_it_rebuilds() {
         &mut durable.begin_request(),
         &document("a/Foo.md", "hash-1", "a body\n"),
     );
+    durable
+        .finish_construction()
+        .expect("finishing the seed's construction");
     drop(durable);
 
     let error = Store::open_throwaway(&database, StoredPathOrder::AsciiCaseInsensitive, DERIVATION)
@@ -1061,10 +1100,13 @@ fn a_discard_reopens_under_the_order_it_is_handed() {
 
     let store =
         Store::open(&database, StoredPathOrder::Sensitive, DERIVATION).expect("creating a store");
-    let replaced = store
+    let mut replaced = store
         .discard_and_reopen(StoredPathOrder::AsciiCaseInsensitive)
         .expect("discarding and reopening");
     assert_eq!(replaced.path_order(), StoredPathOrder::AsciiCaseInsensitive);
+    replaced
+        .finish_construction()
+        .expect("finishing the seed's construction");
     drop(replaced);
 
     let reopened = Store::open(&database, StoredPathOrder::AsciiCaseInsensitive, DERIVATION)
@@ -1116,6 +1158,9 @@ fn a_store_opened_under_another_derivation_version_is_rebuilt_from_zero() {
         stored_paths(&mut rebuilt).is_empty(),
         "the rebuild kept rows another derivation wrote"
     );
+    rebuilt
+        .finish_construction()
+        .expect("finishing the seed's construction");
     drop(rebuilt);
 
     let reopened =
@@ -1139,6 +1184,9 @@ fn a_store_opened_under_the_derivation_version_it_was_derived_by_is_reused() {
         &mut store.begin_request(),
         &document("a/Foo.md", "hash-1", "a body\n"),
     );
+    store
+        .finish_construction()
+        .expect("finishing the seed's construction");
     drop(store);
 
     let mut reopened =
@@ -1187,6 +1235,9 @@ fn a_store_recording_no_derivation_version_is_rebuilt_from_zero() {
         stored_paths(&mut rebuilt).is_empty(),
         "the rebuild kept rows no recorded derivation vouches for"
     );
+    rebuilt
+        .finish_construction()
+        .expect("finishing the seed's construction");
     drop(rebuilt);
 
     let reopened =
@@ -1271,13 +1322,213 @@ fn a_discard_reopens_under_the_derivation_version_it_held() {
 
     let store =
         Store::open(&database, StoredPathOrder::Sensitive, DERIVED_BY).expect("creating a store");
-    let replaced = store
+    let mut replaced = store
         .discard_and_reopen(StoredPathOrder::Sensitive)
         .expect("discarding and reopening");
     assert_eq!(replaced.derivation_version(), DERIVED_BY);
+    replaced
+        .finish_construction()
+        .expect("finishing the seed's construction");
     drop(replaced);
 
     let reopened =
         Store::open(&database, StoredPathOrder::Sensitive, DERIVED_BY).expect("reopening a store");
     assert_eq!(*reopened.open_outcome(), OpenOutcome::Reused);
+}
+
+/// **A store is under construction from the transaction that creates it** and
+/// stays so until the build that fills it says it is done. Every store a from-zero
+/// build fills — a create, an open-time rebuild, a deliberate discard — is
+/// marked, and a store opened over a finished one is not.
+#[test]
+fn a_created_store_is_under_construction_until_its_build_finishes() {
+    let scratch = Scratch::new("construction-created");
+    let database = scratch.database();
+
+    let mut store =
+        Store::open(&database, StoredPathOrder::Sensitive, DERIVATION).expect("creating a store");
+    assert_eq!(*store.open_outcome(), OpenOutcome::Created);
+    assert!(store.under_construction(), "a created store is not marked");
+    store.finish_construction().expect("finishing construction");
+    assert!(!store.under_construction());
+    drop(store);
+
+    let reopened =
+        Store::open(&database, StoredPathOrder::Sensitive, DERIVATION).expect("reopening a store");
+    assert_eq!(*reopened.open_outcome(), OpenOutcome::Reused);
+    assert!(
+        !reopened.under_construction(),
+        "a store adopted as finished reports itself under construction"
+    );
+}
+
+/// **A store whose construction never finished is rebuilt from zero**, through
+/// the ceremony a fingerprint mismatch uses, and the reason says why.
+#[test]
+fn a_store_whose_construction_never_finished_is_rebuilt_from_zero_and_says_why() {
+    let scratch = Scratch::new("construction-unfinished");
+    let database = scratch.database();
+
+    let mut store =
+        Store::open(&database, StoredPathOrder::Sensitive, DERIVATION).expect("creating a store");
+    write_document(
+        &mut store.begin_request(),
+        &document("a/Foo.md", "hash-1", "a body\n"),
+    );
+    let first = store.epoch().to_string();
+    drop(store);
+
+    let mut rebuilt = Store::open(&database, StoredPathOrder::Sensitive, DERIVATION)
+        .expect("reopening an unfinished store");
+    let OpenOutcome::RebuiltFromZero(RebuildReason::Client { detail }) = rebuilt.open_outcome()
+    else {
+        panic!("an unfinished store opened as {:?}", rebuilt.open_outcome());
+    };
+    assert!(detail.contains("construction"), "{detail}");
+    assert!(
+        rebuilt.under_construction(),
+        "the replacement is not marked"
+    );
+    assert_ne!(rebuilt.epoch(), first, "the rebuild kept the epoch");
+    assert!(
+        stored_paths(&mut rebuilt).is_empty(),
+        "the rebuild resumed over rows a build left"
+    );
+}
+
+/// **An unfinished store whose order also moved is rebuilt once**, for one
+/// reason that names every input that disagreed.
+#[test]
+fn an_unfinished_store_under_another_order_is_rebuilt_once_naming_both() {
+    let scratch = Scratch::new("construction-and-order");
+    let database = scratch.database();
+
+    drop(Store::open(&database, StoredPathOrder::Sensitive, DERIVATION).expect("creating"));
+    let rebuilt = Store::open(&database, StoredPathOrder::AsciiCaseInsensitive, DERIVATION)
+        .expect("reopening a store");
+    let OpenOutcome::RebuiltFromZero(RebuildReason::Client { detail }) = rebuilt.open_outcome()
+    else {
+        panic!("the store opened as {:?}", rebuilt.open_outcome());
+    };
+    assert!(
+        detail.contains("construction")
+            && detail.contains(&format!("`{}`", StoredPathOrder::Sensitive.as_str())),
+        "the reason does not name both inputs: {detail}"
+    );
+}
+
+/// **A throwaway open over an unfinished durable store is refused** like any
+/// throwaway open over a durable one: nothing is discarded.
+#[test]
+fn a_throwaway_open_over_an_unfinished_durable_store_is_refused_and_discards_nothing() {
+    let scratch = Scratch::new("construction-throwaway");
+    let database = scratch.database();
+
+    let mut durable =
+        Store::open(&database, StoredPathOrder::Sensitive, DERIVATION).expect("creating a store");
+    write_document(
+        &mut durable.begin_request(),
+        &document("a/Foo.md", "hash-1", "a body\n"),
+    );
+    let epoch = durable.epoch().to_string();
+    drop(durable);
+
+    let error = Store::open_throwaway(&database, StoredPathOrder::Sensitive, DERIVATION)
+        .expect_err("a throwaway over an unfinished durable store");
+    assert!(matches!(error, StoreError::Lifecycle { .. }), "{error:?}");
+    assert!(exists(&database), "the refusal removed the file");
+
+    let mut again = Store::open(&database, StoredPathOrder::Sensitive, DERIVATION)
+        .expect("reopening the durable store");
+    // Still marked, so this open is the rebuild — and it is the durable open's, not the refusal's.
+    assert!(matches!(
+        again.open_outcome(),
+        OpenOutcome::RebuiltFromZero(_)
+    ));
+    assert_ne!(again.epoch(), epoch);
+    assert!(stored_paths(&mut again).is_empty());
+}
+
+/// **A mark of any type is a mark**: the open asks whether the key is set, not
+/// what it holds.
+#[test]
+fn a_mark_of_any_type_is_unfinished() {
+    for (label, value) in [("text", "'yes'"), ("blob", "x'00ff'"), ("null", "NULL")] {
+        let scratch = Scratch::new(&format!("construction-{label}"));
+        let database = scratch.database();
+
+        let mut store = Store::open(&database, StoredPathOrder::Sensitive, DERIVATION)
+            .expect("creating a store");
+        store.finish_construction().expect("finishing construction");
+        induced_failure::execute_out_of_band(
+            &mut store,
+            &format!("INSERT INTO meta (key, value) VALUES ('under_construction', {value})"),
+        )
+        .expect("recording a mark");
+        drop(store);
+
+        let reopened = Store::open(&database, StoredPathOrder::Sensitive, DERIVATION)
+            .expect("reopening a store");
+        assert!(
+            matches!(
+                reopened.open_outcome(),
+                OpenOutcome::RebuiltFromZero(RebuildReason::Client { .. })
+            ),
+            "a {label} mark opened as {:?}",
+            reopened.open_outcome()
+        );
+    }
+}
+
+/// **Finishing construction is a single-row delete.** It is not a changeset, so
+/// neither the epoch nor the write generation moves, and finishing a finished
+/// store is nothing.
+#[test]
+fn finishing_construction_moves_neither_epoch_nor_write_generation() {
+    let scratch = Scratch::new("construction-finish");
+    let database = scratch.database();
+
+    let mut store =
+        Store::open(&database, StoredPathOrder::Sensitive, DERIVATION).expect("creating a store");
+    write_document(
+        &mut store.begin_request(),
+        &document("a/Foo.md", "hash-1", "a body\n"),
+    );
+    let epoch = store.epoch().to_string();
+    let generation = store
+        .begin_request()
+        .write_generation()
+        .expect("the write generation");
+
+    store.finish_construction().expect("finishing construction");
+    store
+        .finish_construction()
+        .expect("finishing a finished store");
+
+    assert_eq!(store.epoch(), epoch);
+    assert_eq!(
+        store
+            .begin_request()
+            .write_generation()
+            .expect("the write generation"),
+        generation
+    );
+    assert!(!store.under_construction());
+}
+
+/// **A deliberate discard hands back a store under construction**, because its
+/// next act is deriving the vault again.
+#[test]
+fn a_store_discarded_and_reopened_is_under_construction() {
+    let scratch = Scratch::new("construction-discard");
+    let database = scratch.database();
+
+    let mut store =
+        Store::open(&database, StoredPathOrder::Sensitive, DERIVATION).expect("creating a store");
+    store.finish_construction().expect("finishing construction");
+    let replaced = store
+        .discard_and_reopen(StoredPathOrder::Sensitive)
+        .expect("discarding and reopening");
+    assert_eq!(*replaced.open_outcome(), OpenOutcome::Created);
+    assert!(replaced.under_construction());
 }
