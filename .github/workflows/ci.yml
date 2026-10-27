@@ -193,6 +193,10 @@ jobs:
         run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-embed --test determinism
       - name: Filesystem contracts
         run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-fs
+      - name: Host library contracts
+        run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-host --features induced-failure --lib
+      - name: Staged host requests
+        run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-host --features induced-failure --test staged_loading --test staged_reads --test staged_registration
       - name: Obsidian parity
         run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-host --features induced-failure --test obsidian_parity
       # --exact alone succeeds on a typo. test-suite.sh rejects zero matches.
