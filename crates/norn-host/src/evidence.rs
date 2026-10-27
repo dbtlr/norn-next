@@ -89,6 +89,7 @@ pub struct JobEvidence {
     changeset_read_steps: AtomicU64,
     recoveries_run: AtomicU64,
     rebuilds_run: AtomicU64,
+    from_zero_builds: AtomicU64,
     watcher_polls: AtomicU64,
     watcher_rescans_reported: AtomicU64,
     mint_statements_under_the_gate: AtomicU64,
@@ -188,6 +189,10 @@ pub struct EvidenceReading {
     /// Rung-3 rebuilds run: how many times a job discarded damaged derived state
     /// and built it from the vault again.
     pub rebuilds_run: u64,
+    /// From-zero builds run: how many times a job derived a vault into a store
+    /// under construction, whichever route reached it. An attach over a finished
+    /// store adds none.
+    pub from_zero_builds: u64,
     /// Watcher polls taken over an attachment, however each one answered.
     ///
     /// One per poll of an entry's attachment — a pass of the dispatcher's
@@ -320,6 +325,9 @@ impl EvidenceReading {
                 .saturating_sub(earlier.changeset_read_steps),
             recoveries_run: self.recoveries_run.saturating_sub(earlier.recoveries_run),
             rebuilds_run: self.rebuilds_run.saturating_sub(earlier.rebuilds_run),
+            from_zero_builds: self
+                .from_zero_builds
+                .saturating_sub(earlier.from_zero_builds),
             watcher_polls: self.watcher_polls.saturating_sub(earlier.watcher_polls),
             watcher_rescans_reported: self
                 .watcher_rescans_reported
@@ -433,6 +441,7 @@ impl JobEvidence {
             changeset_read_steps: get(&self.changeset_read_steps),
             recoveries_run: get(&self.recoveries_run),
             rebuilds_run: get(&self.rebuilds_run),
+            from_zero_builds: get(&self.from_zero_builds),
             watcher_polls: get(&self.watcher_polls),
             watcher_rescans_reported: get(&self.watcher_rescans_reported),
             mint_statements_under_the_gate: get(&self.mint_statements_under_the_gate),
@@ -457,6 +466,10 @@ impl JobEvidence {
 
     pub(crate) fn count_rebuild(&self) {
         self.rebuilds_run.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn count_from_zero_build(&self) {
+        self.from_zero_builds.fetch_add(1, Ordering::Relaxed);
     }
 
     pub(crate) fn count_watcher_poll(&self) {
@@ -944,6 +957,7 @@ mod tests {
         evidence.count_recovery();
         evidence.count_rebuild();
         evidence.count_rebuild();
+        evidence.count_from_zero_build();
         evidence.count_watcher_poll();
         evidence.count_watcher_poll();
         evidence.count_watcher_poll();
@@ -953,10 +967,11 @@ mod tests {
             (
                 read.recoveries_run,
                 read.rebuilds_run,
+                read.from_zero_builds,
                 read.watcher_polls,
                 read.watcher_rescans_reported
             ),
-            (1, 2, 3, 1)
+            (1, 2, 1, 3, 1)
         );
     }
 
