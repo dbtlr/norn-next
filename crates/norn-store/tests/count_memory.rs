@@ -70,6 +70,10 @@ fn populate(path: &Path, size: usize) {
             .apply_increment(IncrementProvenance::Derived, changes, &[], &model())
             .expect("populate fixture");
     }
+    // A store still under construction is rebuilt from zero by the child's open.
+    store
+        .finish_construction()
+        .expect("finish the fixture store");
 }
 
 #[allow(clippy::disallowed_macros)] // Machine-consumed child report.
