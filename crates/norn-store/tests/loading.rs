@@ -82,7 +82,10 @@ fn a_rich_sealed_source_survives_retirement_and_refuses_ordinary_adoption() {
     let norn_wire::GetReport::Record { document, .. } = answer.report else {
         panic!("whole record")
     };
-    assert_eq!(document.body.unwrap().text(), "rich sealed body");
+    let norn_wire::Content::Known { value: body, .. } = document.body.unwrap() else {
+        panic!("the sealed source body must be known");
+    };
+    assert_eq!(body.text(), "rich sealed body");
     drop(snapshot);
     budget.trim(Instant::now() + Duration::from_secs(60));
     assert_eq!(budget.census().live_connections, 0);
@@ -390,7 +393,9 @@ fn a_sealed_rich_get_contains_ordinary_links_anchor_context_and_findings() {
     else {
         panic!("whole record")
     };
-    let links = document.links.unwrap();
+    let norn_wire::Content::Known { value: links, .. } = document.links.unwrap() else {
+        panic!("the sealed source links must be known");
+    };
     assert_eq!(links.total, 3);
     assert_eq!(
         links

@@ -87,8 +87,8 @@ pub enum HeldBlock {
 #[derive(Clone, Debug, PartialEq)]
 pub struct HeldFrontmatter {
     /// The hash the document's row records, spelled as every stored content
-    /// hash is.
-    pub content_hash: String,
+    /// hash is, or absent for a broken document whose projection was cleared.
+    pub content_hash: Option<String>,
     /// What its frontmatter block came to.
     pub block: HeldBlock,
 }
@@ -153,7 +153,7 @@ impl Snapshot {
         let Some((content_hash, projection, diagnostics)) = self
             .run_statement(record, holder, |row| {
                 Ok((
-                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(0)?,
                     row.get::<_, Option<String>>(1)?,
                     row.get::<_, i64>(2)?,
                 ))

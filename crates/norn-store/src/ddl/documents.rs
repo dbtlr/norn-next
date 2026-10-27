@@ -76,6 +76,12 @@
 //!
 //! # The rest of the row
 //!
+//! A broken document holds its names alone. Its content hash, body, body hash,
+//! byte length, body offset and frontmatter are NULL, with zero diagnostics.
+//! The body, body hash, byte length and body offset are present or absent
+//! together; a content hash cannot stand beside an absent body. An empty
+//! readable body is the empty string, so it stays distinct from unread bytes.
+//!
 //! - `content_hash` — the hash the filesystem seam computed over the bytes it
 //!   read. **Only a content hash concludes "unchanged"**, so this is what a
 //!   full tree heal compares against, and it is the same value a
@@ -160,16 +166,20 @@ const STATEMENTS: &[&str] = &[
     suffix_key                   TEXT    NOT NULL,
     path_key                     TEXT    NOT NULL,
     admitting_segments           INTEGER NOT NULL CHECK (admitting_segments >= 1),
-    content_hash                 TEXT    NOT NULL,
-    byte_length                  INTEGER NOT NULL,
-    body                         TEXT    NOT NULL,
-    body_hash                    TEXT    NOT NULL,
-    body_offset                  INTEGER NOT NULL,
+    content_hash                 TEXT,
+    byte_length                  INTEGER,
+    body                         TEXT,
+    body_hash                    TEXT,
+    body_offset                  INTEGER,
     frontmatter                  TEXT,
     frontmatter_projection_hash  TEXT,
     frontmatter_diagnostic_count INTEGER NOT NULL,
     generation                   INTEGER NOT NULL,
     derived_at                   INTEGER NOT NULL,
+    CHECK ((body IS NULL) = (body_hash IS NULL)),
+    CHECK ((body IS NULL) = (byte_length IS NULL)),
+    CHECK ((body IS NULL) = (body_offset IS NULL)),
+    CHECK (body IS NOT NULL OR content_hash IS NULL),
     CHECK ((frontmatter IS NULL) = (frontmatter_projection_hash IS NULL))
 )",
     "CREATE UNIQUE INDEX documents_path ON documents(path)",

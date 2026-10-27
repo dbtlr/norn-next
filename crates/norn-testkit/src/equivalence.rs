@@ -133,20 +133,20 @@ pub struct StoreProjection {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProjectedDocument {
     pub path: String,
-    pub content_hash: String,
+    pub content_hash: Option<String>,
     /// The sub-fingerprint of the body, as the change feed projects it. A
     /// derived fact like every other field here: two stores that agree about a
     /// document agree about what its body hashes to, whichever route derived
     /// them.
-    pub body_hash: String,
+    pub body_hash: Option<String>,
     /// The sub-fingerprint of the frontmatter projection, and `None` where there
     /// is no projection to hash.
     pub frontmatter_projection_hash: Option<String>,
-    pub byte_length: u64,
-    pub body_offset: u64,
+    pub byte_length: Option<u64>,
+    pub body_offset: Option<u64>,
     pub frontmatter: Option<String>,
     pub frontmatter_diagnostic_count: u32,
-    pub body: String,
+    pub body: Option<String>,
     /// Each link as written, with its anchor's readings and the address kind
     /// stored beside it.
     pub links: Vec<StoredLink>,
@@ -362,7 +362,8 @@ impl StoreProjection {
         // whole feed is drained first and keyed by path, so each document takes
         // its pair without a read of its own. The positions the drain hands back
         // are dropped — a cursor is one store's, and a projection compares two.
-        let mut sub_fingerprints: BTreeMap<String, (String, Option<String>)> = BTreeMap::new();
+        let mut sub_fingerprints: BTreeMap<String, (Option<String>, Option<String>)> =
+            BTreeMap::new();
         let mut position = None;
         loop {
             let page = request.changed_documents_after(position.as_ref(), PAGE)?;
@@ -590,7 +591,8 @@ impl StoreProjection {
                 )
             });
             assert_eq!(
-                &held.body, body,
+                held.body.as_deref(),
+                Some(*body),
                 "{subject}: the document at `{path}` holds another body"
             );
         }
@@ -658,19 +660,29 @@ impl StoreProjection {
         }
         for document in &self.documents {
             let at = format!("document[{}]", document.path);
-            entries.push((format!("{at}.content_hash"), quoted(&document.content_hash)));
-            entries.push((format!("{at}.body_hash"), quoted(&document.body_hash)));
+            entries.push((
+                format!("{at}.content_hash"),
+                optional_text(document.content_hash.as_deref()),
+            ));
+            entries.push((
+                format!("{at}.body_hash"),
+                optional_text(document.body_hash.as_deref()),
+            ));
             entries.push((
                 format!("{at}.frontmatter_projection_hash"),
                 optional_text(document.frontmatter_projection_hash.as_deref()),
             ));
             entries.push((
                 format!("{at}.byte_length"),
-                document.byte_length.to_string(),
+                document
+                    .byte_length
+                    .map_or_else(|| "<absent>".to_string(), |value| value.to_string()),
             ));
             entries.push((
                 format!("{at}.body_offset"),
-                document.body_offset.to_string(),
+                document
+                    .body_offset
+                    .map_or_else(|| "<absent>".to_string(), |value| value.to_string()),
             ));
             entries.push((
                 format!("{at}.frontmatter"),
@@ -680,7 +692,10 @@ impl StoreProjection {
                 format!("{at}.frontmatter_diagnostic_count"),
                 document.frontmatter_diagnostic_count.to_string(),
             ));
-            entries.push((format!("{at}.body"), quoted(&document.body)));
+            entries.push((
+                format!("{at}.body"),
+                optional_text(document.body.as_deref()),
+            ));
             push_indexed(&mut entries, &at, "link", &document.links);
             push_indexed(&mut entries, &at, "link_key", &document.link_keys);
             push_indexed(&mut entries, &at, "heading", &document.headings);
@@ -1533,14 +1548,14 @@ mod tests {
             vault_files: Vec::new(),
             documents: vec![ProjectedDocument {
                 path: "docs/a.md".to_string(),
-                content_hash: "hash-1".to_string(),
-                body_hash: "body-hash-1".to_string(),
+                content_hash: Some("hash-1".to_string()),
+                body_hash: Some("body-hash-1".to_string()),
                 frontmatter_projection_hash: None,
-                byte_length: 7,
-                body_offset: 0,
+                byte_length: Some(7),
+                body_offset: Some(0),
                 frontmatter: None,
                 frontmatter_diagnostic_count: 0,
-                body: "a body\n".to_string(),
+                body: Some("a body\n".to_string()),
                 links: Vec::new(),
                 link_keys: Vec::new(),
                 headings: Vec::new(),
@@ -1571,7 +1586,7 @@ mod tests {
     #[test]
     fn a_changed_field_is_reported_by_name() {
         let mut other = projection();
-        other.documents[0].content_hash = "hash-2".to_string();
+        other.documents[0].content_hash = Some("hash-2".to_string());
         let divergence = projection()
             .compare(&other)
             .divergence

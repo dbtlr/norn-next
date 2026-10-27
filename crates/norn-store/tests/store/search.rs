@@ -10,6 +10,7 @@
 
 use std::sync::Arc;
 
+use crate::common::known;
 use crate::common::{
     DOCUMENT_PAYLOAD, Scratch, document, reads_of, span, violation, write_documents,
 };
@@ -904,15 +905,16 @@ fn a_hit_carries_the_row_its_columns_name() {
         row(0)
             .fields
             .as_ref()
+            .map(known)
             .and_then(|fields| fields.get("status")),
         Some(&FieldValue::scalar("open"))
     );
     assert_eq!(
-        row(0).body.as_ref().map(|body| body.text()),
+        row(0).body.as_ref().map(known).map(|body| body.text()),
         Some("lantern lantern lantern harbor\n")
     );
     assert_eq!(
-        row(1).body.as_ref().map(|body| body.text()),
+        row(1).body.as_ref().map(known).map(|body| body.text()),
         Some("harbor lantern twin\n")
     );
     assert_eq!(
@@ -956,12 +958,13 @@ fn a_searchs_links_column_counts_the_candidates_its_links_carry() {
     let [hit] = &linked.hits[..] else {
         panic!("`beacon` is not one hit: {:?}", linked.hits);
     };
-    let links = &hit
-        .document
-        .as_ref()
-        .and_then(|row| row.links.as_ref())
-        .expect("the links column")
-        .items;
+    let links = &known(
+        hit.document
+            .as_ref()
+            .and_then(|row| row.links.as_ref())
+            .expect("the links column"),
+    )
+    .items;
     let carried: u64 = links
         .iter()
         .map(|link| link.targets.candidates().len() as u64)
@@ -1113,6 +1116,7 @@ fn a_ranked_hit_carries_the_row_its_columns_name() {
             .document
             .as_ref()
             .and_then(|row| row.fields.as_ref())
+            .map(known)
             .and_then(|fields| fields.get("status"))
             .cloned()
     };

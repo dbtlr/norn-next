@@ -246,7 +246,7 @@ pub(crate) struct FindPosition {
 #[derive(Clone, Debug)]
 pub(crate) struct PagedKey {
     key: FoundKey,
-    content_hash: String,
+    content_hash: Option<String>,
 }
 
 /// One document a page found.
@@ -256,6 +256,8 @@ pub(crate) struct FoundKey {
     document: i64,
     path: String,
     sort: Option<String>,
+    // Pages already read the hash; a named Get still owes its content state.
+    unreadable: Option<bool>,
 }
 
 impl FoundKey {
@@ -267,6 +269,7 @@ impl FoundKey {
             document,
             path,
             sort: None,
+            unreadable: None,
         }
     }
 
@@ -329,7 +332,7 @@ pub struct Found {
     /// [`Found::into_report`] drops it. A writer matching documents through a
     /// find compares it with the bytes it composes from, so a match resting
     /// on facts the store has not taken in yet is seen as such.
-    pub content_hashes: Vec<String>,
+    pub content_hashes: Vec<Option<String>>,
 }
 
 impl Found {
@@ -735,7 +738,7 @@ impl Snapshot {
         let mut work = FindWork::default();
         let (paged, next) =
             self.page_keys(&compiled, limit, resume.as_ref(), lookups, &mut work)?;
-        let (keys, content_hashes): (Vec<FoundKey>, Vec<String>) = paged
+        let (keys, content_hashes): (Vec<FoundKey>, Vec<Option<String>>) = paged
             .into_iter()
             .map(|paged| (paged.key, paged.content_hash))
             .unzip();
@@ -1037,6 +1040,7 @@ impl Snapshot {
                     document: row.get(0)?,
                     path: row.get(1)?,
                     sort: row.get(2)?,
+                    unreadable: Some(row.get::<_, Option<String>>(3)?.is_none()),
                 },
                 content_hash: row.get(3)?,
             })

@@ -185,7 +185,7 @@ pub struct SectionAt {
 #[derive(Clone, Debug, PartialEq)]
 pub struct HeldHeadings {
     /// The document's recorded content hash.
-    pub content_hash: String,
+    pub content_hash: Option<String>,
     /// The document's headings in source order, including their stored slugs.
     pub headings: Vec<HeadingFact>,
 }
@@ -618,7 +618,16 @@ impl Snapshot {
             .into_iter()
             .collect::<Result<_, StoreError>>()?;
         work.anchor_headings += headings.len() as u64;
-        let held = self.body_of(named.document, lookups)?;
+        let Some(held) = self.body_of(named.document, lookups)? else {
+            return Ok((
+                GetReport::section(
+                    named.wire,
+                    norn_wire::Content::unknown(norn_wire::UnknownReason::Unreadable),
+                    norn_wire::Content::unknown(norn_wire::UnknownReason::Unreadable),
+                ),
+                Vec::new(),
+            ));
+        };
         for heading in &headings {
             let at = held.offset(heading.span.byte_offset, "a heading's offset")?;
             let body_at = held.offset(heading.body_offset, "a heading's body offset")?;
@@ -661,6 +670,16 @@ impl Snapshot {
         text: &dyn DocumentText,
         lookups: &mut Lookups,
     ) -> Result<(GetReport, Vec<Unsatisfied>), StoreError> {
+        let Some(held) = self.body_of(named.document, lookups)? else {
+            return Ok((
+                GetReport::block(
+                    named.wire,
+                    norn_wire::Content::unknown(norn_wire::UnknownReason::Unreadable),
+                    norn_wire::Content::unknown(norn_wire::UnknownReason::Unreadable),
+                ),
+                Vec::new(),
+            ));
+        };
         let definition: Option<BlockFact> = self
             .run_statement(
                 &mut lookups.ran,
@@ -685,7 +704,7 @@ impl Snapshot {
         let body = match definition.span {
             None => BodyText::new("", 0).expect("an empty head heads an empty whole"),
             Some(span) => {
-                let body = self.body_of(named.document, lookups)?;
+                let body = held;
                 body.offset(span.byte_offset, "a block's marker")?;
                 let range = text.block(&body.text, body.start, span.byte_offset);
                 let held = body
@@ -702,12 +721,21 @@ impl Snapshot {
     }
 
     /// One document's whole body, with where it begins in the document.
-    fn body_of(&self, document: i64, lookups: &mut Lookups) -> Result<HeldBody, StoreError> {
+    fn body_of(
+        &self,
+        document: i64,
+        lookups: &mut Lookups,
+    ) -> Result<Option<HeldBody>, StoreError> {
         let (text, start) = self
             .run_statement(
                 &mut lookups.ran,
                 compose(&Spelled::DocumentBody { document }),
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                    ))
+                },
             )
             .map_err(|problem| error::sql("reading a document's body", problem))?
             .into_iter()
@@ -715,10 +743,13 @@ impl Snapshot {
             .ok_or_else(|| StoreError::Damaged {
                 what: format!("the document at row {document} has no row"),
             })?;
+        let (Some(text), Some(start)) = (text, start) else {
+            return Ok(None);
+        };
         let start = usize::try_from(start).map_err(|_| StoreError::Damaged {
             what: format!("the document at row {document} holds a body starting at {start}"),
         })?;
-        Ok(HeldBody { text, start })
+        Ok(Some(HeldBody { text, start }))
     }
 
     /// One page of the collection `selector` names on the named document, a

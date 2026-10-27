@@ -104,7 +104,7 @@ pub fn audit(
     let connection = database.connection();
     validate_schema(connection)?;
     let mut statement = read(
-        connection.prepare("SELECT path, content_hash, byte_length FROM documents ORDER BY path"),
+        connection.prepare("SELECT path, content_hash, byte_length FROM documents WHERE body IS NOT NULL ORDER BY path"),
     )?;
     let mut rows = read(statement.query([]))?;
     while let Some(row) = read(rows.next())? {

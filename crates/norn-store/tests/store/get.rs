@@ -20,12 +20,13 @@ use norn_store::{
 use norn_testkit::explain::{Access, PlanRow, QueryPlan};
 use norn_text::{BodyScan, Heading, SectionAddress, SourceSpan};
 use norn_wire::{
-    AnswerShape, Candidate, CollectionPage, CollectionSelector, Column, Cursor, CursorKey,
+    AnswerShape, Candidate, CollectionPage, CollectionSelector, Column, Content, Cursor, CursorKey,
     Direction, DocumentRow, FindParams, FindingKind, FindingRow, GetParams, GetReport, Hint,
     PagedRows, Pattern, Predicate, RequestPart, ResolutionTarget, Severity, Sort, SortKey,
-    Unsatisfied, ValidateParams, VaultAddress, VaultName,
+    UnknownReason, Unsatisfied, ValidateParams, VaultAddress, VaultName,
 };
 
+use crate::common::known;
 use crate::common::{Scratch, document, heading_anchor, planned_get_work, span, unread_block};
 use crate::find::{failure_of, map, rows_of, string};
 
@@ -650,9 +651,12 @@ fn a_record_projects_each_column_as_a_find_row_projects_it() {
         row.findings.as_ref().map(|findings| findings.total),
         Some(2)
     );
-    assert_eq!(row.tags.as_ref().map(|tags| tags.total), Some(2));
+    assert_eq!(row.tags.as_ref().map(known).map(|tags| tags.total), Some(2));
     assert_eq!(
-        row.body.as_ref().map(|body| body.text().to_string()),
+        row.body
+            .as_ref()
+            .map(known)
+            .map(|body| body.text().to_string()),
         Some(RECORD_BODY.to_string())
     );
 }
@@ -673,10 +677,10 @@ fn a_whole_record_holds_each_collection_and_the_body_to_the_row_ceiling() {
     let vault = Vault::holding("get-record-ceiling", Sensitive, &[long]);
     let whole = vault.get(&getting("long"));
     let row = record(&whole);
-    let tags = row.tags.as_ref().expect("the tags");
+    let tags = known(row.tags.as_ref().expect("the tags"));
     assert_eq!(tags.items.len(), NESTED_ROW_CEILING);
     assert_eq!(tags.total, (NESTED_ROW_CEILING + 44) as u64);
-    let text = row.body.as_ref().expect("the body");
+    let text = known(row.body.as_ref().expect("the body"));
     assert_eq!(text.text().len(), BODY_ROW_CEILING);
     assert_eq!(text.byte_length(), body.len() as u64);
 }
@@ -697,6 +701,180 @@ fn an_unknown_projected_key_is_reported() {
     );
 }
 
+/// A broken row reached through the ordinary changeset, either after a successful
+/// derivation or before the store has read the document.
+fn broken_vault(label: &str, previously_read: bool) -> Vault {
+    let documents = if previously_read {
+        vec![parsed("broken.md", "# Heading\n\nparagraph ^block\n")]
+    } else {
+        Vec::new()
+    };
+    let mut vault = Vault::holding(label, Sensitive, &documents);
+    let mut finding = unread_block("broken.md");
+    finding.kind = FindingKind::UnreadableDocument;
+    finding.message = "`broken.md` could not be read".to_string();
+    finding.detail = Some("Permission denied (os error 13)".to_string());
+    vault
+        .store
+        .begin_request()
+        .apply_increment(
+            norn_store::IncrementProvenance::Derived,
+            [norn_store::Change::Unreadable {
+                path: crate::common::path("broken.md"),
+            }],
+            &[norn_store::DerivedFinding {
+                facts: finding,
+                replaces: None,
+                bytes_hash: None,
+            }],
+            &declared(),
+        )
+        .expect("recording a broken document and its finding");
+    vault
+}
+
+#[test]
+fn get_of_a_broken_document_answers_unknown_unreadable_columns_and_its_finding() {
+    for previously_read in [false, true] {
+        let vault = broken_vault("get-broken-record", previously_read);
+        let gotten = vault.get(&getting("broken"));
+        assert!(gotten.unsatisfied.is_empty(), "{:?}", gotten.unsatisfied);
+        let row = record(&gotten);
+        assert_eq!(row.path.as_str(), "broken.md");
+        assert!(matches!(
+            row.fields,
+            Some(Content::Unknown {
+                reason: UnknownReason::Unreadable,
+                ..
+            })
+        ));
+        assert!(matches!(
+            row.body,
+            Some(Content::Unknown {
+                reason: UnknownReason::Unreadable,
+                ..
+            })
+        ));
+        assert!(matches!(
+            row.links,
+            Some(Content::Unknown {
+                reason: UnknownReason::Unreadable,
+                ..
+            })
+        ));
+        assert!(matches!(
+            row.headings,
+            Some(Content::Unknown {
+                reason: UnknownReason::Unreadable,
+                ..
+            })
+        ));
+        assert!(matches!(
+            row.blocks,
+            Some(Content::Unknown {
+                reason: UnknownReason::Unreadable,
+                ..
+            })
+        ));
+        assert!(matches!(
+            row.tags,
+            Some(Content::Unknown {
+                reason: UnknownReason::Unreadable,
+                ..
+            })
+        ));
+        let findings = row.findings.as_ref().expect("findings project normally");
+        assert_eq!(findings.total, 1);
+        assert_eq!(findings.items.len(), 1);
+        assert_eq!(findings.items[0].kind, FindingKind::UnreadableDocument);
+        assert_eq!(findings.items[0].severity, Severity::Error);
+        assert_eq!(findings.items[0].message, "`broken.md` could not be read");
+        assert_eq!(findings.items[0].path.as_str(), "broken.md");
+        assert!(findings.items[0].target.is_none());
+        assert!(findings.items[0].span.is_none());
+
+        let projected = vault.get(&getting("broken").with_columns([Column::body()]));
+        assert!(
+            projected.unsatisfied.is_empty(),
+            "{:?}",
+            projected.unsatisfied
+        );
+        let row = record(&projected);
+        assert!(matches!(
+            row.body,
+            Some(Content::Unknown {
+                reason: UnknownReason::Unreadable,
+                ..
+            })
+        ));
+        assert!(row.fields.is_none());
+        assert!(row.links.is_none());
+        assert!(row.headings.is_none());
+        assert!(row.blocks.is_none());
+        assert!(row.tags.is_none());
+        assert!(row.findings.is_none());
+    }
+}
+
+#[test]
+fn section_and_block_gets_of_a_broken_document_are_unknown_without_missing_anchors() {
+    for previously_read in [false, true] {
+        let vault = broken_vault("get-broken-anchors", previously_read);
+        for anchor in ["Heading", "missing", "^block", "^missing"] {
+            let gotten = vault.get(&getting(&format!("broken#{anchor}")));
+            assert!(
+                gotten.unsatisfied.is_empty(),
+                "{anchor}: {:?}",
+                gotten.unsatisfied
+            );
+            match gotten.report {
+                GetReport::Section {
+                    path,
+                    heading,
+                    body,
+                    ..
+                } if !anchor.starts_with('^') => {
+                    assert_eq!(path.as_str(), "broken.md");
+                    assert!(matches!(
+                        heading,
+                        Content::Unknown {
+                            reason: UnknownReason::Unreadable,
+                            ..
+                        }
+                    ));
+                    assert!(matches!(
+                        body,
+                        Content::Unknown {
+                            reason: UnknownReason::Unreadable,
+                            ..
+                        }
+                    ));
+                }
+                GetReport::Block {
+                    path, block, body, ..
+                } if anchor.starts_with('^') => {
+                    assert_eq!(path.as_str(), "broken.md");
+                    assert!(matches!(
+                        block,
+                        Content::Unknown {
+                            reason: UnknownReason::Unreadable,
+                            ..
+                        }
+                    ));
+                    assert!(matches!(
+                        body,
+                        Content::Unknown {
+                            reason: UnknownReason::Unreadable,
+                            ..
+                        }
+                    ));
+                }
+                other => panic!("`{anchor}` answered the wrong Get shape: {other:?}"),
+            }
+        }
+    }
+}
+
 // ---- sections and blocks ----
 
 /// The body the section fixture's document holds.
@@ -710,12 +888,15 @@ fn section(vault: &Vault, text: &str) -> (String, u8, String, String) {
     let gotten = vault.get(&getting(text));
     assert!(gotten.unsatisfied.is_empty(), "{:?}", gotten.unsatisfied);
     match gotten.report {
-        GetReport::Section { heading, body, .. } => (
-            heading.text,
-            heading.level,
-            heading.slug,
-            body.text().to_string(),
-        ),
+        GetReport::Section { heading, body, .. } => {
+            let heading = known(&heading);
+            (
+                heading.text.clone(),
+                heading.level,
+                heading.slug.clone(),
+                known(&body).text().to_string(),
+            )
+        }
         other => panic!("`{text}` answered {other:?}, not a section"),
     }
 }
@@ -992,9 +1173,9 @@ fn a_block_anchor_answers_its_block_or_reports_it_missing() {
         let GetReport::Block { block, body, .. } = gotten.report else {
             panic!("`^{anchor}` answered no block");
         };
-        assert_eq!(block.id, anchor);
-        assert_eq!(body.text(), held, "^{anchor}");
-        assert!(block.span.is_some());
+        assert_eq!(known(&block).id, anchor);
+        assert_eq!(known(&body).text(), held, "^{anchor}");
+        assert!(known(&block).span.is_some());
     }
     let missing = vault.get(&getting("b#^zz"));
     assert_eq!(
@@ -1036,7 +1217,7 @@ second
     let GetReport::Block { body, .. } = gotten.report else {
         panic!("`^b1` answered no block");
     };
-    assert_eq!(body.text(), "first ^b1");
+    assert_eq!(known(&body).text(), "first ^b1");
 
     // A heading and a block marker each stored inside the frontmatter block.
     let mut heading_in_block = framed.clone();
@@ -2528,7 +2709,7 @@ fn filled_class_totals_seek_admitted_members_without_stepping_ignored_namesakes(
         let before = snapshot.counters().vm_steps();
         let found = snapshot.find(&holder, &declared).unwrap();
         measured[2] = snapshot.counters().vm_steps() - before;
-        let links = found.rows[0].links.as_ref().expect("a links column");
+        let links = known(found.rows[0].links.as_ref().expect("a links column"));
         assert_eq!(
             links.items[0].targets.total(),
             ADMITTED as u64,

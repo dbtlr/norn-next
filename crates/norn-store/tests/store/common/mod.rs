@@ -22,6 +22,17 @@ use norn_wire::{
     FindParams, FindingKind, Predicate, ResolutionTarget, Severity, VaultAddress, VaultName,
 };
 
+/// Require known content without treating an unreadable document as empty.
+pub fn known<T>(content: &norn_wire::Content<T>) -> &T {
+    match content {
+        norn_wire::Content::Known { value, .. } => value,
+        norn_wire::Content::Unknown { reason, .. } => {
+            panic!("expected known document content, got unknown: {reason:?}")
+        }
+        _ => panic!("expected known document content, got an unsupported state"),
+    }
+}
+
 /// The columns that hold a document's payload: what a document says, rather
 /// than an index entry about it. `documents.body` is the body text and
 /// `documents.frontmatter` the frontmatter as stored; `documents_fts.body` is

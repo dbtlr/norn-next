@@ -171,7 +171,7 @@ fn a_value_outside_a_closed_vocabulary_is_damage() {
             "tombstones.provenance",
         ),
         (
-            "UPDATE findings SET kind = 'document/unreadable'",
+            "UPDATE findings SET kind = 'document/unknown-kind'",
             "findings.kind",
         ),
         (
@@ -2492,7 +2492,8 @@ fn a_path_killed_and_rewritten_in_one_changeset_stands_only_in_the_document_feed
 
     // The changeset's end state is the document it wrote.
     assert_eq!(
-        fed.content_hash, "hash-2",
+        fed.content_hash.as_deref(),
+        Some("hash-2"),
         "the document feed does not carry the hash the changeset wrote"
     );
     assert_eq!(
@@ -2500,7 +2501,7 @@ fn a_path_killed_and_rewritten_in_one_changeset_stands_only_in_the_document_feed
             .stored_facts(&at)
             .expect("reading the rewritten path")
             .map(|facts| facts.document.content_hash),
-        Some("hash-2".to_string()),
+        Some(Some("hash-2".to_string())),
         "the changeset's end state is not the document it wrote"
     );
 }
@@ -2573,11 +2574,25 @@ fn the_feed_projects_a_fingerprint_per_part_a_consumer_derives_from() {
     let titled = &fed["titled.md"];
 
     assert_ne!(
-        plain.content_hash, titled.content_hash,
+        plain
+            .content_hash
+            .as_ref()
+            .expect("a readable document has a content hash"),
+        titled
+            .content_hash
+            .as_ref()
+            .expect("a readable document has a content hash"),
         "two different documents share a content hash"
     );
     assert_eq!(
-        plain.body_hash, titled.body_hash,
+        plain
+            .body_hash
+            .as_ref()
+            .expect("a readable document has a body hash"),
+        titled
+            .body_hash
+            .as_ref()
+            .expect("a readable document has a body hash"),
         "two documents with one body do not share a body hash, so a body-deriving consumer \
          re-reads a document whose frontmatter alone moved"
     );
@@ -2603,7 +2618,14 @@ fn the_feed_projects_a_fingerprint_per_part_a_consumer_derives_from() {
         .find(|fed| fed.path.as_str() == "titled.md")
         .expect("the re-derived document is in the feed");
     assert_ne!(
-        after.body_hash, titled.body_hash,
+        after
+            .body_hash
+            .as_ref()
+            .expect("a readable document has a body hash"),
+        titled
+            .body_hash
+            .as_ref()
+            .expect("a readable document has a body hash"),
         "the body hash did not move"
     );
     assert_eq!(

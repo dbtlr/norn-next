@@ -75,8 +75,8 @@ impl From<HeldLinksStatement> for ReadStatement {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HeldLinks {
     /// The hash the document's row records, spelled as every stored content
-    /// hash is.
-    pub content_hash: String,
+    /// hash is, or absent for a broken document whose links were cleared.
+    pub content_hash: Option<String>,
     /// Every link the document holds, in the order its facts list them —
     /// its frontmatter's wikilinks, then its body's links — as the host's
     /// one reading of a document's links hands them over.
@@ -129,7 +129,7 @@ impl Snapshot {
         &self,
         path: &DocumentPath,
         record: &mut Vec<Ran>,
-    ) -> Result<Option<(i64, String)>, StoreError> {
+    ) -> Result<Option<(i64, Option<String>)>, StoreError> {
         let holder = Ran::new(
             HeldLinksStatement::Holder,
             (
@@ -138,7 +138,7 @@ impl Snapshot {
             ),
         );
         self.run_statement(record, holder, |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?))
         })
         .map_err(|problem| error::sql("reading a holder's row", problem))
         .map(|rows| rows.into_iter().next())

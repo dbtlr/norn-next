@@ -121,7 +121,7 @@ fn a_documents_held_links_are_its_stored_links_in_order_beside_its_hash() {
         assert_eq!(
             held.held(at),
             Some(HeldLinks {
-                content_hash: hash.to_string(),
+                content_hash: Some(hash.to_string()),
                 links: written_links(&stored),
             }),
             "{at}"

@@ -21,6 +21,7 @@ use norn_wire::{
     ResolutionTarget, Severity, ValidateParams, VaultAddress, VaultName,
 };
 
+use crate::common::known;
 use crate::common::{Scratch, path};
 use crate::find::failure_of;
 
@@ -204,7 +205,7 @@ impl Judging {
         let [row] = &found.rows[..] else {
             panic!("`{at}` is not one row: {:?}", found.rows);
         };
-        let links = row.links.clone().expect("the links column");
+        let links = known(row.links.as_ref().expect("the links column")).clone();
         assert_eq!(links.total, links.items.len() as u64);
         links.items
     }
