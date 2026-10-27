@@ -1,5 +1,6 @@
 ---
-status: accepted
+status: superseded
+superseded-by: 0044-a-from-zero-build-judges-link-health-once.md
 date: 2026-09-26
 ---
 

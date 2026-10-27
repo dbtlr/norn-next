@@ -12,7 +12,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from fixture import prepare_probes, tree_digest
-from results import distribution, record, validate_paths, validate_write
+from results import distribution, record, validate_paths, validate_read, validate_write
 from provenance import cargo_configs, main as build_main, run_build, source_tree_digest, verify_build
 from report import summarize
 from transport import Current, stop_process
@@ -129,6 +129,26 @@ class AnswerTests(unittest.TestCase):
     def test_a_complete_answer_must_include_every_matching_document(self):
         with self.assertRaises(ValueError):
             validate_paths(["a.md"], ["a.md", "b.md"], 25)
+
+    def test_a_get_reads_its_content_through_the_wire_carrier(self):
+        def answer(body):
+            return {"answer": {"report": {"document": {"path": "a.md", "body": body,
+                "fields": {"state": "known", "value": {"status": {"raw": "draft"}}}}}}}
+        known = {"state": "known", "value": {"text": "Body\n", "byte_length": 5}}
+        self.assertEqual(record("current", answer(known)),
+                         {"path": "a.md", "body": "Body\n", "fields": {"status": "draft"}})
+        with self.assertRaises(ValueError):
+            record("current", answer({"state": "unknown", "reason": "unreadable"}))
+
+    def test_a_section_reads_its_heading_and_body_through_the_wire_carrier(self):
+        def answer(heading):
+            return {"answer": {"report": {"path": "bench/large.md", "heading": heading,
+                "body": {"state": "known", "value": {"text": "Section text\n", "byte_length": 13}}}}}
+        manifest = {"section": "## Details\nSection text\n"}
+        command = {"op": "get", "target": "bench/large.md#Details"}
+        validate_read("current", command, answer({"state": "known", "value": {"text": "Details"}}), manifest)
+        with self.assertRaises(ValueError):
+            validate_read("current", command, answer({"state": "unknown", "reason": "unreadable"}), manifest)
 
     def test_truncated_content_and_uncommitted_writes_are_not_successes(self):
         with self.assertRaises(ValueError):

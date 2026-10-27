@@ -167,6 +167,8 @@ impl<'a> Request<'a> {
             ExplainedStatement::LinkHealthSuffixes => explained_suffixes()?.0,
             ExplainedStatement::LinkHealthAnchors => health::anchors_sql(),
             ExplainedStatement::LinkHealthWrittenLinks => health::links_sql(key, Selected::Written),
+            ExplainedStatement::LinkHealthEveryLink => health::links_sql(key, Selected::Every),
+            ExplainedStatement::LinkHealthJudgedDiscard => health::judged_discard_sql(),
             ExplainedStatement::LinkHealthClassFindings => health::class_findings_sql(),
             ExplainedStatement::LinkHealthFoundLinks => health::links_sql(key, Selected::Links),
             ExplainedStatement::LinkHealthDiscard => health::discard_sql(),
@@ -343,6 +345,20 @@ impl<'a> Request<'a> {
                     &explained_after(EXPLAINED_PAGE_CURSOR_LEAF),
                     LINK_HEALTH_CHUNK,
                 )),
+            ),
+            ExplainedStatement::LinkHealthEveryLink => database.emitted_plan(
+                &sql,
+                params_from_iter(health::every_parameters(
+                    &explained_after(EXPLAINED_PAGE_CURSOR_LEAF),
+                    LINK_HEALTH_CHUNK,
+                )),
+            ),
+            ExplainedStatement::LinkHealthJudgedDiscard => database.emitted_plan(
+                &sql,
+                params_from_iter(health::judged_discard_parameters(
+                    &[(EXPLAINED_PAGE_CURSOR_LEAF, 0)],
+                    "explained-schema",
+                )?),
             ),
             ExplainedStatement::LinkHealthHeads => database.emitted_plan(
                 &sql,
@@ -652,6 +668,10 @@ pub enum ExplainedStatement<'a> {
     /// [`ExplainedStatement::FindingCandidates`] by the same three readers,
     /// and spelled by a nonzero width for the same reason.
     FindingRules(NonZeroUsize),
+    /// Every stored link, paged in binary document-path and ordinal order.
+    LinkHealthEveryLink,
+    /// A page's prior link-health findings, sought by fingerprint, path and ordinal.
+    LinkHealthJudgedDiscard,
 }
 
 /// How many keyed point reads this seam names.
@@ -665,7 +685,7 @@ pub const POINT_READS: usize = 13;
 ///
 /// It is the length of [`ExplainedStatement::all`], which is the enumeration
 /// every other census is checked against.
-pub const STATEMENTS: usize = 47;
+pub const STATEMENTS: usize = 49;
 
 impl<'a> ExplainedStatement<'a> {
     /// Every statement this seam names, in slot order, each bound to a subject
@@ -745,6 +765,8 @@ impl<'a> ExplainedStatement<'a> {
             Self::IndexedTrigramPage,
             Self::ContentQuarantineHash(subject),
             Self::ContentQuarantineHashPage,
+            Self::LinkHealthEveryLink,
+            Self::LinkHealthJudgedDiscard,
         ]
     }
 
@@ -804,6 +826,8 @@ impl<'a> ExplainedStatement<'a> {
             Self::IndexedTrigramPage => 44,
             Self::ContentQuarantineHash(_) => 45,
             Self::ContentQuarantineHashPage => 46,
+            Self::LinkHealthEveryLink => 47,
+            Self::LinkHealthJudgedDiscard => 48,
         };
         assert!(
             slot < STATEMENTS,
@@ -887,6 +911,8 @@ impl<'a> ExplainedStatement<'a> {
             | Self::LinkHealthSuffixes
             | Self::LinkHealthAnchors
             | Self::LinkHealthWrittenLinks
+            | Self::LinkHealthEveryLink
+            | Self::LinkHealthJudgedDiscard
             | Self::LinkHealthClassFindings
             | Self::LinkHealthFoundLinks
             | Self::LinkHealthDiscard

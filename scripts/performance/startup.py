@@ -49,21 +49,24 @@ def partition(ready: dict) -> dict | None:
     plan, increment = values["host.document_plan"], values["store.increment"]
     rows, health, commit = (values[name] for name in
                             ("store.upsert", "store.link_health", "store.commit"))
-    result = {"document_plan": plan, "row_and_index_writes": rows,
+    once = values["store.link_health_once"]
+    result = {"link_health_once": once, "document_plan": plan, "row_and_index_writes": rows,
               "link_health": health, "commit": commit,
               "other_increment": increment - rows - health - commit,
-              "other_startup": ready["startup_complete_ns"] - plan - increment}
+              "other_startup": ready["startup_complete_ns"] - plan - increment - once}
     if any(value < 0 for value in result.values()):
         raise ValueError("timing scopes overlap or exceed the startup clock")
     return result
 
 
-def validate_work(evidence, stage, documents, batch):
+def validate_work(evidence, stage, documents, batch, store):
     """Reject timings made cheaper by skipped import work or a changed restart."""
     if evidence is None:
         return
     if stage == "fresh" and evidence["changesets_applied"] < (documents + batch - 1) // batch:
         raise ValueError("fresh startup committed fewer batches than its document population requires")
+    if stage == "fresh" and evidence["links_judged"] != store["tables"]["links"]["rows"]:
+        raise ValueError("fresh startup did not judge exactly every stored link")
     if stage == "restart" and any(evidence[key] for key in
                                   ("recoveries_run", "rebuilds_run", "documents_derived", "documents_upserted")):
         raise ValueError("unchanged restart unexpectedly recovered or derived documents")
@@ -88,7 +91,6 @@ def run_one(binary: Path, audit_binary: Path, root: Path, manifest: dict, batch:
             raise ValueError("worker did not use the requested policy")
         if bool(ready["timings"]) != profiling or (ready["job_evidence"] is not None) != (build_kind == "profile"):
             raise ValueError("worker does not expose the requested profiling controls")
-        validate_work(ready["job_evidence"], stage, manifest["document_count"], batch)
         phases = partition(ready)
         verified = []
         for name, command in READS:
@@ -111,6 +113,7 @@ def run_one(binary: Path, audit_binary: Path, root: Path, manifest: dict, batch:
     for name in ("worker.stdout.log", "worker.stderr.log"):
         shutil.copyfile(root / name, root / (stage + "." + name))
     result["store"] = audit_store(audit_binary, root, manifest)
+    validate_work(ready["job_evidence"], stage, manifest["document_count"], batch, result["store"])
     return result
 
 

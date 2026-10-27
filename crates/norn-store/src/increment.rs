@@ -469,7 +469,7 @@ pub(crate) fn apply(
     // path and the path discard every finding keyed by a path this changeset
     // changed, and the re-decision discards the findings under each class it
     // changed before it files one in that class.
-    let run_health = !metadata;
+    let run_health = !metadata && !store.link_health_deferred;
     let redecided = if run_health && (generation.is_some() || !tally.directories.is_empty()) {
         #[cfg(feature = "induced-failure")]
         let _timing = norn_db::profiling::span("store.link_health");
@@ -1107,7 +1107,7 @@ fn refuse_typed_values_the_pin_does_not_derive(
 /// judged under another declaration's globs is one a rebuild under the pinned
 /// schema would not file — and one a later pin's discard would not reach as
 /// the finding it is.
-fn refuse_a_declaration_the_store_does_not_pin(
+pub(crate) fn refuse_a_declaration_the_store_does_not_pin(
     declared: &ContentModel,
     pinned: Option<&str>,
 ) -> Result<(), StoreError> {

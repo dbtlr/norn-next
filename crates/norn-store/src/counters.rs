@@ -58,11 +58,12 @@
 //! the bar for every document with frontmatter regardless of where its facts
 //! came from.
 //!
-//! The link-health counters — [`Counter::LinksRedecided`],
+//! The link-health counters — [`Counter::LinksRedecided`], [`Counter::LinksJudged`],
 //! [`Counter::LinkHealthKeysResolved`], [`Counter::LinkHealthCandidatesRead`]
 //! — name the store's own judgment, which no applier composes: the store
-//! judges the links a changeset reaches against the documents it holds
-//! ([ADR 0027]) and files what it finds, identically under either mark. They
+//! judges the links a changeset reaches, or every link once after a from-zero
+//! build, against the documents it holds
+//! ([ADR 0044]) and files what it finds, identically under either mark. They
 //! count its work, so a write-work bar reads how far a write's re-decision
 //! reached rather than a clock.
 //!
@@ -72,7 +73,7 @@
 //! re-deriving under neither, and it is what a suite asserts rather than a
 //! promise a reviewer has to take.
 //!
-//! [ADR 0027]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0027-link-health-rides-the-changeset.md
+//! [ADR 0044]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0044-a-from-zero-build-judges-link-health-once.md
 
 /// One derivation counter.
 ///
@@ -101,6 +102,8 @@ pub(crate) enum Counter {
     /// Links a changeset re-decided the link health of, each once however
     /// many ways the changeset reached it.
     LinksRedecided,
+    /// Links judged by the complete from-zero judgment, each stored link once.
+    LinksJudged,
     /// Keys the re-decision resolved: each once across a run of consecutive
     /// chunks holding it, and once more for each later run.
     LinkHealthKeysResolved,
@@ -129,6 +132,7 @@ impl Counter {
         Counter::TypedValuesDiscarded,
         Counter::VaultSchemaPins,
         Counter::LinksRedecided,
+        Counter::LinksJudged,
         Counter::LinkHealthKeysResolved,
         Counter::LinkHealthCandidatesRead,
     ];
@@ -153,6 +157,7 @@ impl Counter {
             Counter::TypedValuesDiscarded => "typed_values_discarded",
             Counter::VaultSchemaPins => "vault_schema_pins",
             Counter::LinksRedecided => "links_redecided",
+            Counter::LinksJudged => "links_judged",
             Counter::LinkHealthKeysResolved => "link_health_keys_resolved",
             Counter::LinkHealthCandidatesRead => "link_health_candidates_read",
         }
@@ -205,6 +210,11 @@ impl DerivationCounters {
     /// many ways it was reached.
     pub fn links_redecided(&self) -> u64 {
         self.value(Counter::LinksRedecided)
+    }
+
+    /// Links this request's complete from-zero judgment judged.
+    pub fn links_judged(&self) -> u64 {
+        self.value(Counter::LinksJudged)
     }
 
     /// Keys this request's re-decision resolved.

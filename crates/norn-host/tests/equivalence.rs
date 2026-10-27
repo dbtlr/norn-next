@@ -49,12 +49,9 @@ use norn_wire::{FindingKind, VaultName};
 /// clutter that is not a document, and symbolic links a walk refuses to follow.
 /// Every one of those is a place two derivations could disagree.
 ///
-/// **None of them leaves a finding row behind.** An ambiguity class and a
-/// dangling link are concluded where a target is resolved, and a heal records
-/// neither: the kinds a heal writes are the ones it reaches by reading a
-/// document — a path or a body it cannot decode, and a frontmatter block that
-/// did not read. A tree of well-formed documents derives no finding at all,
-/// which is why this case writes [`UNDECODABLE_AT`] beside the generated one.
+/// Ambiguous and dangling links carry stored link-health findings. This case
+/// also writes [`UNDECODABLE_AT`] beside the generated tree to cover a finding
+/// at a place with no document row.
 const PROFILE: &str = "tiny";
 
 /// The one document in the tree the heal cannot decode.

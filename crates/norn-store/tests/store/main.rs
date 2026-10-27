@@ -32,6 +32,7 @@ mod health;
 mod held_frontmatter;
 mod held_links;
 mod increments;
+mod judgment;
 mod lifecycle;
 mod links;
 mod moved;

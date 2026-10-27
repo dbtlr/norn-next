@@ -1060,6 +1060,9 @@ fn barred_by(statement: ExplainedStatement<'_>) -> &'static str {
         ExplainedStatement::FindingRules(_) => {
             "a_finding_rules_chunk_seeks_each_finding_and_its_rule_set_by_row_id"
         }
+        ExplainedStatement::LinkHealthEveryLink | ExplainedStatement::LinkHealthJudgedDiscard => {
+            "the_complete_judgment_seeks_each_page_and_its_findings_without_sorting"
+        }
         ExplainedStatement::LinkHealthLinks
         | ExplainedStatement::LinkHealthClassLinks
         | ExplainedStatement::LinkHealthPathLinks
@@ -1467,6 +1470,7 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
     ]
     .into_iter()
     .chain(crate::health::LINK_HEALTH)
+    .chain(crate::judgment::JUDGMENT)
     .chain(ENUMERATIONS.iter().copied())
     .chain(FEEDS.iter().copied())
     .chain(ExplainedStatement::point_reads(&subject))
@@ -1500,6 +1504,7 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
             "every_findings_maintenance_statement_searches_the_index_its_parameters_are_bounds_for",
             "every_write_path_statement_scans_no_table_and_each_keyed_one_seeks",
             "the_link_health_judgment_seeks_every_row_it_reads",
+            "the_complete_judgment_seeks_each_page_and_its_findings_without_sorting",
             "the_path_discard_seeks_finding_paths_path_key",
             "stem_statements_seek_without_scans_or_sorts",
         ]
@@ -1831,6 +1836,8 @@ fn point_read_bar(statement: ExplainedStatement<'_>) -> Option<PointReadBar> {
         | ExplainedStatement::LinkHealthSuffixes
         | ExplainedStatement::LinkHealthAnchors
         | ExplainedStatement::LinkHealthWrittenLinks
+        | ExplainedStatement::LinkHealthEveryLink
+        | ExplainedStatement::LinkHealthJudgedDiscard
         | ExplainedStatement::LinkHealthClassFindings
         | ExplainedStatement::LinkHealthFoundLinks
         | ExplainedStatement::LinkHealthDiscard

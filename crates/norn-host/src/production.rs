@@ -1529,7 +1529,8 @@ impl ProductionEntryOps {
     /// that [`Self::build_from_zero`] runs — which is what makes the result
     /// equal to a first attach's rather than merely close to it.
     ///
-    /// The verification afterwards is the other half: a rebuilt database that
+    /// The complete link-health judgment follows the walk; the verification
+    /// afterwards is the other half: a rebuilt database that
     /// cannot answer for itself is not derived state anything may be published
     /// over, and reporting damage here rather than `Ready` is what keeps a
     /// second damaged store from being served as a sound one. The
@@ -13718,6 +13719,76 @@ mod tests {
         .is_some()
     }
 
+    fn link_rows(store: &mut Store) -> u64 {
+        every_stored_fact(store)
+            .iter()
+            .map(|facts| facts.links.len() as u64)
+            .sum()
+    }
+
+    fn assert_judged_build(
+        ops: &ProductionEntryOps,
+        attachment: &mut ProductionAttachment,
+        before: crate::evidence::EvidenceReading,
+    ) {
+        let spent = ops.evidence.read().since(before);
+        assert!(!attachment.store.link_health_deferred());
+        assert!(!attachment.store.under_construction());
+        assert_eq!(spent.links_redecided, 0);
+        assert_eq!(spent.links_judged, link_rows(&mut attachment.store));
+        assert!(spent.links_judged > 0);
+    }
+
+    #[test]
+    fn a_from_zero_build_judges_each_link_once() {
+        let f = Fixture::new("judgment-once");
+        for index in 0..12 {
+            fs::write(
+                f.vault().join(format!("ref-{index:03}.md")),
+                "[[hub]] [[missing]]\n",
+            )
+            .unwrap();
+        }
+        for at in ["z/hub.md", "zz/hub.md"] {
+            fs::create_dir_all(f.vault().join(at).parent().unwrap()).unwrap();
+            fs::write(f.vault().join(at), "# Hub\n").unwrap();
+        }
+        let (ops, name) = f.ops(4);
+        let before = ops.evidence.read();
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        assert_judged_build(&ops, &mut attachment, before);
+        let oracle = {
+            let _attribution = ops.evidence.attributing();
+            from_scratch(
+                &f,
+                "judgment-once-oracle",
+                ProductionPolicy::new(4, 2).unwrap(),
+            )
+        };
+        let control = ops.evidence.read().since(before);
+        assert!(control.links_redecided > control.links_judged);
+        assert_eq!(derived_vault(&mut attachment.store, &f.vault()), oracle);
+        ops.detach(&name, attachment);
+    }
+
+    #[test]
+    fn an_attach_over_a_finished_store_judges_nothing() {
+        let f = Fixture::new("judgment-finished-attach");
+        write_a_vault_of_documents(&f, 12);
+        let (ops, name) = f.ops(4);
+        let progress = ProgressReporter::disconnected();
+        let attachment = ops.attach(&f.registration(), &progress).unwrap();
+        ops.detach(&name, attachment);
+        let before = ops.evidence.read();
+        let attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let spent = ops.evidence.read().since(before);
+        assert_eq!(spent.links_judged, 0);
+        assert_eq!(spent.links_redecided, 0);
+        assert!(!attachment.store.link_health_deferred());
+        ops.detach(&name, attachment);
+    }
+
     fn from_zero_builds(ops: &ProductionEntryOps) -> u64 {
         ops.evidence.read().from_zero_builds
     }
@@ -13737,9 +13808,11 @@ mod tests {
         let f = Fixture::new("one-entry-first");
         write_a_vault_of_documents(&f, 120);
         let (ops, name) = f.ops(64);
+        let before = ops.evidence.read();
         let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
         let database = attachment.store.path().to_path_buf();
         assert_eq!(from_zero_builds(&ops), 1, "a first attach");
+        assert_judged_build(&ops, &mut attachment, before);
         assert!(!mark_stands(&database), "a first attach left its mark");
         assert_eq!(
             derived_vault(&mut attachment.store, f.vault().as_path()),
@@ -13755,8 +13828,10 @@ mod tests {
 
         // The inline rung 3 an attach meets damage with.
         corrupt_the_document_pages(&f, &database);
+        let before = ops.evidence.read();
         let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
         assert_eq!(from_zero_builds(&ops), 2, "an attach over a corrupt store");
+        assert_judged_build(&ops, &mut attachment, before);
         assert!(!mark_stands(&database), "inline rung 3 left its mark");
         assert_eq!(
             derived_vault(&mut attachment.store, f.vault().as_path()),
@@ -13768,18 +13843,20 @@ mod tests {
         // One fixture holds the machine's watcher lease at a time.
         drop(f);
         let f = Fixture::new("one-entry-earlier");
-        fs::write(f.vault().join("note.md"), "# Title\n\nA body.\n").unwrap();
+        fs::write(f.vault().join("note.md"), "# Title\n\n[[missing]]\n").unwrap();
         let (ops, name) = f.ops(64);
         let earlier = norn_store::DerivationVersion::new(crate::DERIVATION_VERSION.get() - 1);
         let mut stale = Store::open(dirs_store(&f, &name), proven_order(&f), earlier).unwrap();
         stale.finish_construction().unwrap();
         drop(stale);
+        let before = ops.evidence.read();
         let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
         assert_eq!(
             from_zero_builds(&ops),
             1,
             "an attach over an earlier derivation"
         );
+        assert_judged_build(&ops, &mut attachment, before);
         assert!(!mark_stands(attachment.store.path()));
         assert_eq!(
             derived_vault(&mut attachment.store, f.vault().as_path()),
@@ -13792,6 +13869,7 @@ mod tests {
         drop(f);
         let f = Fixture::new("one-entry-rebuild");
         write_two_spellings_of_one_stem(&f);
+        fs::write(f.vault().join("ref.md"), "[[Foo]]\n").unwrap();
         let (ops, name) = f.ops(64);
         let proven = proven_order(&f);
         let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
@@ -13804,8 +13882,10 @@ mod tests {
         ops.recover(&name, &mut attachment, &progress)
             .expect_err("a recovery over a store derived under the other order");
         assert_eq!(from_zero_builds(&ops), 1, "a recovery that owes rung 3");
+        let before = ops.evidence.read();
         let mut attachment = ops.rebuild(&name, attachment, &progress).unwrap();
         assert_eq!(from_zero_builds(&ops), 2, "the rebuild leg");
+        assert_judged_build(&ops, &mut attachment, before);
         assert!(!mark_stands(attachment.store.path()));
         assert_eq!(
             derived_vault(&mut attachment.store, f.vault().as_path()),
@@ -13836,14 +13916,117 @@ mod tests {
         assert!(stored_paths(&mut attachment.store).is_empty());
 
         fs::write(&schema, "version: 1\n").unwrap();
+        let before = ops.evidence.read();
         ops.recover(&name, &mut attachment, &progress).unwrap();
         assert_eq!(from_zero_builds(&ops), 1, "the recovery that reads it");
         assert!(!mark_stands(&database), "the recovery left the mark");
+        assert_judged_build(&ops, &mut attachment, before);
         assert_eq!(
             derived_vault(&mut attachment.store, f.vault().as_path()),
             from_scratch(&f, "undeclarable-then-recover-oracle", policy)
         );
         ops.detach(&name, attachment);
+    }
+
+    #[cfg(feature = "induced-failure")]
+    struct JudgmentMarkWitness {
+        database: PathBuf,
+        stood: std::sync::Mutex<Vec<bool>>,
+    }
+
+    #[cfg(feature = "induced-failure")]
+    impl crate::LoadingProbe for JudgmentMarkWitness {
+        fn at(&self, boundary: crate::LoadingBoundary<'_>) {
+            if matches!(boundary, crate::LoadingBoundary::LinkHealthChunk) {
+                self.stood.lock().unwrap().push(mark_stands(&self.database));
+            }
+        }
+    }
+
+    #[cfg(feature = "induced-failure")]
+    #[test]
+    fn the_mark_stands_while_link_health_is_judged() {
+        let f = Fixture::new("mark-through-judgment");
+        fs::write(f.vault().join("ref.md"), "[[absent]]\n".repeat(600)).unwrap();
+        let (ops, name) = f.ops(4);
+        let witness = Arc::new(JudgmentMarkWitness {
+            database: dirs_store(&f, &name),
+            stood: Default::default(),
+        });
+        let ops = ops.with_loading_probe(witness.clone());
+        let attachment = ops
+            .attach(&f.registration(), &ProgressReporter::disconnected())
+            .unwrap();
+        let stood = witness.stood.lock().unwrap();
+        assert_eq!(stood.len(), 3);
+        assert!(stood.iter().all(|stood| *stood));
+        assert!(!attachment.store.under_construction());
+        assert!(!attachment.store.link_health_deferred());
+        ops.detach(&name, attachment);
+    }
+
+    #[cfg(feature = "induced-failure")]
+    struct EditDuringBuild {
+        document: PathBuf,
+        edited: std::sync::atomic::AtomicBool,
+    }
+
+    #[cfg(feature = "induced-failure")]
+    impl crate::LoadingProbe for EditDuringBuild {
+        fn at(&self, boundary: crate::LoadingBoundary<'_>) {
+            if matches!(boundary, crate::LoadingBoundary::CanonicalPage)
+                && !self.edited.swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                fs::write(&self.document, "[[new-missing]]\n").unwrap();
+            }
+        }
+    }
+
+    #[cfg(feature = "induced-failure")]
+    #[test]
+    fn a_fact_seen_during_the_build_is_redecided_before_ready() {
+        let f = Fixture::new("judgment-observed-fact");
+        write_a_vault_of_documents(&f, 120);
+        fs::write(f.vault().join("a-ref.md"), "[[old-missing]]\n").unwrap();
+        let (ops, name) = f.ops(4);
+        let probe = Arc::new(EditDuringBuild {
+            document: f.vault().join("a-ref.md"),
+            edited: Default::default(),
+        });
+        let host = crate::Host::new(
+            crate::RegistryRead::from_entries([f.registration()]),
+            ops.with_loading_probe(probe.clone()),
+            crate::LifecyclePolicy {
+                idle_after: Duration::from_secs(60),
+                worker_slots: 1,
+                watch_poll_interval: Duration::from_millis(2),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
+            },
+        )
+        .unwrap();
+        let demand = host.demand(&name).unwrap();
+        wait_state(&host, &name, norn_wire::TrustState::Ready);
+        assert!(probe.edited.load(std::sync::atomic::Ordering::SeqCst));
+        let spent = host.ops().evidence.read();
+        assert!(spent.links_judged > 0);
+        assert!(spent.links_redecided > 0);
+        drop(demand);
+        drop(host);
+        let mut store = Store::open(
+            dirs_store(&f, &name),
+            proven_order(&f),
+            crate::DERIVATION_VERSION,
+        )
+        .unwrap();
+        assert!(!store.link_health_deferred());
+        assert_eq!(
+            derived_vault(&mut store, &f.vault()),
+            from_scratch(
+                &f,
+                "observed-fact-oracle",
+                ProductionPolicy::new(4, 2).unwrap()
+            )
+        );
     }
 
     /// Records, at every canonical page of a build, whether the mark stood.
@@ -15135,9 +15318,8 @@ mod tests {
     /// written, so two derivations of one vault differ there whenever they land
     /// in different seconds — it is bookkeeping about the writing rather than a
     /// fact read out of the vault, and no claim about equal derivations rests
-    /// on it. Everything else stays, `generation` among it: both sides pin and
-    /// then walk the same documents under the same policy, so the batching that
-    /// hands out generations is part of what the equality claims.
+    /// on it. Write generations are incidental too: a deferred judgment files
+    /// findings after the walk, while an ordinary heal files them per changeset.
     #[derive(Debug, Eq, PartialEq)]
     struct DerivedDocument {
         path: DocumentPath,
@@ -15146,7 +15328,6 @@ mod tests {
         body_offset: Option<u64>,
         frontmatter: Option<String>,
         frontmatter_diagnostic_count: u32,
-        generation: i64,
         body: Option<String>,
         links: Vec<norn_store::StoredLink>,
         link_keys: Vec<norn_store::StoredLinkKey>,
@@ -15175,7 +15356,6 @@ mod tests {
                 body_offset: document.body_offset,
                 frontmatter: document.frontmatter,
                 frontmatter_diagnostic_count: document.frontmatter_diagnostic_count,
-                generation: document.generation,
                 body,
                 links,
                 link_keys,
@@ -15195,10 +15375,17 @@ mod tests {
         // A finding sits at a place the vault holds, whether or not a document
         // row stands there, so the paths it is read at come from the vault
         // rather than from the store's own list of documents.
-        let findings = vault_relative_paths(vault)
+        let mut findings: Vec<_> = vault_relative_paths(vault)
             .iter()
             .flat_map(|path| findings_at(store, path))
+            .map(|mut finding| {
+                finding.generation = 0;
+                finding
+            })
             .collect();
+        findings.sort_by(|left, right| {
+            (&left.path, left.ordinal, &left.kind).cmp(&(&right.path, right.ordinal, &right.kind))
+        });
         let pillars = store.begin_request().pillars().unwrap();
         let vault_schema = store
             .begin_request()

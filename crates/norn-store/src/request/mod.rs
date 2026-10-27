@@ -312,7 +312,7 @@ impl<'a> Request<'a> {
     /// # Link health is re-decided and recorded by the store itself
     ///
     /// **Link-health findings are the one family the store judges and
-    /// records** ([ADR 0027]): broken, ambiguous and missing an anchor, each
+    /// records** ([ADR 0044]): broken, ambiguous, missing an anchor and vault-scheme, each
     /// about one link. After every entry is written, the subject and path
     /// discards have run and the findings handed over are recorded, the store
     /// re-decides every link the changeset reaches — each link a written
@@ -333,9 +333,11 @@ impl<'a> Request<'a> {
     /// resolving each distinct key once for the whole changeset, so what it
     /// holds is a chunk and one summary per key resolved; its work is the
     /// links it reaches plus the candidates they resolve against. A hub stem
-    /// many links name costs those links inside the transaction.
+    /// many links name costs those links inside the transaction. During a
+    /// from-zero deferral these discards still run, and link health waits for
+    /// [`Request::judge_link_health_once`].
     ///
-    /// [ADR 0027]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0027-link-health-rides-the-changeset.md
+    /// [ADR 0044]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0044-a-from-zero-build-judges-link-health-once.md
     ///
     /// # Streaming, and what a changeset holds
     ///
@@ -388,6 +390,33 @@ impl<'a> Request<'a> {
             declared,
             false,
         )
+    }
+
+    /// Judge every stored link after a from-zero build has landed all facts.
+    ///
+    /// Each bounded page discards and files its link-health findings in one
+    /// transaction, then calls `checkpoint`. Holding the store mutably keeps
+    /// document and link facts unchanged across pages, so one set of key
+    /// summaries remains valid. Deferral ends only after every page commits.
+    /// A schema pin reusing this routine must establish reader visibility itself.
+    /// The declaration must match the standing pin, as for an increment.
+    pub fn judge_link_health_once(
+        &mut self,
+        declared: &ContentModel,
+        checkpoint: &mut impl FnMut(),
+    ) -> Result<(), StoreError> {
+        let pinned: Option<String> =
+            norn_db::meta::get_meta(self.store.connection(), ddl::meta::VAULT_SCHEMA_FINGERPRINT)?;
+        increment::refuse_a_declaration_the_store_does_not_pin(declared, pinned.as_deref())?;
+        health::judge_every_link(
+            self.store,
+            &self.read_work,
+            declared.ambiguity_ignore(),
+            &mut self.counters,
+            checkpoint,
+        )?;
+        self.store.link_health_deferred = false;
+        Ok(())
     }
 
     /// Only disposable metadata readers may observe rows with omitted bodies.
@@ -462,7 +491,12 @@ impl<'a> Request<'a> {
             finding.path.as_str(),
             &mut directories,
         )?;
-        let redecided = redecide_directories(&transaction, &self.read_work, &directories)?;
+        let redecided = redecide_directories(
+            &transaction,
+            &self.read_work,
+            &directories,
+            self.store.link_health_deferred,
+        )?;
         transaction
             .commit()
             .map_err(|error| error::sql("committing a finding", error))?;
@@ -521,7 +555,12 @@ impl<'a> Request<'a> {
             .immediate_transaction("opening the findings discard")?;
         let mut directories = BTreeSet::new();
         let discarded = discard_about_in(&transaction, path, scope, &mut directories)?;
-        let redecided = redecide_directories(&transaction, &self.read_work, &directories)?;
+        let redecided = redecide_directories(
+            &transaction,
+            &self.read_work,
+            &directories,
+            self.store.link_health_deferred,
+        )?;
         transaction
             .commit()
             .map_err(|error| error::sql("committing findings discard", error))?;
@@ -596,7 +635,12 @@ impl<'a> Request<'a> {
             params![fingerprint],
             &mut directories,
         )?;
-        let redecided = redecide_directories(&transaction, &self.read_work, &directories)?;
+        let redecided = redecide_directories(
+            &transaction,
+            &self.read_work,
+            &directories,
+            self.store.link_health_deferred,
+        )?;
         let typed_discarded = transaction
             .execute(TYPED_VALUE_DISCARD_SQL, [])
             .map_err(|error| error::sql("clearing the typed field values", error))?
@@ -1539,14 +1583,14 @@ impl<'a> Request<'a> {
     /// key once across them ([`KeySummaries`]). A class or path key spelled
     /// outside the store's key space is refused.
     ///
-    /// The re-decision [ADR 0027] rules into [`Request::apply_increment`]
+    /// The re-decision [ADR 0044] rules into [`Request::apply_increment`]
     /// runs this judgment over the links a changeset reaches — its written
     /// documents' links, and the links held under the classes and paths it
     /// changes — and files what it finds in the changeset's transaction. This
     /// door judges and files nothing; a class or a path key is read here a
     /// chunk at a time, as the re-decision reads it.
     ///
-    /// [ADR 0027]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0027-link-health-rides-the-changeset.md
+    /// [ADR 0044]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0044-a-from-zero-build-judges-link-health-once.md
     pub fn judge_selected_links(
         &self,
         selection: LinkSelection<'_>,
@@ -2211,8 +2255,9 @@ fn redecide_directories(
     transaction: &rusqlite::Transaction<'_>,
     work: &ReadWork,
     directories: &BTreeSet<DirectoryPrefix>,
+    deferred: bool,
 ) -> Result<health::Redecided, StoreError> {
-    if directories.is_empty() {
+    if deferred || directories.is_empty() {
         return Ok(health::Redecided::default());
     }
     // No declared ignore is needed here: a verdict reads each candidate's

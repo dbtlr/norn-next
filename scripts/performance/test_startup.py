@@ -85,12 +85,13 @@ class StartupAccountingTests(unittest.TestCase):
                 {"label": "store.upsert", "calls": 2, "elapsed_ns": 4},
                 {"label": "store.link_health", "calls": 1, "elapsed_ns": 5},
                 {"label": "store.commit", "calls": 1, "elapsed_ns": 1},
+                {"label": "store.link_health_once", "calls": 1, "elapsed_ns": 3},
             ]}}
 
     def test_parent_and_child_times_are_not_added_twice(self):
         self.assertEqual(partition(self.ready()), {
             "document_plan": 7, "row_and_index_writes": 4, "link_health": 5,
-            "commit": 1, "other_increment": 2, "other_startup": 11})
+            "link_health_once": 3, "commit": 1, "other_increment": 2, "other_startup": 8})
 
     def test_incomplete_or_overlapping_timings_cannot_be_presented_as_a_breakdown(self):
         for field in ("unknown_labels", "unfinished_spans"):
@@ -125,13 +126,20 @@ class StartupAccountingTests(unittest.TestCase):
 
     def test_work_evidence_rejects_incomplete_import_and_a_rebuilt_restart(self):
         with self.assertRaises(ValueError):
-            validate_work({"changesets_applied": 2}, "fresh", 314, 128)
-        validate_work({"changesets_applied": 3}, "fresh", 314, 128)
+            validate_work({"changesets_applied": 2, "links_judged": 9}, "fresh", 314, 128, {"tables": {"links": {"rows": 9}}})
+        validate_work({"changesets_applied": 3, "links_judged": 9}, "fresh", 314, 128, {"tables": {"links": {"rows": 9}}})
         unchanged = {"recoveries_run": 0, "rebuilds_run": 0, "documents_derived": 0, "documents_upserted": 0}
-        validate_work(unchanged, "restart", 314, 128)
+        validate_work(unchanged, "restart", 314, 128, {})
         for key in unchanged:
             with self.assertRaises(ValueError):
-                validate_work({**unchanged, key: 1}, "restart", 314, 128)
+                validate_work({**unchanged, key: 1}, "restart", 314, 128, {})
+
+    def test_fresh_work_judges_exactly_every_stored_link(self):
+        store = {"tables": {"links": {"rows": 9}}}
+        for judged in (0, 8, 10):
+            with self.subTest(judged=judged), self.assertRaisesRegex(ValueError, "link"):
+                validate_work({"changesets_applied": 3, "links_judged": judged}, "fresh", 314, 128, store)
+        validate_work({"changesets_applied": 3, "links_judged": 9}, "fresh", 314, 128, store)
 
     def test_revision_reports_require_shutdown_and_the_complete_validated_lifecycle(self):
         metadata = {"completed": True, "workload_version": "startup-attribution-v2", "sizes": [300],

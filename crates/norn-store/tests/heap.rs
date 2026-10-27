@@ -90,11 +90,9 @@ fn hub(at: &str) -> DocumentFacts {
     )
 }
 
-/// The most the heap stood above where it stood before a write of a second
-/// document the stem `hub` names, at `new/hub.md`, beside `links` links of
-/// `shape` held by documents nobody wrote, each of which the write
-/// re-decides.
-fn hub_write_peak(links: usize, shape: Shape) -> usize {
+/// The heap peak of judging `links` of `shape`: once after a deferred build,
+/// or inside the changeset that adds a second hub.
+fn hub_peak(links: usize, shape: Shape, judgment: bool) -> usize {
     let Shape {
         label,
         protocol,
@@ -109,6 +107,9 @@ fn hub_write_peak(links: usize, shape: Shape) -> usize {
     )
     .expect("opening a store");
     let declared = ContentModel::none();
+    if judgment {
+        store.defer_link_health().expect("deferring the build");
+    }
     let holders = links / LINKS_PER_HOLDER;
     for chunk in (0..holders).collect::<Vec<_>>().chunks(100) {
         let mut changes: Vec<Change> = chunk
@@ -134,18 +135,28 @@ fn hub_write_peak(links: usize, shape: Shape) -> usize {
 
     let mark = heap::Mark::set();
     let mut request = store.begin_request();
-    request
-        .apply_increment(
-            IncrementProvenance::Derived,
-            [Change::Upsert(hub("new/hub.md"))],
-            &[],
-            &declared,
-        )
-        .expect("writing a second hub");
+    if judgment {
+        request
+            .judge_link_health_once(&declared, &mut || {})
+            .expect("judging the complete build");
+    } else {
+        request
+            .apply_increment(
+                IncrementProvenance::Derived,
+                [Change::Upsert(hub("new/hub.md"))],
+                &[],
+                &declared,
+            )
+            .expect("writing a second hub");
+    }
     let peak = mark.peak_above();
     let counters = request.finish();
     assert_eq!(
-        counters.get("links_redecided"),
+        counters.get(if judgment {
+            "links_judged"
+        } else {
+            "links_redecided"
+        }),
         Some(links as u64),
         "{label}"
     );
@@ -215,8 +226,8 @@ fn a_hub_write_holds_heap_within_a_chunk() {
         },
     ];
     for shape in shapes {
-        let small = hub_write_peak(5_000, shape);
-        let large = hub_write_peak(50_000, shape);
+        let small = hub_peak(5_000, shape, false);
+        let large = hub_peak(50_000, shape, false);
         let label = shape.label;
         eprintln!("{label} hub-write heap peaks: 5k links {small} bytes, 50k links {large} bytes");
         assert!(
@@ -224,5 +235,32 @@ fn a_hub_write_holds_heap_within_a_chunk() {
             "{label}: re-deciding fifty thousand links peaked {large} bytes above the mark, \
              and five thousand {small}: the re-decision holds more than a chunk"
         );
+    }
+}
+
+#[test]
+#[ignore = "memory-lane case: isolated link-health heap measurement"]
+fn a_complete_judgment_holds_heap_within_a_chunk() {
+    for shape in [
+        Shape {
+            label: "judgment-hub",
+            protocol: None,
+            target: |_| "hub".into(),
+            hubs: 8,
+        },
+        Shape {
+            label: "judgment-distinct",
+            protocol: None,
+            target: |n| format!("d{n:05}/hub"),
+            hubs: 1,
+        },
+    ] {
+        let small = hub_peak(5_000, shape, true);
+        let large = hub_peak(50_000, shape, true);
+        eprintln!(
+            "{} judgment heap peaks: 5k links {small} bytes, 50k links {large} bytes",
+            shape.label
+        );
+        assert!(large <= small + FLAT, "{}: {small} -> {large}", shape.label);
     }
 }
