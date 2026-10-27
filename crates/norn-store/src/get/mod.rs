@@ -181,6 +181,9 @@ pub struct SectionAt {
     pub body: Range<usize>,
 }
 
+/// One collection's ordered rows and the cursor its next page continues from.
+type OrdinalRows<T> = (Vec<T>, Option<Cursor>);
+
 /// Indexed headings of one document, beside the hash their derivation read.
 #[derive(Clone, Debug, PartialEq)]
 pub struct HeldHeadings {
@@ -869,7 +872,7 @@ impl Snapshot {
         page: &OrdinalPage<'_>,
         item: fn(&Row<'_>) -> Reading<T>,
         lookups: &mut Lookups,
-    ) -> Result<Option<(Vec<T>, Option<Cursor>)>, PageRefusal> {
+    ) -> Result<Option<OrdinalRows<T>>, PageRefusal> {
         let width = page.collection.width();
         let mut unreadable = false;
         let read = self.read_page(
