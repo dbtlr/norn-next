@@ -20,7 +20,7 @@ reads one, so nothing needs the findings before every fact they are judged over 
 Every changeset after the judgment — the reconcile that precedes `Ready` included — keeps
 ADR 0027's per-changeset re-decision unchanged, and the store a from-zero build finishes
 holds exactly the findings per-changeset re-decision files over the same tree, save at the
-unreadable documents and directories where
+unlistable directories where
 [ADR 0046](0046-one-unreadable-path-never-breaks-the-vault.md) leaves that bar knowingly
 short, each difference marked by the path's finding.
 
@@ -71,15 +71,14 @@ link's health by:
   carries a bounded head of five candidates, the exact total, and a hint that names how to
   enumerate the rest;
 - a link that resolves to one document lacking the link's `#heading` or `#^block` has a
-  **missing anchor**; a link that resolves to one document the store has never read — a
-  broken document ([ADR 0046](0046-one-unreadable-path-never-breaks-the-vault.md)) whose row
-  holds no body, only the names its path derives — is not judged for its anchor, because
-  that document's headings and blocks are unknown rather than absent. Never read means the
-  body is absent, not empty: an empty readable document holds a content hash and an empty
-  body, and an anchor on a link to it is missing. The predicate tests the absent body, never
-  a count of zero headings and blocks, which a readable document can hold too. A broken
-  document read before it broke keeps its body, headings and blocks, and a link to it is
-  judged against them;
+  **missing anchor**; a link that resolves to one broken document
+  ([ADR 0046](0046-one-unreadable-path-never-breaks-the-vault.md)) is not judged for its
+  anchor. Every broken document holds names alone, whether read before or never read, so
+  its headings and blocks are unknown rather than absent. An absent body is not an empty
+  one: an empty readable document holds a content hash and an empty body, and an anchor on
+  a link to it is missing. The predicate tests `body IS NULL` by one primary-key seek per
+  judged link and target pair, never a count of zero headings and blocks, which a readable
+  document can hold too;
 - a path-addressed link whose spelled path lies beneath a directory marked unreadable
   ([ADR 0046](0046-one-unreadable-path-never-breaks-the-vault.md)) is not judged, because its
   target is unknown rather than absent, and the directory's finding states why. A
@@ -245,10 +244,11 @@ before `Ready` as ordinary changesets, under the per-changeset rule. The judgmen
 memory is a bounded chunk of links and the candidates they resolve against, never the vault.
 The finished store's findings equal the findings per-changeset re-decision files over the
 same tree, finding order included, so incremental equals rebuild holds for every store a
-reader can adopt, short only where ADR 0046 carves it: a store maintained across a path's
-break keeps the facts it read there before, and judges links over them, where a from-zero
-build holds names alone, and each difference is marked by the path's finding and ends when
-the path reads again.
+reader can adopt, apart from the accepted delay in refreshing a still-broken document's
+cause (ADR 0046). Every broken document has the same names-only state in a maintained
+store and a build from zero, with an unreadable-document finding. The exception ADR 0046 carves is beneath an
+unlistable directory: a maintained store keeps the facts it held beneath it, where a
+build from zero holds none. The directory's finding marks that gap until it lists again.
 
 **The four obligations hold for the pass as a from-zero build has them.** Atomicity protects
 a reader from a tear between a row and the findings judged over it. A from-zero build admits

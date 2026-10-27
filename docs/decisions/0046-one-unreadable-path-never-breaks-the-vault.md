@@ -25,10 +25,14 @@ it reached and could not list, because opening, listing or reading that path fai
 denied, the operation not permitted on it, or an I/O error on that path. A **failure of the
 environment as a whole** is the fourth: a vault schema that will not read, a store that will not
 open, a vault root that is gone or that coverage cannot be installed over, and the process's own
-resource failures — an exhausted descriptor table or memory — which say nothing about the path
-being read. Those end the job and keep their existing rules; this decision touches them only as a
-withholder. A device failing under many paths marks each path it fails as broken; the vault does
-not break because its files did.
+resource failures — `EMFILE`, `ENFILE`, `ENOMEM`, `ENOBUFS` and `EINTR`, for retry or
+refusal — which say nothing about the path being read. Failures of the environment as a
+whole end the job and keep their existing rules. This decision touches them only as a
+withholder. Every other errno at a path is a
+path failure, including `EACCES`, `EPERM`, `EIO` and an unknown errno. The existing
+no-document answers remain unchanged: `ENOENT`, `ENAMETOOLONG`, `ELOOP` under `O_NOFOLLOW`,
+`ENXIO`, `EOPNOTSUPP` and `ENOTDIR`. A device failing under many paths marks each path it
+fails as broken. The vault does not break because its files did.
 
 **Quarantine is for the causes that leave nothing derivable.** There are **three cause
 classes** — path bytes that are not UTF-8, a path spelling the document-path grammar refuses,
@@ -57,23 +61,34 @@ partial row carrying a reachable signal does — that is the trade, and it is wh
 exclusivity gives way rather than the row.
 
 **A document a heal cannot open is broken and skipped.** Every rung-2 path answers it the
-same way — a from-zero build, the full tree heal, a scoped subtree heal and the warm scoped
-increment:
+same way — a from-zero build, the full tree heal, a scoped subtree heal, the warm scoped
+increment and the applier's post-write re-read:
 
-- **Its row stays.** An open the machine denies is not evidence that the document left, so
-  its name keeps resolving and links to it still resolve to it. A row a store already
-  committed for it is not pruned and keeps the facts it holds, save one: its content hash is
-  cleared, because no bytes now stand behind it. A document that holds no row — the first
-  build meeting it, or a file created unreadable — gets the row its path alone derives, its
-  names and nothing else, which is the row a from-zero build's first step writes for it.
-- **Nothing is derived from bytes nobody read.** The heal writes no content, frontmatter or
-  structure fact for it, and replaces none a committed row already holds.
-- **A document-scoped finding names the cause** and stands at the document's own path beside
-  its row, as an unread block's finding does: an **unreadable-document** finding, carrying the
-  cause the machine gave. Its kind is spelled in `norn-wire`, which owns the finding-kind
-  vocabulary. The finding and the cleared hash commit in one transaction.
-- **The heal continues**, and the entry reaches `Ready` serving every other document and this
-  document's row.
+- **Every broken document holds names alone**, whether read before or never read. An open,
+  fstat or read that fails at its path is not evidence that the document left. Its row
+  keeps its path, suffix key, path key and admitting segments, so its name and links to it
+  still resolve. A committed row keeps its id, is restamped with the changeset's generation,
+  and is neither pruned nor recorded as a tombstone. With no row, the act writes a names-only
+  birth through the ordinary key, admitting and stem writes.
+- **Nothing derived from unread bytes is kept.** The store is an indexed mirror, never a
+  source of truth. The row's `content_hash`, `byte_length`, `body`, `body_hash`,
+  `body_offset` and frontmatter are `NULL`, and its diagnostic count is zero. Its fields,
+  frontmatter, headings, blocks, links and tags are deleted. The increment's whole-subject
+  discard takes every finding at its subject, and its removed outgoing links' link-health
+  findings end. The row and all these removals change in the same transaction.
+- **Exactly one document-scoped finding names the cause** at the document's own path beside
+  its row: **unreadable-document**, `FindingKind::UnreadableDocument`, spelled
+  `document/unreadable` in `norn-wire`, with Error severity and the machine's cause as
+  detail. The finding and the names-only row commit in one changeset transaction.
+- **Link health follows the cleared facts and touched keys.** Links into its anchors become
+  unjudged, and backlinks its outgoing links gave other documents disappear. A names-only
+  birth re-decides link health over its keys as any birth does. The work follows the
+  document's own facts and the keys it touches, never the vault.
+- **The heal continues**, and the entry reaches `Ready` serving every other document and
+  this document's names-only row. Rung 3 does not run.
+
+An unopenable file whose spelling the document-path grammar refuses is quarantined by
+spelling, not marked broken: the spelling alone settles that cause.
 
 **A directory a walk cannot list is withheld and marked, and the walk continues.** Its places
 are not pruned: every row and every finding beneath it stands, as ADR 0023 already withheld
@@ -83,12 +98,13 @@ finding stands at the directory's own path, carrying the cause, and the walk goe
 every other directory and concludes everywhere else.
 
 **A name the walk listed but whose stat the machine denies is the same condition at one
-name**: what stands at it and beneath it stays, and a finding at the name says it could not
-be read. Which finding depends on what stands there, since whether the name is a document or
-a directory is exactly what the stat could not say. Where a document row stands at the name,
-the name takes the document posture: an unreadable-document finding beside the row, whose
-content hash is cleared as a broken document's is. A `.md` name holding no row takes the same
-posture and gets the names-only row, since its path alone derives the names, as it does for
+name**: pruning is withheld at and beneath it, and a finding at the name says it could not
+be read. The document posture still clears the row and replaces its findings at the name.
+Which finding depends on what stands there, since whether the name is a document or a
+directory is exactly what the stat could not say. Where a document row stands at the name,
+the name takes the document posture: a names-only row beside one unreadable-document
+finding, with every byte-derived fact and every previous finding at its subject discarded.
+A `.md` name holding no row takes the same posture and gets the names-only row, since its path alone derives the names, as it does for
 any document that cannot be opened. A `.md` name that later stats as a directory holds no
 document, so that row leaves as any row whose document left the vault does: the walk that
 lists the name reads no document at it, and the walk's prune removes the row and ends the
@@ -106,9 +122,10 @@ requeues its path, and the walk that lists it installs coverage over it.
 
 **Recovery needs no second mechanism.** A broken document that opens again is an ordinary
 derivation: its row holds no content hash, so the bytes the walk reads match nothing, even
-bytes identical to those it read before the path broke, and the act writes its row, ends
-every finding standing at it and files what it concludes. A directory that lists again is an
-ordinary enumeration: the walk reads what is beneath it, and the subject-axis prune below
+bytes identical to those it read before the path broke. The act derives it from scratch,
+writes its row, ends every finding standing at it and files what it concludes. Its store
+state equals a build from zero over the same readable bytes.
+A directory that lists again is an ordinary enumeration: the walk reads what is beneath it, and the subject-axis prune below
 takes the unreadable-directory finding, since nothing the walk read accounts for it. During
 a from-zero build, a requeued directory that lists again ends its finding in the transaction
 that writes the names beneath it, before step 4's link-health judgment, so that judgment
@@ -124,8 +141,9 @@ Its bytes were not read, so nothing is known about them, and killing its row is 
 data loss the earlier rule feared. Admitting it to the closed set would either kill rows the
 store had no evidence against or stretch the class until a quarantine no longer means the row
 died. The broken path keeps the closed set closed and meaning one thing, and it takes the
-posture whose shape it shares: a row plus a co-resident finding, like an unread block —
-except that its row holds only what was read before, never what the act derived now.
+posture whose shape it shares: a row plus a co-resident finding, like an unread block.
+A broken document's row holds only what its path derives. A directory's unreadable finding
+marks the facts the walk could not refresh beneath it.
 
 **The findings model carries two scopes, and they differ in exactly one thing: whether a
 document row at the subject withholds the finding.** A **place-scoped** finding — every
@@ -137,7 +155,9 @@ the row standing there is the thing it describes. Both scopes are discarded by t
 axis; the increment's whole-subject discard stays whole, licensed per scope — a place-scoped
 finding at a row-bearing place is withheld for as long as the row stands, and a
 document-scoped finding is taken and refiled by the same act, because the act that wrote the
-row is the act that read the frontmatter, or tried to open the document.
+row is the act that read the frontmatter, or tried to open the document. Becoming broken
+discards every finding at the document's subject before filing the unreadable-document
+finding, even though no current bytes could be read.
 
 **The row and the finding beside it are what a heal converges, not the row alone.** A
 partial row is worth writing because a reachable signal stands beside it, so a heal
@@ -145,10 +165,12 @@ re-derives a degraded document whenever no document-scoped finding stands at it,
 only when its bytes moved. The row states its own defect — an absent frontmatter projection
 beside a nonzero count of frontmatter-scoped diagnostics is a block nothing read. A broken
 document's row states its defect too: **a row holding no content hash matches no bytes**, so
-every walk that reads the document again writes its row, as it would for a changed document.
-A walk already reads every document it enumerates, because only a content hash concludes
-"unchanged", so the signal costs no lookup in the findings beside the row: like every other
-piece of pending maintenance, it rests in the row itself.
+every successful read re-derives it, even at identical bytes. A still-broken row costs one
+open attempt per enumerating heal and zero writes or findings lookups. The missing-finding
+check for an unread block skips NULL-hash rows. A cause change, such as `EACCES` to `EIO`,
+is not refreshed until the document reads or the schema re-pins. A converged vault with no
+broken path runs no new statement or lookup: the hash comparison stays in memory. Like
+every other piece of pending maintenance, the signal rests in the row itself.
 
 **A walk prunes the findings its cleanly-enumerated scope no longer accounts for.** One rule
 for every walk, with the vault heal as the maximal case rather than a special venue: at job
@@ -180,8 +202,10 @@ on outcome.
 environment as a whole concludes nothing: its error ends the job ahead of its own prune, so
 every finding in its scope stands. A directory the walk cannot list withholds every row and
 every finding at and beneath it, and a name whose stat the machine denies is not pruned —
-no row and no finding at or beneath it is taken, though the document posture writes the row
-at the name with its content hash cleared — and the job concludes everywhere else. And a root that **vanished** inside one of the walk's own windows, or a
+no row at or beneath it is pruned, and findings beneath it stand. The document posture
+still clears its row to names alone and discards every finding at that subject before
+filing its unreadable-document finding. The job concludes everywhere else. And a root that
+**vanished** inside one of the walk's own windows, or a
 single name it enumerated and opened nothing at because nothing was there, covers the places
 beneath it: nothing was read there and what stands there now is a question the walk never
 asked. Where such a vanished or unlistable root's own spelling defeats the address grammar the
@@ -212,8 +236,9 @@ against and call the pruning derived truth. But it answered by refusing the whol
 one unreadable file — a note saved by another user, a mode copied from an archive — left the
 entry untrusted, every read refused, and every recovery failing the same way until somebody
 found the file. The hazard lives in the prune, not in the heal: a path nothing read is a path
-nothing may conclude about. Withholding what was not read, and marking it, keeps every
-committed row the earlier rule protected, and gives back the vault it took away. The rule
+nothing may conclude about. Keeping a document's name row, clearing its byte-derived facts
+and marking it gives back the vault without treating the index as source truth. Withholding an unlistable directory
+protects the places the walk could not enumerate. The rule
 "refusal is per vault" now means what its examples always meant — the environment as a whole
 is broken — and a path's own access is a fact about that path.
 
@@ -229,14 +254,13 @@ permanently, in every job. ADR 0023 widened prune authority to read the refusal,
 and the refusal is a total statement about everything beneath the entry for as long as the
 entry stands.
 
-A broken path is the one place the bar is knowingly short. A build from zero cannot read a
-broken document either, so it holds the names-only row and the finding, while a maintained
-store keeps the facts it read before the path broke. A build from zero cannot list an
-unlistable directory either, so it holds no row beneath it, while a maintained store keeps
-every row it held there. Each difference is the store keeping what it knew rather than
-discarding it, each is marked by the finding at the path — the directory's finding marking
-the gap beneath it — and each ends when the path reads again. Link health reads the gap
-the same way: a link spelling a path beneath a marked directory has a target that is unknown,
+A build from zero and a maintained store both hold a broken document's names-only row
+and unreadable-document finding, never facts from an earlier reading. Only the accepted
+delay in refreshing a still-broken document's cause can leave that detail behind. An
+unlistable directory is the place the bar is knowingly short over derived facts. A build
+from zero holds no row beneath it, while a maintained store keeps every row it held there. The directory's
+finding marks that gap, and the difference ends when the directory lists again. Link health
+reads the gap the same way: a link spelling a path beneath a marked directory has a target that is unknown,
 not absent, and is not judged
 ([ADR 0044](0044-a-from-zero-build-judges-link-health-once.md)).
 
@@ -255,40 +279,46 @@ later must be assigned to one side rather than inheriting either.
 
 **A row whose block is unread and its finding converge as a pair, at the cost of one
 indexed findings lookup per such document per heal.** A broken document costs one open
-attempt per heal that enumerates it and no findings lookup, since its own row says it is
-owed a write. A
-converged vault with no broken path re-derives nothing.
+attempt per heal that enumerates it, no findings lookup and zero writes while it stays
+broken. Its own row says it is owed derivation once it reads. A converged vault with no
+broken path re-derives nothing.
 
 **A broken document's row carries no content hash, and every reader of a hash sees that.**
 Deleting a broken document leaves a tombstone that records no hash, as deleting a document
 the store never read does, so a repair cannot follow it as a move by its bytes. A repair
 looking for the live document that holds a moved file's hash never finds a broken one.
 
-**Answers about a broken document read the row that stands, with the finding beside it.** A
-field or tag predicate over a document the heal never read answers from the facts its row
-holds — none, for a document the store has never read — and the finding is where "these facts
-were not read" is stated, as it is for an unread block. A link that resolves to a document the
-store has never read — a row whose body is absent, not merely one holding no hash — is
-judged for being broken or ambiguous, which reads names, and not for a missing anchor, since
-that document's headings and blocks are unknown rather than absent — as an anchor on a vault
-file is not judged ([ADR 0044](0044-a-from-zero-build-judges-link-health-once.md)). Absent is
-not empty: an empty readable document holds a content hash and an empty body, so the
-predicate tests the absent body, never a count of zero structure facts. A link that resolves
-to a document read before it broke is judged against the headings and blocks its row still
-holds. The same holds for answers that read across documents: a links-to or backlinks
-answer is exact for the facts the store holds, a broken document the store has never read
-contributes no links to it, and its unreadable-document finding is where that gap is stated.
-This is the store's steady state at a broken path, the same after `Ready` as during a
-from-zero build, not an unfinished stage of construction, so it withholds no capability.
+**Answers about a broken document distinguish unknown from empty.** Every requested
+content column of `DocumentRow` — fields, body, links, headings, blocks and tags — answers
+unknown(unreadable), using one small typed carrier shared by all columns. The state is
+distinct from a column not projected (omitted or `null`) and from a known empty value.
+Section and Block Gets of a broken document answer the same unknown state. Standalone
+links, headings, blocks and tags collection pages use that same carrier as `Content<Page<T>>`,
+so an unreadable document never answers an empty page as though it held no content. Findings
+columns and pages project normally, including the unreadable-document finding. The reason enum is
+`#[non_exhaustive]`; only `unreadable` is admitted in phase 1, with `loading` reserved for
+phase 6. This breaking wire change is accepted before 1.0 and reaches the JSON schema and
+every client and consumer in the workspace.
+
+A field, tag or link Find predicate does not match the document, because those facts are
+gone. A path-only Find lists it, and links to its name still resolve. An anchor on it is
+unjudged: `body IS NULL` means its headings and blocks are unknown, whether it was read
+before or never read. An empty readable document holds a hash and body `''`, so its
+missing anchors are still judged. The predicate tests the absent body by one primary-key
+seek per judged link and target pair, never a count of zero structure facts. Its outgoing
+links are gone, and it contributes no backlinks to other documents. This is the steady
+state at a broken path, the same after `Ready` as during a from-zero build, so it
+withholds no capability.
 
 **A repair fix cannot rest on evidence from a broken document.** A fix that reads evidence
 from a document the plan does not write — the heading a missing anchor is fixed to — carries
 a content-hash condition on that document
 ([ADR 0037](0037-a-plan-refuses-exactly-the-violations-it-introduces.md)), and a broken
 document holds no stored content hash and no bytes that read, so no such condition can be
-written. Repair skips that fix, by the same skip every other skipped fix takes, with a reason
-naming the unreadable target. A fix that reads no evidence from the broken document
-proceeds, and once the document reads again the skipped fix is proposed as any fix is. The
+written. Repair skips that fix with `SkipReason::UnreadableTarget`, spelled
+`unreadable_target`, and the rest of the plan proceeds. A path failure while the planner
+reads a tree becomes `Before::Unread`, not a failed repair. A fix that reads no evidence
+from the broken document proceeds, and once the document reads again the skipped fix is proposed as any fix is. The
 write protocol's check of a target's before-state still refuses a write to the broken path
 itself.
 
@@ -323,8 +353,10 @@ for the answer rather than assuming it.
 **The architecture's failure contract changes where it named a path's permissions.** The
 permission-loss row of the induced-failure table, which refused at rung 2 and withdrew trust
 as a lost watcher on a backend that adds a watch per directory, becomes: the document or
-directory is marked broken and skipped, nothing is pruned, the entry reaches `Ready`, and the
-path converges when it reads again. The quarantine section's closing rule — refusal stays for
+directory is marked broken and skipped. A broken document keeps its names-only row,
+discards its byte-derived facts and previous findings, and holds one unreadable-document
+finding. Directory contents remain withheld. The entry reaches `Ready`, and each path
+converges when it reads again. The quarantine section's closing rule — refusal stays for
 a path whose permissions were revoked, and widening quarantine would turn a broken
 environment into silent data loss — narrows to failures of the environment as a whole, and
 its list of refusals drops the directory a walk cannot list and the revoked path. The walk's
@@ -332,8 +364,10 @@ paging-window bar distinguishes a stat denied for one name, which now withholds 
 from the machine's own failures, which still refuse. The signals of pending maintenance at
 rest in the rows gain a third: a row holding no content hash is re-derived, which is every
 broken document. The wire's health rule, which leaves an anchor on a vault file unjudged,
-also leaves unjudged an anchor on a document the store has never read and a path-addressed
-link whose spelled path lies beneath a marked directory.
+also leaves unjudged an anchor on every broken document and a path-addressed link whose
+spelled path lies beneath a marked directory. A projected content column answers an
+explicit unknown state with the unreadable reason, not an empty value or an unprojected
+column.
 
 **Inversion.** If partial rows prove untrustworthy in practice — queries answered from a row
 whose fields were never read, by callers that never look at the findings beside it — the

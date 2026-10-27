@@ -406,11 +406,13 @@ Each capability is admitted when every row it reads is complete, and not before:
   ends, and resolution is withheld with them so no Get shows a resolved link beside a
   loading verdict. Whether a path is a document is settled for every path when step 2
   ends; a document step 2 could not open stays a document. A Get of such a document
-  answers with the unreadable-document finding its own step 2 filed, never with an empty
-  body read as the document's. A document that breaks on a requeue after its own step 2
-  keeps the body that step committed, as ADR 0046 rules, and a Get of it answers that body
-  with the finding beside it. A projection of the document that reads other documents —
-  its backlinks among them — is admitted when step 3 ends, and until then reads as still
+  answers unknown(unreadable) for each requested content column and carries the
+  unreadable-document finding its own step 2 filed. Section and Block Gets answer the
+  same unknown state, never a missing anchor or an empty body read as the document's.
+  A document that breaks on a requeue after its own step 2 also becomes names-only,
+  discarding every previously committed content and structure fact, as ADR 0046 rules.
+  Its Get answers the same unknown state and finding. A projection of the document that
+  reads other documents — its backlinks among them — is admitted when step 3 ends, and until then reads as still
   loading.
 - **Field and path Find** when every document has finished step 2: predicates, projections
   and ordering over frontmatter fields and paths only, and only those its existing guarded
