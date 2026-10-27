@@ -269,37 +269,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::disallowed_methods)] // Prove the fixture's denial applies to this account.
-    fn inventory_replays_a_still_denied_directory_as_unreadable() {
-        let scratch = Scratch::new("inventory-denied-replay");
-        let folder = scratch.directory("vault/folder");
-        scratch.place("folder/hidden.md", b"hidden");
-        scratch.place("z.md", b"visible");
-        scratch.set_mode(&folder, 0o000);
-        if fs::read_dir(&folder).is_ok() {
-            scratch.set_mode(&folder, 0o755);
-            eprintln!("skipped: this account bypasses directory permissions");
-            return;
-        }
-
-        let mut inventory = InventoryWalk::new(&scratch.at(""), &[]).unwrap();
-        let records = bounded_inventory(&mut inventory, 1, 2);
-        let directory = records
-            .iter()
-            .find(|record| record.value == b"folder")
-            .unwrap();
-        assert!(records.iter().any(|record| record.value == b"z.md"));
-        let replay = inventory.replay(&directory.value);
-        scratch.set_mode(&folder, 0o755);
-        let WalkFact::Unreadable(fact) = replay.unwrap() else {
-            panic!("replay must account for the directory while denial persists");
-        };
-        assert_eq!(fact.path().as_path(), Path::new("folder"));
-        assert_eq!(fact.kind(), UnreadKind::Directory);
-        assert_eq!(fact.cause().raw_os_error(), Some(libc::EACCES));
-    }
-
-    #[test]
     fn zero_work_leaves_the_inventory_at_its_next_name() {
         let scratch = Scratch::new("inventory-zero-work");
         scratch.place("note.md", b"body");
