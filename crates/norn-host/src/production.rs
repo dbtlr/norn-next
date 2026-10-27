@@ -20449,6 +20449,9 @@ mod tests {
         fn an_unregistered_vault_discards_its_derived_state_and_keeps_its_lock_file() {
             let f = Fixture::new("unregister-discards");
             fs::write(f.vault().join("a.md"), "# A\n").unwrap();
+            // The loading directory below exists only if the first attach
+            // began early reads, which a late FSEvents delivery would withdraw.
+            norn_fs::watch::settle_prior_changes(f.root.root(), lifecycle_budget().work()).unwrap();
             let (host, dirs) = empty_host(&f);
             register(&host, &f.vault()).expect("the vault is registered");
             attach_and_idle(&host);
@@ -21114,6 +21117,9 @@ mod tests {
             let f = Fixture::new("set-root-move");
             fs::write(f.vault().join("only-at-a.md"), "# A\n").unwrap();
             let moved = another_root(&f, &[("only-at-b.md", "# B\n")]);
+            // The loading directory below exists only if the first attach
+            // began early reads, which a late FSEvents delivery would withdraw.
+            norn_fs::watch::settle_prior_changes(f.root.root(), lifecycle_budget().work()).unwrap();
             let (host, dirs) = empty_host(&f);
             register(&host, &f.vault()).expect("the vault is registered");
             let (before, epoch_before) = attached_and_found(&host);
