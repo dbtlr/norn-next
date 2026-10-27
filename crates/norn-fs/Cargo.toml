@@ -36,7 +36,9 @@ publish.workspace = true
 # gives a subscription a look at its delivery slot that leaves the batch there,
 # for a suite ordering a change against what a heal window takes, and a
 # switch that turns publication's second reading of a target's before-state
-# off, so a suite can show a drift refusal is that reading's. Off by default,
+# off, so a suite can show a drift refusal is that reading's. A held arm can
+# deny or exhaust opens of one absolute file across host worker threads until dropped.
+# Off by default,
 # so a shipped build reads no arm variable and carries no arm or switch.
 [features]
 induced-failure = []

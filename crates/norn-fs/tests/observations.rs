@@ -8,10 +8,17 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use norn_fs::{
-    ContentHash, Refusal, path_identity, read_and_hash, read_if_present_and_hash,
+    ContentHash, Opened, Refusal, path_identity, read_and_hash, read_if_present_and_hash,
     read_optional_and_hash, stream_optional_and_hash,
 };
 use norn_testkit::scratch;
+
+fn read<T>(opened: Opened<T>) -> T {
+    match opened {
+        Opened::Read(read) => read,
+        _ => panic!("the fixture must read"),
+    }
+}
 
 /// Long enough that a machine under load does not fail the case, short enough
 /// that a read waiting on a writer that will never come is reported instead of
@@ -106,12 +113,11 @@ fn a_streamed_observation_answers_what_the_whole_read_answers() {
         fs::write(scratch.at(name), bytes).expect("a document");
     }
     for (name, bytes) in &files {
-        let whole = read_optional_and_hash(scratch.anchor(), Path::new(name))
-            .expect("a whole read")
-            .expect("the document is there");
-        let streamed = stream_optional_and_hash(scratch.anchor(), Path::new(name))
-            .expect("a streamed read")
-            .expect("the document is there");
+        let whole =
+            read(read_optional_and_hash(scratch.anchor(), Path::new(name)).expect("a whole read"));
+        let streamed = read(
+            stream_optional_and_hash(scratch.anchor(), Path::new(name)).expect("a streamed read"),
+        );
         assert_eq!(streamed.path(), whole.path(), "{name}");
         assert_eq!(streamed.content_hash(), whole.content_hash(), "{name}");
         assert_eq!(streamed.len(), whole.bytes().len() as u64, "{name}");
@@ -132,8 +138,10 @@ fn a_streamed_observation_answers_what_the_whole_read_answers() {
         let anchor = scratch.anchor().to_path_buf();
         let answers = within_budget(move || {
             (
-                read_optional_and_hash(&anchor, Path::new(name)).map(|read| read.is_none()),
-                stream_optional_and_hash(&anchor, Path::new(name)).map(|read| read.is_none()),
+                read_optional_and_hash(&anchor, Path::new(name))
+                    .map(|read| matches!(read, Opened::Nothing)),
+                stream_optional_and_hash(&anchor, Path::new(name))
+                    .map(|read| matches!(read, Opened::Nothing)),
             )
         })
         .unwrap_or_else(|_| panic!("a read of {name} never returned"));
@@ -238,16 +246,19 @@ fn no_component_below_the_anchor_is_followed_through_a_link() {
     symlink("real", scratch.at("link")).expect("ancestor link");
 
     assert_eq!(
-        read_optional_and_hash(scratch.anchor(), Path::new("real/sub/doc.md"))
-            .expect("the contained spelling reads")
-            .expect("the document is there")
-            .bytes(),
+        read(
+            read_optional_and_hash(scratch.anchor(), Path::new("real/sub/doc.md"))
+                .expect("the contained spelling reads")
+        )
+        .bytes(),
         b"body"
     );
     assert!(
-        read_optional_and_hash(scratch.anchor(), Path::new("link/sub/doc.md"))
-            .expect("a linked ancestor is an answer, not a fault")
-            .is_none(),
+        matches!(
+            read_optional_and_hash(scratch.anchor(), Path::new("link/sub/doc.md"))
+                .expect("a linked ancestor is an answer, not a fault"),
+            Opened::Nothing
+        ),
         "a document was read through a linked ancestor"
     );
 
@@ -320,7 +331,10 @@ fn a_pipe_at_a_name_is_refused_without_waiting_for_a_writer() {
     let optional = within_budget(move || read_optional_and_hash(&anchor, Path::new("pipe.toml")))
         .expect("the read never returned: a pipe held it inside open")
         .expect("a pipe is an answer rather than a fault");
-    assert!(optional.is_none(), "a pipe was read as document bytes");
+    assert!(
+        matches!(optional, Opened::Nothing),
+        "a pipe was read as document bytes"
+    );
 }
 
 #[test]
@@ -357,9 +371,11 @@ fn a_socket_and_an_unnameable_length_are_answers_rather_than_faults() {
     let listener = std::os::unix::net::UnixListener::bind(&socket).expect("a bound socket");
 
     assert!(
-        read_optional_and_hash(scratch.anchor(), Path::new("sock.md"))
-            .expect("a socket is an answer rather than a fault")
-            .is_none(),
+        matches!(
+            read_optional_and_hash(scratch.anchor(), Path::new("sock.md"))
+                .expect("a socket is an answer rather than a fault"),
+            Opened::Nothing
+        ),
         "a socket was read as document bytes"
     );
     let refusal =
@@ -373,9 +389,11 @@ fn a_socket_and_an_unnameable_length_are_answers_rather_than_faults() {
 
     let unnameable = "x".repeat(300);
     assert!(
-        read_optional_and_hash(scratch.anchor(), Path::new(&unnameable))
-            .expect("a name no file can have is an answer rather than a fault")
-            .is_none(),
+        matches!(
+            read_optional_and_hash(scratch.anchor(), Path::new(&unnameable))
+                .expect("a name no file can have is an answer rather than a fault"),
+            Opened::Nothing
+        ),
         "a name too long to exist was read as a document"
     );
     let refusal = read_and_hash(scratch.anchor(), Path::new(&unnameable))
@@ -387,10 +405,8 @@ fn a_socket_and_an_unnameable_length_are_answers_rather_than_faults() {
     );
 }
 
-/// **The bar on the split between an answer and a refusal.** An absent name is
-/// an answer to the optional read; a machine that will not let this account
-/// look is not. Reporting the second as absence would have a transient fault
-/// delete derived state.
+/// A configured control file must remain a refusal when it cannot be read;
+/// document readers use the separate unreadable answer.
 #[test]
 fn unreadable_configured_file_is_an_environmental_refusal() {
     let scratch = Scratch::new("unreadable-schema");
@@ -408,8 +424,8 @@ fn unreadable_configured_file_is_an_environmental_refusal() {
     for refusal in [
         read_and_hash(scratch.anchor(), Path::new("schema.toml"))
             .expect_err("unreadable schema must refuse"),
-        read_optional_and_hash(scratch.anchor(), Path::new("schema.toml"))
-            .expect_err("an unreadable file is not an absent one"),
+        read_if_present_and_hash(scratch.anchor(), Path::new("schema.toml"))
+            .expect_err("an unreadable control file must refuse"),
     ] {
         assert!(
             matches!(refusal, Refusal::Environment { kind, ref path, .. }

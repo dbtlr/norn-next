@@ -27,14 +27,17 @@
 //! read nothing at that name, because a walk begun now holds nothing there
 //! either. It says so, as [`SkipReason::Vanished`], rather than refusing or
 //! staying silent: a name the walk read nothing at is a name whose derived state
-//! this walk earned no authority over. A machine that will not answer is the
-//! other thing entirely, and still refuses.
+//! this walk earned no authority over. A listed name whose stat fails answers
+//! unreadable. Directory opening and listing failures, and process resource
+//! failures, still refuse.
 //!
 //! The one observation with no such window before it is the open of the vault
 //! root itself. A root that is not there is the vault gone rather than one name
 //! inside it changing, and it refuses.
 
-mod faults;
+pub(crate) mod faults;
+#[cfg(feature = "induced-failure")]
+pub use faults::{DocumentOpenFailure, deny_document_opens, exhaust_document_opens};
 pub mod inventory;
 
 use std::ffi::{OsStr, OsString};
@@ -54,11 +57,13 @@ use self::faults::{Paged, WalkFaults};
 use crate::exclusion::{Excluded, ExclusionError, Exclusions};
 use crate::hash::{ContentHash, read_bytes_and_hash};
 use crate::identity::{Identity, identity_of, identity_of_stat};
-use crate::open::{Reached, directory_flags, open_regular_at};
+use crate::open::{
+    OpenError, PathOrEnvironment, Reached, directory_flags, open_regular_at, open_regular_at_with,
+};
 use crate::path::{
     CaseSensitivity, ChildKeys, NormalizedPath, NormalizerError, PathError, PathNormalizer,
 };
-use crate::read::PathKind;
+use crate::read::{Opened, PathKind};
 
 /// Begins a deterministic streaming walk of `root`.
 ///
@@ -157,24 +162,52 @@ impl Vault {
     /// Observe a single inventoried name through the vault's anchored descent.
     /// A directory is deferred to the next inventory, with no authority over
     /// its descendants. Content is still read only by `FileFact::read_optional`.
-    #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // The vault filesystem seam owns these handles.
+    #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // norn-fs owns vault handles and stats.
     pub fn fact(&self, relative: &Path) -> Result<WalkFact, WalkError> {
         let path = self.normalize(relative)?;
-        let reason = match self.reach(relative)? {
+        let reached = match self.reach_inner(relative) {
+            Ok(reached) => reached,
+            Err(ReachFailure::Unreadable(fact)) => return Ok(WalkFact::Unreadable(fact)),
+            Err(ReachFailure::Walk(error)) => return Err(error),
+        };
+        let reason = match reached {
             Reach::Refused(skip) => return Ok(WalkFact::Skipped(skip)),
             Reach::Stands {
                 kind: PathKind::RegularFile,
                 at,
             } => {
                 let path = at;
-                match open_regular_at(self.root_fd.as_fd(), path.as_path()).map_err(|source| {
-                    environment(source.operation(), relative, source.into_error())
-                })? {
+                let access = self.root.join(path.as_path());
+                let reached = match open_regular_at(self.root_fd.as_fd(), path.as_path(), &access) {
+                    Ok(reached) => reached,
+                    Err(error @ OpenError::Path { .. }) => {
+                        return Ok(WalkFact::Unreadable(UnreadableFact {
+                            path,
+                            operation: error.operation(),
+                            cause: error.into_error(),
+                            origin: UnreadableOrigin::RegularFile,
+                        }));
+                    }
+                    Err(error) => {
+                        return Err(environment(error.operation(), relative, error.into_error()));
+                    }
+                };
+                match reached {
                     Reached::Regular(fd) => {
                         crate::reads::count_stat();
-                        let metadata = fs::File::from(fd)
-                            .metadata()
-                            .map_err(|error| environment("stating", relative, error))?;
+                        let metadata = match fs::File::from(fd).metadata() {
+                            Ok(metadata) => metadata,
+                            Err(cause) => {
+                                return unreadable_at(
+                                    path,
+                                    UnreadableOrigin::RegularFile,
+                                    "stating",
+                                    &access,
+                                    cause,
+                                )
+                                .map(WalkFact::Unreadable);
+                            }
+                        };
                         return Ok(WalkFact::File(FileFact {
                             root: self.root.clone(),
                             root_fd: self.root_fd.clone(),
@@ -197,7 +230,16 @@ impl Vault {
                     let metadata = match statat(&directory, name, AtFlags::SYMLINK_NOFOLLOW) {
                         Ok(metadata) => Some(metadata),
                         Err(rustix::io::Errno::NOENT | rustix::io::Errno::NOTDIR) => None,
-                        Err(source) => return Err(environment_errno("stating", relative, source)),
+                        Err(source) => {
+                            return unreadable_at(
+                                at,
+                                UnreadableOrigin::Stat,
+                                "stating",
+                                relative,
+                                io::Error::from_raw_os_error(source.raw_os_error()),
+                            )
+                            .map(WalkFact::Unreadable);
+                        }
                     };
                     if let Some(metadata) = metadata
                         && let EntryKind::Special(special) =
@@ -268,6 +310,18 @@ impl Vault {
     /// caller converging derived state reads `Missing` at the other spellings,
     /// which is what a derivation from zero over this tree holds there.
     pub fn reach(&self, relative: &Path) -> Result<Reach, WalkError> {
+        self.reach_inner(relative).map_err(|failure| match failure {
+            ReachFailure::Walk(error) => error,
+            ReachFailure::Unreadable(fact) => environment(
+                fact.operation,
+                &self.root.join(fact.path.as_path()),
+                fact.cause,
+            ),
+        })
+    }
+
+    /// Only the final name's stat can become a fact; folder traversal stays environmental.
+    fn reach_inner(&self, relative: &Path) -> Result<Reach, ReachFailure> {
         let subtree = self.normalize(relative)?;
         if let Some((root, reason)) = self.exclusions.covering_root(&subtree) {
             return Ok(Reach::Refused(SkipFact {
@@ -312,7 +366,16 @@ impl Vault {
                     at: subtree,
                 });
             }
-            Err(source) => return Err(environment_errno("stating", &access, source)),
+            Err(source) => {
+                let fact = unreadable_at(
+                    subtree,
+                    UnreadableOrigin::Stat,
+                    "stating",
+                    &access,
+                    io::Error::from_raw_os_error(source.raw_os_error()),
+                )?;
+                return Err(ReachFailure::Unreadable(fact));
+            }
         };
         let kind = classify_file_type(FileType::from_raw_mode(metadata.st_mode as _));
         let Some(spelling) = self.listed_spelling(&directory, name, &kind, &access)? else {
@@ -545,6 +608,20 @@ fn names_above(path: &NormalizedPath) -> &Path {
     path.as_path().parent().unwrap_or(Path::new(""))
 }
 
+/// A final-name stat failure is distinct from failures traversing its folders.
+enum ReachFailure {
+    /// A normalizer, containment, folder, listing or resource failure.
+    Walk(WalkError),
+    /// The final name alone could not be stated.
+    Unreadable(UnreadableFact),
+}
+
+impl From<WalkError> for ReachFailure {
+    fn from(error: WalkError) -> Self {
+        Self::Walk(error)
+    }
+}
+
 /// Where a descent through a run of names ended.
 enum Descent {
     /// Every name was a directory the descent passed: the last of them, open,
@@ -750,6 +827,14 @@ impl Iterator for Walk {
             };
 
             match pending.observed {
+                Observed::Unreadable(cause) => {
+                    return Some(Ok(WalkFact::Unreadable(UnreadableFact {
+                        path: pending.path,
+                        operation: "stating",
+                        cause,
+                        origin: UnreadableOrigin::Stat,
+                    })));
+                }
                 Observed::Skipped(reason) => {
                     return Some(Ok(WalkFact::Skipped(SkipFact {
                         path: pending.path,
@@ -820,6 +905,8 @@ impl Walk {
 pub enum WalkFact {
     /// A non-directory, non-symlink entry, whatever its extension or bytes.
     File(FileFact),
+    /// A listed name whose stat or document open failed at this path alone.
+    Unreadable(UnreadableFact),
     /// One root Norn deliberately did not enter or read.
     Skipped(SkipFact),
 }
@@ -829,8 +916,70 @@ impl WalkFact {
     pub fn path(&self) -> &NormalizedPath {
         match self {
             Self::File(file) => file.path(),
+            Self::Unreadable(unreadable) => unreadable.path(),
             Self::Skipped(skip) => skip.path(),
         }
+    }
+}
+
+/// A name the filesystem could not read, without an environmental failure.
+#[derive(Debug)]
+pub struct UnreadableFact {
+    path: NormalizedPath,
+    operation: &'static str,
+    cause: io::Error,
+    origin: UnreadableOrigin,
+}
+
+/// The kind evidence available when a path failed.
+#[derive(Debug)]
+enum UnreadableOrigin {
+    /// The name's stat failed before its kind could be established.
+    Stat,
+    /// The name was established as a regular file before the operation failed.
+    RegularFile,
+}
+
+impl UnreadableFact {
+    /// Whether the failed stat left open that this name could be a directory.
+    ///
+    /// Consumers withhold descendants only in this case; a known regular file
+    /// failing to open accounts for its own name alone.
+    pub fn kind_unknown(&self) -> bool {
+        matches!(self.origin, UnreadableOrigin::Stat)
+    }
+    /// The normalized vault-relative name that must remain accounted for.
+    pub fn path(&self) -> &NormalizedPath {
+        &self.path
+    }
+
+    /// The operation the machine could not complete.
+    pub fn operation(&self) -> &'static str {
+        self.operation
+    }
+
+    /// The machine's cause, retained for the document's finding.
+    pub fn cause(&self) -> &io::Error {
+        &self.cause
+    }
+}
+
+/// Preserve the evidence that was available without reclassifying a traversal error.
+fn unreadable_at(
+    path: NormalizedPath,
+    origin: UnreadableOrigin,
+    operation: &'static str,
+    access: &Path,
+    cause: io::Error,
+) -> Result<UnreadableFact, WalkError> {
+    match PathOrEnvironment::of(&cause) {
+        PathOrEnvironment::Path => Ok(UnreadableFact {
+            path,
+            operation,
+            cause,
+            origin,
+        }),
+        PathOrEnvironment::Environment => Err(environment(operation, access, cause)),
     }
 }
 
@@ -874,32 +1023,61 @@ impl FileFact {
     /// tree other writers are editing, and the window between them is ordinary
     /// churn rather than a broken environment.
     ///
-    /// A machine failure is still a refusal. A directory this account cannot
-    /// open and a descriptor table that is full say nothing about whether a
-    /// document is there, and reporting them as absence would let a transient
-    /// fault delete derived state.
+    /// A file's failed open, stat or read answers [`Opened::Unreadable`],
+    /// carrying the machine's cause without exposing any partial content.
+    /// Folder-component failures and process resource failures remain refusals.
     #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // norn-fs owns vault handles and reads.
-    pub fn read_optional(self) -> Result<Option<ReadFile>, WalkError> {
+    pub fn read_optional(self) -> Result<Opened<ReadFile>, WalkError> {
+        self.read_optional_with(&WalkFaults::entry())
+    }
+
+    #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // norn-fs owns vault handles and reads.
+    fn read_optional_with(self, faults: &WalkFaults) -> Result<Opened<ReadFile>, WalkError> {
         let access = self.root.join(self.path.as_path());
-        let fd = match open_regular_at(self.root_fd.as_fd(), self.path.as_path())
-            .map_err(|source| environment(source.operation(), &access, source.into_error()))?
-        {
-            Reached::Regular(fd) => fd,
-            Reached::Nothing(_) => return Ok(None),
+        let fd = match open_regular_at_with(
+            self.root_fd.as_fd(),
+            self.path.as_path(),
+            &access,
+            faults,
+        ) {
+            Ok(Reached::Regular(fd)) => fd,
+            Ok(Reached::Nothing(_)) => return Ok(Opened::Nothing),
+            Err(error @ OpenError::Path { .. }) => {
+                return Ok(Opened::Unreadable {
+                    operation: error.operation(),
+                    cause: error.into_error(),
+                });
+            }
+            Err(error) => return Err(environment(error.operation(), &access, error.into_error())),
         };
         let mut file = fs::File::from(fd);
         crate::reads::count_stat();
-        let metadata = file
-            .metadata()
-            .map_err(|source| environment("stating", &access, source))?;
-        let (bytes, content_hash) = read_bytes_and_hash(&mut file, &access)
-            .map_err(|source| environment("reading", &access, source))?;
-        Ok(Some(ReadFile {
+        let metadata = match file.metadata() {
+            Ok(metadata) => metadata,
+            Err(cause) => return content_failure("stating", &access, cause),
+        };
+        let (bytes, content_hash) = match read_bytes_and_hash(&mut file, &access) {
+            Ok(read) => read,
+            Err(cause) => return content_failure("reading", &access, cause),
+        };
+        Ok(Opened::Read(ReadFile {
             path: self.path,
             stat: stat(&metadata),
             bytes,
             content_hash,
         }))
+    }
+}
+
+/// Classifies a descriptor failure without exposing partial content.
+fn content_failure<T>(
+    operation: &'static str,
+    path: &Path,
+    cause: io::Error,
+) -> Result<Opened<T>, WalkError> {
+    match PathOrEnvironment::of(&cause) {
+        PathOrEnvironment::Path => Ok(Opened::Unreadable { operation, cause }),
+        PathOrEnvironment::Environment => Err(environment(operation, path, cause)),
     }
 }
 
@@ -1192,6 +1370,8 @@ struct Pending {
 /// entries as it took in and a name that went away is an entry saying so rather
 /// than a gap.
 enum Observed {
+    /// A name whose stat failed at this path alone.
+    Unreadable(io::Error),
     /// A directory the walk descends into.
     Directory,
     /// A file, with the stat the page took of it.
@@ -1206,6 +1386,7 @@ struct Candidate {
     /// The kind the listing named, or nothing where the name was already gone
     /// when the stat that learned its kind ran.
     listed: Option<EntryKind>,
+    unreadable: Option<io::Error>,
     sort_key: Vec<u8>,
 }
 
@@ -1417,11 +1598,9 @@ struct Page {
 /// describe: it is a change of the vault's own, reached by the watcher delivery
 /// that edit raises or by the next heal that reads the name.
 ///
-/// **A machine that will not answer still refuses.** A denied stat, an exhausted
-/// descriptor table and a failing device say nothing about whether an entry is
-/// there, and reading one as absence would let a transient fault prune derived
-/// state. Absence is the one error number that converges; every other one ends
-/// the walk.
+/// **A failed path is not an absent name.** A denied stat or failing device
+/// yields an unreadable fact at the listed name, so consumers can withhold what
+/// they could not read. Process resource failures still end the walk.
 ///
 /// # Every page lists the whole directory, and only the cursor is spared
 ///
@@ -1465,14 +1644,10 @@ struct Page {
 /// On a filesystem whose listing carries no entry type, that stat is the whole
 /// per-name cost, so what bounds the identities bounds the stats too.
 ///
-/// That stat is also where such a filesystem meets a machine failure, and which
-/// page meets it is the listing order's to decide: a refusing stat is reached by
-/// the first page whose run still admits the name's key, which is the opening
-/// page for whichever names the stream returns first and a later page for the
-/// rest. The walk refuses either way and yields nothing at that name or after
-/// it; what the order moves is how many facts the consumer already took when the
-/// refusal arrives. A listing that carries entry types owes no such stat and has
-/// no such spread.
+/// On a filesystem whose listing carries no type, a stat can also fail while
+/// candidates are being selected. A path failure is retained with its candidate
+/// and yielded at the name's sorted position. A resource failure refuses at the
+/// page that met it, which is the listing order's to decide.
 ///
 /// # What resumes a directory is a key, not a kernel offset
 ///
@@ -1563,11 +1738,19 @@ fn directory_page(
         // doctrine through the same reading, so the two windows cannot answer a
         // deleted name differently — the candidate is taken in either way, and
         // the loop below states it.
-        let listed = if entry.file_type() == FileType::Unknown {
-            stat_listed(directory, &name, &relative_path, Paged::default())?
-                .map(|metadata| classify_file_type(FileType::from_raw_mode(metadata.st_mode as _)))
+        let (listed, unreadable) = if entry.file_type() == FileType::Unknown {
+            match stat_listed(directory, &name, &relative_path, Paged::default())? {
+                Opened::Read(metadata) => (
+                    Some(classify_file_type(FileType::from_raw_mode(
+                        metadata.st_mode as _,
+                    ))),
+                    None,
+                ),
+                Opened::Nothing => (None, None),
+                Opened::Unreadable { cause, .. } => (None, Some(cause)),
+            }
         } else {
-            Some(classify_file_type(entry.file_type()))
+            (Some(classify_file_type(entry.file_type())), None)
         };
         let mut sort_key = path.comparison_key().as_bytes().to_vec();
         if listed == Some(EntryKind::Directory)
@@ -1586,6 +1769,7 @@ fn directory_page(
             name,
             path,
             listed,
+            unreadable,
             sort_key,
         });
     }
@@ -1599,20 +1783,28 @@ fn directory_page(
         // The sort key is spent: the page's own run of names is what the cursor
         // carries, so nothing past this point reads one entry's key.
         let Candidate {
-            name, path, listed, ..
+            name,
+            path,
+            listed,
+            unreadable,
+            ..
         } = candidate;
         let relative_path = relative.join(&name);
-        let observed = observe_listed(
-            root_fd,
-            directory,
-            &name,
-            &relative_path,
-            &path,
-            listed,
-            normalizer,
-            exclusions,
-            faults,
-        )?;
+        let observed = if let Some(cause) = unreadable {
+            Observed::Unreadable(cause)
+        } else {
+            observe_listed(
+                root_fd,
+                directory,
+                &name,
+                &relative_path,
+                &path,
+                listed,
+                normalizer,
+                exclusions,
+                faults,
+            )?
+        };
         pending.push(Pending {
             parent: directory.clone(),
             name,
@@ -1656,8 +1848,10 @@ fn observe_listed(
         return Ok(Observed::Skipped(SkipReason::Vanished));
     };
     let armed = faults.paging(kind);
-    let Some(metadata) = stat_listed(directory, name, access, armed)? else {
-        return Ok(Observed::Skipped(SkipReason::Vanished));
+    let metadata = match stat_listed(directory, name, access, armed)? {
+        Opened::Read(metadata) => metadata,
+        Opened::Nothing => return Ok(Observed::Skipped(SkipReason::Vanished)),
+        Opened::Unreadable { cause, .. } => return Ok(Observed::Unreadable(cause)),
     };
     let observed_kind = armed
         .observes
@@ -1690,24 +1884,28 @@ fn observe_listed(
 /// **Absence is an answer here, never a refusal**, and `armed` is what lets a
 /// case reach that answer: the seam hands back the error number the stat meets
 /// in place of running, and the reading below is the production one either way.
-/// Every other error number is the machine failing to answer, which ends the
-/// walk.
+/// Other path failures answer unreadable; process resource failures still end
+/// the walk.
 #[allow(clippy::disallowed_methods)] // norn-fs owns the vault walk and stat.
 fn stat_listed(
     directory: &Arc<OwnedFd>,
     name: &OsStr,
     access: &Path,
     armed: Paged,
-) -> Result<Option<rustix::fs::Stat>, WalkError> {
+) -> Result<Opened<rustix::fs::Stat>, WalkError> {
     crate::reads::count_stat();
     let observed = match armed.meets {
         Some(errno) => Err(errno),
         None => statat(directory, name, AtFlags::SYMLINK_NOFOLLOW),
     };
     match observed {
-        Ok(metadata) => Ok(Some(metadata)),
-        Err(rustix::io::Errno::NOENT) => Ok(None),
-        Err(source) => Err(environment_errno("stating", access, source)),
+        Ok(metadata) => Ok(Opened::Read(metadata)),
+        Err(rustix::io::Errno::NOENT) => Ok(Opened::Nothing),
+        Err(source) => content_failure(
+            "stating",
+            access,
+            io::Error::from_raw_os_error(source.raw_os_error()),
+        ),
     }
 }
 
@@ -1887,10 +2085,124 @@ mod tests {
         walk
     }
 
+    #[test]
+    fn an_open_the_machine_denies_is_an_unreadable_fact() {
+        let scratch = Scratch::new("open-denied");
+        scratch.place("blocked.md", b"body");
+        let WalkFact::File(file) = Vault::open(&scratch.at(""), &[])
+            .unwrap()
+            .fact(Path::new("blocked.md"))
+            .unwrap()
+        else {
+            panic!("a file fact")
+        };
+        let answer = file.read_optional_with(&WalkFaults::at(&[(Stage::Open, Answer::Denied)]));
+        assert!(
+            matches!(answer, Ok(Opened::Unreadable { operation: "opening", cause })
+            if cause.raw_os_error() == Some(libc::EACCES))
+        );
+    }
+
+    #[test]
+    fn a_folder_component_stat_failure_stays_environmental() {
+        let scratch = Scratch::new("fact-folder-stat-denied");
+        scratch.directory("vault/a/x.md");
+        scratch.place("a/x.md/n.md", b"body");
+        let vault = Vault::open(&scratch.at(""), &[]).unwrap();
+        let blocked = scratch.at("a");
+        scratch.set_mode(&blocked, 0o400);
+        #[allow(clippy::disallowed_methods)] // Prove the stat denial the fixture needs.
+        let denied = fs::symlink_metadata(scratch.at("a/x.md")).is_err();
+        if !denied {
+            scratch.set_mode(&blocked, 0o755);
+            eprintln!("skipped: this account bypasses directory search permissions");
+            return;
+        }
+        let answer = vault.fact(Path::new("a/x.md/n.md"));
+        scratch.set_mode(&blocked, 0o755);
+        assert!(
+            matches!(&answer, Err(WalkError::Environment { operation: "stating", source, .. })
+            if source.raw_os_error() == Some(libc::EACCES)),
+            "{answer:?}"
+        );
+    }
+
+    #[test]
+    fn a_final_name_stat_failure_has_unknown_kind() {
+        let scratch = Scratch::new("fact-leaf-stat-denied");
+        let note = scratch.place("note.md", b"body");
+        let root = scratch.at("");
+        let vault = Vault::open(&root, &[]).unwrap();
+        scratch.set_mode(&root, 0o400);
+        #[allow(clippy::disallowed_methods)] // Prove the stat denial the fixture needs.
+        let denied = fs::symlink_metadata(&note).is_err();
+        if !denied {
+            scratch.set_mode(&root, 0o755);
+            eprintln!("skipped: this account bypasses directory search permissions");
+            return;
+        }
+        let answer = vault.fact(Path::new("note.md"));
+        scratch.set_mode(&root, 0o755);
+        let WalkFact::Unreadable(fact) = answer.unwrap() else {
+            panic!("the final stat did not identify this name's kind");
+        };
+        assert!(fact.kind_unknown());
+        assert_eq!(fact.path().as_path(), Path::new("note.md"));
+    }
+
+    #[cfg(feature = "induced-failure")]
+    #[test]
+    fn a_document_open_failure_has_a_known_regular_file_kind() {
+        let scratch = Scratch::new("fact-open-known-kind");
+        let note = scratch.place("note.md", b"body");
+        let vault = Vault::open(&scratch.at(""), &[]).unwrap();
+        let _denied = crate::deny_document_opens(&note);
+        let WalkFact::Unreadable(fact) = vault.fact(Path::new("note.md")).unwrap() else {
+            panic!("a denied document open");
+        };
+        assert!(!fact.kind_unknown());
+        assert_eq!(fact.path().as_path(), Path::new("note.md"));
+    }
+
+    #[test]
+    fn a_failing_device_is_an_unreadable_fact() {
+        let scratch = Scratch::new("open-failing-device");
+        scratch.place("failed.md", b"body");
+        let WalkFact::File(file) = Vault::open(&scratch.at(""), &[])
+            .unwrap()
+            .fact(Path::new("failed.md"))
+            .unwrap()
+        else {
+            panic!("a file fact")
+        };
+        let answer = file.read_optional_with(&WalkFaults::at(&[(Stage::Open, Answer::Failing)]));
+        assert!(
+            matches!(answer, Ok(Opened::Unreadable { operation: "opening", cause })
+            if cause.raw_os_error() == Some(libc::EIO))
+        );
+    }
+
+    #[test]
+    fn an_exhausted_descriptor_table_still_refuses() {
+        let scratch = Scratch::new("open-exhausted");
+        scratch.place("note.md", b"body");
+        let WalkFact::File(file) = Vault::open(&scratch.at(""), &[])
+            .unwrap()
+            .fact(Path::new("note.md"))
+            .unwrap()
+        else {
+            panic!("a file fact")
+        };
+        let answer = file.read_optional_with(&WalkFaults::at(&[(Stage::Open, Answer::Exhausted)]));
+        assert!(matches!(answer, Err(WalkError::Environment { source, .. })
+            if source.raw_os_error() == Some(libc::EMFILE)));
+    }
+
     fn paths(walk: Walk) -> Vec<(PathBuf, Option<SkipReason>)> {
         walk.map(|fact| match fact.expect("walk fact") {
             WalkFact::File(file) => (file.path().as_path().to_owned(), None),
             WalkFact::Skipped(skip) => (skip.path().as_path().to_owned(), Some(skip.reason())),
+            WalkFact::Unreadable(fact) => panic!("unexpected unreadable fact: {fact:?}"),
         })
         .collect()
     }
@@ -1956,10 +2268,7 @@ mod tests {
         let WalkFact::File(file) = fact else {
             panic!("file was skipped")
         };
-        let read = file
-            .read_optional()
-            .expect("read")
-            .expect("the file the walk just yielded");
+        let read = crate::scratch::read(file.read_optional().expect("read"));
         assert_eq!(read.bytes(), b"one observation");
         assert_eq!(read.content_hash(), ContentHash::of(read.bytes()));
         assert_eq!(read.stat().len, read.bytes().len() as u64);
@@ -2135,9 +2444,11 @@ mod tests {
         assert!(status.success(), "mkfifo failed");
 
         assert!(
-            file.read_optional()
-                .expect("a replaced name is not a machine failure")
-                .is_none(),
+            matches!(
+                file.read_optional()
+                    .expect("a replaced name is not a machine failure"),
+                Opened::Nothing
+            ),
             "a fifo at a deferred name read as document content"
         );
     }
@@ -2160,9 +2471,11 @@ mod tests {
         fs::remove_file(scratch.at("note.md")).expect("remove the enumerated file");
 
         assert!(
-            file.read_optional()
-                .expect("a deleted name is not a machine failure")
-                .is_none(),
+            matches!(
+                file.read_optional()
+                    .expect("a deleted name is not a machine failure"),
+                Opened::Nothing
+            ),
             "a deleted document read as content"
         );
     }
@@ -2187,9 +2500,11 @@ mod tests {
         fs::create_dir(scratch.at("note.md")).expect("a directory takes the name");
 
         assert!(
-            file.read_optional()
-                .expect("a replaced name is not a machine failure")
-                .is_none(),
+            matches!(
+                file.read_optional()
+                    .expect("a replaced name is not a machine failure"),
+                Opened::Nothing
+            ),
             "a directory at a deferred name read as document content"
         );
     }
@@ -2401,25 +2716,31 @@ mod tests {
         }
     }
 
-    /// **A machine that will not answer still refuses, at this window too.** A
-    /// denied stat says nothing about whether an entry is there, and converging
-    /// on absence would let a revoked permission prune every row under the
-    /// directory. Only absence converges; every other error number ends the
-    /// walk.
     #[test]
-    fn an_entry_the_machine_will_not_stat_refuses_the_walk() {
+    fn an_entry_the_machine_will_not_stat_is_unreadable_and_the_walk_continues() {
         let scratch = Scratch::new("walk-page-denied");
         for name in ["a.md", "b.md", "c.md"] {
             scratch.place(name, b"x");
         }
 
         let mut facts = walk_armed(&scratch.at(""), &[(Stage::Page, Answer::Denied)]);
-        let error = facts
+        let fact = facts
             .next()
             .expect("the page's position")
-            .expect_err("a stat the machine refused");
-        assert!(error.to_string().contains("a.md"), "{error}");
-        assert!(facts.next().is_none(), "a walk error must be terminal");
+            .expect("a path failure does not end the walk");
+        let WalkFact::Unreadable(unreadable) = fact else {
+            panic!("an unreadable fact")
+        };
+        assert_eq!(unreadable.path().as_path(), Path::new("a.md"));
+        assert_eq!(unreadable.operation(), "stating");
+        assert!(unreadable.kind_unknown());
+        assert_eq!(unreadable.cause().raw_os_error(), Some(libc::EACCES));
+        assert_eq!(
+            facts
+                .map(|fact| fact.unwrap().path().as_path().to_owned())
+                .collect::<Vec<_>>(),
+            [PathBuf::from("b.md"), PathBuf::from("c.md")]
+        );
     }
 
     /// **A page holds one entry per name it covered, so the run it covered and
@@ -2827,7 +3148,9 @@ mod tests {
             .expect("walk")
             .map(|fact| match fact.expect("fact") {
                 WalkFact::File(file) => file,
-                WalkFact::Skipped(_) => panic!("fixture contains no skips"),
+                WalkFact::Skipped(_) | WalkFact::Unreadable(_) => {
+                    panic!("fixture contains readable files")
+                }
             })
             .collect::<Vec<_>>();
         assert_eq!(files.len(), 300);
@@ -2890,6 +3213,7 @@ mod tests {
                 name: OsString::from(name),
                 path,
                 listed: Some(EntryKind::File),
+                unreadable: None,
                 sort_key,
             }
         };
@@ -2948,6 +3272,7 @@ mod tests {
             .take(FRONTIER_PAGE)
             .map(|fact| match fact.expect("walk fact") {
                 WalkFact::File(file) => file.path().as_path().to_owned(),
+                WalkFact::Unreadable(fact) => panic!("unexpected unreadable fact: {fact:?}"),
                 WalkFact::Skipped(skip) => {
                     panic!("unexpected skip at {}", skip.path().as_path().display())
                 }
@@ -3628,7 +3953,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unreadable_present_file_refuses_when_content_is_requested() {
+    fn an_unreadable_present_file_answers_unreadable_when_content_is_requested() {
         let scratch = Scratch::new("walk-unreadable-file");
         let blocked = scratch.place("blocked.md", b"present but unreadable");
         scratch.set_mode(&blocked, 0o000);
@@ -3636,10 +3961,11 @@ mod tests {
         #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
         // Proves the arranged read refusal is real.
         let actually_blocked = fs::File::open(&blocked).is_err();
-        assert!(
-            actually_blocked,
-            "this account can read a mode-000 file, so the refusal case proves nothing"
-        );
+        if !actually_blocked {
+            scratch.set_mode(&blocked, 0o600);
+            eprintln!("skipped: this account bypasses mode-000 file permissions");
+            return;
+        }
 
         let fact = walk(&scratch.at(""), &[])
             .expect("walk")
@@ -3649,13 +3975,11 @@ mod tests {
         let WalkFact::File(file) = fact else {
             panic!("the present file was treated as a skip")
         };
-        // A denied file is the machine refusing, not the name answering: the
-        // document is there and this account cannot read it.
-        let error = file
-            .read_optional()
-            .expect_err("an unreadable present file");
-        assert!(error.to_string().contains("blocked.md"), "{error}");
+        let answer = file.read_optional();
         scratch.set_mode(&blocked, 0o600);
+        assert!(
+            matches!(answer, Ok(Opened::Unreadable { cause, .. }) if cause.raw_os_error() == Some(libc::EACCES))
+        );
     }
 
     /// **A denied ancestor is the machine refusing, not the name answering.**
@@ -3677,7 +4001,7 @@ mod tests {
             .expect("walk")
             .find_map(|fact| match fact.expect("the enumerated file") {
                 WalkFact::File(file) => Some(file),
-                WalkFact::Skipped(_) => None,
+                WalkFact::Skipped(_) | WalkFact::Unreadable(_) => None,
             })
             .expect("one file fact");
         scratch.set_mode(&folder, 0o000);

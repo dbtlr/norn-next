@@ -9,8 +9,27 @@ use std::path::{Path, PathBuf};
 use rustix::fs::{Mode, open};
 
 use crate::hash::{ContentHash, hashed_and_checked_from, read_bytes_and_hash};
-use crate::open::{Reached, Unreached, anchor_flags, open_regular_at};
+use crate::open::{
+    OpenError, PathOrEnvironment, Reached, Unreached, anchor_flags, open_regular_at_with,
+};
 use crate::refusal::{Refusal, environment, environment_at};
+use crate::walk::faults::WalkFaults;
+
+/// The result of trying to read one document's bytes.
+#[derive(Debug)]
+pub enum Opened<T> {
+    /// The bytes were read and the requested observation is complete.
+    Read(T),
+    /// No regular file stands at the contained name.
+    Nothing,
+    /// This path could not be read; no content is known from this attempt.
+    Unreadable {
+        /// The operation that failed.
+        operation: &'static str,
+        /// The operating system's cause, preserved without interpretation.
+        cause: io::Error,
+    },
+}
 
 /// What kind of filesystem object a watcher invalidation root names now.
 ///
@@ -68,8 +87,9 @@ impl ReadAndHash {
 pub fn read_and_hash(anchor: &Path, relative: &Path) -> Result<ReadAndHash, Refusal> {
     let path = anchor.join(relative);
     match observe(anchor, relative, &path)? {
-        Observed::Read(read) => Ok(read),
-        Observed::Nothing(unreached) => Err(environment_at(
+        Observation::Read(read) => Ok(read),
+        Observation::Unreadable { operation, cause } => Err(environment(operation, &path, &cause)),
+        Observation::Nothing(unreached) => Err(environment_at(
             unreached.operation(),
             &path,
             unreached.component(),
@@ -89,18 +109,26 @@ pub fn read_and_hash(anchor: &Path, relative: &Path) -> Result<ReadAndHash, Refu
 /// walk of the anchor holds converges the same way for every one of them — a
 /// walk yields no file at any of those names either.
 ///
-/// A machine failure is still a refusal. A directory this account cannot open
-/// and a descriptor table that is full say nothing about whether a document is
-/// there, and reporting them as absence would let a transient fault delete
-/// derived state.
+/// A failed file open or read answers [`Opened::Unreadable`], retaining the
+/// machine's cause. Resource failures, an unopenable anchor, and failures at
+/// folder components remain refusals.
 pub fn read_optional_and_hash(
     anchor: &Path,
     relative: &Path,
-) -> Result<Option<ReadAndHash>, Refusal> {
+) -> Result<Opened<ReadAndHash>, Refusal> {
+    read_optional_with(anchor, relative, &WalkFaults::entry())
+}
+
+fn read_optional_with(
+    anchor: &Path,
+    relative: &Path,
+    faults: &WalkFaults,
+) -> Result<Opened<ReadAndHash>, Refusal> {
     let path = anchor.join(relative);
-    Ok(match observe(anchor, relative, &path)? {
-        Observed::Read(read) => Some(read),
-        Observed::Nothing(_) => None,
+    Ok(match observe_with(anchor, relative, &path, faults)? {
+        Observation::Read(read) => Opened::Read(read),
+        Observation::Nothing(_) => Opened::Nothing,
+        Observation::Unreadable { operation, cause } => Opened::Unreadable { operation, cause },
     })
 }
 
@@ -149,8 +177,8 @@ impl StreamedHash {
 /// **The same observation as [`read_optional_and_hash`], less the bytes.**
 /// The same contained open, the same answer for a name that reaches no
 /// regular file — absent, a link, through a linked folder, a folder or a pipe
-/// are all `None` — the same refusals, and the same count: one
-/// [`crate::reads::ReadTally::document_opens`] per file read. What it answers
+/// are all [`Opened::Nothing`] — the same unreadable answer and refusals, and
+/// the same count: one [`crate::reads::ReadTally::document_opens`] per file read. What it answers
 /// of a file is what the whole read's bytes answer: their hash, their length,
 /// and whether they are UTF-8. Peak memory is one 64 KiB chunk whatever the
 /// file weighs.
@@ -165,20 +193,50 @@ impl StreamedHash {
 pub fn stream_optional_and_hash(
     anchor: &Path,
     relative: &Path,
-) -> Result<Option<StreamedHash>, Refusal> {
+) -> Result<Opened<StreamedHash>, Refusal> {
+    stream_optional_with(anchor, relative, &WalkFaults::entry())
+}
+
+fn stream_optional_with(
+    anchor: &Path,
+    relative: &Path,
+    faults: &WalkFaults,
+) -> Result<Opened<StreamedHash>, Refusal> {
     let path = anchor.join(relative);
-    let mut file = match reach(anchor, relative, &path)? {
-        Ok(file) => file,
-        Err(_) => return Ok(None),
+    let mut file = match reach(anchor, relative, &path, faults)? {
+        Observation::Read(file) => file,
+        Observation::Nothing(_) => return Ok(Opened::Nothing),
+        Observation::Unreadable { operation, cause } => {
+            return Ok(Opened::Unreadable { operation, cause });
+        }
     };
-    let checked = hashed_and_checked_from(&mut file, &path)
-        .map_err(|error| environment("reading", &path, &error))?;
-    Ok(Some(StreamedHash {
+    let checked = match hashed_and_checked_from(&mut file, &path) {
+        Ok(checked) => checked,
+        Err(cause) => {
+            return Ok(Opened::Unreadable {
+                operation: "reading",
+                cause: path_failure("reading", &path, cause)?,
+            });
+        }
+    };
+    Ok(Opened::Read(StreamedHash {
         path,
         content_hash: checked.hash,
         len: checked.len,
         utf8: checked.utf8,
     }))
+}
+
+/// A descriptor failure is unreadable only while the process can still progress.
+fn path_failure(
+    operation: &'static str,
+    path: &Path,
+    cause: io::Error,
+) -> Result<io::Error, Refusal> {
+    match PathOrEnvironment::of(&cause) {
+        PathOrEnvironment::Path => Ok(cause),
+        PathOrEnvironment::Environment => Err(environment(operation, path, &cause)),
+    }
 }
 
 /// Reads a regular file, or returns `None` when its contained path is missing.
@@ -192,13 +250,14 @@ pub fn read_if_present_and_hash(
 ) -> Result<Option<ReadAndHash>, Refusal> {
     let path = anchor.join(relative);
     match observe(anchor, relative, &path)? {
-        Observed::Read(read) => Ok(Some(read)),
-        Observed::Nothing(unreached)
+        Observation::Read(read) => Ok(Some(read)),
+        Observation::Nothing(unreached)
             if unreached.error().kind() == std::io::ErrorKind::NotFound =>
         {
             Ok(None)
         }
-        Observed::Nothing(unreached) => Err(environment_at(
+        Observation::Unreadable { operation, cause } => Err(environment(operation, &path, &cause)),
+        Observation::Nothing(unreached) => Err(environment_at(
             unreached.operation(),
             &path,
             unreached.component(),
@@ -231,12 +290,17 @@ pub(crate) fn read_if_present_bounded(
     bound: usize,
 ) -> Result<Option<Bounded>, Refusal> {
     let path = anchor.join(relative);
-    let mut file = match reach(anchor, relative, &path)? {
-        Ok(file) => file,
-        Err(unreached) if unreached.error().kind() == std::io::ErrorKind::NotFound => {
+    let mut file = match reach(anchor, relative, &path, &WalkFaults::default())? {
+        Observation::Read(file) => file,
+        Observation::Unreadable { operation, cause } => {
+            return Err(environment(operation, &path, &cause));
+        }
+        Observation::Nothing(unreached)
+            if unreached.error().kind() == std::io::ErrorKind::NotFound =>
+        {
             return Ok(None);
         }
-        Err(unreached) => {
+        Observation::Nothing(unreached) => {
             return Err(environment_at(
                 unreached.operation(),
                 &path,
@@ -259,43 +323,87 @@ pub(crate) fn read_if_present_bounded(
     }))
 }
 
-/// One observation, before either caller decides what an unreached name means.
-enum Observed {
-    Read(ReadAndHash),
+/// A contained observation retaining the diagnostic for an unreached name.
+enum Observation<T> {
+    /// The requested descriptor or content.
+    Read(T),
+    /// A contained name that reaches no regular file.
     Nothing(Unreached),
+    /// A path-specific failure with no content observation.
+    Unreadable {
+        operation: &'static str,
+        cause: io::Error,
+    },
 }
 
-fn observe(anchor: &Path, relative: &Path, path: &Path) -> Result<Observed, Refusal> {
-    let mut file = match reach(anchor, relative, path)? {
-        Ok(file) => file,
-        Err(unreached) => return Ok(Observed::Nothing(unreached)),
+fn observe(
+    anchor: &Path,
+    relative: &Path,
+    path: &Path,
+) -> Result<Observation<ReadAndHash>, Refusal> {
+    observe_with(anchor, relative, path, &WalkFaults::default())
+}
+
+fn observe_with(
+    anchor: &Path,
+    relative: &Path,
+    path: &Path,
+    faults: &WalkFaults,
+) -> Result<Observation<ReadAndHash>, Refusal> {
+    let mut file = match reach(anchor, relative, path, faults)? {
+        Observation::Read(file) => file,
+        Observation::Nothing(unreached) => return Ok(Observation::Nothing(unreached)),
+        Observation::Unreadable { operation, cause } => {
+            return Ok(Observation::Unreadable { operation, cause });
+        }
     };
-    let (bytes, content_hash) = read_bytes_and_hash(&mut file, path)
-        .map_err(|error| environment("reading", path, &error))?;
-    Ok(Observed::Read(ReadAndHash {
+    let (bytes, content_hash) = match read_bytes_and_hash(&mut file, path) {
+        Ok(read) => read,
+        Err(cause) => {
+            return Ok(Observation::Unreadable {
+                operation: "reading",
+                cause: path_failure("reading", path, cause)?,
+            });
+        }
+    };
+    Ok(Observation::Read(ReadAndHash {
         path: path.to_owned(),
         bytes,
         content_hash,
     }))
 }
 
-/// The regular file `relative` names below `anchor`, opened through the
-/// contained open, or the fact about the name that stopped the descent.
+/// The contained open; folder and anchor failures always remain refusals.
 #[allow(clippy::disallowed_types)] // norn-fs owns file handles.
 fn reach(
     anchor: &Path,
     relative: &Path,
     path: &Path,
-) -> Result<Result<std::fs::File, Unreached>, Refusal> {
+    faults: &WalkFaults,
+) -> Result<Observation<std::fs::File>, Refusal> {
     let anchor_fd = open(anchor, anchor_flags(), Mode::empty())
         .map_err(|errno| environment("opening directory", anchor, &errno_error(errno)))?;
-    let reached = open_regular_at(anchor_fd.as_fd(), relative).map_err(|error| {
-        let (operation, component) = (error.operation(), error.component().to_owned());
-        environment_at(operation, path, &component, &error.into_error())
-    })?;
+    let reached = match open_regular_at_with(anchor_fd.as_fd(), relative, path, faults) {
+        Ok(reached) => reached,
+        Err(error @ OpenError::Path { .. }) => {
+            return Ok(Observation::Unreadable {
+                operation: error.operation(),
+                cause: error.into_error(),
+            });
+        }
+        Err(error) => {
+            let (operation, component) = (error.operation(), error.component().to_owned());
+            return Err(environment_at(
+                operation,
+                path,
+                &component,
+                &error.into_error(),
+            ));
+        }
+    };
     Ok(match reached {
-        Reached::Regular(fd) => Ok(std::fs::File::from(fd)),
-        Reached::Nothing(unreached) => Err(unreached),
+        Reached::Regular(fd) => Observation::Read(std::fs::File::from(fd)),
+        Reached::Nothing(unreached) => Observation::Nothing(unreached),
     })
 }
 
@@ -310,6 +418,69 @@ mod tests {
     use super::*;
     use crate::reads::ReadWindow;
     use crate::scratch::Scratch;
+    use crate::walk::faults::{Answer, Stage};
+
+    #[test]
+    fn read_optional_and_hash_answers_unreadable() {
+        let scratch = Scratch::new("optional-open-denied");
+        scratch.place("note.md", b"body");
+        let faults = WalkFaults::at(&[(Stage::Open, Answer::Denied)]);
+        let answer = read_optional_with(&scratch.at(""), Path::new("note.md"), &faults);
+        assert!(
+            matches!(answer, Ok(Opened::Unreadable { operation: "opening", cause })
+            if cause.raw_os_error() == Some(libc::EACCES))
+        );
+        let read = crate::scratch::read(
+            read_optional_with(&scratch.at(""), Path::new("note.md"), &faults).unwrap(),
+        );
+        assert_eq!(
+            read.bytes(),
+            b"body",
+            "the next attempt reads after the condition ends"
+        );
+    }
+
+    #[test]
+    fn stream_optional_and_hash_answers_unreadable() {
+        let scratch = Scratch::new("stream-open-failing");
+        scratch.place("note.md", b"body");
+        let answer = stream_optional_with(
+            &scratch.at(""),
+            Path::new("note.md"),
+            &WalkFaults::at(&[(Stage::Open, Answer::Failing)]),
+        );
+        assert!(
+            matches!(answer, Ok(Opened::Unreadable { operation: "opening", cause })
+            if cause.raw_os_error() == Some(libc::EIO))
+        );
+    }
+
+    #[test]
+    fn optional_hash_readers_refuse_descriptor_exhaustion() {
+        let scratch = Scratch::new("optional-open-exhausted");
+        scratch.place("note.md", b"body");
+        let whole = read_optional_with(
+            &scratch.at(""),
+            Path::new("note.md"),
+            &WalkFaults::at(&[(Stage::Open, Answer::Exhausted)]),
+        )
+        .unwrap_err();
+        let streamed = stream_optional_with(
+            &scratch.at(""),
+            Path::new("note.md"),
+            &WalkFaults::at(&[(Stage::Open, Answer::Exhausted)]),
+        )
+        .unwrap_err();
+        for refusal in [whole, streamed] {
+            assert!(matches!(
+                refusal,
+                Refusal::Environment {
+                    raw_os_error: Some(libc::EMFILE),
+                    ..
+                }
+            ));
+        }
+    }
 
     /// **A contained read counts its reads, not its opens.** Each of the four
     /// readers — the streamed one among them — reads the file once and is one
