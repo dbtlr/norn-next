@@ -32,6 +32,76 @@ use first_index::FirstIndexProof;
 
 use faults::{Boundary, HealWindow, WatchFaults};
 
+/// Wait for fixture writes made before this call to pass through FSEvents.
+///
+/// `dir` must be the scratch directory outside the vault root, after its last
+/// pre-attach write. FSEvents numbers changes asynchronously, so its history
+/// marker alone cannot exclude those writes from a later attachment. Delivery
+/// is ordered: observing a sentinel written after the fixture puts its earlier
+/// writes behind the next stream's current-event-ID reading. The sentinel is
+/// outside the vault so its creation and cleanup cannot invalidate that
+/// attachment's first-index proof. Linux needs no such barrier.
+///
+/// Available only with `induced-failure`. A failed stream, an expired delivery
+/// wait or failed sentinel I/O returns an error rather than assuming settlement.
+#[cfg(feature = "induced-failure")]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)] // Test-support sentinel in the caller's scratch directory.
+pub fn settle_prior_changes(dir: &Path, budget: Duration) -> Result<(), WatchError> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (dir, budget);
+        Ok(())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use notify::Watcher;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static SERIAL: AtomicU64 = AtomicU64::new(0);
+        let io_error = |error: std::io::Error| WatchError::Backend(error.to_string());
+        let dir = std::fs::canonicalize(dir).map_err(io_error)?;
+        let sentinel = dir.join(format!(
+            ".norn-prior-changes-{}-{}",
+            std::process::id(),
+            SERIAL.fetch_add(1, Ordering::Relaxed)
+        ));
+        let expected = sentinel.clone();
+        let (delivered, delivery) = mpsc::channel();
+        let mut watcher = notify::fsevent::FsEventWatcher::with_event_history(
+            move |event: notify::Result<Event>| {
+                let answer = match event {
+                    Err(error) => Err(backend(error)),
+                    Ok(event) if event.need_rescan() => Err(WatchError::Backend(
+                        "FSEvents lost events while settling fixture writes".into(),
+                    )),
+                    Ok(event) if event.paths.contains(&expected) => Ok(()),
+                    Ok(_) => return,
+                };
+                let _ = delivered.send(answer);
+            },
+            history_boundary(notify::fsevent::current_event_id())?,
+            || {},
+        )
+        .map_err(backend)?;
+        watcher
+            .watch(&dir, RecursiveMode::Recursive)
+            .map_err(backend)?;
+        std::fs::File::create_new(&sentinel).map_err(io_error)?;
+        let answer = delivery
+            .recv_timeout(budget)
+            .map_err(|error| match error {
+                mpsc::RecvTimeoutError::Timeout => WatchError::SynchronizationExpired,
+                mpsc::RecvTimeoutError::Disconnected => {
+                    WatchError::Backend("fixture settlement stream ended".into())
+                }
+            })
+            .and_then(|answer| answer);
+        drop(watcher);
+        let cleanup = std::fs::remove_file(&sentinel).map_err(io_error);
+        answer.and(cleanup)
+    }
+}
+
 /// A trailing quiet period that closes a naturally settled batch.
 pub const QUIET_WINDOW: Duration = Duration::from_millis(50);
 /// The longest a continuous event stream may postpone delivery.

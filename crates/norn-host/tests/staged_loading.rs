@@ -190,6 +190,7 @@ impl Fixture {
         policy: ProductionPolicy,
     ) -> Host<ProductionEntryOps> {
         let registration = Registration::new(name(), VaultRoot::new(&self.root).unwrap());
+        norn_fs::watch::settle_prior_changes(self.scratch.root(), BUDGET.work()).unwrap();
         Host::new(
             RegistryRead::from_entries([registration]),
             ProductionEntryOps::new(self.dirs.clone(), policy).with_loading_probe(probe),

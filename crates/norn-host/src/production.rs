@@ -9811,6 +9811,7 @@ mod tests {
                 let _ = delivery_resumes.recv();
             });
 
+            norn_fs::watch::settle_prior_changes(f.root.root(), lifecycle_budget().work()).unwrap();
             let _lease = host.demand(&name).unwrap();
             delivery_entered
                 .recv_timeout(Duration::from_secs(15))
