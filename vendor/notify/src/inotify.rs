@@ -57,6 +57,22 @@ enum EventLoopMsg {
     Configure(Config, BoundSender<Result<bool>>),
 }
 
+/// A failed path may be left uncovered; exhausted process resources may not.
+fn is_path_io_error(error: &std::io::Error) -> bool {
+    !matches!(
+        error.raw_os_error(),
+        Some(libc::EMFILE | libc::ENFILE | libc::ENOMEM | libc::ENOBUFS | libc::EINTR)
+    )
+}
+
+fn is_path_watch_error(error: &Error) -> bool {
+    match &error.kind {
+        ErrorKind::Io(error) => is_path_io_error(error),
+        ErrorKind::PathNotFound => true,
+        _ => false,
+    }
+}
+
 #[inline]
 fn add_watch_by_event(
     path: &PathBuf,
@@ -339,6 +355,17 @@ impl EventLoop {
                                 );
                             }
                             if event.mask.contains(EventMask::ATTRIB) {
+                                // A denied directory has no watch of its own.
+                                // Its parent's report restores recursive coverage
+                                // once access to that directory returns.
+                                if !self.watches.contains_key(&path) {
+                                    add_watch_by_event(
+                                        &path,
+                                        &event,
+                                        &self.watches,
+                                        &mut add_watches,
+                                    );
+                                }
                                 evs.push(
                                     Event::new(EventKind::Modify(ModifyKind::Metadata(
                                         MetadataKind::Any,
@@ -382,15 +409,10 @@ impl EventLoop {
 
         for path in add_watches {
             if let Err(add_watch_error) = self.add_watch(path, true, false) {
-                // The handler should be notified if we have reached the limit.
-                // Otherwise, the user might expect that a recursive watch
-                // is continuing to work correctly, but it's not.
-                if let ErrorKind::MaxFilesWatch = add_watch_error.kind {
+                // A denied child withholds only its own coverage. Resource
+                // failures, including the inotify limit, end reliable coverage.
+                if !is_path_watch_error(&add_watch_error) {
                     self.event_handler.handle_event(Err(add_watch_error));
-
-                    // After that kind of a error we should stop adding watches,
-                    // because the limit has already reached and all next calls
-                    // will return us only the same error.
                     break;
                 }
             }
@@ -404,12 +426,38 @@ impl EventLoop {
             return self.add_single_watch(path, false, true);
         }
 
-        for entry in WalkDir::new(path)
+        let mut entries = WalkDir::new(path)
             .follow_links(self.follow_links)
-            .into_iter()
-            .filter_map(filter_dir)
-        {
-            self.add_single_watch(entry.into_path(), is_recursive, watch_self)?;
+            .into_iter();
+        while let Some(entry) = entries.next() {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error)
+                    if error.depth() > 0 && error.io_error().map_or(true, is_path_io_error) =>
+                {
+                    continue;
+                }
+                Err(error) => {
+                    let paths = error.path().map(Path::to_owned).into_iter().collect();
+                    let message = error.to_string();
+                    return Err(error
+                        .into_io_error()
+                        .map(Error::io)
+                        .unwrap_or_else(|| Error::generic(&message))
+                        .set_paths(paths));
+                }
+            };
+            if !entry.file_type().is_dir() {
+                continue;
+            }
+            let is_root = entry.depth() == 0;
+            if let Err(error) = self.add_single_watch(entry.into_path(), is_recursive, watch_self) {
+                if is_root || !is_path_watch_error(&error) {
+                    return Err(error);
+                }
+                entries.skip_current_dir();
+                continue;
+            }
             watch_self = false;
         }
 
@@ -517,18 +565,6 @@ impl EventLoop {
         }
         Ok(())
     }
-}
-
-/// return `DirEntry` when it is a directory
-fn filter_dir(e: walkdir::Result<walkdir::DirEntry>) -> Option<walkdir::DirEntry> {
-    if let Ok(e) = e {
-        if let Ok(metadata) = e.metadata() {
-            if metadata.is_dir() {
-                return Some(e);
-            }
-        }
-    }
-    None
 }
 
 impl INotifyWatcher {

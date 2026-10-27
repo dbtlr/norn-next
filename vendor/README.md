@@ -5,12 +5,12 @@ wired in through `[patch.crates-io]` in the workspace manifest.
 
 ## `notify`
 
-Patches the `notify` 8.2.0 release from crates.io. The patch adds two
-capabilities and one correction: an event-history barrier for the FSEvents
+Patches the `notify` 8.2.0 release from crates.io. The patch adds
+an event-history barrier for the FSEvents
 backend, in `src/fsevent.rs` and inert on every platform except macOS;
 stat-gated content hashing for the poll backend, in `src/poll.rs` and active
-on every platform; and a poll scan that skips an entry gone before its stat,
-also in `src/poll.rs`.
+on every platform; poll scans that skip unavailable entries; and inotify
+coverage that survives denied subdirectories and returns when access does.
 
 ### FSEvents event-history barrier
 
@@ -76,14 +76,37 @@ removed between the two reads, such as an editor's temporary file, is an
 error, and so is a dangling link when links are followed. The patch skips an
 entry below the watched root whose read fails with `NotFound`; the next scan
 that does not find a path it held reports the removal. A watched root that is
-gone, and every other error kind, are still reported.
+gone is still reported as an error.
 
 `norn-fs` needs this because a backend error is terminal to a subscription,
 so one file deleted in the middle of a tick would end coverage of the vault.
 
+### Denied subdirectories withhold only their own coverage
+
+The recursive inotify install in `src/inotify.rs` skips a non-root directory
+whose watch fails at that path, and continues installing readable siblings.
+A failed root still refuses installation. Process-resource errors (`EMFILE`,
+`ENFILE`, `ENOMEM`, `ENOBUFS`, `EINTR`) and the inotify limit (`ENOSPC`, reported
+as `MaxFilesWatch`) still fail coverage.
+
+A recursive parent's `IN_ATTRIB | IN_ISDIR` report for an unwatched child
+queues recursive coverage over that child, as a directory creation does.
+Restoring access therefore reports the directory and covers later writes
+beneath it, including writes in existing nested directories.
+
+Poll scans in `src/poll.rs` also skip denied entries below the watched root.
+On Unix, other per-path I/O failures follow the same rule, while the resource
+errors above remain backend errors. A denied directory's own stat stays in
+the scan, so restoring its mode reports a metadata change. Root scan failures
+remain backend errors on every platform.
+
+`norn-fs` needs these changes so one denied directory leaves its subscription
+live. The filesystem walk accounts for the unreadable subtree; the watcher
+reports restoration and resumes observing its contents.
+
 ### Removal
 
 Delete this directory and the `[patch.crates-io]` entry when a published
-`notify` release carries equivalents of both capabilities and the
-correction. Where a release carries only some of them, keep the patch and
+`notify` release carries equivalents of all these changes.
+Where a release carries only some of them, keep the patch and
 drop the changes that release made redundant.
