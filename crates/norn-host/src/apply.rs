@@ -49,7 +49,10 @@
 //! and nothing written, with the refusal a read carries once the entry meets
 //! the same failure as its cause: the root's coverage lost where the root no
 //! longer stands, and trust withdrawn for the environment's refusal where it
-//! stands and cannot be read.
+//! stands and cannot be read. A document the machine will not let the planner
+//! read is the document's fact rather than the environment's: the same code
+//! answers, its cause a `host/read-failed` for the unreadable document, and the
+//! entry stays ready.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
@@ -65,9 +68,9 @@ use norn_store::{
 use norn_wire::{
     AnswerReading, ApplyMode, ApplyParams, ApplyReport, AuthoredPlan, Citation, Confidence,
     DeleteParams, DocumentPath, EditParams, ErrorDetail, ErrorEnvelope, FindParams, FindingRow,
-    Forecast, MoveParams, NewParams, PlanDocument, Predicate, Provenance, RepairParams,
-    ResolvedPlan, RewriteWikilinkParams, RootIdentity, RuleSet, SetParams, SkippedFinding,
-    TrustState, UntrustedReason, VaultAddress, VaultAnswer, VaultName,
+    Forecast, MoveParams, NewParams, PlanDocument, Predicate, Provenance, ReadFailure,
+    RepairParams, ResolvedPlan, RewriteWikilinkParams, RootIdentity, RuleSet, SetParams,
+    SkippedFinding, TrustState, UntrustedReason, VaultAddress, VaultAnswer, VaultName,
 };
 
 use crate::applier;
@@ -464,7 +467,11 @@ where
             ))
         }
         ExpandingFailure::Planning(PlanningFailure::View(error)) => {
-            PageRefused::Answered(unreadable(name, error))
+            PageRefused::Answered(if V::is_unreadable(&error) {
+                unreadable_target(error)
+            } else {
+                unreadable(name, error)
+            })
         }
         ExpandingFailure::Snapshot(refused) => refused,
     })
@@ -934,6 +941,20 @@ pub(crate) fn unreadable(name: &VaultName, error: impl std::fmt::Display) -> Err
             UntrustedReason::environmental_refusal(error.to_string()),
         )))
         .answer(name),
+        None,
+    )
+}
+
+/// The answer to a plan one of whose documents the machine would not let the
+/// planner read: nothing was planned, and the cause is the read failure
+/// itself. The entry stays serving — a document the machine refuses is that
+/// document's fact, not the environment's — so no trust is withdrawn.
+fn unreadable_target(error: impl std::fmt::Display) -> ErrorEnvelope {
+    not_run(
+        ErrorEnvelope::new(
+            "a document the plan targets cannot be read",
+            ErrorDetail::read_failed(ReadFailure::unreadable_document(), error.to_string()),
+        ),
         None,
     )
 }

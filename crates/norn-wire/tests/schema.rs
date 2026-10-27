@@ -1769,6 +1769,7 @@ fn a_read_refusal_advertises_the_typed_facts_it_carries() {
         sorted(tag_constants(&schema_of::<ReadFailure>(), "kind")),
         sorted([
             "statement",
+            "unreadable_document",
             "declaration_not_pinned",
             "count_cursor_expired",
             "count_result_capacity",

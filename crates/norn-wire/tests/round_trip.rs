@@ -1958,6 +1958,10 @@ fn a_failed_read_crosses_as_the_failure_it_names() {
             r#"{"kind":"count_result_busy"}"#,
         ),
         (ReadFailure::count_result(), r#"{"kind":"count_result"}"#),
+        (
+            ReadFailure::unreadable_document(),
+            r#"{"kind":"unreadable_document"}"#,
+        ),
     ] {
         assert_eq!(wire(&failure), expected);
         assert_eq!(

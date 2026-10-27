@@ -256,6 +256,51 @@ fn a_set_where_writes_exactly_the_matched_documents_in_one_changeset() {
     );
 }
 
+/// **A set on a document the machine will not let the host read is refused as
+/// `host/apply-not-run` without claiming the entry lost trust.** The entry
+/// stays serving; only the target cannot be read.
+#[cfg(feature = "induced-failure")]
+#[test]
+fn a_set_on_an_unreadable_document_does_not_claim_the_entry_is_untrusted() {
+    let (_sandbox, vault) = a_vault(
+        "host-verbs-set-unreadable",
+        &[("subject.md", "---\nstatus: draft\n---\n# Subject\n")],
+    );
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let _denied = norn_fs::deny_document_opens(&vault.path().join("subject.md"));
+
+    let answered = host.set(SetParams::new(
+        address(&vault),
+        ApplyMode::Apply,
+        WriteTarget::path(path("subject.md")),
+        vec![FieldChange::set("status", AuthoredValue::string("shelved"))],
+    ));
+    let refused = match answered {
+        Err(refused) => refused,
+        Ok(pending) => pending.wait().expect_err("the set is refused"),
+    };
+
+    assert_eq!(refused.code(), &ReasonCode::HostApplyNotRun);
+    let ErrorDetail::ApplyNotRun {
+        cause, plan: None, ..
+    } = refused.detail()
+    else {
+        panic!("the set answered {:?}", refused.detail());
+    };
+    assert!(
+        matches!(
+            cause.detail(),
+            ErrorDetail::ReadFailed {
+                failure: norn_wire::ReadFailure::UnreadableDocument {},
+                ..
+            }
+        ),
+        "the cause claims {:?}",
+        cause.detail()
+    );
+}
+
 /// **A set whose `where` matches no document is refused, its operation
 /// unresolved naming the predicate**, as its preview is, and nothing is
 /// written.
