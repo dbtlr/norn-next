@@ -1,21 +1,14 @@
 //! The induced-failure rows a running host has to answer.
 //!
-//! Four conditions, each stated as a required outcome and a forbidden one, and
-//! each reached through a production attachment rather than through a fake
-//! operation. Two of them are **refusals** — a full disk and a revoked
-//! permission — where the environment is broken and the stored state is not, so
-//! the entry stays untrusted, everything already committed stands, and the
-//! database is never discarded. Two are **tears**, where a process dies partway
-//! through a heal and what it left at rest has to be something the next heal
-//! converges from with no edit to the vault.
+//! Each condition is reached through a production attachment. A full disk or
+//! an unreadable directory still refuses the job and keeps the entry untrusted.
+//! An unreadable document instead keeps a names-only row and a cause finding,
+//! and the entry reaches Ready. A tear ends the process inside a heal; what it
+//! leaves must converge without an edit to the vault.
 //!
-//! **The revoked permission is stated in two shapes, because a mode taken away
-//! from a document and a mode taken away from a directory are not the same
-//! condition to the machine.** A document is read by the heal alone, so every
-//! platform reaches the refusal through the heal's own open. A directory is
-//! read by the heal *and* by the watcher backend that has to cover it, so which
-//! of the two meets the denial first is the backend's, and the case that
-//! revokes a subtree is stated over both doors.
+//! Permission loss is stated over both documents and directories. A document
+//! is opened by the heal alone. A directory is read by the walk and covered by
+//! the watcher backend, either of which can meet its denial first.
 //!
 //! **Every case names its forbidden outcome as an assertion.** A refusal that
 //! reached rung 3 discarded a sound database to fix a broken environment; a
@@ -24,11 +17,9 @@
 //! is visible in "the request failed", so each is read off the account the
 //! host's own jobs write, off the rows at rest, or off both.
 //!
-//! **Recovery is the other half of each refusal, and of each tear.** A
-//! transient environmental failure is resolved by refusing, so the case that
-//! stops there has only shown the refusal: what says the work was not lost is
-//! clearing the condition and demanding the vault again, and comparing what
-//! converges against a derivation built from zero over the same tree.
+//! Recovery clears each condition and demands the vault again. A broken
+//! document's unchanged bytes must be re-derived; every recovered store is
+//! compared against a derivation built from zero over the same tree.
 //!
 //! **Converging is not enough on its own.** A store that was thrown away and
 //! derived again from the same tree converges too, and every recovery bar here
@@ -75,10 +66,9 @@
 //! `norn-fs`'s walk seam through the environment the child is started with. An
 //! entry that vanishes there is the vault evolving: the walk states the name as
 //! one it read nothing at, the heal completes, and every other document derives.
-//! A stat the machine refuses is the environment breaking: the heal refuses, the
-//! entry stays untrusted naming the path, and nothing is pruned. Neither is
-//! stated without the other, because what the pair says is where the boundary
-//! between them runs.
+//! A stat denied at a Markdown name instead marks its document broken and
+//! keeps the name accounted for. Contained-open arms also state that posture
+//! under EACCES and EIO, on privileged accounts as well as ordinary ones.
 //!
 //! **Two of them share one arm and state different things.** A stream that ends
 //! is the condition behind both the recovery case and the case about the cause
@@ -336,34 +326,15 @@ fn a_full_disk_refuses_the_heal_and_the_entry_stays_untrusted() {
 }
 
 // ---------------------------------------------------------------------------
-// Rung 2, refused: a revoked permission
+// Rung 2: document and directory permission loss
 // ---------------------------------------------------------------------------
 
-/// **An unreadable document is an error, never a document with nothing in it.**
-///
-/// One document of the vault has its mode taken away between two attaches, so
-/// the heal's own open meets `EACCES` at a path the walk enumerated and stated
-/// nothing else about. The answer for bytes norn *read* and could derive no
-/// facts from is to quarantine the place, record a finding naming it, and keep
-/// going; the answer for bytes norn could not read at all is the opposite,
-/// because nothing was learned about the document. So the heal refuses and the
-/// entry stays untrusted.
-///
-/// **The forbidden outcome is the quarantine.** An entry that reached `Ready`
-/// with a finding standing at the locked path would be serving the vault while
-/// silently answering as though one of its documents held nothing — a broken
-/// environment turned into data loss, which is the hazard refusal exists to
-/// prevent. The prune is forbidden here for the same reason it is under a locked
-/// subtree, and rung 3 for the same reason a full disk forbids it.
-///
-/// **A document is read by the heal and by nothing else.** Change detection over
-/// a vault is installed over its directories, so revoking a document's mode
-/// leaves every watcher backend covering the tree exactly as before — which is
-/// what makes the heal's door the one door this case has on every platform, and
-/// why the subtree case below is the one stated over two.
+/// A document that cannot be opened keeps its name, loses byte-derived facts,
+/// and reaches Ready beside one unreadable-document finding. Restoring access
+/// re-derives its unchanged bytes and converges with a build from zero.
 #[test]
 #[ignore = "fault-lane case: induced recovery runs in full regression"]
-fn an_unreadable_document_refuses_the_heal_rather_than_quarantining_it() {
+fn an_unreadable_document_is_marked_broken_and_the_heal_reaches_ready() {
     let _beside = beside_the_arms();
     let vault = Vault::new("unreadable-document");
     vault.write("kept.md", &readable(0));
@@ -374,79 +345,76 @@ fn an_unreadable_document_refuses_the_heal_rather_than_quarantining_it() {
         let serving = vault.serving(ProductionPolicy::new(64, 64).unwrap());
         let lease = attach_and_wait(&serving, vault.name());
         drop(lease);
-        let mut store = vault.store();
-        StoreProjection::read(&mut store).expect("projecting the first attach")
+        StoreProjection::read(&mut vault.store()).expect("projecting the first attach")
     };
     assert!(before.document("locked.md").is_some());
 
-    let untrusted = {
-        let _revoked = Revoked::over_file(&locked);
+    {
+        let Some(_revoked) = Revoked::over_file(&locked) else {
+            return;
+        };
         let serving = vault.serving(ProductionPolicy::new(64, 64).unwrap());
         let opening = serving.evidence();
-        let _lease = serving
-            .demand(vault.name())
-            .expect("request the attachment");
-        let untrusted = wait_for_untrusted(&serving, vault.name());
-        let spent = serving.evidence().since(opening);
-        assert_eq!(
-            spent.rebuilds_run, 0,
-            "a revoked permission reached rung 3, which discards a sound database to fix a \
-             broken environment"
-        );
-        untrusted
-    };
-    // The reason is the case's own arm attesting: it has to name the document
-    // whose mode was taken away and the denial that came of it, or the entry is
-    // untrusted for something this arrangement did not cause.
-    let UntrustedReason::EnvironmentalRefusal { detail, .. } = &untrusted else {
-        panic!(
-            "an unreadable document was published as something other than a broken environment: \
-             {untrusted:?}"
-        )
-    };
-    assert!(
-        detail.contains("locked.md") && detail.contains("Permission denied"),
-        "the entry is untrusted for a reason that is not the revoked document: {detail}"
-    );
+        let _lease = serve_or_report_the_refusal(&serving, vault.name());
+        assert_eq!(serving.state(vault.name()), Ok(TrustState::Ready));
+        assert_eq!(serving.evidence().since(opening).rebuilds_run, 0);
+        let mut store = vault.store();
+        assert_unreadable_document(&mut store, "locked.md", "Permission denied");
+        let after = StoreProjection::read(&mut store).expect("projecting the broken row");
+        assert_eq!(after.document("kept.md"), before.document("kept.md"));
+        assert_operationally_valid(&mut store, "the store beside an unreadable document");
+    }
 
-    let mut refused = vault.store();
-    let after = StoreProjection::read(&mut refused).expect("projecting the refused attach");
-    assert!(
-        after.document("locked.md").is_some(),
-        "the heal read a document it could not open as evidence that the document was deleted"
-    );
-    assert!(
-        findings_at(&mut refused, "locked.md").is_empty(),
-        "the heal quarantined a document it never read, which turns a revoked permission into a \
-         vault that answers as though the document held nothing"
-    );
-    assert_eq!(
-        tombstones(&mut refused).expect("reading the tombstones"),
-        Vec::new(),
-        "the heal recorded a death for a path nothing said was gone"
-    );
-    assert_eq!(
-        after.documents(),
-        before.documents(),
-        "the refused heal changed what the store holds"
-    );
-    assert_operationally_valid(
-        &mut refused,
-        "the store an unreadable document refused over",
-    );
-    drop(refused);
-
-    // The recovery bar: with the document readable again, an ordinary demand
-    // converges on what a derivation from zero over this tree holds — and does
-    // it by healing the work the refusal withheld rather than by starting over.
-    // The refused heal committed nothing and no document's bytes moved, so the
-    // work left over is nothing at all: the recovery writes no row and commits
-    // no changeset, where a derivation from zero writes both documents in one.
     let serving = vault.serving(ProductionPolicy::new(64, 64).unwrap());
     let healed = heal_and_read(&serving, vault.name());
     drop(serving);
-    assert_healed_only("a document that reads again", healed, 0, 0);
+    assert_rederived_one("a document that reads again", healed);
     vault.assert_converged_from_zero("a document that reads again");
+}
+
+/// A denied open is reachable under privileged accounts through the file seam.
+#[test]
+#[ignore = "fault-lane case: induced recovery runs in full regression"]
+fn a_denied_document_open_is_marked_broken_and_the_heal_reaches_ready() {
+    an_armed_document_open_is_broken("denied", "Permission denied");
+}
+
+/// An I/O failure has the same document posture as a permission denial.
+#[test]
+#[ignore = "fault-lane case: induced recovery runs in full regression"]
+fn an_io_failing_document_open_is_marked_broken_and_the_heal_reaches_ready() {
+    an_armed_document_open_is_broken("failing", "Input/output error");
+}
+
+/// The environment's one-shot open failure stands over a warm attach. The
+/// held-denial first-build cases are covered by the production unit suite.
+fn an_armed_document_open_is_broken(answer: &str, cause: &str) {
+    let _beside = beside_the_arms();
+    let vault = Vault::new(&format!("open-{answer}"));
+    for index in 0..4 {
+        vault.write(&format!("note-{index:03}.md"), &readable(index));
+    }
+    {
+        let serving = vault.serving(ProductionPolicy::new(64, 64).unwrap());
+        drop(attach_and_wait(&serving, vault.name()));
+    }
+    let ran = vault.run_walk_child(&format!("open-{answer}"), &format!("open={answer}"));
+    assert_eq!(ran.status, RunStatus::Exited(0), "{}", ran.stderr);
+    ran.attestation.assert_reached(
+        "a failed document open",
+        &[(SEAM, WALK_SEAM), ("stage", "open"), ("answer", answer)],
+    );
+    ran.attestation.assert_count("a failed document open", 1);
+    let mut store = vault.store();
+    assert_unreadable_document(&mut store, "note-000.md", cause);
+    assert_eq!(every_row(&mut store).len(), 4);
+    assert_operationally_valid(&mut store, "a failed document open");
+    drop(store);
+    let serving = vault.serving(ProductionPolicy::new(64, 64).unwrap());
+    let healed = heal_and_read(&serving, vault.name());
+    drop(serving);
+    assert_rederived_one("an open that answers again", healed);
+    vault.assert_converged_from_zero("an open that answers again");
 }
 
 /// **An unreadable path is an error, never evidence of deletion.**
@@ -608,6 +576,15 @@ fn an_unreadable_subtree_refuses_the_heal_rather_than_pruning_it() {
 fn a_tear_at_a_chunk_boundary_leaves_every_committed_chunk_whole() {
     let _beside = beside_the_arms();
     let vault = Vault::new("chunk-tear");
+    // Reuse a canonical store: a fresh attach first increments its disposable
+    // metadata database, which would spend the process-wide tear before the
+    // canonical heal. Keep this baseline empty so every row below is the torn
+    // heal's own, and its first committed chunk is exactly two documents.
+    {
+        let serving = vault.serving(ProductionPolicy::new(8, 2).unwrap());
+        let lease = attach_and_wait(&serving, vault.name());
+        drop(lease);
+    }
     for index in 0..6 {
         vault.write(&format!("note-{index:03}.md"), &readable(index));
     }
@@ -646,7 +623,7 @@ fn a_tear_at_a_chunk_boundary_leaves_every_committed_chunk_whole() {
         let bytes = std::fs::read(vault.path().join(row.path.as_str())).expect("the document");
         assert_eq!(
             row.content_hash,
-            norn_fs::ContentHash::of(&bytes).to_string(),
+            Some(norn_fs::ContentHash::of(&bytes).to_string()),
             "a committed chunk holds a row that is not the document at its path"
         );
     }
@@ -663,6 +640,11 @@ fn a_tear_at_a_chunk_boundary_leaves_every_committed_chunk_whole() {
     let healed = heal_and_read(&serving, vault.name());
     drop(serving);
     assert_healed_only("a chunk boundary that was torn", healed, 4, 2);
+    assert_eq!(
+        (healed.documents_upserted, healed.changesets_applied),
+        (4, 2),
+        "the heal did not write exactly the two chunks the tear withheld"
+    );
     vault.assert_converged_from_zero("a chunk boundary that was torn");
 }
 
@@ -895,7 +877,7 @@ fn a_flush_commits_its_rule_findings_with_its_changeset() {
         .expect("the row the increment wrote");
     assert_eq!(
         judged.content_hash,
-        norn_fs::ContentHash::of(breaching.as_bytes()).to_string(),
+        Some(norn_fs::ContentHash::of(breaching.as_bytes()).to_string()),
         "the kill did not reach the act that derived the edit"
     );
     let standing = findings_at(&mut store, "judged.md");
@@ -1490,77 +1472,41 @@ fn an_entry_that_vanishes_from_a_page_is_dropped_and_the_heal_completes() {
     vault.assert_converged_from_zero("an entry that left one page");
 }
 
-/// **An entry the machine will not stat refuses the heal, at that same
-/// window.**
-///
-/// The convergence above narrows the paging window to absence; it does not
-/// remove the environmental boundary there. A denied stat says nothing about
-/// whether an entry is at that name, so reading it as one that left would let a
-/// revoked permission prune every row the page covers. The condition is armed at
-/// the same seam and the same window as the vanishing above, which is what makes
-/// the pair a boundary rather than two unrelated cases.
-///
-/// **The forbidden outcome is the prune.** A row that disappeared, or a
-/// tombstone recorded for it, would be the walk reading a machine that would not
-/// answer as a deletion. Rung 3 is forbidden for the same reason a full disk
-/// forbids it: the environment is broken and the stored state is not.
+/// A denied stat at a listed Markdown name marks the document broken while
+/// the other names derive. Recovery re-derives exactly that document.
 #[test]
 #[ignore = "fault-lane case: induced recovery runs in full regression"]
-fn an_entry_the_machine_will_not_stat_refuses_the_heal_rather_than_dropping_it() {
+fn a_stat_denied_md_name_is_marked_broken_and_the_heal_reaches_ready() {
     let _beside = beside_the_arms();
     let vault = Vault::new("walk-page-denied");
     for index in 0..4 {
         vault.write(&format!("note-{index:03}.md"), &readable(index));
     }
-
     let before = {
         let serving = vault.serving(ProductionPolicy::new(64, 64).unwrap());
-        let lease = attach_and_wait(&serving, vault.name());
-        drop(lease);
-        let mut store = vault.store();
-        StoreProjection::read(&mut store).expect("projecting the first attach")
+        drop(attach_and_wait(&serving, vault.name()));
+        StoreProjection::read(&mut vault.store()).expect("projecting the first attach")
     };
     assert_eq!(before.documents().len(), 4);
-
-    let refused = vault.run_walk_child("denied", "page=denied");
-    assert_eq!(
-        refused.status,
-        RunStatus::Exited(0),
-        "the child did not answer a stat the machine refused the way the entry is required to\n{}",
-        refused.stderr
-    );
-    refused.attestation.assert_reached(
-        "a paging stat the machine refused",
+    let ran = vault.run_walk_child("denied", "page=denied");
+    assert_eq!(ran.status, RunStatus::Exited(0), "{}", ran.stderr);
+    ran.attestation.assert_reached(
+        "a denied paging stat",
         &[(SEAM, WALK_SEAM), ("stage", "page"), ("answer", "denied")],
     );
-    refused
-        .attestation
-        .assert_count("a paging stat the machine refused", 1);
-
+    ran.attestation.assert_count("a denied paging stat", 1);
     let mut store = vault.store();
-    let after = StoreProjection::read(&mut store).expect("projecting the refused attach");
-    assert_eq!(
-        after.documents(),
-        before.documents(),
-        "the refused heal changed what the store holds"
-    );
-    assert_eq!(
-        tombstones(&mut store).expect("reading the tombstones"),
-        Vec::new(),
-        "the heal read a stat the machine refused as evidence that the entry was gone"
-    );
-    assert_operationally_valid(&mut store, "the store a refused paging stat stands in");
+    assert_unreadable_document(&mut store, "note-000.md", "Permission denied");
+    let after = StoreProjection::read(&mut store).expect("projecting the broken row");
+    for name in ["note-001.md", "note-002.md", "note-003.md"] {
+        assert_eq!(after.document(name), before.document(name));
+    }
+    assert_operationally_valid(&mut store, "a denied paging stat");
     drop(store);
-
-    // The recovery bar: with nothing armed, an ordinary demand converges on what
-    // a derivation from zero over this tree holds. The refused heal committed
-    // nothing and no document's bytes moved, so the work left over is nothing at
-    // all — where a derivation from zero writes all four documents in one
-    // changeset.
     let serving = vault.serving(ProductionPolicy::new(64, 64).unwrap());
     let healed = heal_and_read(&serving, vault.name());
     drop(serving);
-    assert_healed_only("a paging stat that answers again", healed, 0, 0);
+    assert_rederived_one("a paging stat that answers again", healed);
     vault.assert_converged_from_zero("a paging stat that answers again");
 }
 
@@ -2096,7 +2042,10 @@ fn walk_under_the_arm(root: &Path, condition: &str) {
     let vault = Vault::adopt(root);
     match condition {
         "vanished" => an_entry_that_left_a_page_still_serves_the_vault(&vault),
-        "denied" => a_paging_stat_the_machine_refused_withdraws_the_entry(&vault),
+        "denied" | "open-denied" => {
+            a_failed_document_still_serves_the_vault(&vault, "Permission denied")
+        }
+        "open-failing" => a_failed_document_still_serves_the_vault(&vault, "Input/output error"),
         other => panic!("the child was given no paging condition it knows: {other:?}"),
     }
 }
@@ -2122,35 +2071,15 @@ fn an_entry_that_left_a_page_still_serves_the_vault(vault: &Vault) {
     drop(lease);
 }
 
-/// The armed attach: the machine will not stat a name the listing named, so the
-/// heal refuses and the entry stays untrusted naming it.
-fn a_paging_stat_the_machine_refused_withdraws_the_entry(vault: &Vault) {
+/// The child's Ready state and row attest the document posture before the
+/// one-shot arm can be answered by another watcher-driven reading.
+fn a_failed_document_still_serves_the_vault(vault: &Vault, cause: &str) {
     let serving = vault.serving_undrained(ProductionPolicy::new(64, 64).unwrap());
     let opening = serving.evidence();
-    let _lease = serving
-        .demand(vault.name())
-        .expect("request the attachment");
-
-    let untrusted = wait_for_untrusted(&serving, vault.name());
-    let spent = serving.evidence().since(opening);
-    assert_eq!(
-        spent.rebuilds_run, 0,
-        "a refused paging stat reached rung 3, which discards a sound database to fix a broken \
-         environment: {spent:?}"
-    );
-    // The reason is the case's own arm attesting: it has to name the entry the
-    // stat was refused over and the denial that came of it, or the entry is
-    // untrusted for something this arrangement did not cause.
-    let UntrustedReason::EnvironmentalRefusal { detail, .. } = &untrusted else {
-        panic!(
-            "a refused paging stat was published as something other than a broken environment: \
-             {untrusted:?}"
-        )
-    };
-    assert!(
-        detail.contains("note-000.md") && detail.contains("Permission denied"),
-        "the entry is untrusted for a reason that is not the refused stat: {detail}"
-    );
+    let _lease = serve_or_report_the_refusal(&serving, vault.name());
+    assert_eq!(serving.state(vault.name()), Ok(TrustState::Ready));
+    assert_eq!(serving.evidence().since(opening).rebuilds_run, 0);
+    assert_unreadable_document(&mut vault.store(), "note-000.md", cause);
 }
 
 /// Demand `name`, wait for it to serve the vault, and fail at once where it
@@ -2174,8 +2103,7 @@ fn serve_or_report_the_refusal(
             }
             if let Some(reason) = untrusted_reason(&observed) {
                 panic!(
-                    "the heal refused over an edit another writer made inside one of its own \
-                     windows: {reason:?}"
+                    "the heal refused instead of reaching Ready under the document condition: {reason:?}"
                 );
             }
             assert!(
@@ -2248,6 +2176,14 @@ fn assert_healed_only(subject: &str, spent: EvidenceReading, upserts: u64, chang
          {spent:?}",
         spent.changesets_applied
     );
+}
+
+/// Recovery of a broken row must derive it even when its bytes did not move.
+#[track_caller]
+fn assert_rederived_one(subject: &str, spent: EvidenceReading) {
+    assert_healed_only(subject, spent, 1, 1);
+    assert_eq!(spent.documents_derived, 1, "{subject}: {spent:?}");
+    assert_eq!(spent.documents_upserted, 1, "{subject}: {spent:?}");
 }
 
 /// Demand `name`, wait for it to reach `Ready`, and hand back the demand.
@@ -2364,6 +2300,45 @@ fn findings_at(store: &mut Store, at: &str) -> Vec<norn_store::StoredFinding> {
         .into_iter()
         .filter(|finding| finding.ordinal.is_none())
         .collect()
+}
+
+/// A broken document holds names and exactly one cause finding.
+#[track_caller]
+fn assert_unreadable_document(store: &mut Store, at: &str, cause: &str) {
+    let path = document_path(at);
+    let projection = StoreProjection::read(store).expect("project the names-only row");
+    let document = projection
+        .document(at)
+        .expect("the name still resolves as a document");
+    assert!(document.content_hash.is_none());
+    assert!(document.byte_length.is_none());
+    assert!(document.body.is_none());
+    assert!(document.body_hash.is_none());
+    assert!(document.body_offset.is_none());
+    assert!(document.frontmatter.is_none());
+    assert!(document.frontmatter_projection_hash.is_none());
+    assert_eq!(document.frontmatter_diagnostic_count, 0);
+    assert!(document.fields.is_empty());
+    assert!(document.links.is_empty());
+    assert!(document.link_keys.is_empty());
+    assert!(document.headings.is_empty());
+    assert!(document.blocks.is_empty());
+    assert!(document.tags.is_empty());
+    let findings = store.begin_request().stored_findings(&path).unwrap();
+    let [finding] = findings.as_slice() else {
+        panic!("exactly one unreadable finding: {findings:?}")
+    };
+    assert_eq!(finding.kind, "document/unreadable");
+    assert_eq!(finding.severity, "error");
+    assert_eq!(finding.ordinal, None);
+    assert!(
+        finding
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains(cause)),
+        "{finding:?}"
+    );
+    assert!(tombstones(store).expect("read the tombstones").is_empty());
 }
 
 /// Every derived row, a bounded page at a time.
@@ -2592,12 +2567,8 @@ impl Vault {
         self.spawn(&hits, &arm)
     }
 
-    /// Run this binary again as a child meeting the paging-window `condition`,
-    /// armed at `stages`, and report what it left behind.
-    ///
-    /// The arm is the process's and it fires once, so a child here meets the
-    /// condition at the first entry any of its walks pages — which is the attach
-    /// heal's own walk of the vault root.
+    /// Run this binary with a one-shot paging or document-open condition.
+    /// The child observes the attach before watcher polling can re-read the path.
     fn run_walk_child(&self, condition: &str, stages: &str) -> Ran {
         let hits = self.records().join(format!("{condition}-arm-hits"));
         self.spawn(
@@ -2815,19 +2786,18 @@ impl Revoked {
         }
     }
 
-    /// A document nothing may open.
-    fn over_file(path: &Path) -> Revoked {
+    /// A document nothing may open, or no fixture where privilege bypasses modes.
+    fn over_file(path: &Path) -> Option<Revoked> {
         set_mode(path, 0o000);
-        assert!(
-            std::fs::read(path).is_err(),
-            "this process reads {} whatever its mode says, so the case below would be arranging \
-             nothing. A privileged process cannot carry the permission-loss row.",
-            path.display()
-        );
-        Revoked {
+        if std::fs::read(path).is_ok() {
+            set_mode(path, 0o644);
+            eprintln!("skipped: this account bypasses the document's mode bits");
+            return None;
+        }
+        Some(Revoked {
             path: path.to_path_buf(),
             restored: 0o644,
-        }
+        })
     }
 }
 

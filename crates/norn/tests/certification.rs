@@ -1340,7 +1340,7 @@ fn assert_fast_gate(workflow: &str) {
 const NATIVE_CASES: &[&str] = &[
     "a_case_flip_converges_on_a_build_from_zero",
     "a_case_renamed_parent_over_a_save_converges_on_a_build_from_zero",
-    "an_unreadable_document_refuses_the_heal_rather_than_quarantining_it",
+    "an_unreadable_document_is_marked_broken_and_the_heal_reaches_ready",
     "an_unreadable_subtree_refuses_the_heal_rather_than_pruning_it",
 ];
 
@@ -1404,7 +1404,7 @@ fn full_regression_adopts_fault_and_audit_cases_with_their_features() {
                     .filter(|line| line.trim().starts_with("#[ignore = \"fault-lane case:"))
                     .count();
                 assert_eq!(tests, ignored, "every fault case is ignored");
-                assert_eq!(tests, if *target == "lockdown" { 14 } else { 1 });
+                assert_eq!(tests, if *target == "lockdown" { 16 } else { 1 });
             }
             std::fs::write(manifest.join(format!("tests/{target}.rs")), source).unwrap();
         }
@@ -1758,7 +1758,7 @@ fn assert_complete_active_matrix(workflow: &str, full: bool) {
                 ".github/scripts/flake-tripwire.sh cargo test --locked -p norn-host --features induced-failure --test obsidian_parity",
                 ".github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-host --features induced-failure --test churn a_case_flip_converges_on_a_build_from_zero -- --exact --include-ignored",
                 ".github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-host --features induced-failure --test churn a_case_renamed_parent_over_a_save_converges_on_a_build_from_zero -- --exact --include-ignored",
-                ".github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-host --features induced-failure --test lockdown an_unreadable_document_refuses_the_heal_rather_than_quarantining_it -- --exact --include-ignored",
+                ".github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-host --features induced-failure --test lockdown an_unreadable_document_is_marked_broken_and_the_heal_reaches_ready -- --exact --include-ignored",
                 ".github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-host --features induced-failure --test lockdown an_unreadable_subtree_refuses_the_heal_rather_than_pruning_it -- --exact --include-ignored",
                 ".github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host folding_cost --nocapture --test-threads=1",
             ];

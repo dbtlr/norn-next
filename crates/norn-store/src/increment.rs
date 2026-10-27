@@ -29,15 +29,17 @@ use crate::write_path::WriteStatement;
 
 /// One entry in a changeset.
 ///
-/// The three shapes are the things that happen to a path: it is derived, it is
-/// gone, or it is a place emptied of the findings about it that never held a
-/// row.
+/// A path contributes derived facts or names alone, is gone, or is a place
+/// emptied of findings that never held a row.
 #[derive(Clone, Debug, PartialEq)]
 #[allow(clippy::large_enum_variant)] // An upsert is the common entry: boxing it would allocate once per document to shrink the rarer death.
 pub enum Change {
     /// A regular vault file admitted by the walk and path grammar. Only its
     /// name is stored; no bytes, hash, fact rows or tombstone belong to it.
     FileBirth { path: DocumentPath },
+    /// A document whose bytes cannot be read. Its names stand and every
+    /// content-derived fact is cleared in this transaction.
+    Unreadable { path: DocumentPath },
     /// A vault file no longer admitted at this path. Its class and path keys
     /// re-judge the same link neighborhood a document death reaches.
     FileDeath { path: DocumentPath },
@@ -341,6 +343,16 @@ pub(crate) fn apply(
                     .execute(params![path.as_str()])
                     .map(|_| ())
                     .map_err(|error| error::sql("deleting a vault file", error)),
+                Change::Unreadable { path } => unreadable(
+                    &mut statements,
+                    stamp,
+                    recorded_at,
+                    path,
+                    declared
+                        .ambiguity_ignore()
+                        .admitting_segments(path.as_str()),
+                    &mut tally,
+                ),
                 Change::Upsert(facts) => {
                     refuse_typed_values_the_pin_does_not_derive(pinned.as_deref(), facts).and_then(
                         |()| {
@@ -890,6 +902,61 @@ fn upsert(
     Ok(())
 }
 
+/// Write the names alone and clear every fact no unread bytes can support.
+fn unreadable(
+    statements: &mut Statements<'_>,
+    generation: i64,
+    derived_at: i64,
+    path: &DocumentPath,
+    admitting: usize,
+    tally: &mut Tally,
+) -> Result<(), StoreError> {
+    let stood: bool = statements
+        .row_at
+        .query_row(params![path.as_str()], |row| row.get(0))
+        .map_err(|error| error::sql("probing a document row", error))?;
+    let document: i64 = statements
+        .upsert_document
+        .query_row(
+            params![
+                path.as_str(),
+                path.suffix_key(),
+                path.path_key(),
+                i64::try_from(admitting).expect("a segment count fits i64"),
+                Option::<&str>::None,
+                Option::<u64>::None,
+                Option::<&str>::None,
+                Option::<&str>::None,
+                Option::<u64>::None,
+                Option::<&str>::None,
+                Option::<&str>::None,
+                0,
+                generation,
+                derived_at,
+            ],
+            |row| row.get(0),
+        )
+        .map_err(|error| error::sql("writing an unreadable document", error))?;
+    if stood {
+        for statement in &mut statements.discard_facts {
+            tally.fact_rows_discarded += statement
+                .execute(params![document])
+                .map_err(|error| error::sql("discarding an unreadable document's facts", error))?
+                as u64;
+        }
+    } else {
+        for trigram in crate::similarity::trigrams(path.stem()) {
+            tally.trigram_rows += statements
+                .insert_stem_trigram
+                .execute(params![trigram, document])
+                .map_err(|error| error::sql("writing a stem trigram", error))?
+                as u64;
+        }
+    }
+    tally.documents_upserted += 1;
+    Ok(())
+}
+
 /// Delete one document and record its death.
 ///
 /// The delete and the tombstone read one value between them: the hash comes back
@@ -904,14 +971,15 @@ fn record_death(
     provenance: Provenance,
     tally: &mut Tally,
 ) -> Result<(), StoreError> {
-    let last_content_hash: Option<String> = statements
+    let removed: Option<Option<String>> = statements
         .delete_document
         .query_row(params![path.as_str()], |row| row.get(0))
         .optional()
         .map_err(|error| error::sql("deleting a document row", error))?;
-    if last_content_hash.is_some() {
+    if removed.is_some() {
         tally.documents_deleted += 1;
     }
+    let last_content_hash = removed.flatten();
 
     statements
         .record_tombstone
@@ -1024,7 +1092,8 @@ fn subject(change: &Change) -> &DocumentPath {
         Change::Death { path, .. }
         | Change::Vacated { path }
         | Change::FileBirth { path }
-        | Change::FileDeath { path } => path,
+        | Change::FileDeath { path }
+        | Change::Unreadable { path } => path,
     }
 }
 

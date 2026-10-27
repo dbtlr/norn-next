@@ -34,8 +34,8 @@ use std::collections::{BTreeMap, HashMap};
 
 use norn_db::rusqlite::Row;
 use norn_wire::{
-    BlockRow, BodyText, Collection, DocumentRow, FieldValue, FindingRow, HeadingRow, LinkRow,
-    TagRow, TotalBelowHead,
+    BlockRow, BodyText, Collection, Content, DocumentRow, FieldValue, FindingRow, HeadingRow,
+    LinkRow, TagRow, TotalBelowHead, UnknownReason,
 };
 
 use super::statement::{
@@ -182,6 +182,7 @@ impl NestedRows {
 /// One document row's own columns, as the hydration read them.
 #[derive(Default)]
 struct DocumentColumnsRead {
+    unreadable: bool,
     frontmatter: Option<String>,
     body_head: Option<Vec<u8>>,
     body_length: Option<u64>,
@@ -214,13 +215,18 @@ impl Snapshot {
             frontmatter: projection.all_fields || !fields.is_empty(),
             body: projection.body,
         };
-        let mut read = if ids.is_empty() || columns == DocumentColumns::default() {
+        let mut read = if ids.is_empty()
+            || (columns == DocumentColumns::default()
+                && (projection.nested.is_empty()
+                    || keys.iter().all(|key| key.unreadable.is_some())))
+        {
             HashMap::new()
         } else {
             self.read_documents(&ids, columns, work, record)?
         };
 
         let mut rows = Vec::with_capacity(keys.len());
+        let mut unreadable = Vec::with_capacity(keys.len());
         for key in keys {
             let path = norn_wire::DocumentPath::new(key.path()).map_err(|problem| {
                 StoreError::Damaged {
@@ -228,8 +234,12 @@ impl Snapshot {
                 }
             })?;
             let mut row = DocumentRow::new(path);
-            let own = read.remove(&key.document()).unwrap_or_default();
-            if projection.names_fields() {
+            let mut own = read.remove(&key.document()).unwrap_or_default();
+            own.unreadable = key.unreadable.unwrap_or(own.unreadable);
+            unreadable.push(own.unreadable);
+            if projection.names_fields() && own.unreadable {
+                row = row.with_fields(Content::unknown(UnknownReason::Unreadable));
+            } else if projection.names_fields() {
                 row = row.with_fields(project_fields(
                     own.frontmatter.as_deref(),
                     projection.all_fields,
@@ -237,7 +247,11 @@ impl Snapshot {
                 )?);
             }
             if projection.body {
-                row = row.with_body(body_text(own.body_head, own.body_length)?);
+                row = row.with_body(if own.unreadable {
+                    Content::unknown(UnknownReason::Unreadable)
+                } else {
+                    Content::known(body_text(own.body_head, own.body_length)?)
+                });
             }
             rows.push(row);
         }
@@ -259,29 +273,62 @@ impl Snapshot {
                         .into_iter();
                     for ((row, count), total) in rows.iter_mut().zip(counts).zip(totals) {
                         let links: Vec<LinkRow> = resolved.by_ref().take(count).collect();
-                        row.links = Some(Collection::new(links, total).map_err(cut_below_head)?);
+                        row.links = Some(
+                            Collection::new(links, total)
+                                .map_err(cut_below_head)?
+                                .into(),
+                        );
                     }
                 }
                 Nested::Tags => {
                     let mut heads = self.read_nested(nested, &ids, tag_row, work, record)?;
                     for (row, id) in rows.iter_mut().zip(&ids) {
                         let (items, total) = heads.remove(id).unwrap_or_default();
-                        row.tags = Some(Collection::new(items, total).map_err(cut_below_head)?);
+                        row.tags = Some(
+                            Collection::new(items, total)
+                                .map_err(cut_below_head)?
+                                .into(),
+                        );
                     }
                 }
                 Nested::Headings => {
                     let mut heads = self.read_nested(nested, &ids, heading_row, work, record)?;
                     for (row, id) in rows.iter_mut().zip(&ids) {
                         let (items, total) = heads.remove(id).unwrap_or_default();
-                        row.headings = Some(Collection::new(items, total).map_err(cut_below_head)?);
+                        row.headings = Some(
+                            Collection::new(items, total)
+                                .map_err(cut_below_head)?
+                                .into(),
+                        );
                     }
                 }
                 Nested::Blocks => {
                     let mut heads = self.read_nested(nested, &ids, block_row, work, record)?;
                     for (row, id) in rows.iter_mut().zip(&ids) {
                         let (items, total) = heads.remove(id).unwrap_or_default();
-                        row.blocks = Some(Collection::new(items, total).map_err(cut_below_head)?);
+                        row.blocks = Some(
+                            Collection::new(items, total)
+                                .map_err(cut_below_head)?
+                                .into(),
+                        );
                     }
+                }
+            }
+        }
+
+        for (row, unreadable) in rows.iter_mut().zip(unreadable) {
+            if unreadable {
+                if row.links.is_some() {
+                    row.links = Some(Content::unknown(UnknownReason::Unreadable));
+                }
+                if row.headings.is_some() {
+                    row.headings = Some(Content::unknown(UnknownReason::Unreadable));
+                }
+                if row.blocks.is_some() {
+                    row.blocks = Some(Content::unknown(UnknownReason::Unreadable));
+                }
+                if row.tags.is_some() {
+                    row.tags = Some(Content::unknown(UnknownReason::Unreadable));
                 }
             }
         }
@@ -397,6 +444,7 @@ impl Snapshot {
                 Ok((
                     row.get::<_, i64>(0)?,
                     DocumentColumnsRead {
+                        unreadable: row.get(4)?,
                         frontmatter: row.get(1)?,
                         body_head: row.get(2)?,
                         body_length: row.get(3)?,

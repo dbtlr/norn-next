@@ -127,7 +127,7 @@ pub use path::{
     canonical_spelling, canonical_spelling_through_links,
 };
 pub use read::{
-    PathKind, ReadAndHash, StreamedHash, read_and_hash, read_if_present_and_hash,
+    Opened, PathKind, ReadAndHash, StreamedHash, read_and_hash, read_if_present_and_hash,
     read_optional_and_hash, stream_optional_and_hash,
 };
 pub use refusal::Refusal;
@@ -135,9 +135,13 @@ pub use shadow::{
     DiscardRefusal, FALLBACK, MaintainershipKey, Placement, SHADOW_AGE_THRESHOLD, ShadowHome,
     Swept, Unpublishable, discard_homes, is_shadow_name, sweep_fallback_root, sweep_fallback_tree,
 };
+#[cfg(feature = "induced-failure")]
 pub use walk::{
-    FileFact, FileKind, FileStat, LinkKind, Reach, ReadFile, SkipFact, SkipReason, Vault, Walk,
-    WalkError, WalkFact, walk, walk_subtree,
+    DocumentOpenFailure, deny_document_opens, exhaust_document_opens, fail_document_stats,
+};
+pub use walk::{
+    FileFact, FileKind, FileStat, LinkKind, Reach, ReadFile, SkipFact, SkipReason, UnreadableFact,
+    Vault, Walk, WalkError, WalkFact, walk, walk_subtree,
 };
 pub use watch::{
     Batch, FirstIndexObservation, OWN_WRITE_TTL, OwnWrites, RescanScope, Subscription,

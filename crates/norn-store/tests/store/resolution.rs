@@ -17,6 +17,7 @@ use norn_wire::{
     Unsatisfied, VaultAddress, VaultName,
 };
 
+use crate::common::known;
 use crate::common::{Scratch, path};
 use crate::health::derived;
 
@@ -1413,7 +1414,7 @@ fn found_links(vault: &Vault, at: &str) -> BTreeMap<(String, String, Option<u64>
     let [row] = &found.rows[..] else {
         panic!("`{at}` is not one row: {:?}", found.rows);
     };
-    let links = row.links.clone().expect("the links column");
+    let links = known(row.links.as_ref().expect("the links column")).clone();
     assert_eq!(
         links.total,
         links.items.len() as u64,

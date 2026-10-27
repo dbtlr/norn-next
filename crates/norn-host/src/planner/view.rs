@@ -34,6 +34,12 @@ pub(crate) trait VaultView {
     /// Why the view could not answer: a machine failure, never absence.
     type Error;
 
+    /// Whether a read failed at one document, so repair can skip its fixes.
+    /// Root, directory and environmental failures must remain errors.
+    fn is_unreadable(_error: &Self::Error) -> bool {
+        false
+    }
+
     /// The root's identity rule.
     fn normalizer(&self) -> &PathNormalizer;
 
@@ -283,6 +289,10 @@ impl<'view, V> Remembered<'view, V> {
 impl<V: VaultView> VaultView for Remembered<'_, V> {
     type Error = V::Error;
 
+    fn is_unreadable(error: &Self::Error) -> bool {
+        V::is_unreadable(error)
+    }
+
     fn normalizer(&self) -> &PathNormalizer {
         self.view.normalizer()
     }
@@ -417,6 +427,13 @@ pub(crate) enum TreeViewError {
     Walk(WalkError),
     /// A document's read failed.
     Read(Refusal),
+    /// A path failure prevented reading one document's bytes. Repair skips
+    /// its fixes; a resolved plan's recheck still refuses with a read error.
+    Unreadable {
+        operation: &'static str,
+        path: PathBuf,
+        cause: std::io::Error,
+    },
 }
 
 impl std::fmt::Display for TreeViewError {
@@ -424,6 +441,11 @@ impl std::fmt::Display for TreeViewError {
         match self {
             TreeViewError::Walk(error) => error.fmt(formatter),
             TreeViewError::Read(refusal) => refusal.fmt(formatter),
+            TreeViewError::Unreadable {
+                operation,
+                path,
+                cause,
+            } => write!(formatter, "{operation} {}: {cause}", path.display()),
         }
     }
 }
@@ -433,6 +455,7 @@ impl std::error::Error for TreeViewError {
         match self {
             TreeViewError::Walk(error) => Some(error),
             TreeViewError::Read(refusal) => Some(refusal),
+            TreeViewError::Unreadable { cause, .. } => Some(cause),
         }
     }
 }
@@ -523,9 +546,26 @@ impl TreeView {
     fn entry_read(
         &self,
         path: &NormalizedPath,
-        read: impl FnOnce(&Path, &Path) -> Result<Option<(ContentHash, Body)>, Refusal>,
+        read: impl FnOnce(&Path, &Path) -> Result<norn_fs::Opened<(ContentHash, Body)>, Refusal>,
     ) -> Result<Entry, TreeViewError> {
-        let (kind, at) = match self.reach(path.as_path())? {
+        let reached = match self
+            .vault
+            .reach_or_unreadable(path.as_path())
+            .map_err(TreeViewError::Walk)?
+        {
+            Ok(reached) => reached,
+            Err(unreadable) => {
+                return Err(TreeViewError::Unreadable {
+                    operation: unreadable.operation(),
+                    path: self.root.join(unreadable.path().as_path()),
+                    cause: std::io::Error::new(
+                        unreadable.cause().kind(),
+                        unreadable.cause().to_string(),
+                    ),
+                });
+            }
+        };
+        let (kind, at) = match reached {
             Reach::Refused(skip) => {
                 let root = skip.path().as_path().display();
                 let (detail, barrier) = match skip.reason() {
@@ -570,8 +610,15 @@ impl TreeView {
                 match read(&self.root, at.as_path()).map_err(TreeViewError::Read)? {
                     // Taken away between the descent and the read: nothing
                     // stands there now.
-                    None => self.spelled_where_absent(path)?,
-                    Some((hash, body)) => Entry::Document {
+                    norn_fs::Opened::Nothing => self.spelled_where_absent(path)?,
+                    norn_fs::Opened::Unreadable { operation, cause } => {
+                        return Err(TreeViewError::Unreadable {
+                            operation,
+                            path: self.root.join(at.as_path()),
+                            cause,
+                        });
+                    }
+                    norn_fs::Opened::Read((hash, body)) => Entry::Document {
                         at: spelling,
                         hash,
                         body,
@@ -585,16 +632,26 @@ impl TreeView {
 impl VaultView for TreeView {
     type Error = TreeViewError;
 
+    fn is_unreadable(error: &Self::Error) -> bool {
+        matches!(error, TreeViewError::Unreadable { .. })
+    }
+
     fn normalizer(&self) -> &PathNormalizer {
         self.vault.normalizer()
     }
 
     fn entry(&self, path: &NormalizedPath) -> Result<Entry, TreeViewError> {
         self.entry_read(path, |root, at| {
-            Ok(norn_fs::read_optional_and_hash(root, at)?.map(|read| {
-                let (bytes, hash) = read.into_parts();
-                (wire_hash(hash), Body::Held(Arc::from(bytes)))
-            }))
+            Ok(match norn_fs::read_optional_and_hash(root, at)? {
+                norn_fs::Opened::Read(read) => {
+                    let (bytes, hash) = read.into_parts();
+                    norn_fs::Opened::Read((wire_hash(hash), Body::Held(Arc::from(bytes))))
+                }
+                norn_fs::Opened::Nothing => norn_fs::Opened::Nothing,
+                norn_fs::Opened::Unreadable { operation, cause } => {
+                    norn_fs::Opened::Unreadable { operation, cause }
+                }
+            })
         })
     }
 
@@ -606,16 +663,18 @@ impl VaultView for TreeView {
     /// but for the body.
     fn streamed_entry(&self, path: &NormalizedPath) -> Result<Entry, TreeViewError> {
         self.entry_read(path, |root, at| {
-            Ok(
-                norn_fs::stream_optional_and_hash(root, at)?.map(|streamed| {
-                    (
-                        wire_hash(streamed.content_hash()),
-                        Body::Streamed {
-                            decodes: crate::derivation::streamed_decodes(&streamed),
-                        },
-                    )
-                }),
-            )
+            Ok(match norn_fs::stream_optional_and_hash(root, at)? {
+                norn_fs::Opened::Read(streamed) => norn_fs::Opened::Read((
+                    wire_hash(streamed.content_hash()),
+                    Body::Streamed {
+                        decodes: crate::derivation::streamed_decodes(&streamed),
+                    },
+                )),
+                norn_fs::Opened::Nothing => norn_fs::Opened::Nothing,
+                norn_fs::Opened::Unreadable { operation, cause } => {
+                    norn_fs::Opened::Unreadable { operation, cause }
+                }
+            })
         })
     }
 
@@ -722,6 +781,20 @@ impl VaultView for TreeView {
         for fact in walk {
             match fact.map_err(TreeViewError::Walk)? {
                 norn_fs::WalkFact::File(file) => contents.take(file.path().as_path()),
+                norn_fs::WalkFact::Unreadable(unreadable) => {
+                    if crate::production::is_markdown(unreadable.path().as_path()) {
+                        contents.take(unreadable.path().as_path());
+                    } else {
+                        return Err(TreeViewError::Walk(norn_fs::WalkError::Environment {
+                            operation: unreadable.operation(),
+                            path: unreadable.path().as_path().to_owned(),
+                            source: std::io::Error::new(
+                                unreadable.cause().kind(),
+                                unreadable.cause().to_string(),
+                            ),
+                        }));
+                    }
+                }
                 norn_fs::WalkFact::Skipped(skip) => {
                     contents.leave(&skip.path().as_path().to_string_lossy());
                 }
@@ -1410,5 +1483,47 @@ mod tests {
             panic!("the document stands at its listed spelling");
         };
         assert_eq!(at.as_str(), "Note.md");
+    }
+
+    /// An unreadable document is a document of the folder in any ASCII case
+    /// of its extension, as it is where it reads. The walk's stat of the one
+    /// name is denied in a child process, where the environment arms it.
+    #[cfg(feature = "induced-failure")]
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: the tree a folder reads.
+    fn an_unreadable_upper_case_document_is_taken_as_a_document_of_the_folder() {
+        const CHILD_ROOT: &str = "NORN_PLANNER_UNREADABLE_CASE_ROOT";
+        const TEST: &str = "planner::view::tests::an_unreadable_upper_case_document_is_taken_as_a_document_of_the_folder";
+
+        if let Some(root) = std::env::var_os(CHILD_ROOT) {
+            let view =
+                TreeView::open(Path::new(&root), &[], &SchemaPlace::default()).expect("a vault");
+            let folder = view
+                .normalizer()
+                .normalize(Path::new("folder"))
+                .expect("a folder name");
+            let contents = view
+                .folder_contents(&folder)
+                .expect("an unreadable document does not fail the read")
+                .expect("the folder stands");
+            let documents: Vec<_> = contents.documents.iter().map(|d| d.as_str()).collect();
+            assert_eq!(documents, ["folder/c.MD"]);
+            return;
+        }
+        let scratch = Scratch::new("planner-view-unreadable-case");
+        std::fs::create_dir(scratch.join("folder")).expect("a folder");
+        std::fs::write(scratch.join("folder/c.MD"), "N").expect("a document");
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", TEST, "--nocapture"])
+            .env(CHILD_ROOT, scratch.root())
+            .env("NORN_FS_WALK_ARMED_STAGES", "page=denied")
+            .output()
+            .unwrap();
+        assert!(
+            child.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&child.stdout),
+            String::from_utf8_lossy(&child.stderr)
+        );
     }
 }

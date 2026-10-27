@@ -53,7 +53,8 @@ impl SliceBudget {
 /// One engine is one `(sidecar database, embedder)` pair for one vault. It
 /// consumes the store's change feed through consumer-owned cursors recorded
 /// in its own sidecar, embeds changed bodies through the embedder, retracts
-/// deaths, and answers vector-nearest over what it holds. It never touches
+/// deaths and unreadable content, and answers vector-nearest over what it
+/// holds. It never touches
 /// vault files: every input reaches it through [`FeedRead`], the store's
 /// read-only lane-2 surface, so a committed lane-1 record is the only thing
 /// it can consume and nothing it derives can enter the store.
@@ -95,7 +96,8 @@ pub struct DrainReport {
     /// Feed rows superseded mid-drain: the stored document had already moved
     /// past the row's generation (or died), so a later feed row covers it.
     pub deferred: u64,
-    /// Paths whose rows were retracted because the feed recorded a death.
+    /// Paths whose held rows were retracted because the feed recorded a death
+    /// or a document with unreadable content.
     pub retracted: u64,
     /// The slice's budget ran out before the reconcile and both feeds were
     /// complete, so the next slice has work to resume from the positions this
@@ -299,7 +301,9 @@ impl Engine {
     ///    next slice resumes the pass. A pass recorded for another lifetime
     ///    than the store's starts over.
     /// 2. **Documents, triaged before fetched.** A feed row whose `body_hash`
-    ///    equals the recorded `input_hash` is current and costs no body read.
+    ///    is absent has no content to embed: every held vector at its path is
+    ///    retracted with this page's progress, without fetching a body. A hash
+    ///    equal to the recorded `input_hash` is current and costs no body read.
     ///    A changed one is fetched; a fetch that comes back at a different
     ///    generation (or gone) was superseded mid-drain and is deferred — the
     ///    feed presents the successor at its own strictly-higher generation,
@@ -373,21 +377,31 @@ impl Engine {
             let advanced = last.clone();
 
             let mut writes: Vec<(String, String, Vec<u8>, usize)> = Vec::new();
+            let mut retractions = Vec::new();
             for (_, document) in &page {
+                let Some(body_hash) = document.body_hash.as_ref() else {
+                    retractions.push(document.path.as_str());
+                    continue;
+                };
                 let current: Option<String> = self.row_input_hash(document.path.as_str())?;
-                if current.as_deref() == Some(document.body_hash.as_str()) {
+                if current.as_deref() == Some(body_hash.as_str()) {
                     report.skipped_current += 1;
                     continue;
                 }
                 let fetched = feed.stored_facts(&document.path)?;
                 match fetched {
                     Some(facts) if facts.document.generation == document.generation => {
-                        let embedding = self.embedder.embed(&facts.body).map_err(|error| {
-                            EngineError::Embed {
-                                path: document.path.as_str().to_string(),
-                                error,
-                            }
-                        })?;
+                        let Some(body) = facts.body.as_deref() else {
+                            report.deferred += 1;
+                            continue;
+                        };
+                        let embedding =
+                            self.embedder
+                                .embed(body)
+                                .map_err(|error| EngineError::Embed {
+                                    path: document.path.as_str().to_string(),
+                                    error,
+                                })?;
                         let promised = self.embedder.dimensions().get();
                         if embedding.dimensions() != promised {
                             return Err(EngineError::WrongWidth {
@@ -398,7 +412,7 @@ impl Engine {
                         }
                         writes.push((
                             document.path.as_str().to_string(),
-                            document.body_hash.clone(),
+                            body_hash.clone(),
                             encode(embedding.values()),
                             embedding.dimensions(),
                         ));
@@ -412,7 +426,8 @@ impl Engine {
                 }
             }
 
-            self.commit_documents(&writes, &advanced, completed)?;
+            report.retracted +=
+                self.commit_documents(&writes, &retractions, &advanced, completed)?;
             *left -= 1;
             cursor = Some(advanced);
             if !full {
@@ -707,14 +722,16 @@ impl Engine {
             .map_err(|error| error::sql("reading a held path", error))
     }
 
-    /// One page's writes and its advanced cursor, in one transaction, with the
-    /// feed's watermark where this page completed the feed.
+    /// One page's writes, unreadable-content retractions and advanced cursor,
+    /// in one transaction, with the watermark where this page completed the
+    /// feed. Unknown content invalidates every model's rows at its path.
     fn commit_documents(
         &mut self,
         writes: &[(String, String, Vec<u8>, usize)],
+        retractions: &[&str],
         advanced: &FeedCursor,
         completed: Option<Watermark>,
-    ) -> Result<(), EngineError> {
+    ) -> Result<u64, EngineError> {
         let model = self.embedder.model().clone();
         let transaction = self
             .database
@@ -740,6 +757,18 @@ impl Engine {
                 )
                 .map_err(|error| error::sql("writing an embedding", error))?;
         }
+        let mut retracted = 0;
+        for path in retractions {
+            let removed = transaction
+                .execute(
+                    "DELETE FROM document_vectors WHERE path = ?1",
+                    params![path],
+                )
+                .map_err(|error| error::sql("retracting unreadable content", error))?;
+            if removed > 0 {
+                retracted += 1;
+            }
+        }
         norn_db::meta::put_meta(
             &transaction,
             ddl::meta::DOCUMENT_CURSOR,
@@ -755,7 +784,7 @@ impl Engine {
         if let Some(watermark) = completed {
             self.recorded.watermarks.set(Feed::Documents, watermark);
         }
-        Ok(())
+        Ok(retracted)
     }
 
     /// One page's retractions and its advanced cursor, in one transaction, with

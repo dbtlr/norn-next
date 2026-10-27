@@ -797,7 +797,7 @@ impl<'a> Request<'a> {
             params![path.as_str()],
             |row| {
                 let id: i64 = row.get(0)?;
-                let body: String = row.get(1)?;
+                let body: Option<String> = row.get(1)?;
                 Ok(stored_document(row, 2)?.map(|document| (id, body, document)))
             },
             "reading a document row",
@@ -2902,8 +2902,8 @@ fn feed_page_parameters(after: Option<&FeedCursor>, limit: usize) -> Vec<Value> 
 fn fed_document(row: &Row<'_>) -> Reading<(FeedCursor, FeedDocument)> {
     let generation: i64 = row.get(0)?;
     let path: String = row.get(1)?;
-    let content_hash: String = row.get(2)?;
-    let body_hash: String = row.get(3)?;
+    let content_hash: Option<String> = row.get(2)?;
+    let body_hash: Option<String> = row.get(3)?;
     let frontmatter_projection_hash: Option<String> = row.get(4)?;
     Ok(DocumentPath::new(&path).map(|path| {
         (
@@ -2990,12 +2990,20 @@ pub(crate) fn probe_parameters(probe: &SuffixProbe) -> impl Params {
 /// A document row, read from `first` onwards.
 fn stored_document(row: &Row<'_>, first: usize) -> Reading<StoredDocument> {
     let path: String = row.get(first)?;
-    let content_hash: String = row.get(first + 1)?;
-    let byte_length = match position(row.get(first + 2)?, "documents.byte_length") {
+    let content_hash: Option<String> = row.get(first + 1)?;
+    let byte_length = match row
+        .get::<_, Option<i64>>(first + 2)?
+        .map(|value| position(value, "documents.byte_length"))
+        .transpose()
+    {
         Ok(byte_length) => byte_length,
         Err(damaged) => return Ok(Err(damaged)),
     };
-    let body_offset = match position(row.get(first + 3)?, "documents.body_offset") {
+    let body_offset = match row
+        .get::<_, Option<i64>>(first + 3)?
+        .map(|value| position(value, "documents.body_offset"))
+        .transpose()
+    {
         Ok(body_offset) => body_offset,
         Err(damaged) => return Ok(Err(damaged)),
     };

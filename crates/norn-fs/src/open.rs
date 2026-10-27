@@ -28,6 +28,27 @@ use std::path::{Component, Path};
 use rustix::fs::{AtFlags, FileType, Mode, OFlags, fstat, openat, statat};
 use rustix::io::Errno;
 
+/// Whether a failed operation describes one path or the process's resources.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PathOrEnvironment {
+    /// The operation failed at this path alone.
+    Path,
+    /// The process cannot make progress reliably, irrespective of the path.
+    Environment,
+}
+
+impl PathOrEnvironment {
+    /// Classifies failures after the caller has ruled out ordinary absence.
+    pub(crate) fn of(cause: &io::Error) -> Self {
+        match cause.raw_os_error() {
+            Some(libc::EMFILE | libc::ENFILE | libc::ENOMEM | libc::ENOBUFS | libc::EINTR) => {
+                Self::Environment
+            }
+            _ => Self::Path,
+        }
+    }
+}
+
 /// The flags every directory a contained descent passes through is opened with.
 pub(crate) fn directory_flags() -> OFlags {
     OFlags::RDONLY | OFlags::CLOEXEC | OFlags::DIRECTORY | OFlags::NOFOLLOW
@@ -257,6 +278,22 @@ pub(crate) fn descend(
 pub(crate) fn open_regular_at(
     anchor: BorrowedFd<'_>,
     relative: &Path,
+    access: &Path,
+) -> Result<Reached, OpenError> {
+    open_regular_at_with(
+        anchor,
+        relative,
+        access,
+        &crate::walk::faults::WalkFaults::entry(),
+    )
+}
+
+/// The contained open with one explicitly armed observation seam.
+pub(crate) fn open_regular_at_with(
+    anchor: BorrowedFd<'_>,
+    relative: &Path,
+    access: &Path,
+    faults: &crate::walk::faults::WalkFaults,
 ) -> Result<Reached, OpenError> {
     let names = contained_names(relative).map_err(|component| OpenError::Uncontained {
         component: component.to_owned(),
@@ -284,15 +321,16 @@ pub(crate) fn open_regular_at(
         None => {}
     }
     let parent = opened.last().map_or(anchor, AsFd::as_fd);
-    let fd = match openat(parent, *last, regular_flags(), Mode::empty()) {
+    let opened = match faults.opening_at(access) {
+        Some(errno) => Err(errno),
+        None => openat(parent, *last, regular_flags(), Mode::empty()),
+    };
+    let fd = match opened {
         Ok(fd) => fd,
         Err(errno) => return classify(parent, last, errno),
     };
     crate::reads::count_stat();
-    let stat = fstat(&fd).map_err(|errno| OpenError::Machine {
-        errno,
-        component: last.to_os_string(),
-    })?;
+    let stat = fstat(&fd).map_err(|errno| OpenError::at_file("stating", last, errno))?;
     Ok(match FileType::from_raw_mode(stat.st_mode as _) {
         // The read that follows counts itself, once per read of the file.
         FileType::RegularFile => Reached::Regular(fd),
@@ -307,30 +345,54 @@ pub(crate) fn open_regular_at(
 /// than a denied document, and the whole path says neither.
 #[derive(Debug)]
 pub(crate) enum OpenError {
-    /// The machine refused: a denied directory, a full descriptor table, a
-    /// failing device.
+    /// A folder component failed, or process resources could not support the open.
     Machine { errno: Errno, component: OsString },
+    /// The final file could not be opened or stated, without a resource failure.
+    Path {
+        operation: &'static str,
+        errno: Errno,
+        component: OsString,
+    },
     /// The relative path is not a name below the anchor at all.
     Uncontained { component: OsString },
 }
 
 impl OpenError {
+    /// Classifies only the final name; folder-component failures stay environmental.
+    fn at_file(operation: &'static str, component: &OsStr, errno: Errno) -> Self {
+        let component = component.to_owned();
+        match PathOrEnvironment::of(&io::Error::from_raw_os_error(errno.raw_os_error())) {
+            PathOrEnvironment::Path => Self::Path {
+                operation,
+                errno,
+                component,
+            },
+            PathOrEnvironment::Environment => Self::Machine { errno, component },
+        }
+    }
     /// What was being attempted, in words that complete "… failed".
     pub(crate) fn operation(&self) -> &'static str {
-        "opening"
+        match self {
+            Self::Path { operation, .. } => operation,
+            _ => "opening",
+        }
     }
 
     /// The name the open stopped at, which is the one the failure is about.
     pub(crate) fn component(&self) -> &OsStr {
         match self {
-            Self::Machine { component, .. } | Self::Uncontained { component } => component,
+            Self::Machine { component, .. }
+            | Self::Path { component, .. }
+            | Self::Uncontained { component } => component,
         }
     }
 
     /// The failure stated as the error a refusal carries.
     pub(crate) fn into_error(self) -> io::Error {
         match self {
-            Self::Machine { errno, .. } => io::Error::from_raw_os_error(errno.raw_os_error()),
+            Self::Machine { errno, .. } | Self::Path { errno, .. } => {
+                io::Error::from_raw_os_error(errno.raw_os_error())
+            }
             Self::Uncontained { .. } => io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "the path leaves the directory it is read from",
@@ -359,10 +421,7 @@ fn classify(parent: BorrowedFd<'_>, name: &OsStr, errno: Errno) -> Result<Reache
         } else {
             Unreached::not_a_directory(name)
         })),
-        errno => Err(OpenError::Machine {
-            errno,
-            component: name.to_owned(),
-        }),
+        errno => Err(OpenError::at_file("opening", name, errno)),
     }
 }
 
@@ -374,4 +433,37 @@ pub(crate) fn is_link(holder: BorrowedFd<'_>, name: &OsStr) -> bool {
         statat(holder, name, AtFlags::SYMLINK_NOFOLLOW),
         Ok(stat) if FileType::from_raw_mode(stat.st_mode as _) == FileType::Symlink
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failure_classifies_each_errno() {
+        for errno in [
+            libc::EMFILE,
+            libc::ENFILE,
+            libc::ENOMEM,
+            libc::ENOBUFS,
+            libc::EINTR,
+        ] {
+            assert_eq!(
+                PathOrEnvironment::of(&io::Error::from_raw_os_error(errno)),
+                PathOrEnvironment::Environment,
+                "errno {errno}"
+            );
+        }
+        for errno in [libc::EACCES, libc::EPERM, libc::EIO, libc::EINVAL, 12345] {
+            assert_eq!(
+                PathOrEnvironment::of(&io::Error::from_raw_os_error(errno)),
+                PathOrEnvironment::Path,
+                "errno {errno}"
+            );
+        }
+        assert_eq!(
+            PathOrEnvironment::of(&io::Error::other("path failure without an errno")),
+            PathOrEnvironment::Path
+        );
+    }
 }

@@ -394,13 +394,17 @@ impl DocumentFacts {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoredDocument {
     pub path: DocumentPath,
-    pub content_hash: String,
-    pub byte_length: u64,
-    pub body_offset: u64,
+    /// The hash of the bytes read, absent for a broken document.
+    pub content_hash: Option<String>,
+    /// The length of the bytes read, absent for a broken document.
+    pub byte_length: Option<u64>,
+    /// Where the body starts, absent for a broken document.
+    pub body_offset: Option<u64>,
     /// The canonical JSON projection, or `None` where no projection exists.
     pub frontmatter: Option<String>,
     /// How many frontmatter-scoped diagnostics the parse raised. Zero beside a
-    /// `None` projection is "no block"; nonzero is "a block that did not read".
+    /// `None` projection is "no block" on a readable row; nonzero is "a block
+    /// that did not read". A broken row carries zero.
     pub frontmatter_diagnostic_count: u32,
     /// The write generation this row was last derived at. Generations order;
     /// `derived_at` does not.
@@ -568,7 +572,9 @@ pub struct StoredTag {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoredFacts {
     pub document: StoredDocument,
-    pub body: String,
+    /// The stored body, absent for a broken document and empty for an empty
+    /// readable document.
+    pub body: Option<String>,
     pub links: Vec<StoredLink>,
     /// The keys the link index holds the links under, in link order and then
     /// in key order.
@@ -665,10 +671,12 @@ pub struct FeedDocument {
     /// it in the feed.
     pub generation: i64,
     /// The hash of the whole document. **Only a content hash concludes
-    /// "unchanged"** about the document as a document.
-    pub content_hash: String,
-    /// The hash of the stored body, for a consumer that derives from bodies.
-    pub body_hash: String,
+    /// "unchanged"** about the document as a document. A broken document holds
+    /// no hash.
+    pub content_hash: Option<String>,
+    /// The hash of the stored body, absent for a broken document. A consumer
+    /// that derives from bodies retracts its held result where this is absent.
+    pub body_hash: Option<String>,
     /// The hash of the stored frontmatter projection, and `None` exactly where
     /// there is no projection — no block, or a block that did not parse.
     pub frontmatter_projection_hash: Option<String>,

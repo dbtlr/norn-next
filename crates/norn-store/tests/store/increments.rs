@@ -153,7 +153,7 @@ fn fact_discards_follow_standing_rows_in_the_transaction() {
         .stored_facts(&path("twice.md"))
         .expect("facts")
         .expect("the row");
-    assert_eq!(twice.document.content_hash, "second");
+    assert_eq!(twice.document.content_hash.as_deref(), Some("second"));
     assert!(twice.links.is_empty() && twice.fields.is_empty());
 
     write_document(
@@ -178,8 +178,9 @@ fn fact_discards_follow_standing_rows_in_the_transaction() {
             .stored_document(&path("fresh.md"))
             .expect("row")
             .expect("reborn")
-            .content_hash,
-        "reborn"
+            .content_hash
+            .as_deref(),
+        Some("reborn")
     );
     request.finish();
     store
@@ -960,8 +961,8 @@ fn the_last_entry_for_a_path_is_the_one_that_stands() {
         .stored_facts(&path("twice.md"))
         .expect("reading a document")
         .expect("a document");
-    assert_eq!(stored.document.content_hash, "hash-2");
-    assert_eq!(stored.body, "second\n");
+    assert_eq!(stored.document.content_hash.as_deref(), Some("hash-2"));
+    assert_eq!(stored.body.as_deref(), Some("second\n"));
 
     assert_eq!(
         request
@@ -1041,8 +1042,8 @@ fn a_path_named_three_times_ends_where_its_last_entry_left_it() {
         .stored_facts(&path("revived.md"))
         .expect("reading a document")
         .expect("the upsert after the death did not stand");
-    assert_eq!(revived.document.content_hash, "hash-2");
-    assert_eq!(revived.body, "second\n");
+    assert_eq!(revived.document.content_hash.as_deref(), Some("hash-2"));
+    assert_eq!(revived.body.as_deref(), Some("second\n"));
 
     assert!(
         request
@@ -2133,8 +2134,8 @@ fn a_refused_changeset_rolls_back_the_entries_that_ran_before_it() {
         .stored_facts(&path("notes/one.md"))
         .expect("reading a document")
         .expect("a document the refused changeset removed");
-    assert_eq!(one.document.content_hash, "hash-1");
-    assert_eq!(one.body, "the first body\n");
+    assert_eq!(one.document.content_hash.as_deref(), Some("hash-1"));
+    assert_eq!(one.body.as_deref(), Some("the first body\n"));
     assert_eq!(
         Some(one.document.generation),
         before.generation,
@@ -2329,10 +2330,11 @@ fn a_torn_changeset_leaves_the_previous_generation_whole() {
             .expect("reading a document")
             .expect("a document the previous generation wrote");
         assert_eq!(
-            stored.document.content_hash, hash,
+            stored.document.content_hash.as_deref(),
+            Some(hash),
             "`{at}` carries what the torn changeset was writing"
         );
-        assert_eq!(stored.body, body);
+        assert_eq!(stored.body.as_deref(), Some(body));
         assert_eq!(
             Some(stored.document.generation),
             before.generation,

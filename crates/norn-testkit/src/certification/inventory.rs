@@ -460,13 +460,13 @@ pub const REQUIRED_CASES: &[Case] = &[
         feature: Some(INDUCED_FAILURE),
     },
     Case {
-        id: "induced-unreadable-document-refuses",
+        id: "induced-unreadable-document-recovers",
         suite: Suite::InducedFailure,
         lane: Lane::RealWatcher,
-        states: "a document the heal cannot open is refused rather than quarantined: nothing was \
-                 read, so nothing is known about what it holds",
+        states: "a document the heal cannot open holds names alone and one unreadable finding; \
+                 the vault reaches Ready and the document re-derives when it reads again",
         carrier: "crates/norn-host/tests/lockdown.rs::\
-                  an_unreadable_document_refuses_the_heal_rather_than_quarantining_it",
+                  an_unreadable_document_is_marked_broken_and_the_heal_reaches_ready",
         feature: Some(INDUCED_FAILURE),
     },
     Case {

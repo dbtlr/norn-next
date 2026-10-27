@@ -81,8 +81,16 @@ impl InventoryWalk {
             let relative = scan.relative.join(&name);
             let path = self.vault.normalize(&relative)?;
             let listed = if entry.file_type() == FileType::Unknown {
-                stat_listed(&scan.fd, &name, &relative, Paged::default())?
-                    .map(|stat| classify_file_type(FileType::from_raw_mode(stat.st_mode as _)))
+                match stat_listed(&scan.fd, &name, &relative, Paged::default())? {
+                    Opened::Read(stat) => Some(classify_file_type(FileType::from_raw_mode(
+                        stat.st_mode as _,
+                    ))),
+                    Opened::Nothing => None,
+                    Opened::Unreadable { .. } => {
+                        records.push(record(&path));
+                        continue;
+                    }
+                }
             } else {
                 Some(classify_file_type(entry.file_type()))
             };
@@ -372,7 +380,10 @@ mod tests {
                 panic!("raw file name was lost in replay");
             };
             assert_eq!(file.path().as_path().as_os_str().as_bytes(), record.value);
-            assert_eq!(file.read_optional().unwrap().unwrap().bytes(), b"raw");
+            assert_eq!(
+                crate::scratch::read(file.read_optional().unwrap()).bytes(),
+                b"raw"
+            );
         }
         let tally = window.finish();
         assert_eq!(tally.document_opens, 4);
@@ -467,7 +478,7 @@ mod tests {
                 _ => None,
             })
             .unwrap();
-        let read: ReadFile = file.read_optional().unwrap().unwrap();
+        let read: ReadFile = crate::scratch::read(file.read_optional().unwrap());
         assert_eq!(read.bytes(), b"body");
     }
 }

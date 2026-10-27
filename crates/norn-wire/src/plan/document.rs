@@ -467,6 +467,8 @@ pub enum SkipReason {
     BelowThreshold,
     /// The document cannot be read.
     Unreadable,
+    /// The document supplying evidence for the fix cannot be read.
+    UnreadableTarget,
     /// The rules declare conflicting defaults for the field.
     ConflictingDefaults,
     /// The fix would bring in required fields the document does not hold.

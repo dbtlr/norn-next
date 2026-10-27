@@ -7,7 +7,8 @@
 //! and an absent option is left out of the bytes entirely. A shape that always
 //! carried every column would make one read of a vault's bodies out of every
 //! read of its paths, and a client could not tell a column it did not ask for
-//! from a column the document does not have.
+//! from a column the document does not have. Requested content is [`Content`],
+//! distinguishing known empty values from unknown content with a reason.
 //!
 //! **A nested collection is a head and a total.** [`Collection`] carries the
 //! items that fit and how many there were, so a row whose links were cut says
@@ -1077,11 +1078,66 @@ impl FieldValue {
     }
 }
 
+/// Why requested document content cannot be answered.
+///
+/// A reason describes unknown content, distinct from an unprojected column or
+/// a known empty value. On the wire it is a flat snake_case string.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum UnknownReason {
+    /// The document could not be read, so no content facts are held for it.
+    Unreadable,
+}
+
+/// Requested document content, either known or explicitly unknown.
+///
+/// On the wire the `state` tag distinguishes `{"state":"known","value":…}`
+/// from `{"state":"unknown","reason":"unreadable"}`. An unprojected column
+/// is represented by the enclosing option, never by this carrier. Standalone
+/// collection pages reuse this carrier around their page value.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum Content<T> {
+    /// Content read from a readable document, including an empty value.
+    #[non_exhaustive]
+    Known {
+        /// The requested content.
+        value: T,
+    },
+    /// Content that cannot be answered for the stated reason.
+    #[non_exhaustive]
+    Unknown {
+        /// Why the content is unknown.
+        reason: UnknownReason,
+    },
+}
+
+impl<T> Content<T> {
+    /// Known content holding `value`.
+    pub const fn known(value: T) -> Self {
+        Self::Known { value }
+    }
+
+    /// Unknown content with its `reason`.
+    pub const fn unknown(reason: UnknownReason) -> Self {
+        Self::Unknown { reason }
+    }
+}
+
+impl<T> From<T> for Content<T> {
+    fn from(value: T) -> Self {
+        Self::known(value)
+    }
+}
+
 /// One document, projected onto the columns a read asked for.
 ///
-/// The path is always carried. Every other column is `null` — and left out of
-/// the bytes — where the read did not ask for it, so a client tells a column
-/// it did not project from a column the document does not have.
+/// The path is always carried. Every other column is omitted where the read
+/// did not ask for it; an incoming `null` also means unprojected. Requested
+/// content columns distinguish known values, including empty ones, from
+/// unknown content. Findings project normally even when content is unknown.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct DocumentRow {
@@ -1089,22 +1145,22 @@ pub struct DocumentRow {
     pub path: DocumentPath,
     /// Every frontmatter field the document carries, by key.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub fields: Option<BTreeMap<String, FieldValue>>,
+    pub fields: Option<Content<BTreeMap<String, FieldValue>>>,
     /// The document's body text, with how many bytes the whole of it has.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub body: Option<BodyText>,
+    pub body: Option<Content<BodyText>>,
     /// The links the document carries.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub links: Option<Collection<LinkRow>>,
+    pub links: Option<Content<Collection<LinkRow>>>,
     /// The headings the document carries.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub headings: Option<Collection<HeadingRow>>,
+    pub headings: Option<Content<Collection<HeadingRow>>>,
     /// The block identifiers the document defines.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub blocks: Option<Collection<BlockRow>>,
+    pub blocks: Option<Content<Collection<BlockRow>>>,
     /// The tags the document carries.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tags: Option<Collection<TagRow>>,
+    pub tags: Option<Content<Collection<TagRow>>>,
     /// The findings standing over the document.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub findings: Option<Collection<FindingRow>>,
@@ -1130,43 +1186,43 @@ impl DocumentRow {
 
     /// The row with its frontmatter fields projected.
     #[must_use]
-    pub fn with_fields(mut self, fields: BTreeMap<String, FieldValue>) -> Self {
-        self.fields = Some(fields);
+    pub fn with_fields(mut self, fields: impl Into<Content<BTreeMap<String, FieldValue>>>) -> Self {
+        self.fields = Some(fields.into());
         self
     }
 
     /// The row with its body projected.
     #[must_use]
-    pub fn with_body(mut self, body: BodyText) -> Self {
-        self.body = Some(body);
+    pub fn with_body(mut self, body: impl Into<Content<BodyText>>) -> Self {
+        self.body = Some(body.into());
         self
     }
 
     /// The row with its links projected.
     #[must_use]
-    pub fn with_links(mut self, links: Collection<LinkRow>) -> Self {
-        self.links = Some(links);
+    pub fn with_links(mut self, links: impl Into<Content<Collection<LinkRow>>>) -> Self {
+        self.links = Some(links.into());
         self
     }
 
     /// The row with its headings projected.
     #[must_use]
-    pub fn with_headings(mut self, headings: Collection<HeadingRow>) -> Self {
-        self.headings = Some(headings);
+    pub fn with_headings(mut self, headings: impl Into<Content<Collection<HeadingRow>>>) -> Self {
+        self.headings = Some(headings.into());
         self
     }
 
     /// The row with its block identifiers projected.
     #[must_use]
-    pub fn with_blocks(mut self, blocks: Collection<BlockRow>) -> Self {
-        self.blocks = Some(blocks);
+    pub fn with_blocks(mut self, blocks: impl Into<Content<Collection<BlockRow>>>) -> Self {
+        self.blocks = Some(blocks.into());
         self
     }
 
     /// The row with its tags projected.
     #[must_use]
-    pub fn with_tags(mut self, tags: Collection<TagRow>) -> Self {
-        self.tags = Some(tags);
+    pub fn with_tags(mut self, tags: impl Into<Content<Collection<TagRow>>>) -> Self {
+        self.tags = Some(tags.into());
         self
     }
 

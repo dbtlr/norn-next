@@ -21,28 +21,19 @@
 //! back an error number and a kind; the page's own answers to those are what a
 //! case reads.
 //!
-//! # The one stage and its three answers
+//! # The observations and their answers
 //!
-//! [`Stage::Page`] is the whole roster, because the window is one place. Its
-//! answers are the three conditions that window holds, and two required
-//! outcomes across them:
+//! [`Stage::Page`] stands between a listing and a listed name's stat.
+//! [`Stage::Open`] stands at a document's contained final-component open;
+//! strict control-file readers leave this stage unarmed.
 //!
-//! - [`Answer::Vanishes`] — the stat meets `ENOENT`. **The page states the name
-//!   as one it read nothing at.** A walk begun now yields no entry at that name
-//!   either, so that is the answer the walk converges on, and it is the same
-//!   answer the window between a yielded fact and its open has given since that
-//!   window converged.
-//! - [`Answer::Replaced`] — the stat observes a kind the listing did not name.
-//!   **The page states the same vanishing**: the name the listing named was
-//!   unlinked and something else took it inside the same window, so what stands
-//!   there is not the entry that was listed and nothing here read it. What
-//!   stands there now is a change of the vault's own, and the page claims
-//!   nothing about it.
-//! - [`Answer::Denied`] — the stat meets `EACCES`. **The walk refuses**, and the
-//!   refusal is terminal the way every environmental one is. A machine that will
-//!   not answer says nothing about whether an entry is there, and reading it as
-//!   absence would let a revoked permission prune derived state. The convergence
-//!   above narrows this boundary to absence; it does not remove it.
+//! - [`Answer::Vanishes`] supplies `ENOENT`, so the name reaches no file.
+//! - [`Answer::Replaced`] supplies a changed kind at a page, or `ENXIO` at an
+//!   open, so the original entry reaches no file.
+//! - [`Answer::Denied`] supplies `EACCES`, and [`Answer::Failing`] supplies
+//!   `EIO`. The path answers unreadable, retaining the machine's cause.
+//! - [`Answer::Exhausted`] supplies `EMFILE`, which remains environmental and
+//!   refuses the operation.
 //!
 //! # Which entry an arm stands over
 //!
@@ -70,14 +61,15 @@
 //! carrying an empty arm. Two variables carry it, both read once per process:
 //!
 //! - `NORN_FS_WALK_ARMED_STAGES` — the arm, as comma-separated `stage=answer`
-//!   pairs, spelled `page` and `vanishes`, `replaced`, `denied`. A pair this
+//!   pairs, spelled `page` or `open` and `vanishes`, `replaced`, `denied`,
+//!   `failing` or `exhausted`. A pair this
 //!   module cannot read — an unknown name, or one stage armed twice — is a
 //!   mistake in the harness rather than a stage nothing is armed at, so it
 //!   panics. An arm spelled through the environment stands over a regular file:
 //!   the other reach is a shape this crate's own suite reads a page off, not one
 //!   a host case states.
 //! - `NORN_FS_ARM_HITS` — the record file the other two seams write, and the
-//!   same one here. A fired arm appends `seam=norn-fs/walk stage=page
+//!   same one here. A fired arm appends `seam=norn-fs/walk stage=<stage>
 //!   answer=<name>` to it before it answers, so a harness reads which window the
 //!   walk actually reached rather than inferring it from a heal that converged
 //!   for some other reason. A file this process named and cannot write ends the
@@ -92,8 +84,8 @@
 //! `norn-host`'s lockdown suite arms one answer per case in a child process,
 //! attaches a real host over a real tree, and states what the heal owes: an
 //! entry that vanishes leaves the heal completing with every other document
-//! derived, and an entry the machine will not stat refuses the heal and leaves
-//! the vault entry untrusted. This crate's own cases arm the seam in code
+//! derived, a document path failure marks that document unreadable, and resource
+//! exhaustion refuses the heal. This crate's own cases arm the seam in code
 //! and read the page itself, which is the observation a host cannot make.
 
 use std::sync::Arc;
@@ -102,6 +94,158 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use rustix::io::Errno;
 
 use super::EntryKind;
+
+#[cfg(feature = "induced-failure")]
+pub use targeted_open::{
+    DocumentOpenFailure, deny_document_opens, exhaust_document_opens, fail_document_stats,
+};
+
+/// Path-specific open failures held across worker threads and retries.
+#[cfg(feature = "induced-failure")]
+mod targeted_open {
+    use std::collections::BTreeMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Mutex, OnceLock};
+
+    use rustix::io::Errno;
+
+    /// Independently held denial, exhaustion and failing-stat arms for one file.
+    #[derive(Default)]
+    struct Held {
+        denied: usize,
+        exhausted: usize,
+        failing_stat: usize,
+    }
+
+    impl Held {
+        fn count(&mut self, errno: Errno) -> &mut usize {
+            match errno {
+                Errno::MFILE => &mut self.exhausted,
+                Errno::ACCESS => &mut self.denied,
+                Errno::IO => &mut self.failing_stat,
+                _ => unreachable!("only denial, exhaustion and a failing stat can be armed"),
+            }
+        }
+    }
+
+    static ARMS: OnceLock<Mutex<BTreeMap<PathBuf, Held>>> = OnceLock::new();
+    static ACTIVE: AtomicUsize = AtomicUsize::new(0);
+
+    /// Keeps one absolute file's contained opens failing while held.
+    ///
+    /// The arm is visible to every thread. Other paths and directory opens are
+    /// unaffected. Overlapping guards retain each cause independently; exhaustion
+    /// takes precedence while both causes are held. A failing-stat arm answers
+    /// only the final-name stat of a reach and never an open. Available only
+    /// with `induced-failure`.
+    #[must_use = "dropping the guard withdraws its open failure"]
+    pub struct DocumentOpenFailure {
+        path: PathBuf,
+        errno: Errno,
+    }
+
+    /// Exhausts contained file opens at exactly this absolute spelling with `EMFILE`.
+    ///
+    /// Hold over a worker's failed leg and recovery refusal, then drop before
+    /// successful recovery. The environment's one-shot walk arm is not consumed.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `path` is relative. Available only with `induced-failure`.
+    pub fn exhaust_document_opens(path: &Path) -> DocumentOpenFailure {
+        arm(path, Errno::MFILE)
+    }
+
+    /// Denies contained file opens at exactly this absolute spelling with `EACCES`.
+    ///
+    /// The denial stands across threads and repeated opens until the last denial
+    /// guard for the path is dropped. It does not consume the one-shot walk arm.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `path` is relative. Available only with `induced-failure`.
+    pub fn deny_document_opens(path: &Path) -> DocumentOpenFailure {
+        arm(path, Errno::ACCESS)
+    }
+
+    /// Fails the final-name stat a reach makes at exactly this absolute spelling
+    /// with `EIO`.
+    ///
+    /// The failure stands across threads and repeated reaches until the last
+    /// guard for the path is dropped. Opens of the path are unaffected.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `path` is relative. Available only with `induced-failure`.
+    pub fn fail_document_stats(path: &Path) -> DocumentOpenFailure {
+        arm(path, Errno::IO)
+    }
+
+    fn arm(path: &Path, errno: Errno) -> DocumentOpenFailure {
+        assert!(
+            path.is_absolute(),
+            "an open-failure arm requires an absolute path"
+        );
+        let mut arms = ARMS
+            .get_or_init(Mutex::default)
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        *arms.entry(path.to_owned()).or_default().count(errno) += 1;
+        ACTIVE.fetch_add(1, Ordering::Release);
+        DocumentOpenFailure {
+            path: path.to_owned(),
+            errno,
+        }
+    }
+
+    impl Drop for DocumentOpenFailure {
+        fn drop(&mut self) {
+            let mut arms = ARMS
+                .get()
+                .expect("a registered arm")
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            let held = arms.get_mut(&self.path).expect("a held arm");
+            *held.count(self.errno) -= 1;
+            if held.denied == 0 && held.exhausted == 0 && held.failing_stat == 0 {
+                arms.remove(&self.path);
+            }
+            ACTIVE.fetch_sub(1, Ordering::Release);
+        }
+    }
+
+    /// An unarmed process takes no registry lock on the document-read path.
+    pub(super) fn failure(path: &Path) -> Option<Errno> {
+        if ACTIVE.load(Ordering::Acquire) == 0 {
+            return None;
+        }
+        let arms = ARMS
+            .get()?
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let held = arms.get(path)?;
+        if held.exhausted != 0 {
+            Some(Errno::MFILE)
+        } else if held.denied != 0 {
+            Some(Errno::ACCESS)
+        } else {
+            None
+        }
+    }
+
+    /// The `EIO` a held failing-stat arm supplies for a reach's final-name stat.
+    pub(crate) fn stat_failure(path: &Path) -> Option<Errno> {
+        if ACTIVE.load(Ordering::Acquire) == 0 {
+            return None;
+        }
+        let arms = ARMS
+            .get()?
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        (arms.get(path)?.failing_stat != 0).then_some(Errno::IO)
+    }
+}
 
 /// The environment variable naming the walk stages this process is armed at.
 #[cfg(feature = "induced-failure")]
@@ -112,17 +256,14 @@ pub(crate) const ARMED_STAGES: &str = "NORN_FS_WALK_ARMED_STAGES";
 #[cfg(any(test, feature = "induced-failure"))]
 const SEAM: &str = "norn-fs/walk";
 
-/// A window in the walk that can be made to hold a foreign writer's edit.
-///
-/// One, because the walk has one such window: everything else it does with a
-/// directory is a single call whose failure is the machine's own. A roster of
-/// one still carries the `stage=answer` spelling the other two seams are armed
-/// with, so a harness arms all three the same way.
+/// A stat or contained document open whose observation can be supplied by a test.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Stage {
     /// Between the listing that names a directory's entries and the stat of one
     /// of those names.
     Page,
+    /// Before the contained open of a document's final name.
+    Open,
 }
 
 // The stage vocabulary — the roster and the names — is what a harness arms and
@@ -133,7 +274,7 @@ pub(crate) enum Stage {
 impl Stage {
     /// Every stage the walk holds.
     #[cfg(any(test, feature = "induced-failure"))]
-    pub(crate) const ALL: [Stage; 1] = [Stage::Page];
+    pub(crate) const ALL: [Stage; 2] = [Stage::Page, Stage::Open];
 
     /// The name a harness arms this stage under, which is also the name a
     /// record of it carries.
@@ -141,6 +282,7 @@ impl Stage {
     pub(crate) const fn name(self) -> &'static str {
         match self {
             Stage::Page => "page",
+            Stage::Open => "open",
         }
     }
 
@@ -155,13 +297,12 @@ impl Stage {
 /// observes.
 ///
 /// Each is a thing the *observation* was, never a thing the page does with it.
-/// Two of them are the same edit seen twice — a name taken away, and a name
-/// taken away and given to something else — and the third is the machine
-/// declining to answer at all, which the page owes the opposite outcome.
+/// A name taken away or replaced reaches no file. Denial and device failure
+/// describe a path; descriptor exhaustion describes the process.
 // The allow stays at the enum rather than moving onto its items: nothing in a
 // build that arms nothing constructs an answer at all, and a variant nobody
 // names is what the lint reads as dead. The variants are the seam's vocabulary
-// even so — an unarmed build has to hold the same three, or the arm a harness
+// even so — an unarmed build has to hold the same answers, or the arm a harness
 // spells means something different from the arm this seam answers.
 #[cfg_attr(not(any(test, feature = "induced-failure")), allow(dead_code))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -174,12 +315,22 @@ pub(crate) enum Answer {
     Replaced,
     /// The machine will not answer for the name, so the stat meets `EACCES`.
     Denied,
+    /// The device fails this path's operation with `EIO`.
+    Failing,
+    /// The process has no descriptor available and meets `EMFILE`.
+    Exhausted,
 }
 
 impl Answer {
     /// Every answer, in the order this seam's doc names them.
     #[cfg(any(test, feature = "induced-failure"))]
-    pub(crate) const ALL: [Answer; 3] = [Answer::Vanishes, Answer::Replaced, Answer::Denied];
+    pub(crate) const ALL: [Answer; 5] = [
+        Answer::Vanishes,
+        Answer::Replaced,
+        Answer::Denied,
+        Answer::Failing,
+        Answer::Exhausted,
+    ];
 
     /// The name a harness arms this answer under.
     #[cfg(any(test, feature = "induced-failure"))]
@@ -188,6 +339,8 @@ impl Answer {
             Answer::Vanishes => "vanishes",
             Answer::Replaced => "replaced",
             Answer::Denied => "denied",
+            Answer::Failing => "failing",
+            Answer::Exhausted => "exhausted",
         }
     }
 
@@ -244,7 +397,7 @@ pub(crate) struct Paged {
     pub(crate) meets: Option<Errno>,
     /// The kind the stat observed, where that is not the kind the machine's own
     /// mode bits say.
-    pub(crate) observes: Option<EntryKind>,
+    pub(super) observes: Option<EntryKind>,
 }
 
 /// Which window of a walk holds a foreign edit, and which one.
@@ -269,10 +422,58 @@ pub(crate) struct WalkFaults {
     /// Whether the arm has already been spent on an entry. Shared with every
     /// other walk of an armed process, and this walk's own where a case spelled
     /// the arm in code.
-    spent: Arc<AtomicBool>,
+    spent: Option<Arc<AtomicBool>>,
+}
+
+/// The failure a held arm supplies in place of a reach's final-name stat.
+pub(crate) fn stat_failing_at(access: &std::path::Path) -> Option<Errno> {
+    #[cfg(feature = "induced-failure")]
+    return targeted_open::stat_failure(access);
+    #[cfg(not(feature = "induced-failure"))]
+    {
+        let _ = access;
+        None
+    }
 }
 
 impl WalkFaults {
+    /// A held path-specific failure takes precedence over a one-shot arm.
+    pub(crate) fn opening_at(&self, access: &std::path::Path) -> Option<Errno> {
+        #[cfg(feature = "induced-failure")]
+        if let Some(errno) = targeted_open::failure(access) {
+            return Some(errno);
+        }
+        #[cfg(not(feature = "induced-failure"))]
+        let _ = access;
+        self.opening()
+    }
+
+    /// The failure standing in place of one document open, if armed.
+    pub(crate) fn opening(&self) -> Option<Errno> {
+        let answer = self.answer(Stage::Open)?;
+        if self
+            .spent
+            .as_ref()
+            .is_none_or(|spent| spent.swap(true, Ordering::AcqRel))
+        {
+            return None;
+        }
+        #[cfg(any(test, feature = "induced-failure"))]
+        crate::faults::record_or_abort(
+            self.hits.as_deref(),
+            SEAM,
+            Stage::Open.name(),
+            answer.name(),
+        );
+        Some(match answer {
+            Answer::Denied => Errno::ACCESS,
+            Answer::Failing => Errno::IO,
+            Answer::Exhausted => Errno::MFILE,
+            Answer::Vanishes => Errno::NOENT,
+            Answer::Replaced => Errno::NXIO,
+        })
+    }
+
     /// A walk that answers each named stage the named way, recording nothing.
     ///
     /// An arm spelled in code is held to the same reading as one spelled through
@@ -287,6 +488,7 @@ impl WalkFaults {
         );
         WalkFaults {
             armed,
+            spent: Some(Arc::default()),
             ..WalkFaults::default()
         }
     }
@@ -323,10 +525,14 @@ impl WalkFaults {
     pub(crate) fn entry() -> WalkFaults {
         #[cfg(feature = "induced-failure")]
         {
+            let stages = armed::stages();
+            if stages.is_empty() {
+                return WalkFaults::default();
+            }
             WalkFaults {
-                armed: armed::stages(),
+                armed: stages,
                 hits: crate::faults::armed_hits().cloned(),
-                spent: armed::spent(),
+                spent: Some(armed::spent()),
                 ..WalkFaults::default()
             }
         }
@@ -350,11 +556,16 @@ impl WalkFaults {
     /// stat after it is the machine's own again. An unarmed walk pays one
     /// comparison against an empty list and nothing else, which is what keeps
     /// the feature's cost off a heal-scale enumeration.
-    pub(crate) fn paging(&self, listed: EntryKind) -> Paged {
+    pub(super) fn paging(&self, listed: EntryKind) -> Paged {
         let Some(answer) = self.answer(Stage::Page) else {
             return Paged::default();
         };
-        if listed != self.reach.kind() || self.spent.swap(true, Ordering::AcqRel) {
+        if listed != self.reach.kind()
+            || self
+                .spent
+                .as_ref()
+                .is_none_or(|spent| spent.swap(true, Ordering::AcqRel))
+        {
             return Paged::default();
         }
         #[cfg(any(test, feature = "induced-failure"))]
@@ -371,6 +582,14 @@ impl WalkFaults {
             },
             Answer::Denied => Paged {
                 meets: Some(Errno::ACCESS),
+                ..Paged::default()
+            },
+            Answer::Failing => Paged {
+                meets: Some(Errno::IO),
+                ..Paged::default()
+            },
+            Answer::Exhausted => Paged {
+                meets: Some(Errno::MFILE),
                 ..Paged::default()
             },
             // The coarsest kind change there is, in whichever direction the

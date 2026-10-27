@@ -163,7 +163,10 @@ fn public_get_answers_the_requested_slug_during_first_attach_before_ready() {
 fn expected_report() -> GetReport {
     GetReport::record(
         DocumentRow::new(DocumentPath::new("requested.md").unwrap())
-            .with_fields([("rating".to_owned(), FieldValue::scalar("7"))].into())
+            .with_fields(std::collections::BTreeMap::from([(
+                "rating".to_owned(),
+                FieldValue::scalar("7"),
+            )]))
             .with_body(BodyText::new(BODY, 49).unwrap())
             .with_links(
                 Collection::new(

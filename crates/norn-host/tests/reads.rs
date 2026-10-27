@@ -1369,6 +1369,8 @@ fn a_get_answers_a_record_a_section_a_block_and_a_collection_page() {
         panic!("a heading anchor answered no section");
     };
     assert_eq!(path.as_str(), "zz-guide/zz-handbook.md");
+    let heading = attach::known(&heading);
+    let body = attach::known(&body);
     assert_eq!((heading.level, heading.text.as_str()), (2, "Design Notes"));
     assert_eq!(
         body.text(),
@@ -1380,8 +1382,8 @@ fn a_get_answers_a_record_a_section_a_block_and_a_collection_page() {
     else {
         panic!("a block anchor answered no block");
     };
-    assert_eq!(block.id, "design");
-    assert_eq!(body.text(), "design body ^design");
+    assert_eq!(attach::known(&block).id, "design");
+    assert_eq!(attach::known(&body).text(), "design body ^design");
 
     let headings = getting("zz-handbook")
         .with_collection(CollectionSelector::Headings)
@@ -1390,13 +1392,16 @@ fn a_get_answers_a_record_a_section_a_block_and_a_collection_page() {
         GetReport::Collection {
             page: CollectionPage::Headings { page, .. },
             ..
-        } => (
-            page.rows
-                .into_iter()
-                .map(|row| row.text)
-                .collect::<Vec<_>>(),
-            page.next,
-        ),
+        } => {
+            let page = attach::known(&page).clone();
+            (
+                page.rows
+                    .into_iter()
+                    .map(|row| row.text)
+                    .collect::<Vec<_>>(),
+                page.next,
+            )
+        }
         other => panic!("a headings page answered {other:?}"),
     };
     let (first, next) = heading_texts(got(&host, &vault, &headings));
@@ -1594,6 +1599,7 @@ fn a_tag_query_finds_a_document_whose_refused_block_holds_the_tag() {
     let norn_wire::CollectionPage::Tags { page, .. } = page else {
         panic!("a get of a document's tags answered another collection");
     };
+    let page = attach::known(&page);
     let [row] = page.rows.as_slice() else {
         panic!("the refused block's tags were {:?}", page.rows);
     };
@@ -1788,8 +1794,16 @@ fn a_gets_sections_and_blocks_are_the_text_layers_reading() {
             else {
                 panic!("`{path}#{}` answered no section", heading.text);
             };
-            assert_eq!(answered.text, scan.headings()[span.heading].text, "{path}");
-            assert_body(&text, &body[span.body_start..span.end], &path);
+            assert_eq!(
+                attach::known(&answered).text,
+                scan.headings()[span.heading].text,
+                "{path}"
+            );
+            assert_body(
+                attach::known(&text),
+                &body[span.body_start..span.end],
+                &path,
+            );
             sections += 1;
         }
 
@@ -1804,7 +1818,7 @@ fn a_gets_sections_and_blocks_are_the_text_layers_reading() {
             else {
                 panic!("`{path}#^{}` answered no block", definition.id);
             };
-            assert_body(&text, &body[extent], &path);
+            assert_body(attach::known(&text), &body[extent], &path);
             blocks += 1;
         }
     }
@@ -1874,14 +1888,14 @@ fn a_read_answers_the_body_its_snapshot_holds_and_reads_no_file() {
     );
     for row in &found.answer.report.page.rows {
         let path = row.path.as_str();
-        let body = row.body.as_ref().expect("the find projected the body");
+        let body = attach::known(row.body.as_ref().expect("the find projected the body"));
         assert_body(body, &bodies[path], path);
     }
     for (path, report) in &gotten {
         let GetReport::Record { document, .. } = report else {
             panic!("`{path}` answered {report:?}");
         };
-        let body = document.body.as_ref().expect("the get projected the body");
+        let body = attach::known(document.body.as_ref().expect("the get projected the body"));
         assert_body(body, &bodies[path], path);
     }
     assert_eq!(

@@ -36,14 +36,17 @@ fn every_fact_shape_survives_the_round_trip() {
         .expect("a document that was just written");
 
     assert_eq!(stored.document.path, facts.path);
-    assert_eq!(stored.document.content_hash, facts.content_hash);
-    assert_eq!(stored.document.byte_length, facts.byte_length);
-    assert_eq!(stored.document.body_offset, facts.body_offset);
+    assert_eq!(
+        stored.document.content_hash,
+        Some(facts.content_hash.clone())
+    );
+    assert_eq!(stored.document.byte_length, Some(facts.byte_length));
+    assert_eq!(stored.document.body_offset, Some(facts.body_offset));
     assert_eq!(
         stored.document.frontmatter_diagnostic_count,
         facts.frontmatter_diagnostic_count
     );
-    assert_eq!(stored.body, facts.body);
+    assert_eq!(stored.body, Some(facts.body.clone()));
     assert_eq!(written_links(&stored), facts.links);
     assert_eq!(stored.headings, facts.headings);
     assert_eq!(stored.blocks, facts.blocks);
@@ -203,8 +206,8 @@ fn a_re_derivation_replaces_fact_rows_wholesale() {
     assert_eq!(after.headings, second.headings);
     assert_eq!(after.blocks, Vec::new());
     assert_eq!(after.tags, Vec::new());
-    assert_eq!(after.document.content_hash, "hash-2");
-    assert_eq!(after.body, second.body);
+    assert_eq!(after.document.content_hash.as_deref(), Some("hash-2"));
+    assert_eq!(after.body, Some(second.body.clone()));
     assert_eq!(
         after.document.frontmatter, None,
         "the old projection outlived the block it projected"
@@ -1006,8 +1009,8 @@ fn byte_length_is_the_document_and_not_the_body() {
         .stored_document(&facts.path)
         .expect("reading a document")
         .expect("a document");
-    assert_eq!(stored.byte_length, facts.byte_length);
-    assert_eq!(stored.body_offset, facts.body_offset);
+    assert_eq!(stored.byte_length, Some(facts.byte_length));
+    assert_eq!(stored.body_offset, Some(facts.body_offset));
 }
 
 /// **A document whose frame and body do not account for its size is refused.**

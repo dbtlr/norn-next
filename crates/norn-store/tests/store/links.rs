@@ -26,6 +26,7 @@ use norn_wire::{
     ValidateParams, VaultAddress, VaultName,
 };
 
+use crate::common::known;
 use crate::common::{
     DOCUMENT_PAYLOAD, Scratch, document, heading_anchor, planned_get_work, reads_of, span,
     violation,
@@ -245,7 +246,7 @@ impl Linked {
         let [row] = &found.rows[..] else {
             panic!("`{at}` is not one row: {:?}", found.rows);
         };
-        let links = row.links.clone().expect("the links column");
+        let links = known(row.links.as_ref().expect("the links column")).clone();
         assert_eq!(links.total, links.items.len() as u64);
         links.items
     }
@@ -970,6 +971,7 @@ fn a_get_pages_a_documents_links_as_a_row_carries_them() {
             else {
                 panic!("a get answered {:?}, not a links page", gotten.report);
             };
+            let page = crate::common::known(&page).clone();
             assert!(page.rows.len() <= limit as usize);
             drained.extend(page.rows);
             match page.next {
@@ -1429,7 +1431,7 @@ fn a_links_head_is_cut_in_the_statement_that_names_it() {
         let [row] = &found.rows[..] else {
             panic!("`src/many.md` is not one row: {:?}", found.rows);
         };
-        let links = &row.links.as_ref().expect("the links column").items;
+        let links = &known(row.links.as_ref().expect("the links column")).items;
         let glossary = links
             .iter()
             .find(|link| link.target == "glossary")
@@ -1671,7 +1673,10 @@ fn a_pages_links_cost_a_fixed_number_of_statements() {
         else {
             panic!("a get answered {:?}, not a links page", gotten.report);
         };
-        (page.rows.len(), gotten.work.statements)
+        (
+            crate::common::known(page).rows.len(),
+            gotten.work.statements,
+        )
     };
     let (one_link, at_one) = page(1);
     let (forty_links, at_forty) = page(40);

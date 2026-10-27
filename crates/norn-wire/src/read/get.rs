@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use crate::address::VaultAddress;
 use crate::cursor::{Cursor, Page};
 use crate::document::{
-    BlockRow, BodyText, Column, DocumentPath, DocumentRow, HeadingRow, LinkRow, TagRow,
+    BlockRow, BodyText, Column, Content, DocumentPath, DocumentRow, HeadingRow, LinkRow, TagRow,
 };
 use crate::finding_row::FindingRow;
 use crate::read::validate::RuleSet;
@@ -61,9 +61,11 @@ pub enum CollectionSelector {
 /// One page of one nested collection.
 ///
 /// On the wire a page is an object tagged `of`:
-/// `{"of":"links","page":{"rows":[…],"next":null,"moved":[]}}`. The tag names
-/// which collection was paged, so a consumer reads the row type from the value
-/// rather than from the request it sent.
+/// `{"of":"links","page":{"state":"known","value":{"rows":[…],"next":null,"moved":[]}}}`.
+/// Content pages use `Content` to distinguish a known page, including an
+/// empty page, from unknown content with a reason. A broken document answers
+/// `{"state":"unknown","reason":"unreadable"}`. Findings page normally.
+/// The `of` tag names the collection and its row type.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "of", rename_all = "snake_case")]
 #[non_exhaustive]
@@ -71,26 +73,26 @@ pub enum CollectionPage {
     /// A page of the document's links.
     #[non_exhaustive]
     Links {
-        /// The page.
-        page: Page<LinkRow>,
+        /// The page, or why the document's content is unknown.
+        page: Content<Page<LinkRow>>,
     },
     /// A page of the document's headings.
     #[non_exhaustive]
     Headings {
-        /// The page.
-        page: Page<HeadingRow>,
+        /// The page, or why the document's content is unknown.
+        page: Content<Page<HeadingRow>>,
     },
     /// A page of the document's block identifiers.
     #[non_exhaustive]
     Blocks {
-        /// The page.
-        page: Page<BlockRow>,
+        /// The page, or why the document's content is unknown.
+        page: Content<Page<BlockRow>>,
     },
     /// A page of the document's tags.
     #[non_exhaustive]
     Tags {
-        /// The page.
-        page: Page<TagRow>,
+        /// The page, or why the document's content is unknown.
+        page: Content<Page<TagRow>>,
     },
     /// A page of the findings standing over the document.
     #[non_exhaustive]
@@ -105,23 +107,23 @@ pub enum CollectionPage {
 
 impl CollectionPage {
     /// A page of links.
-    pub const fn links(page: Page<LinkRow>) -> Self {
-        CollectionPage::Links { page }
+    pub fn links(page: impl Into<Content<Page<LinkRow>>>) -> Self {
+        CollectionPage::Links { page: page.into() }
     }
 
     /// A page of headings.
-    pub const fn headings(page: Page<HeadingRow>) -> Self {
-        CollectionPage::Headings { page }
+    pub fn headings(page: impl Into<Content<Page<HeadingRow>>>) -> Self {
+        CollectionPage::Headings { page: page.into() }
     }
 
     /// A page of block identifiers.
-    pub const fn blocks(page: Page<BlockRow>) -> Self {
-        CollectionPage::Blocks { page }
+    pub fn blocks(page: impl Into<Content<Page<BlockRow>>>) -> Self {
+        CollectionPage::Blocks { page: page.into() }
     }
 
     /// A page of tags.
-    pub const fn tags(page: Page<TagRow>) -> Self {
-        CollectionPage::Tags { page }
+    pub fn tags(page: impl Into<Content<Page<TagRow>>>) -> Self {
+        CollectionPage::Tags { page: page.into() }
     }
 
     /// A page of findings, with the rule sets its rows cite.
@@ -175,21 +177,21 @@ pub enum GetReport {
     Section {
         /// The document the section is in.
         path: DocumentPath,
-        /// The heading that opens it.
-        heading: HeadingRow,
+        /// The heading that opens it, or why it is unknown.
+        heading: Content<HeadingRow>,
         /// The section body, from the heading to the start of the line
-        /// holding the next one at its level or above.
-        body: BodyText,
+        /// holding the next one at its level or above, or why it is unknown.
+        body: Content<BodyText>,
     },
     /// The block the target's block anchor named.
     #[non_exhaustive]
     Block {
         /// The document the block is in.
         path: DocumentPath,
-        /// The block identifier the anchor named, and where it is defined.
-        block: BlockRow,
-        /// The block body.
-        body: BodyText,
+        /// The block identifier and its position, or why they are unknown.
+        block: Content<BlockRow>,
+        /// The block body, or why it is unknown.
+        body: Content<BodyText>,
     },
     /// One page of one nested collection.
     #[non_exhaustive]
@@ -211,17 +213,29 @@ impl GetReport {
     }
 
     /// The section `heading` opens in the document at `path`, holding `body`.
-    pub const fn section(path: DocumentPath, heading: HeadingRow, body: BodyText) -> Self {
+    pub fn section(
+        path: DocumentPath,
+        heading: impl Into<Content<HeadingRow>>,
+        body: impl Into<Content<BodyText>>,
+    ) -> Self {
         GetReport::Section {
             path,
-            heading,
-            body,
+            heading: heading.into(),
+            body: body.into(),
         }
     }
 
     /// The `block` in the document at `path`, holding `body`.
-    pub const fn block(path: DocumentPath, block: BlockRow, body: BodyText) -> Self {
-        GetReport::Block { path, block, body }
+    pub fn block(
+        path: DocumentPath,
+        block: impl Into<Content<BlockRow>>,
+        body: impl Into<Content<BodyText>>,
+    ) -> Self {
+        GetReport::Block {
+            path,
+            block: block.into(),
+            body: body.into(),
+        }
     }
 
     /// The `page` of one collection on the document at `path`.

@@ -306,7 +306,7 @@ pub(crate) fn vouched<I: LinkIndex + ?Sized>(
     };
     Ok(index
         .held_links(from)?
-        .filter(|held| held.content_hash == hash.hex())
+        .filter(|held| held.content_hash.as_deref() == Some(hash.hex()))
         .map(|held| held.links))
 }
 
@@ -326,7 +326,7 @@ pub(crate) fn vouched_block<I: LinkIndex + ?Sized>(
     };
     Ok(index
         .held_frontmatter(from)?
-        .filter(|held| held.content_hash == hash.hex())
+        .filter(|held| held.content_hash.as_deref() == Some(hash.hex()))
         .map(|held| held.block))
 }
 
@@ -2143,7 +2143,9 @@ pub(crate) mod testing {
                         (
                             at.to_string(),
                             norn_store::HeldLinks {
-                                content_hash: norn_fs::ContentHash::of(content.as_bytes()).to_hex(),
+                                content_hash: Some(
+                                    norn_fs::ContentHash::of(content.as_bytes()).to_hex(),
+                                ),
                                 links: crate::derivation::document_links(content.as_bytes()),
                             },
                         )
@@ -3503,14 +3505,21 @@ mod tests {
         let index = crate::apply::PlanSnapshot::held(vault(), &snapshot, &declared);
 
         for (at, bytes) in documents {
-            let streamed = norn_fs::stream_optional_and_hash(&root, std::path::Path::new(at))
-                .expect("a streamed read")
-                .expect("the document is there");
+            let norn_fs::Opened::Read(streamed) =
+                norn_fs::stream_optional_and_hash(&root, std::path::Path::new(at))
+                    .expect("a streamed read")
+            else {
+                panic!("the document is there");
+            };
             let held = index
                 .held_links(&path(at))
                 .unwrap_or_else(|refused| panic!("the links {at} holds: {refused:?}"))
                 .unwrap_or_else(|| panic!("the index holds no document at {at}"));
-            assert_eq!(held.content_hash, streamed.content_hash().to_hex(), "{at}");
+            assert_eq!(
+                held.content_hash,
+                Some(streamed.content_hash().to_hex()),
+                "{at}"
+            );
             assert_eq!(held.links, document_links(bytes), "{at}");
         }
         // The Markdown image beside the wikilink embeds is a held link of its

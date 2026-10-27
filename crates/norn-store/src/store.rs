@@ -1700,7 +1700,7 @@ impl Store {
             .connection()
             .prepare(
                 "SELECT path, body, body_hash, frontmatter, frontmatter_projection_hash
-                 FROM documents",
+                 FROM documents WHERE body IS NOT NULL",
             )
             .map_err(|error| error::sql(operation, error))?;
         let mut rows = statement

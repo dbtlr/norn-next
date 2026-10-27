@@ -109,6 +109,12 @@ pub(super) fn fixes<R: Reading>(
         let Some((held, trigrams)) = &headings[target] else {
             continue;
         };
+        let Some(content_hash) = held.content_hash.as_deref() else {
+            for (at, row) in &rows {
+                composed.decided[*at] = Some(skip(row, SkipReason::UnreadableTarget));
+            }
+            continue;
+        };
         let query = similarity::trigrams(link.anchor.as_deref().expect("a grouped heading anchor"));
         let mut best = similarity::CUTOFF;
         let mut winners = Vec::new();
@@ -168,8 +174,7 @@ pub(super) fn fixes<R: Reading>(
         );
         let condition = AuthorCondition::content_hash(
             target.clone(),
-            ContentHash::new(format!("sha256:{}", held.content_hash))
-                .expect("an indexed document hash"),
+            ContentHash::new(format!("sha256:{content_hash}")).expect("an indexed document hash"),
         );
         fixes.push(NameFix {
             operation,

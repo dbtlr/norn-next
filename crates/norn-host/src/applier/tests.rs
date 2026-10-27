@@ -1984,7 +1984,10 @@ impl Fixture {
             .begin_request()
             .stored_document(&norn_store::DocumentPath::new(at).expect("a path"))
             .expect("a read")
-            .map(|row| row.content_hash)
+            .map(|row| {
+                row.content_hash
+                    .expect("a readable fixture has a content hash")
+            })
     }
 }
 

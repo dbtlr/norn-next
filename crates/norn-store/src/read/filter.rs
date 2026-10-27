@@ -31,15 +31,15 @@ pub enum ReadFilter {
     /// A shaped reading counts a row only where its key's presence row, one
     /// primary-key seek, names the container the declared shape holds.
     Equal(FieldMatch),
-    /// No value row under the key equals the value under the reading, a
-    /// document without the key included.
+    /// A readable document has no value row under the key equal to the
+    /// value under the reading, including a document without the key.
     NotEqual(FieldMatch),
     /// A value row under the key equals one of the values under the reading.
     Member(FieldMatch),
     /// The document carries the key: its presence row, on
     /// `document_fields_presence`.
     Present,
-    /// The document does not carry the key.
+    /// A readable document does not carry the key.
     Absent,
     /// A value row under the key sorts before the bound under the order.
     Before(FieldOrder),
@@ -248,10 +248,15 @@ impl Filter {
         } else {
             "IN"
         };
-        format!(
+        let membership = format!(
             "{id} {membership} (SELECT {document} FROM {table}
                      WHERE {condition})"
-        )
+        );
+        if matches!(self.shape(), ReadFilter::NotEqual(_) | ReadFilter::Absent) {
+            format!("({membership} AND {})", readable(id))
+        } else {
+            membership
+        }
     }
 
     /// Whether the documents this filter keeps are at most `ceiling`, as one
@@ -493,9 +498,22 @@ fn test_bound(shape: ReadFilter, values: &[Value], id: &str, binder: &mut Binder
     } else {
         "EXISTS"
     };
-    format!(
+    let test = format!(
         "{existence} (SELECT 1 FROM {table}
                      WHERE {document} = {id} AND {condition})"
+    );
+    if matches!(shape, ReadFilter::NotEqual(_) | ReadFilter::Absent) {
+        format!("({test} AND {})", readable(id))
+    } else {
+        test
+    }
+}
+
+/// Unknown fields cannot establish absence or inequality. The row's hash
+/// answers that distinction through one primary-key seek.
+fn readable(id: &str) -> String {
+    format!(
+        "EXISTS (SELECT 1 FROM documents AS readable WHERE readable.id = {id} AND readable.content_hash IS NOT NULL)"
     )
 }
 

@@ -105,7 +105,7 @@ impl Held {
 fn a_documents_held_frontmatter_is_its_projection_typed_beside_its_hash() {
     let held = Held::new("held-frontmatter");
     let fronted = held.held("notes/fronted.md").expect("a document");
-    assert_eq!(fronted.content_hash, "hash-fronted");
+    assert_eq!(fronted.content_hash.as_deref(), Some("hash-fronted"));
     let HeldBlock::Read(FrontmatterValue::Map(entries)) = &fronted.block else {
         panic!("a read block: {fronted:?}");
     };
@@ -122,7 +122,7 @@ fn a_documents_held_frontmatter_is_its_projection_typed_beside_its_hash() {
     assert_eq!(
         held.held("notes/bare.md"),
         Some(HeldFrontmatter {
-            content_hash: "hash-bare".to_string(),
+            content_hash: Some("hash-bare".to_string()),
             block: HeldBlock::None,
         })
     );

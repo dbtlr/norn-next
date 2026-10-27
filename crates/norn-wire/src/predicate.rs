@@ -38,7 +38,9 @@ use crate::target::ResolutionTarget;
 /// On the wire a part is an object tagged `op`:
 /// `{"op":"eq","key":"type","value":"note"}`, `{"op":"tag","name":"draft"}`. A
 /// request carries a list of them, and a document matches when it satisfies
-/// every one.
+/// every one. A broken document's content is unknown, so no content predicate
+/// matches it, including absence or negation of a field, tag or link. Path
+/// predicates still match its name.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 #[non_exhaustive]
@@ -51,7 +53,7 @@ pub enum Predicate {
         /// The value the key must hold, as text.
         value: String,
     },
-    /// No value the document holds for `key` is `value`.
+    /// A readable document holds no value for `key` equal to `value`.
     #[non_exhaustive]
     NotEq {
         /// The frontmatter key.
@@ -75,7 +77,7 @@ pub enum Predicate {
         /// The frontmatter key.
         key: String,
     },
-    /// The document does not carry `key`.
+    /// A readable document does not carry `key`.
     #[non_exhaustive]
     Missing {
         /// The frontmatter key.

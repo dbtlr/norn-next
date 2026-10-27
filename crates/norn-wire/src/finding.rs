@@ -145,6 +145,10 @@ pub enum FindingKind {
     /// no facts are read out of it.
     #[serde(rename = "document/body-bytes-not-utf8")]
     BodyBytesNotUtf8,
+    /// `document/unreadable` — the document could not be read. Its names-only
+    /// row remains resolvable, and this finding carries the machine's cause.
+    #[serde(rename = "document/unreadable")]
+    UnreadableDocument,
     /// `document/frontmatter-too-large` — the frontmatter block is past the
     /// bound the text layer reads, so the block is refused unparsed and the
     /// document's fields are unknown.
@@ -290,10 +294,11 @@ impl FindingKind {
     /// Reading a kind back and enumerating the registry both walk this list,
     /// so a variant absent here is unreadable and unadvertisable — the schema
     /// suite holds this list equal to the enum itself.
-    pub const ALL: [FindingKind; 20] = [
+    pub const ALL: [FindingKind; 21] = [
         FindingKind::PathBytesNotUtf8,
         FindingKind::PathNamesNoDocument,
         FindingKind::BodyBytesNotUtf8,
+        FindingKind::UnreadableDocument,
         FindingKind::FrontmatterTooLarge,
         FindingKind::FrontmatterUnclosed,
         FindingKind::FrontmatterUnreadable,
@@ -319,6 +324,7 @@ impl FindingKind {
             FindingKind::PathBytesNotUtf8 => "document/path-bytes-not-utf8",
             FindingKind::PathNamesNoDocument => "document/path-names-no-document",
             FindingKind::BodyBytesNotUtf8 => "document/body-bytes-not-utf8",
+            FindingKind::UnreadableDocument => "document/unreadable",
             FindingKind::FrontmatterTooLarge => "document/frontmatter-too-large",
             FindingKind::FrontmatterUnclosed => "document/frontmatter-unclosed",
             FindingKind::FrontmatterUnreadable => "document/frontmatter-unreadable",
@@ -354,6 +360,7 @@ impl FindingKind {
             FindingKind::PathBytesNotUtf8
             | FindingKind::PathNamesNoDocument
             | FindingKind::BodyBytesNotUtf8
+            | FindingKind::UnreadableDocument
             | FindingKind::FrontmatterTooLarge
             | FindingKind::FrontmatterUnclosed
             | FindingKind::FrontmatterUnreadable => Severity::Error,
@@ -387,6 +394,8 @@ impl FindingKind {
     /// the subject itself.
     pub const fn scope(&self) -> FindingScope {
         match self {
+            // The names-only row still identifies the unreadable document.
+            FindingKind::UnreadableDocument => FindingScope::Document,
             // Nothing is derivable: there is no identity to hold a row under, or
             // no text to read facts out of.
             FindingKind::PathBytesNotUtf8

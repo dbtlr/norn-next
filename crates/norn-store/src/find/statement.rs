@@ -853,7 +853,7 @@ pub(crate) fn compose_documents(
     };
     (
         format!(
-            "SELECT d.id, {frontmatter}, {head}, {length} FROM documents AS d
+            "SELECT d.id, {frontmatter}, {head}, {length}, d.content_hash IS NULL FROM documents AS d
              WHERE d.id IN (SELECT value FROM json_each({listed}))"
         ),
         binder.into_values(),

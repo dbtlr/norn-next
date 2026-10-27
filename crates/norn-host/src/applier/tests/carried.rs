@@ -1393,7 +1393,10 @@ rules:
                 crate::planner::links::LinkIndex::held_frontmatter(&index, &path("open/x.md"))
                     .expect("the index reads")
                     .expect("the index holds the document");
-            assert_eq!(held.content_hash, content_hash(shape.as_bytes()).hex());
+            assert_eq!(
+                held.content_hash.as_deref(),
+                Some(content_hash(shape.as_bytes()).hex())
+            );
             let bytes =
                 crate::derivation::frontmatter_block(shape.as_bytes()).expect("the bytes decode");
             let canonical = |block: &norn_store::HeldBlock| match block {

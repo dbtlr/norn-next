@@ -103,9 +103,9 @@ use crate::read::projected_findings;
 use norn_db::EmittedPlan;
 use norn_db::rusqlite::Row;
 use norn_wire::{
-    Anchor, AnswerShape, BodyText, CollectionPage, CollectionSelector, Cursor, CursorKey,
+    Anchor, AnswerShape, BodyText, CollectionPage, CollectionSelector, Content, Cursor, CursorKey,
     DocumentRow, GetParams, GetReport, Hint, Page, PagedRows, RequestPart, ResolutionTarget,
-    Unsatisfied,
+    UnknownReason, Unsatisfied,
 };
 
 use crate::error::{self, StoreError};
@@ -181,11 +181,14 @@ pub struct SectionAt {
     pub body: Range<usize>,
 }
 
+/// One collection's ordered rows and the cursor its next page continues from.
+type OrdinalRows<T> = (Vec<T>, Option<Cursor>);
+
 /// Indexed headings of one document, beside the hash their derivation read.
 #[derive(Clone, Debug, PartialEq)]
 pub struct HeldHeadings {
-    /// The document's recorded content hash.
-    pub content_hash: String,
+    /// The document's recorded content hash, absent for a broken document.
+    pub content_hash: Option<String>,
     /// The document's headings in source order, including their stored slugs.
     pub headings: Vec<HeadingFact>,
 }
@@ -618,7 +621,16 @@ impl Snapshot {
             .into_iter()
             .collect::<Result<_, StoreError>>()?;
         work.anchor_headings += headings.len() as u64;
-        let held = self.body_of(named.document, lookups)?;
+        let Some(held) = self.body_of(named.document, lookups)? else {
+            return Ok((
+                GetReport::section(
+                    named.wire,
+                    norn_wire::Content::unknown(norn_wire::UnknownReason::Unreadable),
+                    norn_wire::Content::unknown(norn_wire::UnknownReason::Unreadable),
+                ),
+                Vec::new(),
+            ));
+        };
         for heading in &headings {
             let at = held.offset(heading.span.byte_offset, "a heading's offset")?;
             let body_at = held.offset(heading.body_offset, "a heading's body offset")?;
@@ -661,6 +673,16 @@ impl Snapshot {
         text: &dyn DocumentText,
         lookups: &mut Lookups,
     ) -> Result<(GetReport, Vec<Unsatisfied>), StoreError> {
+        let Some(held) = self.body_of(named.document, lookups)? else {
+            return Ok((
+                GetReport::block(
+                    named.wire,
+                    norn_wire::Content::unknown(norn_wire::UnknownReason::Unreadable),
+                    norn_wire::Content::unknown(norn_wire::UnknownReason::Unreadable),
+                ),
+                Vec::new(),
+            ));
+        };
         let definition: Option<BlockFact> = self
             .run_statement(
                 &mut lookups.ran,
@@ -685,7 +707,7 @@ impl Snapshot {
         let body = match definition.span {
             None => BodyText::new("", 0).expect("an empty head heads an empty whole"),
             Some(span) => {
-                let body = self.body_of(named.document, lookups)?;
+                let body = held;
                 body.offset(span.byte_offset, "a block's marker")?;
                 let range = text.block(&body.text, body.start, span.byte_offset);
                 let held = body
@@ -702,12 +724,21 @@ impl Snapshot {
     }
 
     /// One document's whole body, with where it begins in the document.
-    fn body_of(&self, document: i64, lookups: &mut Lookups) -> Result<HeldBody, StoreError> {
+    fn body_of(
+        &self,
+        document: i64,
+        lookups: &mut Lookups,
+    ) -> Result<Option<HeldBody>, StoreError> {
         let (text, start) = self
             .run_statement(
                 &mut lookups.ran,
                 compose(&Spelled::DocumentBody { document }),
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                    ))
+                },
             )
             .map_err(|problem| error::sql("reading a document's body", problem))?
             .into_iter()
@@ -715,10 +746,13 @@ impl Snapshot {
             .ok_or_else(|| StoreError::Damaged {
                 what: format!("the document at row {document} has no row"),
             })?;
+        let (Some(text), Some(start)) = (text, start) else {
+            return Ok(None);
+        };
         let start = usize::try_from(start).map_err(|_| StoreError::Damaged {
             what: format!("the document at row {document} holds a body starting at {start}"),
         })?;
-        Ok(HeldBody { text, start })
+        Ok(Some(HeldBody { text, start }))
     }
 
     /// One page of the collection `selector` names on the named document, a
@@ -763,7 +797,12 @@ impl Snapshot {
         };
         Ok(match collection {
             Nested::Links => {
-                let (links, next) = self.ordinal_page(&page, identified_link, lookups)?;
+                let Some((links, next)) = self.ordinal_page(&page, identified_link, lookups)?
+                else {
+                    return Ok(CollectionPage::links(Content::unknown(
+                        UnknownReason::Unreadable,
+                    )));
+                };
                 let rows = self.link_rows(
                     links,
                     declared.ambiguity_ignore(),
@@ -773,15 +812,27 @@ impl Snapshot {
                 CollectionPage::links(Page::new(rows, next, moved))
             }
             Nested::Headings => {
-                let (rows, next) = self.ordinal_page(&page, heading_row, lookups)?;
+                let Some((rows, next)) = self.ordinal_page(&page, heading_row, lookups)? else {
+                    return Ok(CollectionPage::headings(Content::unknown(
+                        UnknownReason::Unreadable,
+                    )));
+                };
                 CollectionPage::headings(Page::new(rows, next, moved))
             }
             Nested::Blocks => {
-                let (rows, next) = self.ordinal_page(&page, block_row, lookups)?;
+                let Some((rows, next)) = self.ordinal_page(&page, block_row, lookups)? else {
+                    return Ok(CollectionPage::blocks(Content::unknown(
+                        UnknownReason::Unreadable,
+                    )));
+                };
                 CollectionPage::blocks(Page::new(rows, next, moved))
             }
             Nested::Tags => {
-                let (rows, next) = self.ordinal_page(&page, tag_row, lookups)?;
+                let Some((rows, next)) = self.ordinal_page(&page, tag_row, lookups)? else {
+                    return Ok(CollectionPage::tags(Content::unknown(
+                        UnknownReason::Unreadable,
+                    )));
+                };
                 CollectionPage::tags(Page::new(rows, next, moved))
             }
         })
@@ -814,14 +865,16 @@ impl Snapshot {
     }
 
     /// One page of the rows `page` names, each read through `item`, and the
-    /// cursor the next page continues from.
+    /// cursor the next page continues from. No page is known where the
+    /// document's content hash is null; an empty readable collection is known.
     fn ordinal_page<T: Clone>(
         &self,
         page: &OrdinalPage<'_>,
         item: fn(&Row<'_>) -> Reading<T>,
         lookups: &mut Lookups,
-    ) -> Result<(Vec<T>, Option<Cursor>), PageRefusal> {
+    ) -> Result<Option<OrdinalRows<T>>, PageRefusal> {
         let width = page.collection.width();
+        let mut unreadable = false;
         let read = self.read_page(
             [page.after],
             page.limit,
@@ -834,21 +887,31 @@ impl Snapshot {
                     rows,
                 });
                 self.run_statement(record, ran, |row| {
-                    Ok((row.get::<_, i64>(width)?, item(row)?))
+                    unreadable = row.get(width + 1)?;
+                    let ordinal = row.get::<_, Option<i64>>(width)?;
+                    ordinal
+                        .map(|ordinal| item(row).map(|item| item.map(|item| (ordinal, item))))
+                        .transpose()
                 })
                 .map_err(|problem| error::sql("reading a page of a collection", problem))?
                 .into_iter()
-                .map(|(ordinal, item)| item.map(|item| (ordinal, item)))
+                .flatten()
                 .collect()
             },
         )?;
+        if unreadable {
+            return Ok(None);
+        }
         let next = read.next.map(|(ordinal, _)| {
             Cursor::new(
                 page.snapshot.clone(),
                 CursorKey::ordinal(page.selector, u64::try_from(ordinal).unwrap_or_default()),
             )
         });
-        Ok((read.rows.into_iter().map(|(_, item)| item).collect(), next))
+        Ok(Some((
+            read.rows.into_iter().map(|(_, item)| item).collect(),
+            next,
+        )))
     }
 
     /// One page of at most `limit` of the findings standing at the named

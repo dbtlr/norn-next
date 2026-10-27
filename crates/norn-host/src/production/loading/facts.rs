@@ -15,6 +15,16 @@ pub(in crate::production) fn load_fact(
     files: bool,
 ) -> Result<Option<String>, JobFailure> {
     match fact {
+        norn_fs::WalkFact::Unreadable(unreadable) => {
+            if unreadable.kind_unknown() {
+                pending.withhold_entry(unreadable.path().as_path());
+            }
+            pending.unreadable(
+                unreadable.path().as_path(),
+                unreadable.operation(),
+                unreadable.cause(),
+            )?;
+        }
         norn_fs::WalkFact::Skipped(skip) => {
             if files {
                 pending.passed_over(skip.path().as_path(), skip.reason());
@@ -38,9 +48,16 @@ pub(in crate::production) fn load_fact(
                 }
                 return Ok(None);
             };
-            let Some(read) = file.read_optional().map_err(effect)? else {
-                pending.withhold_entry(&path);
-                return Ok(None);
+            let read = match file.read_optional().map_err(effect)? {
+                norn_fs::Opened::Read(read) => read,
+                norn_fs::Opened::Nothing => {
+                    pending.withhold_entry(&path);
+                    return Ok(None);
+                }
+                norn_fs::Opened::Unreadable { operation, cause } => {
+                    pending.unreadable(&path, operation, &cause)?;
+                    return Ok(None);
+                }
             };
             pending.account.bytes_read += read.bytes().len() as u64;
             let stored = match document_path(&path) {

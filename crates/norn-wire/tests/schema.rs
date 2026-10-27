@@ -176,6 +176,8 @@ fn every_wire_schema() -> Vec<Value> {
         schema_of::<Column>(),
         schema_of::<Collection<String>>(),
         schema_of::<BodyText>(),
+        schema_of::<norn_wire::Content<String>>(),
+        schema_of::<norn_wire::UnknownReason>(),
         schema_of::<LinkHealth>(),
         schema_of::<LinkFamily>(),
         schema_of::<LinkRow>(),
@@ -774,6 +776,7 @@ fn a_finding_kind_advertises_its_flat_namespaced_string() {
             "document/path-bytes-not-utf8",
             "document/path-names-no-document",
             "document/body-bytes-not-utf8",
+            "document/unreadable",
             "document/frontmatter-too-large",
             "document/frontmatter-unclosed",
             "document/frontmatter-unreadable",
@@ -1766,6 +1769,7 @@ fn a_read_refusal_advertises_the_typed_facts_it_carries() {
         sorted(tag_constants(&schema_of::<ReadFailure>(), "kind")),
         sorted([
             "statement",
+            "unreadable_document",
             "declaration_not_pinned",
             "count_cursor_expired",
             "count_result_capacity",
@@ -4277,6 +4281,7 @@ fn the_repair_vocabularies_are_closed_strings() {
         "tie",
         "below_threshold",
         "unreadable",
+        "unreadable_target",
         "conflicting_defaults",
         "brings_in_required_fields",
         "ambiguous_capture",
@@ -4636,4 +4641,116 @@ fn a_rewrite_tag_appears_in_the_plan_schema() {
     for name in ["from", "to"] {
         assert_eq!(fields["properties"][name]["minLength"], 1);
     }
+}
+
+#[test]
+fn content_schema_distinguishes_known_values_and_unknown_reasons() {
+    use norn_wire::{Content, UnknownReason};
+
+    let schema = schema_of::<Content<BodyText>>();
+    assert_eq!(
+        sorted(tag_constants(&schema, "state")),
+        ["known", "unknown"]
+    );
+    let known = branches(&schema)
+        .iter()
+        .find(|branch| tag_constant(branch, "state") == Some("known"))
+        .expect("known branch");
+    let unknown = branches(&schema)
+        .iter()
+        .find(|branch| tag_constant(branch, "state") == Some("unknown"))
+        .expect("unknown branch");
+    assert_eq!(known["properties"]["value"]["$ref"], "#/$defs/BodyText");
+    assert_eq!(
+        unknown["properties"]["reason"]["$ref"],
+        "#/$defs/UnknownReason"
+    );
+    assert!(
+        unknown["required"]
+            .as_array()
+            .expect("required keys")
+            .contains(&Value::from("reason"))
+    );
+    assert_eq!(
+        branches(&schema_of::<UnknownReason>())
+            .iter()
+            .map(|branch| string_constant(branch).expect("a reason"))
+            .collect::<Vec<_>>(),
+        ["unreadable"]
+    );
+
+    let document = schema_of::<DocumentRow>();
+    for column in ["fields", "body", "links", "headings", "blocks", "tags"] {
+        let choices = document["properties"][column]["anyOf"]
+            .as_array()
+            .expect("optional content");
+        let reference = choices
+            .iter()
+            .find_map(|choice| choice["$ref"].as_str())
+            .expect("typed content carrier");
+        let definition = &document["$defs"][reference
+            .strip_prefix("#/$defs/")
+            .expect("local definition")];
+        assert_eq!(
+            sorted(tag_constants(definition, "state")),
+            ["known", "unknown"],
+            "{column}"
+        );
+    }
+    assert!(
+        !document["properties"]["findings"]
+            .to_string()
+            .contains("Content")
+    );
+    let get = schema_of::<GetReport>();
+    for (shape, metadata) in [("section", "heading"), ("block", "block")] {
+        let branch = branches(&get)
+            .iter()
+            .find(|branch| tag_constant(branch, "shape") == Some(shape))
+            .expect("anchored get branch");
+        for column in [metadata, "body"] {
+            let reference = branch["properties"][column]["$ref"]
+                .as_str()
+                .expect("typed content");
+            let definition = &get["$defs"][reference
+                .strip_prefix("#/$defs/")
+                .expect("local definition")];
+            assert_eq!(
+                sorted(tag_constants(definition, "state")),
+                ["known", "unknown"]
+            );
+        }
+    }
+}
+
+#[test]
+fn collection_content_pages_advertise_unknown_content_but_findings_stay_normal() {
+    let schema = schema_of::<CollectionPage>();
+    for selector in ["links", "headings", "blocks", "tags"] {
+        let page = &branch(&schema, "of", selector)["properties"]["page"];
+        let reference = page["$ref"].as_str().expect("a typed content carrier");
+        let content = definition(&schema, reference.strip_prefix("#/$defs/").unwrap());
+        assert_eq!(
+            sorted(tag_constants(content, "state")),
+            ["known", "unknown"],
+            "{selector}"
+        );
+        let known = branch(content, "state", "known");
+        let value = known["properties"]["value"]["$ref"]
+            .as_str()
+            .expect("a typed page");
+        assert!(
+            property_names(definition(&schema, value.strip_prefix("#/$defs/").unwrap()))
+                .contains("rows")
+        );
+    }
+    let findings = &branch(&schema, "of", "findings")["properties"]["page"];
+    let reference = findings["$ref"].as_str().expect("a normal findings page");
+    assert!(
+        property_names(definition(
+            &schema,
+            reference.strip_prefix("#/$defs/").unwrap()
+        ))
+        .contains("rows")
+    );
 }

@@ -129,3 +129,11 @@ impl Scratch {
         names
     }
 }
+
+/// Require a complete content observation in a readable-file fixture.
+pub(crate) fn read<T>(opened: crate::Opened<T>) -> T {
+    match opened {
+        crate::Opened::Read(read) => read,
+        _ => panic!("the fixture must read"),
+    }
+}

@@ -270,6 +270,10 @@ pub enum ReadFailure {
     /// A fault of the environment may pass, so the same read may later be
     /// answered.
     Statement {},
+    /// A document the request must read could not be read: the machine refused
+    /// its bytes. The entry is still serving, and no trust was withdrawn; the
+    /// same request is answered once the document reads again.
+    UnreadableDocument {},
     /// The declaration the read was compiled under was read from a schema
     /// other than the one the store's snapshot pins. Each fingerprint is
     /// `null` for no schema. It is a host defect, not advice to try the read
@@ -303,6 +307,11 @@ impl ReadFailure {
     /// A statement the store refused.
     pub const fn statement() -> Self {
         ReadFailure::Statement {}
+    }
+
+    /// A document the machine refused to read.
+    pub const fn unreadable_document() -> Self {
+        ReadFailure::UnreadableDocument {}
     }
 
     /// A declaration read under `declared_under` against a snapshot pinning

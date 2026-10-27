@@ -313,7 +313,7 @@ fn an_interruption_reports_and_commits_a_removal_already_landed_after_the_stop()
             .stored_facts(&norn_store::DocumentPath::new(at).unwrap())
             .expect("the stored target reads")
             .expect("the target is stored");
-        assert_eq!(facts.body, body);
+        assert_eq!(facts.body.as_deref(), Some(body));
     }
 }
 
@@ -633,7 +633,7 @@ fn a_respell_cut_short_at_either_step_is_finished_and_its_first_step_is_committe
         .expect("the old spelling's row");
     assert_eq!(
         row.content_hash,
-        norn_fs::ContentHash::of(b"# Note\nfinal\n").to_string(),
+        Some(norn_fs::ContentHash::of(b"# Note\nfinal\n").to_string()),
         "the changeset carries the first step"
     );
 }

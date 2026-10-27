@@ -384,3 +384,60 @@ fn a_drain_that_fails_after_its_reconcile_answers_the_reconciled_revision() {
         "the revision does not name the reconcile the sidecar committed"
     );
 }
+
+/// Refusing a page's progress rolls its unreadable-content retractions back;
+/// the same page remains owed and can commit after the refusal is removed.
+#[test]
+fn an_unreadable_retraction_commits_atomically_with_document_progress() {
+    let scratch = Scratch::new("unreadable-atomic");
+    let mut store = scratch.store();
+    write_document(&mut store, &document("docs/a.md", "hash-a", "alpha\n"));
+    let embedder = CountingEmbedder::new();
+    let mut engine = scratch.engine(embedder.clone());
+    engine
+        .drain(&mut store.feed_read())
+        .expect("the readable document drains");
+    let held = engine.projection().expect("the held vector");
+    let revision = engine.revision();
+    let watermarks = engine.watermarks().clone();
+    crate::common::record_unreadable(&mut store, "docs/a.md");
+
+    out_of_band(
+        &scratch.sidecar_path(),
+        "CREATE TRIGGER refuse_document_progress BEFORE UPDATE OF value ON meta
+         WHEN NEW.key = 'document_watermark'
+         BEGIN SELECT RAISE(FAIL, 'test refuses document progress'); END",
+    );
+    engine
+        .drain(&mut store.feed_read())
+        .expect_err("the page cannot record progress");
+    assert_eq!(engine.projection().expect("the rolled-back vector"), held);
+    assert_eq!(engine.revision(), revision);
+    assert_eq!(engine.watermarks(), &watermarks);
+    assert_eq!(embedder.calls(), 1, "a broken document is never embedded");
+    out_of_band(
+        &scratch.sidecar_path(),
+        "DROP TRIGGER refuse_document_progress",
+    );
+    drop(engine);
+
+    let mut engine = scratch.engine(embedder.clone());
+    assert_eq!(engine.revision(), revision);
+    assert_eq!(engine.watermarks(), &watermarks);
+    assert_eq!(engine.projection().expect("persisted rollback"), held);
+    let report = engine
+        .drain(&mut store.feed_read())
+        .expect("the owed page commits");
+    assert_eq!(
+        report.retracted, 1,
+        "the cursor must not have advanced: {report:?}"
+    );
+    assert_eq!(embedder.calls(), 1);
+    assert!(
+        engine
+            .projection()
+            .expect("the committed retraction")
+            .is_empty()
+    );
+    assert_eq!(engine.watermarks().documents, Some(caught_up(&mut store)));
+}

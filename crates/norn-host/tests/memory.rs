@@ -1927,7 +1927,7 @@ fn derived_alone(
             .begin_request()
             .stored_document(&path)
             .expect("reading a control's row");
-        if stored.is_some_and(|row| row.byte_length == length) {
+        if stored.is_some_and(|row| row.byte_length == Some(length)) {
             break;
         }
         assert!(
@@ -2450,7 +2450,7 @@ fn complete<R: std::fmt::Debug, W>(
 /// that carries it.
 fn a_linked_stem(rows: &[DocumentRow]) -> Option<(String, DocumentPath, DocumentPath)> {
     rows.iter().find_map(|row| {
-        let links = row.links.as_ref()?;
+        let links = attach::known(row.links.as_ref()?);
         links.items.iter().find_map(|link| {
             let bare = link.family == LinkFamily::Wikilink
                 && link.protocol.is_none()

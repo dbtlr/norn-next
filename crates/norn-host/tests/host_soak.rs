@@ -1557,7 +1557,7 @@ fn assert_the_churn_reached_the_store(store: &mut Store, written: &Written) {
                 .begin_request()
                 .stored_document(&written.path)
                 .expect("reading a document")
-                .map(|document| document.content_hash);
+                .and_then(|document| document.content_hash);
             if derived.as_deref() == Some(expected.as_str()) {
                 Observed::Met(())
             } else {

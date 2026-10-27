@@ -1145,6 +1145,9 @@ mod tests {
             .expect("a walk")
             .map(|fact| match fact.expect("a walk fact") {
                 crate::walk::WalkFact::File(file) => (file.path().as_path().to_owned(), None),
+                crate::walk::WalkFact::Unreadable(fact) => {
+                    panic!("unexpected unreadable fact: {fact:?}")
+                }
                 crate::walk::WalkFact::Skipped(skip) => {
                     (skip.path().as_path().to_owned(), Some(skip.reason()))
                 }

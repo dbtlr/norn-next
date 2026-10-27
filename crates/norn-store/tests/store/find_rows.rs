@@ -17,6 +17,7 @@ use norn_wire::{
     VaultName,
 };
 
+use crate::common::known;
 use crate::common::{
     Scratch, classes, document, path_names_no_document_in_class, unread_block, violation,
     write_documents,
@@ -218,7 +219,10 @@ fn every_found_row_carries_the_content_hash_its_document_was_indexed_under() {
                 .rows
                 .iter()
                 .map(|row| row.path.as_str().to_string())
-                .zip(found.content_hashes.iter().cloned())
+                .zip(found.content_hashes.iter().map(|hash| {
+                    hash.clone()
+                        .expect("a readable document has a content hash")
+                }))
                 .collect();
             assert_eq!(found.content_hashes.len(), found.rows.len(), "{params:?}");
             for (at, hash) in carried {
@@ -953,7 +957,7 @@ fn a_row_carries_the_columns_it_names_read_off_the_projection() {
             .find(|row| row.path.as_str() == path)
             .unwrap_or_else(|| panic!("{path} in the page"))
     };
-    let fields = |path: &str| row(path).fields.clone().expect("fields projected");
+    let fields = |path: &str| known(row(path).fields.as_ref().expect("fields projected")).clone();
 
     assert_eq!(
         fields("notes/a.md"),
@@ -975,18 +979,22 @@ fn a_row_carries_the_columns_it_names_read_off_the_projection() {
             .into_iter()
             .collect()
     );
-    let body = row("notes/a.md").body.clone().expect("body projected");
+    let body = known(row("notes/a.md").body.as_ref().expect("body projected")).clone();
     assert_eq!(body.text(), "the interloper walked in\n");
     assert_eq!(body.byte_length(), 25);
     assert!(!body.is_truncated());
-    let tags = row("notes/a.md").tags.clone().expect("tags projected");
+    let tags = known(row("notes/a.md").tags.as_ref().expect("tags projected")).clone();
     assert_eq!(
         tags.items,
         [TagRow::new("draft", norn_wire::TagSource::Body, None)]
     );
     assert_eq!(tags.total, 1);
     assert_eq!(
-        row("notes/c.md").tags.as_ref().map(|tags| tags.total),
+        row("notes/c.md")
+            .tags
+            .as_ref()
+            .map(known)
+            .map(|tags| tags.total),
         Some(0)
     );
     assert!(row("notes/a.md").headings.is_none());
@@ -1247,24 +1255,24 @@ fn a_row_cut_by_a_ceiling_says_how_much_the_whole_held() {
     let [row] = &found.rows[..] else {
         panic!("one row: {:?}", paths(&found));
     };
-    let links = row.links.clone().expect("links");
+    let links = known(row.links.as_ref().expect("links")).clone();
     assert_eq!(
         (links.items.len(), links.total),
         (NESTED_ROW_CEILING, NESTED_ROW_CEILING as u64 + 2)
     );
     assert_eq!(links.items[1].target, "example.com/001");
     assert_eq!(links.items[1].health(), LinkHealth::NotJudged);
-    let tags = row.tags.clone().expect("tags");
+    let tags = known(row.tags.as_ref().expect("tags")).clone();
     assert_eq!((tags.items.len(), tags.total), (NESTED_ROW_CEILING, 300));
     assert_eq!(tags.items[0].name, "t000");
     assert_eq!(tags.items[NESTED_ROW_CEILING - 1].name, "t255");
-    let headings = row.headings.clone().expect("headings");
+    let headings = known(row.headings.as_ref().expect("headings")).clone();
     assert_eq!(
         (headings.items.len(), headings.total),
         (NESTED_ROW_CEILING, NESTED_ROW_CEILING as u64 + 1)
     );
     assert!(headings.is_truncated());
-    let blocks = row.blocks.clone().expect("blocks");
+    let blocks = known(row.blocks.as_ref().expect("blocks")).clone();
     assert_eq!(
         (blocks.items.len(), blocks.total),
         (NESTED_ROW_CEILING, NESTED_ROW_CEILING as u64)
@@ -1272,7 +1280,7 @@ fn a_row_cut_by_a_ceiling_says_how_much_the_whole_held() {
     assert!(!blocks.is_truncated());
     assert_eq!(blocks.items[1], BlockRow::new("b1", None));
 
-    let text = row.body.clone().expect("body");
+    let text = known(row.body.as_ref().expect("body")).clone();
     assert_eq!(text.byte_length(), 70_000);
     assert_eq!(text.text().len(), BODY_ROW_CEILING - 1);
     assert!(text.text().bytes().all(|byte| byte == b'a'));
@@ -1349,7 +1357,7 @@ fn every_unknown_key_is_reported_with_the_keys_near_it() {
             .with_columns([Column::field("cont"), Column::field("status")]),
     );
     assert_eq!(
-        unknown_column.rows[0].fields,
+        unknown_column.rows[0].fields.as_ref().map(known).cloned(),
         Some(
             [("status".to_string(), FieldValue::scalar("open"))]
                 .into_iter()

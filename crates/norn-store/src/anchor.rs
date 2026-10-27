@@ -36,13 +36,17 @@ pub(crate) fn carries_anchor(link: &str) -> String {
 }
 
 /// The predicate that the document whose row id `target` evaluates to holds
-/// the place named by the anchor of the `links` row aliased `link`.
+/// the place named by the anchor of the `links` row aliased `link`, or cannot
+/// be judged because its body is unknown. A broken target's absent body is
+/// checked by primary key before its structure is sought.
 ///
 /// `link` is a table alias and `target` an SQL expression, both spliced into
 /// the text: neither is ever a value a caller supplies.
 pub(crate) fn anchor_held(link: &str, target: &str) -> String {
     format!(
-        "(EXISTS (SELECT 1 FROM headings AS hr
+        "(EXISTS (SELECT 1 FROM documents AS unread
+                  WHERE unread.id = {target} AND unread.body IS NULL)
+          OR EXISTS (SELECT 1 FROM headings AS hr
                   WHERE hr.document = {target}
                     AND hr.reading IN ({link}.anchor_text, {link}.anchor_marked))
           OR EXISTS (SELECT 1 FROM headings AS hs
