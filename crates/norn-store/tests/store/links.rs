@@ -971,6 +971,7 @@ fn a_get_pages_a_documents_links_as_a_row_carries_them() {
             else {
                 panic!("a get answered {:?}, not a links page", gotten.report);
             };
+            let page = crate::common::known(&page).clone();
             assert!(page.rows.len() <= limit as usize);
             drained.extend(page.rows);
             match page.next {
@@ -1672,7 +1673,10 @@ fn a_pages_links_cost_a_fixed_number_of_statements() {
         else {
             panic!("a get answered {:?}, not a links page", gotten.report);
         };
-        (page.rows.len(), gotten.work.statements)
+        (
+            crate::common::known(page).rows.len(),
+            gotten.work.statements,
+        )
     };
     let (one_link, at_one) = page(1);
     let (forty_links, at_forty) = page(40);

@@ -4721,3 +4721,35 @@ fn content_schema_distinguishes_known_values_and_unknown_reasons() {
         }
     }
 }
+
+#[test]
+fn collection_content_pages_advertise_unknown_content_but_findings_stay_normal() {
+    let schema = schema_of::<CollectionPage>();
+    for selector in ["links", "headings", "blocks", "tags"] {
+        let page = &branch(&schema, "of", selector)["properties"]["page"];
+        let reference = page["$ref"].as_str().expect("a typed content carrier");
+        let content = definition(&schema, reference.strip_prefix("#/$defs/").unwrap());
+        assert_eq!(
+            sorted(tag_constants(content, "state")),
+            ["known", "unknown"],
+            "{selector}"
+        );
+        let known = branch(content, "state", "known");
+        let value = known["properties"]["value"]["$ref"]
+            .as_str()
+            .expect("a typed page");
+        assert!(
+            property_names(definition(&schema, value.strip_prefix("#/$defs/").unwrap()))
+                .contains("rows")
+        );
+    }
+    let findings = &branch(&schema, "of", "findings")["properties"]["page"];
+    let reference = findings["$ref"].as_str().expect("a normal findings page");
+    assert!(
+        property_names(definition(
+            &schema,
+            reference.strip_prefix("#/$defs/").unwrap()
+        ))
+        .contains("rows")
+    );
+}

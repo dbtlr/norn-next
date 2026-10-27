@@ -42,6 +42,8 @@ pub enum GetStatement {
     /// One page of one nested collection, in document order: a seek of the
     /// collection's `(document, ordinal)` index at the document, from the
     /// ordinal the page continues after, that stops at the page's bound.
+    /// A primary-key seek of the document reads its hash's nullness beside
+    /// the rows, including an empty collection, without reading its body.
     CollectionPage(Nested),
     /// One page of the findings standing at the document's path under the
     /// active fingerprint, in `(position, kind, id)` order: a seek of
@@ -169,8 +171,10 @@ pub(crate) fn compose(spelled: &Spelled<'_>) -> Ran {
             let limit = binder.bind(integer(*rows));
             (
                 format!(
-                    "SELECT {columns}, n.ordinal FROM {table} AS n
-                     WHERE n.document = {document} AND n.ordinal > {after}
+                    "SELECT {columns}, n.ordinal, d.content_hash IS NULL
+                     FROM documents AS d
+                     LEFT JOIN {table} AS n ON n.document = d.id AND n.ordinal > {after}
+                     WHERE d.id = {document}
                      ORDER BY n.ordinal
                      LIMIT {limit}",
                     columns = collection.columns(),

@@ -319,7 +319,8 @@ fn warm_requests_under_a_live_attachment_finish_at_zero() {
         );
     }
     for row in read.pages.iter().flat_map(|page| &page.rows) {
-        let fields = row.fields.as_ref().expect("the find projected the fields");
+        let fields = attach::known(row.fields.as_ref().expect("the find projected the fields"));
+        let _ = attach::known(row.tags.as_ref().expect("the find projected the tags"));
         assert!(
             fields.contains_key("type") && row.tags.is_some(),
             "{} came back without the columns the find projected",
@@ -5282,7 +5283,7 @@ fn links_page(reader: &Reader<'_>, stem: &str, links: usize) -> CounterSnapshot 
         panic!("a links page answered {:?}", answered.answer.report);
     };
     assert_eq!(
-        page.rows.len(),
+        attach::known(page).rows.len(),
         links,
         "`{stem}` carries other links: {page:?}"
     );

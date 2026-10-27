@@ -12632,3 +12632,25 @@ fn an_unreadable_document_finding_stands_beside_its_names_only_row() {
     );
     round_trip(&SkipReason::UnreadableTarget);
 }
+
+#[test]
+fn collection_content_pages_round_trip_unknown_unreadable_and_known_empty_values() {
+    for selector in ["links", "headings", "blocks", "tags"] {
+        for content in [
+            serde_json::json!({"state":"unknown", "reason":"unreadable"}),
+            serde_json::json!({"state":"known", "value":{"rows":[], "next":null, "moved":[]}}),
+        ] {
+            let json = serde_json::json!({"of":selector, "page":content});
+            let page: CollectionPage =
+                serde_json::from_value(json.clone()).expect("a collection content page");
+            assert_eq!(serde_json::to_value(&page).expect("a page as JSON"), json);
+            assert_eq!(serde_json::to_value(page.selector()).unwrap(), selector);
+            round_trip(&page);
+        }
+    }
+    let findings = CollectionPage::findings(Page::new(vec![finding_row()], None, vec![]), []);
+    let json = serde_json::to_value(&findings).unwrap();
+    assert!(json["page"].get("state").is_none());
+    assert_eq!(json["page"]["rows"][0]["id"], 7);
+    round_trip(&findings);
+}

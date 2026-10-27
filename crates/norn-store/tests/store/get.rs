@@ -817,6 +817,68 @@ fn get_of_a_broken_document_answers_unknown_unreadable_columns_and_its_finding()
 }
 
 #[test]
+fn collection_gets_of_a_broken_document_are_unknown_but_findings_page_normally() {
+    for previously_read in [false, true] {
+        let vault = broken_vault("get-broken-collections", previously_read);
+        for selector in SELECTORS {
+            let gotten = vault.get(&getting("broken").with_collection(selector).with_limit(1));
+            assert!(
+                gotten.unsatisfied.is_empty(),
+                "{selector:?}: {:?}",
+                gotten.unsatisfied
+            );
+            let json = serde_json::to_value(&gotten.report).expect("a get report");
+            assert_eq!(json["path"], "broken.md");
+            if selector == CollectionSelector::Findings {
+                assert!(json["page"]["page"].get("state").is_none());
+                assert_eq!(
+                    json["page"]["page"]["rows"][0]["kind"],
+                    "document/unreadable"
+                );
+                assert_eq!(json["page"]["page"]["rows"].as_array().unwrap().len(), 1);
+                assert!(json["page"]["page"]["next"].is_null());
+            } else {
+                assert_eq!(
+                    json["page"]["page"],
+                    serde_json::json!({"state":"unknown", "reason":"unreadable"}),
+                    "{selector:?}"
+                );
+                let continued = vault.get(&getting("broken").with_collection(selector).with_after(
+                    Cursor::new(gotten.snapshot, CursorKey::ordinal(selector, 99)),
+                ));
+                assert!(continued.unsatisfied.is_empty());
+                assert_eq!(
+                    serde_json::to_value(&continued.report).unwrap()["page"]["page"],
+                    serde_json::json!({"state":"unknown", "reason":"unreadable"}),
+                    "continued {selector:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn collection_gets_of_an_empty_readable_document_answer_known_empty_pages() {
+    let vault = Vault::holding(
+        "get-empty-collections",
+        Sensitive,
+        &[parsed("empty.md", "")],
+    );
+    for selector in SELECTORS
+        .into_iter()
+        .filter(|selector| *selector != CollectionSelector::Findings)
+    {
+        let gotten = vault.get(&getting("empty").with_collection(selector));
+        assert!(gotten.unsatisfied.is_empty());
+        assert_eq!(
+            serde_json::to_value(gotten.report).unwrap()["page"]["page"],
+            serde_json::json!({"state":"known", "value":{"rows":[], "next":null, "moved":[]}}),
+            "{selector:?}"
+        );
+    }
+}
+
+#[test]
 fn section_and_block_gets_of_a_broken_document_are_unknown_without_missing_anchors() {
     for previously_read in [false, true] {
         let vault = broken_vault("get-broken-anchors", previously_read);
@@ -1344,10 +1406,12 @@ fn page_of(report: &GetReport) -> (Vec<String>, Option<Cursor>) {
         panic!("a get answered {report:?}, not a collection page");
     };
     match page {
-        CollectionPage::Links { page, .. } => (read(&page.rows), page.next.clone()),
-        CollectionPage::Headings { page, .. } => (read(&page.rows), page.next.clone()),
-        CollectionPage::Blocks { page, .. } => (read(&page.rows), page.next.clone()),
-        CollectionPage::Tags { page, .. } => (read(&page.rows), page.next.clone()),
+        CollectionPage::Links { page, .. } => (read(&known(page).rows), known(page).next.clone()),
+        CollectionPage::Headings { page, .. } => {
+            (read(&known(page).rows), known(page).next.clone())
+        }
+        CollectionPage::Blocks { page, .. } => (read(&known(page).rows), known(page).next.clone()),
+        CollectionPage::Tags { page, .. } => (read(&known(page).rows), known(page).next.clone()),
         CollectionPage::Findings { page, .. } => (read(&page.rows), page.next.clone()),
         other => panic!("a page of no collection this suite knows: {other:?}"),
     }
@@ -1941,7 +2005,11 @@ fn an_ordinal_cursor_continues_its_collection_by_position() {
         else {
             panic!("a headings page answered {:?}", gotten.report);
         };
-        page.rows.iter().map(|row| row.text.clone()).collect()
+        known(page)
+            .rows
+            .iter()
+            .map(|row| row.text.clone())
+            .collect()
     };
     let headings = |at: &str| getting(at).with_collection(CollectionSelector::Headings);
     let first = vault.get(&headings("one").with_limit(2));

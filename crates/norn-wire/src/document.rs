@@ -1094,7 +1094,8 @@ pub enum UnknownReason {
 ///
 /// On the wire the `state` tag distinguishes `{"state":"known","value":…}`
 /// from `{"state":"unknown","reason":"unreadable"}`. An unprojected column
-/// is represented by the enclosing option, never by this carrier.
+/// is represented by the enclosing option, never by this carrier. Standalone
+/// collection pages reuse this carrier around their page value.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 #[non_exhaustive]

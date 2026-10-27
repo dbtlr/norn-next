@@ -103,9 +103,9 @@ use crate::read::projected_findings;
 use norn_db::EmittedPlan;
 use norn_db::rusqlite::Row;
 use norn_wire::{
-    Anchor, AnswerShape, BodyText, CollectionPage, CollectionSelector, Cursor, CursorKey,
+    Anchor, AnswerShape, BodyText, CollectionPage, CollectionSelector, Content, Cursor, CursorKey,
     DocumentRow, GetParams, GetReport, Hint, Page, PagedRows, RequestPart, ResolutionTarget,
-    Unsatisfied,
+    UnknownReason, Unsatisfied,
 };
 
 use crate::error::{self, StoreError};
@@ -184,7 +184,7 @@ pub struct SectionAt {
 /// Indexed headings of one document, beside the hash their derivation read.
 #[derive(Clone, Debug, PartialEq)]
 pub struct HeldHeadings {
-    /// The document's recorded content hash.
+    /// The document's recorded content hash, absent for a broken document.
     pub content_hash: Option<String>,
     /// The document's headings in source order, including their stored slugs.
     pub headings: Vec<HeadingFact>,
@@ -794,7 +794,12 @@ impl Snapshot {
         };
         Ok(match collection {
             Nested::Links => {
-                let (links, next) = self.ordinal_page(&page, identified_link, lookups)?;
+                let Some((links, next)) = self.ordinal_page(&page, identified_link, lookups)?
+                else {
+                    return Ok(CollectionPage::links(Content::unknown(
+                        UnknownReason::Unreadable,
+                    )));
+                };
                 let rows = self.link_rows(
                     links,
                     declared.ambiguity_ignore(),
@@ -804,15 +809,27 @@ impl Snapshot {
                 CollectionPage::links(Page::new(rows, next, moved))
             }
             Nested::Headings => {
-                let (rows, next) = self.ordinal_page(&page, heading_row, lookups)?;
+                let Some((rows, next)) = self.ordinal_page(&page, heading_row, lookups)? else {
+                    return Ok(CollectionPage::headings(Content::unknown(
+                        UnknownReason::Unreadable,
+                    )));
+                };
                 CollectionPage::headings(Page::new(rows, next, moved))
             }
             Nested::Blocks => {
-                let (rows, next) = self.ordinal_page(&page, block_row, lookups)?;
+                let Some((rows, next)) = self.ordinal_page(&page, block_row, lookups)? else {
+                    return Ok(CollectionPage::blocks(Content::unknown(
+                        UnknownReason::Unreadable,
+                    )));
+                };
                 CollectionPage::blocks(Page::new(rows, next, moved))
             }
             Nested::Tags => {
-                let (rows, next) = self.ordinal_page(&page, tag_row, lookups)?;
+                let Some((rows, next)) = self.ordinal_page(&page, tag_row, lookups)? else {
+                    return Ok(CollectionPage::tags(Content::unknown(
+                        UnknownReason::Unreadable,
+                    )));
+                };
                 CollectionPage::tags(Page::new(rows, next, moved))
             }
         })
@@ -845,14 +862,16 @@ impl Snapshot {
     }
 
     /// One page of the rows `page` names, each read through `item`, and the
-    /// cursor the next page continues from.
+    /// cursor the next page continues from. No page is known where the
+    /// document's content hash is null; an empty readable collection is known.
     fn ordinal_page<T: Clone>(
         &self,
         page: &OrdinalPage<'_>,
         item: fn(&Row<'_>) -> Reading<T>,
         lookups: &mut Lookups,
-    ) -> Result<(Vec<T>, Option<Cursor>), PageRefusal> {
+    ) -> Result<Option<(Vec<T>, Option<Cursor>)>, PageRefusal> {
         let width = page.collection.width();
+        let mut unreadable = false;
         let read = self.read_page(
             [page.after],
             page.limit,
@@ -865,21 +884,31 @@ impl Snapshot {
                     rows,
                 });
                 self.run_statement(record, ran, |row| {
-                    Ok((row.get::<_, i64>(width)?, item(row)?))
+                    unreadable = row.get(width + 1)?;
+                    let ordinal = row.get::<_, Option<i64>>(width)?;
+                    ordinal
+                        .map(|ordinal| item(row).map(|item| item.map(|item| (ordinal, item))))
+                        .transpose()
                 })
                 .map_err(|problem| error::sql("reading a page of a collection", problem))?
                 .into_iter()
-                .map(|(ordinal, item)| item.map(|item| (ordinal, item)))
+                .flatten()
                 .collect()
             },
         )?;
+        if unreadable {
+            return Ok(None);
+        }
         let next = read.next.map(|(ordinal, _)| {
             Cursor::new(
                 page.snapshot.clone(),
                 CursorKey::ordinal(page.selector, u64::try_from(ordinal).unwrap_or_default()),
             )
         });
-        Ok((read.rows.into_iter().map(|(_, item)| item).collect(), next))
+        Ok(Some((
+            read.rows.into_iter().map(|(_, item)| item).collect(),
+            next,
+        )))
     }
 
     /// One page of at most `limit` of the findings standing at the named
