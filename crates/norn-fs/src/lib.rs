@@ -136,7 +136,9 @@ pub use shadow::{
     Swept, Unpublishable, discard_homes, is_shadow_name, sweep_fallback_root, sweep_fallback_tree,
 };
 #[cfg(feature = "induced-failure")]
-pub use walk::{DocumentOpenFailure, deny_document_opens, exhaust_document_opens};
+pub use walk::{
+    DocumentOpenFailure, deny_document_opens, exhaust_document_opens, fail_document_stats,
+};
 pub use walk::{
     FileFact, FileKind, FileStat, LinkKind, Reach, ReadFile, SkipFact, SkipReason, UnreadableFact,
     Vault, Walk, WalkError, WalkFact, walk, walk_subtree,

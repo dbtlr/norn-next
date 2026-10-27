@@ -96,7 +96,9 @@ use rustix::io::Errno;
 use super::EntryKind;
 
 #[cfg(feature = "induced-failure")]
-pub use targeted_open::{DocumentOpenFailure, deny_document_opens, exhaust_document_opens};
+pub use targeted_open::{
+    DocumentOpenFailure, deny_document_opens, exhaust_document_opens, fail_document_stats,
+};
 
 /// Path-specific open failures held across worker threads and retries.
 #[cfg(feature = "induced-failure")]
@@ -108,11 +110,12 @@ mod targeted_open {
 
     use rustix::io::Errno;
 
-    /// Independently held denial and exhaustion arms for one file.
+    /// Independently held denial, exhaustion and failing-stat arms for one file.
     #[derive(Default)]
     struct Held {
         denied: usize,
         exhausted: usize,
+        failing_stat: usize,
     }
 
     impl Held {
@@ -120,7 +123,8 @@ mod targeted_open {
             match errno {
                 Errno::MFILE => &mut self.exhausted,
                 Errno::ACCESS => &mut self.denied,
-                _ => unreachable!("only denial and exhaustion can be armed"),
+                Errno::IO => &mut self.failing_stat,
+                _ => unreachable!("only denial, exhaustion and a failing stat can be armed"),
             }
         }
     }
@@ -132,8 +136,9 @@ mod targeted_open {
     ///
     /// The arm is visible to every thread. Other paths and directory opens are
     /// unaffected. Overlapping guards retain each cause independently; exhaustion
-    /// takes precedence while both causes are held. Available only with
-    /// `induced-failure`.
+    /// takes precedence while both causes are held. A failing-stat arm answers
+    /// only the final-name stat of a reach and never an open. Available only
+    /// with `induced-failure`.
     #[must_use = "dropping the guard withdraws its open failure"]
     pub struct DocumentOpenFailure {
         path: PathBuf,
@@ -164,6 +169,19 @@ mod targeted_open {
         arm(path, Errno::ACCESS)
     }
 
+    /// Fails the final-name stat a reach makes at exactly this absolute spelling
+    /// with `EIO`.
+    ///
+    /// The failure stands across threads and repeated reaches until the last
+    /// guard for the path is dropped. Opens of the path are unaffected.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `path` is relative. Available only with `induced-failure`.
+    pub fn fail_document_stats(path: &Path) -> DocumentOpenFailure {
+        arm(path, Errno::IO)
+    }
+
     fn arm(path: &Path, errno: Errno) -> DocumentOpenFailure {
         assert!(
             path.is_absolute(),
@@ -190,7 +208,7 @@ mod targeted_open {
                 .unwrap_or_else(|poison| poison.into_inner());
             let held = arms.get_mut(&self.path).expect("a held arm");
             *held.count(self.errno) -= 1;
-            if held.denied == 0 && held.exhausted == 0 {
+            if held.denied == 0 && held.exhausted == 0 && held.failing_stat == 0 {
                 arms.remove(&self.path);
             }
             ACTIVE.fetch_sub(1, Ordering::Release);
@@ -209,9 +227,23 @@ mod targeted_open {
         let held = arms.get(path)?;
         if held.exhausted != 0 {
             Some(Errno::MFILE)
-        } else {
+        } else if held.denied != 0 {
             Some(Errno::ACCESS)
+        } else {
+            None
         }
+    }
+
+    /// The `EIO` a held failing-stat arm supplies for a reach's final-name stat.
+    pub(crate) fn stat_failure(path: &Path) -> Option<Errno> {
+        if ACTIVE.load(Ordering::Acquire) == 0 {
+            return None;
+        }
+        let arms = ARMS
+            .get()?
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        (arms.get(path)?.failing_stat != 0).then_some(Errno::IO)
     }
 }
 
@@ -391,6 +423,17 @@ pub(crate) struct WalkFaults {
     /// other walk of an armed process, and this walk's own where a case spelled
     /// the arm in code.
     spent: Option<Arc<AtomicBool>>,
+}
+
+/// The failure a held arm supplies in place of a reach's final-name stat.
+pub(crate) fn stat_failing_at(access: &std::path::Path) -> Option<Errno> {
+    #[cfg(feature = "induced-failure")]
+    return targeted_open::stat_failure(access);
+    #[cfg(not(feature = "induced-failure"))]
+    {
+        let _ = access;
+        None
+    }
 }
 
 impl WalkFaults {

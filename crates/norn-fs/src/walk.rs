@@ -37,7 +37,9 @@
 
 pub(crate) mod faults;
 #[cfg(feature = "induced-failure")]
-pub use faults::{DocumentOpenFailure, deny_document_opens, exhaust_document_opens};
+pub use faults::{
+    DocumentOpenFailure, deny_document_opens, exhaust_document_opens, fail_document_stats,
+};
 pub mod inventory;
 
 use std::ffi::{OsStr, OsString};
@@ -310,14 +312,31 @@ impl Vault {
     /// caller converging derived state reads `Missing` at the other spellings,
     /// which is what a derivation from zero over this tree holds there.
     pub fn reach(&self, relative: &Path) -> Result<Reach, WalkError> {
-        self.reach_inner(relative).map_err(|failure| match failure {
-            ReachFailure::Walk(error) => error,
-            ReachFailure::Unreadable(fact) => environment(
+        self.reach_or_unreadable(relative)?.map_err(|fact| {
+            environment(
                 fact.operation,
                 &self.root.join(fact.path.as_path()),
                 fact.cause,
-            ),
+            )
         })
+    }
+
+    /// [`reach`](Self::reach), except that a final name whose stat meets a path
+    /// failure answers the unreadable fact rather than an environmental error.
+    ///
+    /// A caller that accounts for one document it cannot read — a heal marking
+    /// it broken, a planner answering that its bytes are unread — takes this
+    /// answer; a failure traversing a folder above the name is still the
+    /// `WalkError`.
+    pub fn reach_or_unreadable(
+        &self,
+        relative: &Path,
+    ) -> Result<Result<Reach, UnreadableFact>, WalkError> {
+        match self.reach_inner(relative) {
+            Ok(reach) => Ok(Ok(reach)),
+            Err(ReachFailure::Unreadable(fact)) => Ok(Err(fact)),
+            Err(ReachFailure::Walk(error)) => Err(error),
+        }
     }
 
     /// Only the final name's stat can become a fact; folder traversal stays environmental.
@@ -358,7 +377,11 @@ impl Vault {
         // `Missing`, not a refusal.
         let access = self.root.join(subtree.as_path());
         crate::reads::count_stat();
-        let metadata = match statat(&directory, name, AtFlags::SYMLINK_NOFOLLOW) {
+        let stat = match faults::stat_failing_at(&access) {
+            Some(errno) => Err(errno),
+            None => statat(&directory, name, AtFlags::SYMLINK_NOFOLLOW),
+        };
+        let metadata = match stat {
             Ok(metadata) => metadata,
             Err(rustix::io::Errno::NOENT | rustix::io::Errno::NOTDIR) => {
                 return Ok(Reach::Stands {

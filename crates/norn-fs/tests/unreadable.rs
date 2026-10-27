@@ -55,6 +55,30 @@ fn path_targeted_document_denial_repeats_until_the_guard_drops() {
 }
 
 #[test]
+fn a_failing_final_name_stat_is_an_unreadable_answer_to_a_reach_that_asks_for_it() {
+    let scratch = norn_testkit::scratch::Scratch::new("fs-failing-stat");
+    let note = scratch.join("note.md");
+    std::fs::write(&note, b"body").unwrap();
+    let vault = Vault::open(scratch.root(), &[]).unwrap();
+    let failing = norn_fs::fail_document_stats(&note);
+    let unreadable = vault
+        .reach_or_unreadable(Path::new("note.md"))
+        .unwrap()
+        .expect_err("the stat of the final name fails");
+    assert_eq!(unreadable.path().as_path(), Path::new("note.md"));
+    assert_eq!(unreadable.cause().raw_os_error(), Some(libc::EIO));
+    assert!(matches!(
+        vault.reach(Path::new("note.md")),
+        Err(WalkError::Environment { .. })
+    ));
+    drop(failing);
+    assert!(matches!(
+        vault.reach_or_unreadable(Path::new("note.md")).unwrap(),
+        Ok(norn_fs::Reach::Stands { .. })
+    ));
+}
+
+#[test]
 fn path_targeted_descriptor_exhaustion_crosses_threads_and_ends_with_its_guard() {
     let scratch = norn_testkit::scratch::Scratch::new("fs-targeted-open");
     let note = scratch.join("zz.md");
