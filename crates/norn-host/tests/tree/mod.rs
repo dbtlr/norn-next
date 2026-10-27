@@ -345,7 +345,10 @@ pub fn derived_hashes(store: &mut Store) -> BTreeMap<String, String> {
     attach::for_each_derived_document(store, |document| {
         held.insert(
             document.path.as_str().to_string(),
-            document.content_hash.clone(),
+            document
+                .content_hash
+                .clone()
+                .expect("a readable fixture has a content hash"),
         );
     });
     held

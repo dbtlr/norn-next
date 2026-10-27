@@ -49,6 +49,9 @@ pub(in crate::production) fn prepare(
             return Ok(Preparation::Declined);
         }
         let fact = source.fact(Path::new(&name)).map_err(effect)?;
+        if matches!(fact, norn_fs::WalkFact::Unreadable(_)) {
+            return Ok(Preparation::Declined);
+        }
         if !matches!(fact, norn_fs::WalkFact::File(_)) {
             return Ok(Preparation::SourceChanged);
         }
@@ -60,7 +63,18 @@ pub(in crate::production) fn prepare(
             hash
         };
         if is_markdown(Path::new(&name)) && hash.is_none() {
-            return Ok(Preparation::SourceChanged);
+            let broken = document_path(Path::new(&name))
+                .ok()
+                .map(|path| store.begin_request().stored_document(&path))
+                .transpose()
+                .map_err(store_effect)?
+                .flatten()
+                .is_some_and(|row| row.content_hash.is_none());
+            return Ok(if broken {
+                Preparation::Declined
+            } else {
+                Preparation::SourceChanged
+            });
         }
         loaded(&name)?;
         observed.insert(name.clone(), hash);
@@ -111,12 +125,16 @@ pub(in crate::production) fn prepare(
     // Re-observe real bytes after closure construction, including invalid UTF-8
     // candidates. A changed or removed member declines this construction.
     for (name, hash) in observed {
-        let norn_fs::WalkFact::File(file) = source.fact(Path::new(&name)).map_err(effect)? else {
-            return Ok(Preparation::SourceChanged);
+        let file = match source.fact(Path::new(&name)).map_err(effect)? {
+            norn_fs::WalkFact::File(file) => file,
+            norn_fs::WalkFact::Unreadable(_) => return Ok(Preparation::Declined),
+            norn_fs::WalkFact::Skipped(_) => return Ok(Preparation::SourceChanged),
         };
         if let Some(hash) = hash {
-            let Some(read) = file.read_optional().map_err(effect)? else {
-                return Ok(Preparation::SourceChanged);
+            let read = match file.read_optional().map_err(effect)? {
+                norn_fs::Opened::Read(read) => read,
+                norn_fs::Opened::Nothing => return Ok(Preparation::SourceChanged),
+                norn_fs::Opened::Unreadable { .. } => return Ok(Preparation::Declined),
             };
             if read.content_hash().to_string() != hash {
                 return Ok(Preparation::SourceChanged);

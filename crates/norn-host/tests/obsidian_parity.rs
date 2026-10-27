@@ -354,7 +354,7 @@ fn links_of(host: &attach::ServingHost, address: &VaultAddress, source: &str) ->
     let [row] = &found.answer.report.page.rows[..] else {
         panic!("`{source}` is not one row");
     };
-    let links = row.links.as_ref().expect("the links column");
+    let links = attach::known(row.links.as_ref().expect("the links column"));
     assert_eq!(links.total, links.items.len() as u64, "`{source}`'s links");
     links.items.clone()
 }

@@ -1844,7 +1844,10 @@ fn an_apply_healing_over_a_park_is_healed_by_the_attach_that_serves_again() {
             .begin_request()
             .stored_document(&norn_store::DocumentPath::new(path).unwrap())
             .unwrap()
-            .map(|row| row.content_hash)
+            .map(|row| {
+                row.content_hash
+                    .expect("a readable fixture has a content hash")
+            })
     };
     let hash_of = |bytes: &[u8]| Some(norn_fs::ContentHash::of(bytes).to_string());
     // The trigger goes in and out beside the store rather than through an

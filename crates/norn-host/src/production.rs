@@ -31,7 +31,7 @@ use crate::applier::Applier;
 use crate::apply::PlanGround;
 use crate::derivation::{
     Cause, Decided, Declared, Plan, PlannedFinding, Quarantine, SIDES, UNREAD_BLOCK_KINDS,
-    WALKED_KINDS, decodes, document_path, plan_document, plan_quarantine,
+    WALKED_KINDS, decodes, document_path, plan_document, plan_quarantine, plan_unreadable,
 };
 use crate::evidence::{
     JobEvidence, count_changeset, count_document_derived, count_increment_work, count_rule_work,
@@ -2530,6 +2530,7 @@ where
     let mut checked = 0;
     let mut through = Vec::new();
     let mut last_read_spelling = None;
+    let mut unreadable_names = Withheld::default();
     let mut complete = false;
     loop {
         if limit.as_ref().is_some_and(|limit| {
@@ -2572,6 +2573,26 @@ where
                 .expect("checked")
                 .1
             {
+                norn_fs::WalkFact::Unreadable(unreadable) => {
+                    if unreadable.kind_unknown() {
+                        unreadable_names.absorb_entry(unreadable.path().as_path());
+                        pending.withhold_entry(unreadable.path().as_path());
+                    }
+                    if pending.account.rolling
+                        && is_markdown(unreadable.path().as_path())
+                        && document_path(unreadable.path().as_path()).is_err()
+                    {
+                        files.next();
+                    } else {
+                        pending.unreadable_matching(
+                            unreadable.path().as_path(),
+                            unreadable.operation(),
+                            unreadable.cause(),
+                            row.and_then(|row| row.document.as_ref()),
+                        )?;
+                        files.next();
+                    }
+                }
                 norn_fs::WalkFact::Skipped(skip) => {
                     let root = skip.path().as_path().to_owned();
                     let reason = skip.reason();
@@ -2605,7 +2626,7 @@ where
                 norn_fs::WalkFact::File(file) => {
                     let spelling = file.path().as_path().to_str().expect("UTF-8").to_owned();
                     match open_enumerated(&mut files, &mut pending)? {
-                        Some(read) => {
+                        norn_fs::Opened::Read(read) => {
                             merge_read(
                                 &mut pending,
                                 &spelling,
@@ -2614,7 +2635,15 @@ where
                             )?;
                             last_read_spelling = Some(spelling);
                         }
-                        None => {
+                        norn_fs::Opened::Unreadable { operation, cause } => {
+                            pending.unreadable_matching(
+                                Path::new(&spelling),
+                                operation,
+                                &cause,
+                                row.and_then(|row| row.document.as_ref()),
+                            )?;
+                        }
+                        norn_fs::Opened::Nothing => {
                             if let Some(row) = row {
                                 rolling_death(&mut pending, row.path.clone());
                             }
@@ -2630,7 +2659,10 @@ where
         } else if let Some(row) = stored.get(index) {
             // An inventory can span watcher turns. Confirm a stored-only name
             // before pruning it so an earlier watcher update is never undone.
-            if last_read_spelling.as_deref() == Some(row.path.as_str()) {
+            if unreadable_names.covers(&row.path, order) {
+                // A failed stat could have hidden a directory. Its listed name
+                // licenses no removal of the rows beneath it.
+            } else if last_read_spelling.as_deref() == Some(row.path.as_str()) {
                 // A flushed respelling can enter a later page of its own
                 // folded class. This exact spelling was already read; every
                 // other alias still takes its turn through the merge.
@@ -2656,12 +2688,32 @@ where
                             break;
                         }
                         match file.read_optional().map_err(effect)? {
-                            Some(read) => {
+                            norn_fs::Opened::Read(read) => {
                                 pending.account.bytes_read += read.bytes().len() as u64;
                                 merge_read(&mut pending, &spelling, read, row.document.as_ref())?;
                             }
-                            None => rolling_death(&mut pending, row.path.clone()),
+                            norn_fs::Opened::Nothing => {
+                                rolling_death(&mut pending, row.path.clone())
+                            }
+                            norn_fs::Opened::Unreadable { operation, cause } => pending
+                                .unreadable_matching(
+                                    Path::new(&spelling),
+                                    operation,
+                                    &cause,
+                                    row.document.as_ref(),
+                                )?,
                         }
+                    }
+                    norn_fs::WalkFact::Unreadable(unreadable) => {
+                        if unreadable.kind_unknown() {
+                            pending.withhold_entry(unreadable.path().as_path());
+                        }
+                        pending.unreadable_matching(
+                            unreadable.path().as_path(),
+                            unreadable.operation(),
+                            unreadable.cause(),
+                            row.document.as_ref(),
+                        )?;
                     }
                     norn_fs::WalkFact::Skipped(skip) => {
                         pending.passed_over(skip.path().as_path(), skip.reason());
@@ -2774,7 +2826,8 @@ fn merge_read(
     let hash = read.content_hash().to_string();
     let count = counts_rolling_write(pending.account, read.stat());
     if let Some(row) = row {
-        let changed = hash != row.content_hash || spelling != row.path.as_str();
+        let changed =
+            row.content_hash.as_deref() != Some(hash.as_str()) || spelling != row.path.as_str();
         if changed
             || !pending.declared.judged(row.generation)
             || stands_without_its_finding(pending.store, row)?
@@ -2857,7 +2910,10 @@ fn merge_read(
 /// The findings read below costs one indexed lookup per **defective** document
 /// per heal, and a converged vault re-derives nothing.
 fn stands_without_its_finding(store: &mut Store, row: &StoredDocument) -> Result<bool, JobFailure> {
-    if row.frontmatter.is_some() || row.frontmatter_diagnostic_count == 0 {
+    if row.content_hash.is_none()
+        || row.frontmatter.is_some()
+        || row.frontmatter_diagnostic_count == 0
+    {
         return Ok(false);
     }
     let standing = store
@@ -2875,9 +2931,9 @@ fn stands_without_its_finding(store: &mut Store, row: &StoredDocument) -> Result
 ///
 /// The iterator is advanced past the fact whatever the open reaches, because
 /// the merge has finished with that name either way. An absence is a foreign
-/// edit landing in the window between enumeration and open; a machine failure
-/// still refuses, so a denied directory or an exhausted descriptor table never
-/// reads as a deletion.
+/// edit landing in the window between enumeration and open. A path failure
+/// marks the document broken; directory-component and process-resource failures
+/// still refuse. Neither is read as a deletion.
 ///
 /// **A name that opened nothing is a name this walk read nothing at**, so the
 /// one place it stands at is withheld. The row axis converges it on the answer a
@@ -2890,7 +2946,7 @@ fn stands_without_its_finding(store: &mut Store, row: &StoredDocument) -> Result
 fn open_enumerated<I>(
     files: &mut Peekable<I>,
     pending: &mut Pending<'_>,
-) -> Result<Option<norn_fs::ReadFile>, JobFailure>
+) -> Result<norn_fs::Opened<norn_fs::ReadFile>, JobFailure>
 where
     I: Iterator<Item = Result<(Vec<u8>, norn_fs::WalkFact), norn_fs::WalkError>>,
 {
@@ -2901,9 +2957,10 @@ where
     };
     let path = file.path().as_path().to_owned();
     let read = file.read_optional().map_err(effect)?;
-    pending.account.bytes_read += read.as_ref().map_or(0, |read| read.bytes().len() as u64);
-    if read.is_none() {
-        pending.withhold_entry(&path);
+    match &read {
+        norn_fs::Opened::Read(read) => pending.account.bytes_read += read.bytes().len() as u64,
+        norn_fs::Opened::Nothing => pending.withhold_entry(&path),
+        norn_fs::Opened::Unreadable { .. } => {}
     }
     Ok(read)
 }
@@ -3121,7 +3178,7 @@ fn scoped_increment(
         // an absolute join would follow it: the row derived there is one the
         // vault walk never yields and the next heal prunes.
         match norn_fs::read_optional_and_hash(root, path).map_err(effect)? {
-            Some(observed) => {
+            norn_fs::Opened::Read(observed) => {
                 let hash = observed.content_hash().to_string();
                 let standing = pending
                     .store
@@ -3131,7 +3188,7 @@ fn scoped_increment(
                 let stale = match standing.as_ref() {
                     None => !pending.unchanged_content_quarantine(path, observed.bytes(), &hash)?,
                     Some(row) => {
-                        row.content_hash != hash
+                        row.content_hash.as_deref() != Some(hash.as_str())
                             || !pending.declared.judged(row.generation)
                             || stands_without_its_finding(pending.store, row)?
                     }
@@ -3153,7 +3210,10 @@ fn scoped_increment(
             // regular file between the kind above and the read — and a tombstone
             // there would state the removal of a document this vault never held,
             // at a path no heal ever prunes.
-            None => {
+            norn_fs::Opened::Unreadable { operation, cause } => {
+                pending.unreadable(path, operation, &cause)?
+            }
+            norn_fs::Opened::Nothing => {
                 let standing = pending
                     .store
                     .begin_request()
@@ -3278,8 +3338,13 @@ pub(crate) fn commit_plan_changeset(
     }
     for left in writes {
         let path = Path::new(left.path.as_str());
-        let Some(observed) = norn_fs::read_optional_and_hash(root, path).map_err(effect)? else {
-            continue;
+        let observed = match norn_fs::read_optional_and_hash(root, path).map_err(effect)? {
+            norn_fs::Opened::Read(read) => read,
+            norn_fs::Opened::Nothing => continue,
+            norn_fs::Opened::Unreadable { operation, cause } => {
+                pending.unreadable(path, operation, &cause)?;
+                continue;
+            }
         };
         if Some(observed.content_hash()) != left.holds {
             continue;
@@ -3803,7 +3868,8 @@ impl FreedRoots {
                 | Change::Vacated { .. }
                 | Change::Upsert(_)
                 | Change::FileBirth { .. }
-                | Change::FileDeath { .. } => {}
+                | Change::FileDeath { .. }
+                | Change::Unreadable { .. } => {}
             }
         }
     }
@@ -4335,6 +4401,7 @@ fn rows_the_changeset_leaves(changes: &[Change]) -> BTreeMap<&DocumentPath, bool
         .iter()
         .map(|change| match change {
             Change::Upsert(facts) => (&facts.path, true),
+            Change::Unreadable { path } => (path, true),
             Change::Death { path, .. }
             | Change::Vacated { path }
             | Change::FileBirth { path }
@@ -4444,6 +4511,66 @@ impl<'s> Pending<'s> {
 
     fn push(&mut self, change: Change) {
         self.changes.push(change);
+    }
+
+    /// Keep an unreadable document's names and discard facts no bytes support.
+    fn unreadable(
+        &mut self,
+        path: &Path,
+        operation: &'static str,
+        cause: &std::io::Error,
+    ) -> Result<(), JobFailure> {
+        self.unreadable_matching(path, operation, cause, None)
+    }
+
+    /// Use the merge's matched row so an unreadable respelling retires its old
+    /// name in the same changeset as the names-only birth.
+    fn unreadable_matching(
+        &mut self,
+        path: &Path,
+        operation: &'static str,
+        cause: &std::io::Error,
+        matched: Option<&StoredDocument>,
+    ) -> Result<(), JobFailure> {
+        if !is_markdown(path) {
+            return Err(effect(norn_fs::WalkError::Environment {
+                operation,
+                path: path.to_owned(),
+                source: std::io::Error::new(cause.kind(), cause.to_string()),
+            }));
+        }
+        let path = match document_path(path) {
+            Ok(path) => path,
+            Err(quarantine) => {
+                self.quarantine(path, quarantine);
+                return Ok(());
+            }
+        };
+        let looked_up = if matched.is_none() {
+            self.store
+                .begin_request()
+                .stored_document(&path)
+                .map_err(store_effect)?
+        } else {
+            None
+        };
+        let standing = matched.or(looked_up.as_ref());
+        if let Some(row) = standing {
+            if row.path != path {
+                if self.changes.len() + 2 > self.bound {
+                    self.flush()?;
+                }
+                self.push(Change::Death {
+                    path: row.path.clone(),
+                    provenance: Provenance::HealPrune,
+                });
+            } else if row.content_hash.is_none() && self.declared.judged(row.generation) {
+                return Ok(());
+            }
+        }
+        self.push(Change::Unreadable { path: path.clone() });
+        self.file(plan_unreadable(path, cause), None);
+        Ok(())
     }
 
     /// Derive a document the store holds no row for: its facts where the bytes
@@ -4857,6 +4984,14 @@ impl<'s> Pending<'s> {
             for fact in reading {
                 let file = match fact {
                     Ok(norn_fs::WalkFact::File(file)) => file,
+                    Ok(norn_fs::WalkFact::Unreadable(unreadable)) => {
+                        if is_markdown(unreadable.path().as_path())
+                            && let Err(quarantine) = document_path(unreadable.path().as_path())
+                        {
+                            self.quarantine(unreadable.path().as_path(), quarantine);
+                        }
+                        continue;
+                    }
                     Ok(norn_fs::WalkFact::Skipped(_)) => continue,
                     // A walk yields nothing after an error, so a failed fact is
                     // the end of this root's reading.
@@ -5686,6 +5821,11 @@ mod tests {
     /// cases queued ahead of one here include another crate's.
     fn lease_budget() -> Budget {
         norn_testkit::isolation::acquisition_budget(lifecycle_budget())
+    }
+
+    #[cfg(feature = "induced-failure")]
+    mod broken_documents {
+        include!("production/broken_tests.rs");
     }
 
     struct Fixture {
@@ -8700,7 +8840,7 @@ mod tests {
             fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
             fs::write(f.vault().join("a.md"), "alpha alpha\n").unwrap();
             // Never armed: the watcher's facts are swallowed, so the explicit
-            // reload is the only leg that meets the unreadable document, and
+            // reload is the only leg that meets the exhausted document open, and
             // the polls still run the engine's maintenance slices.
             let (host, name, _lease, _armed, _) = overflowing_ready_host(&f);
             wait_for_engine(&host, &name, |engine| {
@@ -8708,9 +8848,7 @@ mod tests {
             });
 
             let denied = f.vault().join("zz.md");
-            if !unreadable_document(&denied) {
-                return;
-            }
+            let exhausted = exhausted_document(&denied);
             fs::write(
                 f.vault().join(".norn/schema.yaml"),
                 "version: 1\n# edited\n",
@@ -8718,7 +8856,7 @@ mod tests {
             .unwrap();
             let refused = host.reload(&name);
             let (_, engine) = engine_reported(&host, &name);
-            readable_again(&denied);
+            drop(exhausted);
 
             assert!(
                 matches!(
@@ -8728,7 +8866,7 @@ mod tests {
                 "{refused:?}"
             );
             // The reload pinned the edited schema as one generation before
-            // its heal met the document it cannot read.
+            // its heal met the exhausted document open.
             assert_eq!(
                 engine,
                 norn_wire::EngineStatus::on(None, Some(Freshness::trailing(1)))
@@ -9332,24 +9470,9 @@ mod tests {
         /// watcher only reports a change at the file: no backend adds a watch
         /// for a file, so its mode cannot fail the watcher.
         #[cfg(unix)]
-        fn unreadable_document(path: &Path) -> bool {
-            use std::os::unix::fs::PermissionsExt;
-
+        fn exhausted_document(path: &Path) -> impl Drop {
             fs::write(path, "omega omega\n").unwrap();
-            fs::set_permissions(path, fs::Permissions::from_mode(0o000)).unwrap();
-            if fs::read(path).is_ok() {
-                eprintln!("skipped: this account reads a mode-000 file");
-                fs::set_permissions(path, fs::Permissions::from_mode(0o644)).unwrap();
-                return false;
-            }
-            true
-        }
-
-        #[cfg(unix)]
-        fn readable_again(path: &Path) {
-            use std::os::unix::fs::PermissionsExt;
-
-            fs::set_permissions(path, fs::Permissions::from_mode(0o644)).unwrap();
+            norn_fs::exhaust_document_opens(path)
         }
 
         /// Wait until `name` stands untrusted for an environmental refusal: an
@@ -9387,16 +9510,14 @@ mod tests {
             fs::write(f.vault().join("a.md"), "beta beta\n").unwrap();
             fs::write(f.vault().join("b.md"), "gamma gamma\n").unwrap();
             let denied = f.vault().join("zz.md");
-            if !unreadable_document(&denied) {
-                return;
-            }
+            let exhausted = exhausted_document(&denied);
             armed.store(true, std::sync::atomic::Ordering::SeqCst);
             wait_refused(&host, &name);
             let (_, engine) = engine_reported(&host, &name);
-            readable_again(&denied);
+            drop(exhausted);
 
             // The rescan committed the rewritten `a.md` and the new `b.md` as
-            // one full changeset before it met the document it cannot read.
+            // one full changeset before it met the exhausted document open.
             assert_eq!(
                 engine,
                 norn_wire::EngineStatus::on(None, Some(Freshness::trailing(1)))
@@ -9420,9 +9541,7 @@ mod tests {
             fs::write(f.vault().join("a.md"), "beta beta\n").unwrap();
             fs::write(f.vault().join("b.md"), "gamma gamma\n").unwrap();
             let denied = f.vault().join("zz.md");
-            if !unreadable_document(&denied) {
-                return;
-            }
+            let exhausted = exhausted_document(&denied);
             armed.store(true, std::sync::atomic::Ordering::SeqCst);
             wait_refused(&host, &name);
             assert_eq!(
@@ -9444,10 +9563,10 @@ mod tests {
             .unwrap_or_else(|failure| panic!("{failure}"));
             wait_refused(&host, &name);
             let (_, engine) = engine_reported(&host, &name);
-            readable_again(&denied);
+            drop(exhausted);
 
             // The recovery's heal committed the new `c.md` and `d.md` as one
-            // more full changeset before it met the document it cannot read.
+            // more full changeset before it met the exhausted document open.
             assert_eq!(
                 engine,
                 norn_wire::EngineStatus::on(None, Some(Freshness::trailing(2)))
@@ -10705,7 +10824,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .byte_length,
-            7
+            Some(7)
         );
         ops.detach(&name, attachment);
     }
@@ -10762,7 +10881,9 @@ mod tests {
             &progress,
             "the edited document to converge on its new hash",
             |attachment, _| match stored(attachment, "note.md") {
-                Some(row) if row.content_hash == after => Observed::Met(()),
+                Some(row) if row.content_hash.as_deref() == Some(after.as_str()) => {
+                    Observed::Met(())
+                }
                 row => Observed::pending(format!("note.md is {:?}", row.map(|r| r.content_hash))),
             },
         );
@@ -10829,10 +10950,13 @@ mod tests {
             &progress,
             "the configured polling backend to hash-detect the same-stat replacement",
             |attachment, _| match stored(attachment, "note.md") {
-                Some(row) if row.content_hash == after => Observed::Met(()),
-                row => {
-                    Observed::pending(format!("note.md is {:?}", row.map(|row| row.content_hash)))
+                Some(row) if row.content_hash.as_deref() == Some(after.as_str()) => {
+                    Observed::Met(())
                 }
+                row => Observed::pending(format!(
+                    "note.md is {:?}",
+                    row.and_then(|row| row.content_hash)
+                )),
             },
         );
         ops.detach(&name, attachment);
@@ -12649,7 +12773,7 @@ mod tests {
                 .unwrap()
                 .expect("the replaced document keeps a row")
                 .content_hash,
-            norn_fs::ContentHash::of(AFTER).to_string(),
+            Some(norn_fs::ContentHash::of(AFTER).to_string()),
             "the merge derived the bytes the enumeration saw rather than the ones the open read"
         );
         assert_eq!(finding_total(&mut store), 0);
@@ -14589,13 +14713,13 @@ mod tests {
     #[derive(Debug, Eq, PartialEq)]
     struct DerivedDocument {
         path: DocumentPath,
-        content_hash: String,
-        byte_length: u64,
-        body_offset: u64,
+        content_hash: Option<String>,
+        byte_length: Option<u64>,
+        body_offset: Option<u64>,
         frontmatter: Option<String>,
         frontmatter_diagnostic_count: u32,
         generation: i64,
-        body: String,
+        body: Option<String>,
         links: Vec<norn_store::StoredLink>,
         link_keys: Vec<norn_store::StoredLinkKey>,
         headings: Vec<HeadingFact>,
@@ -18060,7 +18184,7 @@ mod tests {
                 .begin_request()
                 .stored_document(&DocumentPath::new("note.md").unwrap())
                 .unwrap()
-                .map(|row| row.content_hash),
+                .and_then(|row| row.content_hash),
             Some(norn_fs::ContentHash::of(b"status draft\n").to_string()),
             "the apply committed a changeset after its maintainership was lost"
         );
@@ -18281,7 +18405,7 @@ mod tests {
                 .begin_request()
                 .stored_document(&DocumentPath::new(path).unwrap())
                 .unwrap()
-                .map(|row| row.content_hash)
+                .and_then(|row| row.content_hash)
         };
         wait_until(
             "the store to hold the other writer's bytes",
@@ -18539,7 +18663,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             row.content_hash,
-            norn_fs::ContentHash::of(b"after").to_string()
+            Some(norn_fs::ContentHash::of(b"after").to_string())
         );
     }
 
@@ -19079,8 +19203,9 @@ mod tests {
                 .stored_facts(&DocumentPath::new("added.md").unwrap())
                 .unwrap()
                 .unwrap()
-                .body,
-            "arrived after inventory"
+                .body
+                .as_deref(),
+            Some("arrived after inventory")
         );
         assert_eq!(
             sorted_kinds(&mut attachment.store, "quarantined.md"),
@@ -19367,7 +19492,10 @@ mod tests {
                 .stored_facts(&DocumentPath::new(path).unwrap())
                 .unwrap()
                 .unwrap();
-            assert_eq!(row.body, fs::read_to_string(f.vault().join(path)).unwrap());
+            assert_eq!(
+                row.body,
+                Some(fs::read_to_string(f.vault().join(path)).unwrap())
+            );
         }
         assert!(
             attachment
@@ -19529,7 +19657,7 @@ mod tests {
                 .begin_request()
                 .stored_document(&self.subject)
                 .expect("reading the subject after a reconcile")
-                .map(|row| row.content_hash);
+                .and_then(|row| row.content_hash);
             Ok(())
         }
 
@@ -19755,7 +19883,7 @@ mod tests {
             .stored_document(&DocumentPath::new("note.md").unwrap())
             .unwrap()
             .unwrap();
-        assert_eq!(row.content_hash, during);
+        assert_eq!(row.content_hash, Some(during));
     }
 
     /// The registration changes over the production seam: the registry file

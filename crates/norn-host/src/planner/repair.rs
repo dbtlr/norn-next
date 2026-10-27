@@ -714,7 +714,8 @@ fn skip(row: &FindingRow, reason: SkipReason) -> SkippedFinding {
 fn leaves_document_unread(kind: FindingKind) -> bool {
     matches!(
         kind,
-        FindingKind::PathBytesNotUtf8
+        FindingKind::UnreadableDocument
+            | FindingKind::PathBytesNotUtf8
             | FindingKind::PathNamesNoDocument
             | FindingKind::BodyBytesNotUtf8
             | FindingKind::FrontmatterTooLarge

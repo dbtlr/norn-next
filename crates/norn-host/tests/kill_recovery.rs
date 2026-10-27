@@ -97,7 +97,7 @@ fn next_attach_converges_after_process_death_mid_increment() {
         let old = format!("old {}\n", row.path.as_str().trim_end_matches(".md"));
         assert_eq!(
             row.content_hash,
-            norn_fs::ContentHash::of(old.as_bytes()).to_string()
+            Some(norn_fs::ContentHash::of(old.as_bytes()).to_string())
         );
     }
     assert!(
@@ -133,9 +133,9 @@ fn next_attach_converges_after_process_death_mid_increment() {
             .expect("healed document");
         assert_eq!(
             row.content_hash,
-            norn_fs::ContentHash::of(body.as_bytes()).to_string()
+            Some(norn_fs::ContentHash::of(body.as_bytes()).to_string())
         );
-        assert_eq!(row.byte_length, body.len() as u64);
+        assert_eq!(row.byte_length, Some(body.len() as u64));
     }
 }
 

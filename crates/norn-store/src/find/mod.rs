@@ -327,8 +327,8 @@ pub struct Found {
     /// What the find read.
     pub work: FindWork,
     /// The content hash each row's document was indexed under, one per row
-    /// and in row order: what the store took in when it last derived that
-    /// document. **Store-internal, never on the wire**:
+    /// and in row order, absent for a broken document: what the store took in
+    /// when it last derived that document. **Store-internal, never on the wire**:
     /// [`Found::into_report`] drops it. A writer matching documents through a
     /// find compares it with the bytes it composes from, so a match resting
     /// on facts the store has not taken in yet is seen as such.

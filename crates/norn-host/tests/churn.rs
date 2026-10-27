@@ -514,7 +514,11 @@ fn documents_crossing_validity_boundaries_converge_on_a_build_from_zero() {
             .document("churn/states/recovering.md")
             .expect("the document that stopped being undecodable derives a row");
         assert!(
-            !recovered.body.is_empty(),
+            !recovered
+                .body
+                .as_deref()
+                .expect("the recovered document has a known body")
+                .is_empty(),
             "the recovered document derived an empty body"
         );
         assert!(
@@ -2088,7 +2092,11 @@ impl Churned {
             .begin_request()
             .stored_document(&DocumentPath::new(path).expect("a document path"))
             .expect("reading a document")
-            .map(|document| document.content_hash);
+            .map(|document| {
+                document
+                    .content_hash
+                    .expect("the readable fixture has a content hash")
+            });
         assert_eq!(
             held.as_deref(),
             Some(hash),

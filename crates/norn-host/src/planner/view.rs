@@ -523,7 +523,7 @@ impl TreeView {
     fn entry_read(
         &self,
         path: &NormalizedPath,
-        read: impl FnOnce(&Path, &Path) -> Result<Option<(ContentHash, Body)>, Refusal>,
+        read: impl FnOnce(&Path, &Path) -> Result<norn_fs::Opened<(ContentHash, Body)>, Refusal>,
     ) -> Result<Entry, TreeViewError> {
         let (kind, at) = match self.reach(path.as_path())? {
             Reach::Refused(skip) => {
@@ -570,8 +570,12 @@ impl TreeView {
                 match read(&self.root, at.as_path()).map_err(TreeViewError::Read)? {
                     // Taken away between the descent and the read: nothing
                     // stands there now.
-                    None => self.spelled_where_absent(path)?,
-                    Some((hash, body)) => Entry::Document {
+                    norn_fs::Opened::Nothing => self.spelled_where_absent(path)?,
+                    norn_fs::Opened::Unreadable { operation, cause } => Entry::Blocked {
+                        detail: format!("{operation}: {cause}"),
+                        barrier: Barrier::Occupied,
+                    },
+                    norn_fs::Opened::Read((hash, body)) => Entry::Document {
                         at: spelling,
                         hash,
                         body,
@@ -591,10 +595,16 @@ impl VaultView for TreeView {
 
     fn entry(&self, path: &NormalizedPath) -> Result<Entry, TreeViewError> {
         self.entry_read(path, |root, at| {
-            Ok(norn_fs::read_optional_and_hash(root, at)?.map(|read| {
-                let (bytes, hash) = read.into_parts();
-                (wire_hash(hash), Body::Held(Arc::from(bytes)))
-            }))
+            Ok(match norn_fs::read_optional_and_hash(root, at)? {
+                norn_fs::Opened::Read(read) => {
+                    let (bytes, hash) = read.into_parts();
+                    norn_fs::Opened::Read((wire_hash(hash), Body::Held(Arc::from(bytes))))
+                }
+                norn_fs::Opened::Nothing => norn_fs::Opened::Nothing,
+                norn_fs::Opened::Unreadable { operation, cause } => {
+                    norn_fs::Opened::Unreadable { operation, cause }
+                }
+            })
         })
     }
 
@@ -606,16 +616,18 @@ impl VaultView for TreeView {
     /// but for the body.
     fn streamed_entry(&self, path: &NormalizedPath) -> Result<Entry, TreeViewError> {
         self.entry_read(path, |root, at| {
-            Ok(
-                norn_fs::stream_optional_and_hash(root, at)?.map(|streamed| {
-                    (
-                        wire_hash(streamed.content_hash()),
-                        Body::Streamed {
-                            decodes: crate::derivation::streamed_decodes(&streamed),
-                        },
-                    )
-                }),
-            )
+            Ok(match norn_fs::stream_optional_and_hash(root, at)? {
+                norn_fs::Opened::Read(streamed) => norn_fs::Opened::Read((
+                    wire_hash(streamed.content_hash()),
+                    Body::Streamed {
+                        decodes: crate::derivation::streamed_decodes(&streamed),
+                    },
+                )),
+                norn_fs::Opened::Nothing => norn_fs::Opened::Nothing,
+                norn_fs::Opened::Unreadable { operation, cause } => {
+                    norn_fs::Opened::Unreadable { operation, cause }
+                }
+            })
         })
     }
 
@@ -722,6 +734,25 @@ impl VaultView for TreeView {
         for fact in walk {
             match fact.map_err(TreeViewError::Walk)? {
                 norn_fs::WalkFact::File(file) => contents.take(file.path().as_path()),
+                norn_fs::WalkFact::Unreadable(unreadable) => {
+                    if unreadable
+                        .path()
+                        .as_path()
+                        .extension()
+                        .is_some_and(|suffix| suffix == "md")
+                    {
+                        contents.take(unreadable.path().as_path());
+                    } else {
+                        return Err(TreeViewError::Walk(norn_fs::WalkError::Environment {
+                            operation: unreadable.operation(),
+                            path: unreadable.path().as_path().to_owned(),
+                            source: std::io::Error::new(
+                                unreadable.cause().kind(),
+                                unreadable.cause().to_string(),
+                            ),
+                        }));
+                    }
+                }
                 norn_fs::WalkFact::Skipped(skip) => {
                     contents.leave(&skip.path().as_path().to_string_lossy());
                 }

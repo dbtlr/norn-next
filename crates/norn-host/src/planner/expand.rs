@@ -88,7 +88,7 @@ pub(crate) type Matched = Result<Vec<MatchedDocument>, String>;
 pub(crate) struct MatchedDocument {
     pub(crate) path: DocumentPath,
     /// The 64 lowercase hexadecimal digits of the indexed content hash.
-    pub(crate) indexed: String,
+    pub(crate) indexed: Option<String>,
 }
 
 /// The documents a predicate list matches, on the one snapshot a request
@@ -350,7 +350,7 @@ fn changed_since_indexed<V: VaultView>(
 ) -> Result<Option<UnresolvedReason>, V::Error> {
     let identity = identity_of(view.normalizer(), &document.path);
     Ok(match view.entry(&identity)? {
-        Entry::Document { hash, .. } if hash.hex() != document.indexed => {
+        Entry::Document { hash, .. } if document.indexed.as_deref() != Some(hash.hex()) => {
             Some(UnresolvedReason::no_longer_resolves(format!(
                 "`{}` changed since the vault's index saw it, so the `where` target's match \
                  of it rests on facts the index has not taken in; re-send the plan once the \
@@ -490,7 +490,7 @@ mod tests {
                 .iter()
                 .map(|(at, text)| MatchedDocument {
                     path: path(at),
-                    indexed: content_hash(text.as_bytes()).hex().to_string(),
+                    indexed: Some(content_hash(text.as_bytes()).hex().to_string()),
                 })
                 .collect()))
         }

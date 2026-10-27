@@ -306,3 +306,81 @@ fn the_ddl_refuses_a_partial_body() {
     }
     assert!(induced_failure::execute_out_of_band(&mut store, "UPDATE documents SET body = NULL, body_hash = NULL, byte_length = NULL, body_offset = NULL WHERE path = 'a.md'").is_err(), "a content hash cannot stand without its body");
 }
+
+#[test]
+fn field_predicates_never_match_a_broken_document() {
+    use norn_store::FrontmatterValue;
+    use norn_wire::{CountParams, FindParams, Predicate, VaultAddress, VaultName};
+    let scratch = Scratch::new("broken-field-predicates");
+    let mut store = scratch.open();
+    let declared = ContentModel::none();
+    for (at, status) in [
+        ("broken.md", Some("done")),
+        ("done.md", Some("done")),
+        ("missing.md", None),
+        ("open.md", Some("open")),
+    ] {
+        let fields = status.map(|value| {
+            FrontmatterValue::Map(vec![(
+                "status".to_string(),
+                FrontmatterValue::String(value.to_string()),
+            )])
+        });
+        write_document(
+            &mut store.begin_request(),
+            &document(at, "hash", "body\n").with_frontmatter(fields, &declared),
+        );
+    }
+    unreadable(&mut store.begin_request(), "broken.md");
+    let reader = Arc::new(store.open_reader().reader.unwrap());
+    let snapshot = reader.try_take().unwrap().establish().unwrap();
+    let vault = VaultAddress::name(VaultName::new("notes").unwrap());
+    let found = snapshot
+        .find(&FindParams::new(vault.clone()), &declared)
+        .unwrap();
+    assert_eq!(
+        found
+            .rows
+            .iter()
+            .map(|row| row.path.as_str())
+            .collect::<Vec<_>>(),
+        ["broken.md", "done.md", "missing.md", "open.md"]
+    );
+    for (predicate, expected) in [
+        (Predicate::missing("status"), vec!["missing.md"]),
+        (
+            Predicate::not_equal_to("status", "done"),
+            vec!["missing.md", "open.md"],
+        ),
+        (Predicate::has("status"), vec!["done.md", "open.md"]),
+        (Predicate::equal_to("status", "done"), vec!["done.md"]),
+    ] {
+        for predicates in [
+            vec![predicate.clone()],
+            vec![Predicate::path("*.md"), predicate],
+        ] {
+            let found = snapshot
+                .find(
+                    &FindParams::new(vault.clone()).with_predicates(predicates.clone()),
+                    &declared,
+                )
+                .unwrap();
+            assert_eq!(
+                found
+                    .rows
+                    .iter()
+                    .map(|row| row.path.as_str())
+                    .collect::<Vec<_>>(),
+                expected,
+                "{predicates:?}"
+            );
+            let counted = snapshot
+                .count(
+                    &CountParams::new(vault.clone()).with_predicates(predicates),
+                    &declared,
+                )
+                .unwrap();
+            assert_eq!(counted.tallies[0].count, expected.len() as u64);
+        }
+    }
+}

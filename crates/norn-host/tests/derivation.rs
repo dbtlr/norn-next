@@ -1245,7 +1245,11 @@ fn assert_the_corpus_exercises_every_fact(rows: &DerivedRows) {
         "the glossary's frontmatter derived no field rows"
     );
     assert!(
-        document("notes/Deep Note.md").body.contains("\r\n"),
+        document("notes/Deep Note.md")
+            .body
+            .as_deref()
+            .expect("the readable fixture has a body")
+            .contains("\r\n"),
         "no CRLF document is exercised"
     );
     assert_eq!(
@@ -1435,7 +1439,11 @@ fn assert_the_corpus_exercises_every_fact(rows: &DerivedRows) {
         "| 1 | 2 |\n\n^table-block",
     ] {
         assert!(
-            markup.body.contains(written),
+            markup
+                .body
+                .as_deref()
+                .expect("the readable markup has a body")
+                .contains(written),
             "the markup document does not carry `{written}`"
         );
     }
@@ -1455,8 +1463,12 @@ fn assert_the_corpus_exercises_every_fact(rows: &DerivedRows) {
         "no setext heading over two lines is exercised"
     );
     let lone_cr = document("cr-only.md");
+    let body = lone_cr
+        .body
+        .as_deref()
+        .expect("the readable CR fixture has a body");
     assert!(
-        !lone_cr.body.contains('\n') && lone_cr.body.contains("```\r#fenced\r```"),
+        !body.contains('\n') && body.contains("```\r#fenced\r```"),
         "no lone-CR document with a fenced tag marker is exercised"
     );
     // The walk derives a document under a hidden directory like any other,

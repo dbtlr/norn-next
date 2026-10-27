@@ -736,3 +736,14 @@ pub fn for_each_derived_document(store: &mut Store, mut visit: impl FnMut(&Store
         }
     }
 }
+
+/// Read content from a fixture that is expected to be readable.
+pub fn known<T>(content: &norn_wire::Content<T>) -> &T {
+    match content {
+        norn_wire::Content::Known { value, .. } => value,
+        norn_wire::Content::Unknown { reason, .. } => {
+            panic!("expected known fixture content, got unknown ({reason:?})")
+        }
+        _ => panic!("expected known fixture content, got an unsupported state"),
+    }
+}

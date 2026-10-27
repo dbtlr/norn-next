@@ -62,7 +62,7 @@ fn read_back(host: &attach::ServingHost, vault: &attach::Vault) -> String {
     let GetReport::Section { body, .. } = answered.answer.report else {
         panic!("a heading anchor answered no section");
     };
-    body.text().to_string()
+    attach::known(&body).text().to_string()
 }
 
 /// **A previewed plan, sent back, applies and reads back.** The preview

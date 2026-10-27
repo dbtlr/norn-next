@@ -24,8 +24,8 @@
 //! the store's own pin, so the model a plan derives under and the fingerprint
 //! its findings are stamped with come from one set of bytes.
 //!
-//! **Findings are minted here and nowhere else.** [`plan_document`] and
-//! [`plan_quarantine`] are [`PlannedFinding`]'s two constructors, and they are
+//! **Findings are minted here and nowhere else.** [`plan_document`],
+//! [`plan_quarantine`] and [`plan_unreadable`] construct [`PlannedFinding`], and are
 //! what holds a finding's subject and its cause coherent: the subject is the
 //! place the act read, and the cause is what the act concluded there. Code
 //! outside this module consumes plans; it does not build them.
@@ -230,6 +230,8 @@ impl TagBreach {
 pub(crate) enum Cause {
     /// Nothing about the path is derivable.
     Undecodable(Undecodable),
+    /// The document's bytes could not be opened or read.
+    Unreadable,
     /// The document derives and its frontmatter block was read by nothing.
     UnreadBlock(UnreadBlock),
     /// The document derives whole and disagrees with the vault's declared tag
@@ -246,6 +248,7 @@ impl Cause {
     pub(crate) const fn kind(self) -> FindingKind {
         match self {
             Cause::Undecodable(cause) => cause.kind(),
+            Cause::Unreadable => FindingKind::UnreadableDocument,
             Cause::UnreadBlock(cause) => cause.kind(),
             Cause::TagBreach(cause) => cause.kind(),
             Cause::RuleBreach(breach) => breach.kind(),
@@ -255,7 +258,7 @@ impl Cause {
     /// How urgently a finding of this cause is reported, where the cause
     /// alone decides it.
     ///
-    /// The two derivation defects are errors: derived state is missing
+    /// The derivation defects are errors: derived state is missing
     /// something the vault holds, and a reader of that state gets a wrong
     /// answer until it is fixed. A facet breach is a warning: the document
     /// derived whole, every fact it holds is on its row, and what stands is a
@@ -266,7 +269,7 @@ impl Cause {
     /// reported at.
     pub(crate) const fn severity(self) -> Severity {
         match self {
-            Cause::Undecodable(_) | Cause::UnreadBlock(_) => Severity::Error,
+            Cause::Undecodable(_) | Cause::UnreadBlock(_) | Cause::Unreadable => Severity::Error,
             Cause::TagBreach(_) | Cause::RuleBreach(_) => Severity::Warning,
         }
     }
@@ -280,13 +283,17 @@ impl Cause {
             // facts a facet judges are read from the document itself. So is a
             // rule breach: it judges the frontmatter those bytes hold, at the
             // path they stand at, and the act that re-reads them re-judges it.
-            Cause::UnreadBlock(_) | Cause::TagBreach(_) | Cause::RuleBreach(_) => Decided::ByBytes,
+            Cause::UnreadBlock(_)
+            | Cause::TagBreach(_)
+            | Cause::RuleBreach(_)
+            | Cause::Unreadable => Decided::ByBytes,
         }
     }
 
     /// The finding's message: the subject, what happened to it, and the cause.
     pub(crate) fn message(self, subject: &DocumentPath) -> String {
         match self {
+            Cause::Unreadable => format!("`{}` could not be read", subject.as_str()),
             Cause::Undecodable(cause) => format!(
                 "`{}` is quarantined: {}",
                 subject.as_str(),
@@ -333,8 +340,8 @@ pub(crate) enum Decided {
     /// The spelling alone decides it: the act read paths and opened no bytes,
     /// so what it concludes is what the grammar says about the names it read.
     BySpelling,
-    /// The document's own bytes decide it: the act opened the file the place
-    /// names, so it concludes what those bytes say and nothing about the other
+    /// The document's content decides it: the act read the file's bytes or
+    /// learned they could not be read. It concludes nothing about other
     /// spellings rendering there.
     ByBytes,
 }
@@ -378,10 +385,11 @@ impl Decided {
 /// leaves none. A cause minted under a kind an older cause already carries is
 /// reached by neither side, and the ADR that closes both cause sets is what
 /// stands in front of one.
-const CAUSES: [Cause; 16] = [
+const CAUSES: [Cause; 17] = [
     Cause::Undecodable(Undecodable::PathBytes),
     Cause::Undecodable(Undecodable::PathSpelling),
     Cause::Undecodable(Undecodable::BodyBytes),
+    Cause::Unreadable,
     Cause::UnreadBlock(UnreadBlock::Unclosed),
     Cause::UnreadBlock(UnreadBlock::Unreadable),
     Cause::UnreadBlock(UnreadBlock::TooLarge),
@@ -454,7 +462,8 @@ const _: () = {
 const fn scope_agrees(cause: Cause) -> bool {
     matches!(
         (cause, cause.kind().scope()),
-        (Cause::Undecodable(_), FindingScope::Place)
+        (Cause::Unreadable, FindingScope::Document)
+            | (Cause::Undecodable(_), FindingScope::Place)
             | (Cause::UnreadBlock(_), FindingScope::Document)
             | (Cause::TagBreach(_), FindingScope::Document)
             | (Cause::RuleBreach(_), FindingScope::Document)
@@ -1452,6 +1461,11 @@ const fn source(source: TagSource) -> &'static str {
     }
 }
 
+/// The finding beside a document whose bytes could not be read.
+pub(crate) fn plan_unreadable(subject: DocumentPath, cause: &std::io::Error) -> PlannedFinding {
+    PlannedFinding::of(subject, Cause::Unreadable, cause.to_string(), None)
+}
+
 /// Plan the finding that says why a path contributes no facts.
 ///
 /// The subject is the place the path occupies — its own spelling where the
@@ -1708,9 +1722,12 @@ mod tests {
         for (at, (name, bytes)) in corpus.iter().enumerate() {
             let relative = format!("{at:02}.md");
             std::fs::write(root.join(&relative), bytes).expect("a file");
-            let streamed = norn_fs::stream_optional_and_hash(&root, Path::new(&relative))
-                .expect("a streamed read")
-                .expect("the file is there");
+            let norn_fs::Opened::Read(streamed) =
+                norn_fs::stream_optional_and_hash(&root, Path::new(&relative))
+                    .expect("a streamed read")
+            else {
+                panic!("the file is there");
+            };
             assert_eq!(streamed.len(), bytes.len() as u64, "{name}");
             assert_eq!(streamed_decodes(&streamed), decodes(bytes), "{name}");
             verdicts.insert(decodes(bytes));
@@ -2238,9 +2255,10 @@ rules:
         for cause in CAUSES {
             let expected = match cause {
                 Cause::Undecodable(_) => FindingScope::Place,
-                Cause::UnreadBlock(_) | Cause::TagBreach(_) | Cause::RuleBreach(_) => {
-                    FindingScope::Document
-                }
+                Cause::Unreadable
+                | Cause::UnreadBlock(_)
+                | Cause::TagBreach(_)
+                | Cause::RuleBreach(_) => FindingScope::Document,
             };
             assert_eq!(
                 cause.kind().scope(),
@@ -3024,7 +3042,9 @@ rules:
     fn the_two_finding_families_carry_the_severity_their_effect_on_derived_state_has() {
         for cause in CAUSES {
             let expected = match cause {
-                Cause::Undecodable(_) | Cause::UnreadBlock(_) => Severity::Error,
+                Cause::Unreadable | Cause::Undecodable(_) | Cause::UnreadBlock(_) => {
+                    Severity::Error
+                }
                 Cause::TagBreach(_) | Cause::RuleBreach(_) => Severity::Warning,
             };
             assert_eq!(cause.severity(), expected, "`{}`", cause.kind());

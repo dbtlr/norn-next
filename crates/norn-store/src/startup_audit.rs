@@ -92,9 +92,10 @@ const META_FILTER: &str =
 
 /// Audit a cleanly closed worker's store outside measurement clocks.
 ///
-/// Documents are emitted in path order so the controller can check each hash
+/// Readable documents are emitted in path order so the controller can check each hash
 /// and length against source bytes without retaining document bodies. The
 /// callback writes harness evidence only; it must not mutate the audited store.
+/// Names-only rows still participate in the normalized table digests.
 pub fn audit(
     path: &Path,
     mut emit_document: impl FnMut(&str, &str, u64) -> std::io::Result<()>,

@@ -689,7 +689,10 @@ mod intake_tests {
                     .apply_intake_increment([Change::Upsert(facts)], &[], &model)
                     .unwrap();
                 let stored = store.begin_request().stored_facts(&path).unwrap().unwrap();
-                assert_eq!(stored.document.content_hash.as_deref(), Some("real-source-hash"));
+                assert_eq!(
+                    stored.document.content_hash.as_deref(),
+                    Some("real-source-hash")
+                );
                 assert_eq!(stored.document.byte_length, Some(15));
                 assert_eq!(stored.body.as_deref(), Some(""));
                 let matches: u64 = store

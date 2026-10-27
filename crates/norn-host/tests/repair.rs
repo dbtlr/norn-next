@@ -5422,6 +5422,161 @@ fn a_vault_with_a_missing_anchor(label: &str) -> (Sandbox, attach::Vault, attach
     )
 }
 
+/// A target that stopped reading cannot supply a closest-heading suggestion;
+/// independent fixes in the same batch still proceed.
+#[cfg(feature = "induced-failure")]
+#[test]
+fn a_closest_heading_fix_into_a_broken_document_is_skipped_as_unreadable_target() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "repair-anchor-unreadable-target",
+        "version: 1\n",
+        &[
+            ("zz-holder.md", b"[[zz-target#Important Headinh]]\n"),
+            ("zz-target.md", b"# Important Heading\n"),
+            ("zz-other-holder.md", b"[[zz-other#Another Headinh]]\n"),
+            ("zz-other.md", b"# Another Heading\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let before = previewed(
+        host.repair(repairing(&vault, ApplyMode::Preview).with_threshold(Confidence::Suggested)),
+    );
+    assert_eq!(
+        before.operations.len(),
+        2,
+        "both heading fixes are initially eligible"
+    );
+    let target = norn_store::DocumentPath::new(at("zz-target.md").as_str()).unwrap();
+    let holder = norn_store::DocumentPath::new(at("zz-holder.md").as_str()).unwrap();
+    let mut store = vault.store();
+    let captured = store
+        .begin_request()
+        .stored_findings(&holder)
+        .unwrap()
+        .into_iter()
+        .find(|finding| finding.kind == FindingKind::MissingAnchor.as_str())
+        .expect("the original missing-anchor evidence");
+    assert!(captured.value.is_none());
+    let selected = norn_store::FindingFacts {
+        kind: FindingKind::MissingAnchor,
+        severity: Severity::try_from(captured.severity.as_str()).unwrap(),
+        path: captured.path,
+        class_keys: captured.class_keys,
+        path_keys: captured.path_keys,
+        target: captured.target,
+        span: captured.span,
+        ordinal: captured.ordinal,
+        candidates: captured.candidates,
+        candidates_total: captured.candidates_total,
+        message: captured.message,
+        detail: captured.detail,
+        rules: captured.rules,
+        value: None,
+    };
+    let unreadable = norn_store::FindingFacts {
+        kind: FindingKind::UnreadableDocument,
+        severity: Severity::Error,
+        path: target.clone(),
+        class_keys: BTreeSet::new(),
+        path_keys: BTreeSet::new(),
+        target: None,
+        span: None,
+        ordinal: None,
+        candidates: Vec::new(),
+        candidates_total: 0,
+        message: "the document could not be read".to_owned(),
+        detail: Some("Permission denied (os error 13)".to_owned()),
+        rules: BTreeSet::new(),
+        value: None,
+    };
+    let _denied = norn_fs::deny_document_opens(&vault.path().join(FOLDER).join("zz-target.md"));
+    let declared = norn_store::ContentModel::under(
+        store
+            .begin_request()
+            .vault_schema_pin()
+            .unwrap()
+            .unwrap()
+            .fingerprint,
+    );
+    store
+        .begin_request()
+        .apply_increment(
+            norn_store::IncrementProvenance::Derived,
+            [norn_store::Change::Unreadable {
+                path: target.clone(),
+            }],
+            &[norn_store::DerivedFinding {
+                facts: unreadable,
+                replaces: None,
+                bytes_hash: None,
+            }],
+            &declared,
+        )
+        .expect("marking the target broken and filing its cause atomically");
+    assert!(
+        store
+            .begin_request()
+            .stored_document(&target)
+            .unwrap()
+            .unwrap()
+            .content_hash
+            .is_none()
+    );
+    assert!(
+        store
+            .begin_request()
+            .stored_findings(&holder)
+            .unwrap()
+            .iter()
+            .all(|finding| finding.kind != FindingKind::MissingAnchor.as_str())
+    );
+    norn_testkit::equivalence::assert_operationally_valid(
+        &mut store,
+        "the ordinary broken-target state",
+    );
+    // Ordinary link health withholds this judgment. Restore only the captured
+    // input through the fenced seam to test repair's defensive evidence boundary.
+    norn_store::induced_failure::record_finding_out_of_band(&mut store, &selected).unwrap();
+    drop(store);
+    let findings = standing(&host, &vault, |request| request);
+    let finding = *findings
+        .iter()
+        .find(|(_, (path, kind))| {
+            path == &format!("{FOLDER}zz-holder.md") && *kind == FindingKind::MissingAnchor
+        })
+        .expect("the explicitly supplied missing-anchor finding")
+        .0;
+    let plan = previewed(
+        host.repair(repairing(&vault, ApplyMode::Preview).with_threshold(Confidence::Suggested)),
+    );
+    let skipped = &provenance(&plan).skipped;
+    assert!(
+        skipped
+            .iter()
+            .any(|skip| skip.finding == finding && skip.reason == SkipReason::UnreadableTarget),
+        "{plan:?}"
+    );
+    assert_eq!(
+        plan.operations.len(),
+        1,
+        "the independent heading fix proceeds: {plan:?}"
+    );
+    assert_eq!(
+        plan.operations[0].kind,
+        OperationKind::rewrite_anchor(
+            at("zz-other-holder.md"),
+            norn_wire::LinkFamily::Wikilink,
+            "zz-other",
+            "Another Headinh",
+            "Another Heading"
+        )
+    );
+    assert_eq!(
+        written(&vault, "zz-holder.md"),
+        "[[zz-target#Important Headinh]]\n"
+    );
+}
+
 /// Tag comparisons count even when the read gate finds no possible fix.
 #[test]
 fn an_unfixable_undeclared_tag_counts_each_declared_tag_the_read_gate_compares() {
@@ -6822,7 +6977,8 @@ fn a_broken_link_with_a_no_holder_tombstone_stays_broken_without_a_suggestion() 
                 )
                 .expect("the moved document");
             if held.as_ref().is_some_and(|doc| {
-                doc.content_hash == norn_fs::ContentHash::of(b"# Changed\n").to_hex()
+                doc.content_hash.as_deref()
+                    == Some(norn_fs::ContentHash::of(b"# Changed\n").to_hex().as_str())
             }) {
                 Observed::Met(())
             } else {
