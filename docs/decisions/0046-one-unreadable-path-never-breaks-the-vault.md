@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 date: 2026-10-26
 ---
 
@@ -91,11 +91,14 @@ An unopenable file whose spelling the document-path grammar refuses is quarantin
 spelling, not marked broken: the spelling alone settles that cause.
 
 **A directory a walk cannot list is withheld and marked, and the walk continues.** Its places
-are not pruned: every row and every finding beneath it stands, as ADR 0023 already withheld
-the findings beneath a page it could not read, because nothing was read there and what stands
-there now is a question the walk could not ask. A place-scoped **unreadable-directory**
-finding stands at the directory's own path, carrying the cause, and the walk goes on through
-every other directory and concludes everywhere else.
+are not pruned: every document beneath it keeps its name, id and keys, without a tombstone.
+In the transaction that first files the directory's finding, these rows become names-only:
+content hashes and bodies are NULL, byte-derived facts and content-side findings are deleted,
+and findings about their outgoing links end. Spelling-side findings stay. No per-document
+unreadable finding is filed. A place-scoped **unreadable-directory** finding stands at the
+directory's own path, carrying the cause, and the walk goes on through every other directory
+and concludes everywhere else. Names still resolve, and NULL hashes require fresh derivation
+when the directory lists again.
 
 **A name the walk listed but whose stat the machine denies is the same condition at one
 name**: pruning is withheld at and beneath it, and a finding at the name says it could not
@@ -118,7 +121,7 @@ condition, not a lost watcher, so the install withholds coverage at that directo
 rather than withdrawing the entry, and it marks nothing: the walk that meets the same denial
 files the finding. The directory's parent is still watched, and its watch reports a change
 to the directory's attributes. That report requeues the directory, as any filesystem fact
-requeues its path, and the walk that lists it installs coverage over it.
+requeues its path, and coverage is installed over it once it reads.
 
 **Recovery needs no second mechanism.** A broken document that opens again is an ordinary
 derivation: its row holds no content hash, so the bytes the walk reads match nothing, even
@@ -201,10 +204,12 @@ on outcome.
 **Three withholders remain, and each is the walk saying it could not look.** A failure of the
 environment as a whole concludes nothing: its error ends the job ahead of its own prune, so
 every finding in its scope stands. A directory the walk cannot list withholds every row and
-every finding at and beneath it, and a name whose stat the machine denies is not pruned —
-no row at or beneath it is pruned, and findings beneath it stand. The document posture
-still clears its row to names alone and discards every finding at that subject before
-filing its unreadable-document finding. The job concludes everywhere else. And a root that
+every spelling-side finding at and beneath it. Its first mark clears every document beneath
+it to names alone and discards byte-derived facts, content-side findings and outgoing-link
+findings in the same transaction. A name whose stat the machine denies is not pruned:
+no row at or beneath it is pruned. Its directory posture applies the same names-only rule
+beneath it. The document posture clears its own row to names alone and discards every
+finding at that subject before filing its unreadable-document finding. The job concludes everywhere else. And a root that
 **vanished** inside one of the walk's own windows, or a
 single name it enumerated and opened nothing at because nothing was there, covers the places
 beneath it: nothing was read there and what stands there now is a question the walk never
@@ -258,10 +263,13 @@ A build from zero and a maintained store both hold a broken document's names-onl
 and unreadable-document finding, never facts from an earlier reading. Only the accepted
 delay in refreshing a still-broken document's cause can leave that detail behind. An
 unlistable directory is the place the bar is knowingly short over derived facts. A build
-from zero holds no row beneath it, while a maintained store keeps every row it held there. The directory's
-finding marks that gap, and the difference ends when the directory lists again. Link health
-reads the gap the same way: a link spelling a path beneath a marked directory has a target that is unknown,
-not absent, and is not judged
+from zero holds no row beneath it, while a maintained store keeps only the names, ids and
+keys of the document rows it held there. Neither holds facts derived from unread bytes.
+The directory's finding marks that gap, and the difference ends when the directory lists again. Link health
+reads the gap the same way: a path-addressed link beneath a marked directory resolving to
+no held name has an unknown target rather than an absent one, and is not judged. A link
+resolving to a held name keeps its ordinary judgment; its anchor is unjudged because the
+names-only row holds no body
 ([ADR 0044](0044-a-from-zero-build-judges-link-health-once.md)).
 
 ## Consequences
@@ -370,8 +378,8 @@ paging-window bar distinguishes a stat denied for one name, which now withholds 
 from the machine's own failures, which still refuse. The signals of pending maintenance at
 rest in the rows gain a third: a row holding no content hash is re-derived, which is every
 broken document. The wire's health rule, which leaves an anchor on a vault file unjudged,
-also leaves unjudged an anchor on every broken document and a path-addressed link whose
-spelled path lies beneath a marked directory. A projected content column answers an
+also leaves unjudged an anchor on every broken document and a zero-target path-addressed
+link whose spelled path lies beneath a marked directory. A projected content column answers an
 explicit unknown state with the unreadable reason, not an empty value or an unprojected
 column.
 

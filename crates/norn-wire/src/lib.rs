@@ -614,7 +614,8 @@ pub use doctor::{
 pub use document::{
     BlockRow, BodyText, Collection, Column, Content, DOCUMENT_EXTENSION, DocumentPath, DocumentRow,
     ElsewhereNamesDocuments, FieldValue, HeadingRow, LinkAddress, LinkAddressKind, LinkFamily,
-    LinkHealth, LinkRow, Span, TagRow, TagSource, TotalBelowHead, UnknownReason, VAULT_PROTOCOL,
+    LinkHealth, LinkRow, Span, TagRow, TagSource, TargetGap, TotalBelowHead, UnknownReason,
+    VAULT_PROTOCOL,
 };
 pub use error::{
     AnswerShape, ErrorDetail, ErrorEnvelope, MaintainerIdentity, NameSet, ReadFailure, ReasonCode,

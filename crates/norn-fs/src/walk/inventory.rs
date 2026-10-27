@@ -29,6 +29,7 @@ struct Scan {
 pub struct InventoryWalk {
     vault: Vault,
     stack: Vec<Scan>,
+    faults: WalkFaults,
 }
 
 impl InventoryWalk {
@@ -40,14 +41,22 @@ impl InventoryWalk {
     pub fn from_vault(vault: &Vault) -> Result<Self, WalkError> {
         let vault = vault.clone();
         let root = vault.root.as_path();
-        let entries = Dir::read_from(&vault.root_fd)
-            .map_err(|error| environment_errno("reading directory", root, error))?;
+        let faults = WalkFaults::entry();
+        let entries = match faults.listing(Path::new(""), false) {
+            Some(errno) => Err(errno),
+            None => Dir::read_from(&vault.root_fd),
+        }
+        .map_err(|error| environment_errno("reading directory", root, error))?;
         let stack = vec![Scan {
             fd: vault.root_fd.clone(),
             relative: PathBuf::new(),
             entries,
         }];
-        Ok(Self { vault, stack })
+        Ok(Self {
+            vault,
+            stack,
+            faults,
+        })
     }
 
     pub fn case_sensitivity(&self) -> CaseSensitivity {
@@ -69,8 +78,24 @@ impl InventoryWalk {
                 self.stack.pop();
                 continue;
             };
-            let entry = entry
-                .map_err(|error| environment_errno("reading entry in", &scan.relative, error))?;
+            let entry = match self.faults.listing(&scan.relative, true) {
+                Some(errno) => Err(errno),
+                None => entry,
+            };
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    let cause = io::Error::from_raw_os_error(error.raw_os_error());
+                    if scan.relative.as_os_str().is_empty()
+                        || PathOrEnvironment::of(&cause) == PathOrEnvironment::Environment
+                    {
+                        return Err(environment("reading entry in", &scan.relative, cause));
+                    }
+                    records.push(record(&self.vault.traversed(&scan.relative)));
+                    self.stack.pop();
+                    continue;
+                }
+            };
             let name = entry.file_name().to_bytes();
             if name == b"." || name == b".." {
                 continue;
@@ -86,6 +111,9 @@ impl InventoryWalk {
                         stat.st_mode as _,
                     ))),
                     Opened::Nothing => None,
+                    Opened::UnreadableFolder { .. } => {
+                        unreachable!("a single-name stat does not descend")
+                    }
                     Opened::Unreadable { .. } => {
                         records.push(record(&path));
                         continue;
@@ -103,15 +131,35 @@ impl InventoryWalk {
                 listed,
                 &self.vault.normalizer,
                 &self.vault.exclusions,
+                // Replay re-observes catalogue names. Page arms belong to the
+                // canonical walk and must remain unspent until it lists them.
                 &WalkFaults::default(),
             )?;
             match observed {
                 Observed::Directory => {
-                    match openat(&scan.fd, &name, directory_flags(), Mode::empty()) {
+                    let opened = match self.faults.listing(&relative, false) {
+                        Some(errno) => Err(errno),
+                        None => openat(&scan.fd, &name, directory_flags(), Mode::empty()),
+                    };
+                    match opened {
                         Ok(fd) => {
-                            let entries = Dir::read_from(&fd).map_err(|error| {
-                                environment_errno("reading directory", &relative, error)
-                            })?;
+                            let entries = match Dir::read_from(&fd) {
+                                Ok(entries) => entries,
+                                Err(error) => {
+                                    let cause = io::Error::from_raw_os_error(error.raw_os_error());
+                                    if PathOrEnvironment::of(&cause)
+                                        == PathOrEnvironment::Environment
+                                    {
+                                        return Err(environment(
+                                            "reading directory",
+                                            &relative,
+                                            cause,
+                                        ));
+                                    }
+                                    records.push(record(&path));
+                                    continue;
+                                }
+                            };
                             self.stack.push(Scan {
                                 fd: Arc::new(fd),
                                 relative,
@@ -124,7 +172,11 @@ impl InventoryWalk {
                             | rustix::io::Errno::LOOP,
                         ) => records.push(record(&path)),
                         Err(error) => {
-                            return Err(environment_errno("opening directory", &relative, error));
+                            let cause = io::Error::from_raw_os_error(error.raw_os_error());
+                            if PathOrEnvironment::of(&cause) == PathOrEnvironment::Environment {
+                                return Err(environment("opening directory", &relative, cause));
+                            }
+                            records.push(record(&path));
                         }
                     }
                 }
@@ -214,6 +266,37 @@ mod tests {
             let actual: Vec<_> = records.into_iter().map(|record| record.value).collect();
             assert_eq!(actual, expected, "width {width}, depth {depth}");
         }
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Prove the fixture's denial applies to this account.
+    fn inventory_replays_a_still_denied_directory_as_unreadable() {
+        let scratch = Scratch::new("inventory-denied-replay");
+        let folder = scratch.directory("vault/folder");
+        scratch.place("folder/hidden.md", b"hidden");
+        scratch.place("z.md", b"visible");
+        scratch.set_mode(&folder, 0o000);
+        if fs::read_dir(&folder).is_ok() {
+            scratch.set_mode(&folder, 0o755);
+            eprintln!("skipped: this account bypasses directory permissions");
+            return;
+        }
+
+        let mut inventory = InventoryWalk::new(&scratch.at(""), &[]).unwrap();
+        let records = bounded_inventory(&mut inventory, 1, 2);
+        let directory = records
+            .iter()
+            .find(|record| record.value == b"folder")
+            .unwrap();
+        assert!(records.iter().any(|record| record.value == b"z.md"));
+        let replay = inventory.replay(&directory.value);
+        scratch.set_mode(&folder, 0o755);
+        let WalkFact::Unreadable(fact) = replay.unwrap() else {
+            panic!("replay must account for the directory while denial persists");
+        };
+        assert_eq!(fact.path().as_path(), Path::new("folder"));
+        assert_eq!(fact.kind(), UnreadKind::Directory);
+        assert_eq!(fact.cause().raw_os_error(), Some(libc::EACCES));
     }
 
     #[test]

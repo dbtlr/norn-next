@@ -674,6 +674,15 @@ pub(crate) fn written_protocol(address: &str) -> Option<&str> {
     (is_scheme && !stem.is_empty()).then_some(scheme)
 }
 
+/// Whether an unreadable directory leaves a path target's absence unknown.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TargetGap {
+    /// No directory mark withholds judgment of this target.
+    None,
+    /// A directory mark covers this path target.
+    Marked,
+}
+
 /// What resolving a link's target found.
 ///
 /// On the wire a health is the flat string itself: `"healthy"`, `"broken"`,
@@ -688,7 +697,8 @@ pub enum LinkHealth {
     Broken,
     /// The target resolves to more than one document or vault file.
     Ambiguous,
-    /// No resolution judges the link: it addresses elsewhere.
+    /// No resolution judges the link: it addresses elsewhere, or its absent
+    /// path target lies beneath a directory marked unreadable.
     NotJudged,
 }
 
@@ -697,8 +707,8 @@ impl LinkHealth {
     /// `target`, whose target resolved to `targets` documents.
     ///
     /// **A link is judged by resolving it first**, read through its address's
-    /// kind ([`LinkAddress::kind`]). A link addressed elsewhere is not judged.
-    /// Any other link is healthy where it resolved to one document or vault
+    /// kind ([`LinkAddress::kind`]), without a directory mark. A link addressed
+    /// elsewhere is not judged. Any other link is healthy where it resolved to one document or vault
     /// file, ambiguous where it resolved to more, and broken where none. The
     /// count is the head's total rather than the candidates it carries, so a
     /// head cut at its bound reports the health of the whole class.
@@ -706,18 +716,25 @@ impl LinkHealth {
     /// This is the whole of the derivation, so a producer cannot file one
     /// reading of a link and a consumer another.
     pub fn of_link(family: LinkFamily, protocol: Option<&str>, target: &str, targets: u64) -> Self {
-        Self::of_address(LinkAddress::of(family, protocol, target).kind(), targets)
+        Self::of_address(
+            LinkAddress::of(family, protocol, target).kind(),
+            targets,
+            TargetGap::None,
+        )
     }
 
     /// The health of a link whose address is of `kind` and whose target
     /// resolved to `targets` documents: [`LinkHealth::of_link`]'s judgment,
     /// read from the address kind a store holds beside the link rather than
-    /// from the link as written.
-    pub const fn of_address(kind: LinkAddressKind, targets: u64) -> Self {
-        match (kind, targets) {
-            (LinkAddressKind::Elsewhere, _) => LinkHealth::NotJudged,
-            (LinkAddressKind::Vault, 0) => LinkHealth::Broken,
-            (_, 1) => LinkHealth::Healthy,
+    /// from the link as written. Only an absent path target covered by a
+    /// directory mark is unjudged; held names keep their ordinary judgment.
+    pub const fn of_address(kind: LinkAddressKind, targets: u64, gap: TargetGap) -> Self {
+        match (kind, targets, gap) {
+            (LinkAddressKind::Elsewhere, _, _) | (LinkAddressKind::Vault, 0, TargetGap::Marked) => {
+                LinkHealth::NotJudged
+            }
+            (LinkAddressKind::Vault, 0, TargetGap::None) => LinkHealth::Broken,
+            (_, 1, _) => LinkHealth::Healthy,
             _ => LinkHealth::Ambiguous,
         }
     }
@@ -745,8 +762,8 @@ impl ElsewhereNamesDocuments {
     /// `targets`, if `health` can carry it: a link not judged because it
     /// addresses no document resolves to none. `health` is the derivation
     /// [`LinkHealth::of_link`] already ran, so this reuses its judgement
-    /// rather than re-deciding addressing on its own. Only a link addressed
-    /// elsewhere is unjudged, and it cannot carry candidates.
+    /// rather than re-deciding addressing on its own. A link addressed elsewhere or
+    /// missing beneath a directory mark is unjudged and carries no candidates.
     fn check(health: LinkHealth, targets: u64) -> Result<(), Self> {
         if health == LinkHealth::NotJudged && targets != 0 {
             return Err(ElsewhereNamesDocuments { total: targets });
@@ -860,6 +877,18 @@ impl LinkRow {
         })
     }
 
+    /// Apply the store's account of an unreadable directory at this path.
+    /// A resolved target keeps its ordinary judgment.
+    pub fn with_target_gap(mut self, gap: TargetGap) -> Self {
+        let address = LinkAddress::of(self.family, self.protocol.as_deref(), &self.target);
+        let gap = match address {
+            LinkAddress::RootedName(_) | LinkAddress::Relative(_) | LinkAddress::Rooted(_) => gap,
+            _ => TargetGap::None,
+        };
+        self.health = LinkHealth::of_address(address.kind(), self.targets.total(), gap);
+        self
+    }
+
     /// What resolving this link's target found.
     pub const fn health(&self) -> LinkHealth {
         self.health
@@ -894,12 +923,15 @@ impl<'de> Deserialize<'de> for LinkRow {
         D: Deserializer<'de>,
     {
         let fields = LinkRowFields::deserialize(deserializer)?;
-        let derived = LinkHealth::of_link(
-            fields.family,
-            fields.protocol.as_deref(),
-            &fields.target,
-            fields.targets.total(),
-        );
+        let address = LinkAddress::of(fields.family, fields.protocol.as_deref(), &fields.target);
+        let gap = match (&address, fields.health) {
+            (
+                LinkAddress::RootedName(_) | LinkAddress::Relative(_) | LinkAddress::Rooted(_),
+                LinkHealth::NotJudged,
+            ) => TargetGap::Marked,
+            _ => TargetGap::None,
+        };
+        let derived = LinkHealth::of_address(address.kind(), fields.targets.total(), gap);
         ElsewhereNamesDocuments::check(derived, fields.targets.total())
             .map_err(D::Error::custom)?;
         if fields.health != derived {

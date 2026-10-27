@@ -45,6 +45,8 @@ pub(crate) enum Selected {
     /// By a path key: an equality seek of the link index at the key. Read a
     /// page at a time.
     Path,
+    /// By a directory range of path keys alone.
+    Beneath,
     /// By their row ids: an equality seek of `links` per id. Read whole.
     Links,
 }
@@ -56,6 +58,7 @@ impl Selected {
             LinkSelection::Documents(_) => Selected::Documents,
             LinkSelection::Class(_) => Selected::Class,
             LinkSelection::Path(_) => Selected::Path,
+            LinkSelection::Beneath(_) => Selected::Beneath,
         }
     }
 }
@@ -140,7 +143,7 @@ pub(crate) fn links_sql(key: SuffixKey, selected: Selected) -> String {
     let driver = match selected {
         Selected::Documents => {
             return format!(
-                "SELECT {columns}, NULL, NULL, NULL
+                "SELECT {columns}, NULL, NULL, NULL, EXISTS(SELECT 1 FROM directory_marks WHERE path_key >= '')
          FROM json_each(?1) AS j CROSS JOIN documents AS d CROSS JOIN links AS l
          LEFT JOIN link_keys AS k ON k.link = l.id
          WHERE d.path = j.value AND l.document = d.id"
@@ -148,7 +151,7 @@ pub(crate) fn links_sql(key: SuffixKey, selected: Selected) -> String {
         }
         Selected::Links => {
             return format!(
-                "SELECT {columns}, NULL, NULL, NULL
+                "SELECT {columns}, NULL, NULL, NULL, EXISTS(SELECT 1 FROM directory_marks WHERE path_key >= '')
          FROM json_each(?1) AS j CROSS JOIN links AS l CROSS JOIN documents AS d
          LEFT JOIN link_keys AS k ON k.link = l.id
          WHERE l.id = j.value AND d.id = l.document"
@@ -169,6 +172,17 @@ pub(crate) fn links_sql(key: SuffixKey, selected: Selected) -> String {
                    AND s.segments IS NOT NULL
                  ORDER BY s.{link_key}, s.document, s.link LIMIT ?5"
         ),
+        Selected::Beneath => format!(
+            "SELECT s.link AS link, s.{link_key} AS after_text, s.document AS after_first,
+                        s.link AS after_second
+                 FROM link_keys AS s INDEXED BY link_keys_path_key
+                 WHERE (s.{link_key}, s.document, s.link) > (?2, ?3, ?4) AND s.{link_key} < ?1
+                   AND s.segments IS NULL
+                   AND NOT EXISTS (SELECT 1 FROM link_keys AS earlier
+                       WHERE earlier.link = s.link AND earlier.segments IS NULL
+                         AND earlier.key >= ?6 AND earlier.key < s.key)
+                 ORDER BY s.{link_key}, s.document, s.link LIMIT ?5"
+        ),
         Selected::Path => format!(
             "SELECT s.link AS link, s.{link_key} AS after_text, s.document AS after_first,
                         s.link AS after_second
@@ -178,7 +192,7 @@ pub(crate) fn links_sql(key: SuffixKey, selected: Selected) -> String {
         ),
     };
     format!(
-        "SELECT {columns}, p.after_text, p.after_first, p.after_second
+        "SELECT {columns}, p.after_text, p.after_first, p.after_second, EXISTS(SELECT 1 FROM directory_marks WHERE path_key >= '')
          FROM ({driver}) AS p CROSS JOIN links AS l CROSS JOIN documents AS d
          LEFT JOIN link_keys AS k ON k.link = l.id
          WHERE l.id = p.link AND d.id = l.document"
@@ -537,3 +551,51 @@ pub(crate) fn anchors_parameters(pairs: &[(i64, i64)]) -> Result<Vec<Value>, Sto
 /// Exact stored spellings the overlay replaces, each reached by path equality.
 pub(crate) const STANDING_TARGETS_SQL: &str = "SELECT d.path
     FROM json_each(?1) AS j CROSS JOIN documents AS d WHERE d.path = j.value";
+
+/// Segment-aligned bounds in the comparison-key space used by path indexes.
+pub(crate) fn directory_bounds(prefix: &crate::DirectoryPrefix) -> (String, String) {
+    let key = crate::comparison_key(prefix.as_str());
+    (format!("{key}/"), format!("{key}0"))
+}
+
+/// One equality seek per directory ancestor, stopping at the first mark.
+pub(crate) fn directory_probe(path: &str) -> Result<(String, Vec<Value>), StoreError> {
+    let ancestors: Vec<&str> = path.match_indices('/').map(|(at, _)| &path[..at]).collect();
+    Ok((
+        "SELECT EXISTS (SELECT 1 FROM json_each(?1) AS a
+        WHERE EXISTS (SELECT 1 FROM directory_marks AS m WHERE m.path_key = a.value))"
+            .to_string(),
+        vec![path_list(&ancestors)?],
+    ))
+}
+
+/// Resume a directory's path-only link range.
+pub(crate) fn paged_directory_parameters(
+    prefix: &crate::DirectoryPrefix,
+    after: &After,
+    limit: usize,
+) -> Vec<Value> {
+    let (lower, upper) = directory_bounds(prefix);
+    let mut values = paged(Value::Text(upper), after, limit);
+    values.push(Value::Text(lower));
+    values
+}
+
+/// Probe the ancestors of a stored path link. Optional `.md` spellings have
+/// the same directories, so one indexed key supplies the ancestor chain.
+pub(crate) fn stored_directory_probe(link: i64) -> (String, Vec<Value>) {
+    (
+        "WITH RECURSIVE ancestors(prefix, tail) AS (
+        SELECT '', key FROM (SELECT key FROM link_keys WHERE link = ?1
+            AND segments IS NULL ORDER BY key LIMIT 1)
+        UNION ALL
+        SELECT prefix || CASE WHEN prefix = '' THEN '' ELSE '/' END ||
+                   substr(tail, 1, instr(tail, '/') - 1),
+               substr(tail, instr(tail, '/') + 1)
+        FROM ancestors WHERE instr(tail, '/') > 0)
+      SELECT EXISTS (SELECT 1 FROM ancestors AS a WHERE a.prefix <> ''
+          AND EXISTS (SELECT 1 FROM directory_marks AS m WHERE m.path_key = a.prefix))"
+            .to_string(),
+        vec![Value::Integer(link)],
+    )
+}

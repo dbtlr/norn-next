@@ -232,6 +232,8 @@ pub(crate) enum Cause {
     Undecodable(Undecodable),
     /// The document's bytes could not be opened or read.
     Unreadable,
+    /// The directory could not be listed, so its descendants are unknown.
+    UnreadableDirectory,
     /// The document derives and its frontmatter block was read by nothing.
     UnreadBlock(UnreadBlock),
     /// The document derives whole and disagrees with the vault's declared tag
@@ -249,6 +251,7 @@ impl Cause {
         match self {
             Cause::Undecodable(cause) => cause.kind(),
             Cause::Unreadable => FindingKind::UnreadableDocument,
+            Cause::UnreadableDirectory => FindingKind::UnreadableDirectory,
             Cause::UnreadBlock(cause) => cause.kind(),
             Cause::TagBreach(cause) => cause.kind(),
             Cause::RuleBreach(breach) => breach.kind(),
@@ -269,7 +272,10 @@ impl Cause {
     /// reported at.
     pub(crate) const fn severity(self) -> Severity {
         match self {
-            Cause::Undecodable(_) | Cause::UnreadBlock(_) | Cause::Unreadable => Severity::Error,
+            Cause::Undecodable(_)
+            | Cause::UnreadBlock(_)
+            | Cause::Unreadable
+            | Cause::UnreadableDirectory => Severity::Error,
             Cause::TagBreach(_) | Cause::RuleBreach(_) => Severity::Warning,
         }
     }
@@ -286,7 +292,8 @@ impl Cause {
             Cause::UnreadBlock(_)
             | Cause::TagBreach(_)
             | Cause::RuleBreach(_)
-            | Cause::Unreadable => Decided::ByBytes,
+            | Cause::Unreadable
+            | Cause::UnreadableDirectory => Decided::ByBytes,
         }
     }
 
@@ -294,6 +301,10 @@ impl Cause {
     pub(crate) fn message(self, subject: &DocumentPath) -> String {
         match self {
             Cause::Unreadable => format!("`{}` could not be read", subject.as_str()),
+            Cause::UnreadableDirectory => format!(
+                "`{}` could not be listed; what stands beneath it is unknown",
+                subject.as_str()
+            ),
             Cause::Undecodable(cause) => format!(
                 "`{}` is quarantined: {}",
                 subject.as_str(),
@@ -385,11 +396,12 @@ impl Decided {
 /// leaves none. A cause minted under a kind an older cause already carries is
 /// reached by neither side, and the ADR that closes both cause sets is what
 /// stands in front of one.
-const CAUSES: [Cause; 17] = [
+const CAUSES: [Cause; 18] = [
     Cause::Undecodable(Undecodable::PathBytes),
     Cause::Undecodable(Undecodable::PathSpelling),
     Cause::Undecodable(Undecodable::BodyBytes),
     Cause::Unreadable,
+    Cause::UnreadableDirectory,
     Cause::UnreadBlock(UnreadBlock::Unclosed),
     Cause::UnreadBlock(UnreadBlock::Unreadable),
     Cause::UnreadBlock(UnreadBlock::TooLarge),
@@ -463,6 +475,7 @@ const fn scope_agrees(cause: Cause) -> bool {
     matches!(
         (cause, cause.kind().scope()),
         (Cause::Unreadable, FindingScope::Document)
+            | (Cause::UnreadableDirectory, FindingScope::Place)
             | (Cause::Undecodable(_), FindingScope::Place)
             | (Cause::UnreadBlock(_), FindingScope::Document)
             | (Cause::TagBreach(_), FindingScope::Document)
@@ -1466,6 +1479,16 @@ pub(crate) fn plan_unreadable(subject: DocumentPath, cause: &std::io::Error) -> 
     PlannedFinding::of(subject, Cause::Unreadable, cause.to_string(), None)
 }
 
+/// The finding accounting for the unknown contents beneath one directory.
+pub(crate) fn plan_unreadable_directory(path: &Path, cause: &std::io::Error) -> PlannedFinding {
+    PlannedFinding::of(
+        DocumentPath::rendered(path),
+        Cause::UnreadableDirectory,
+        cause.to_string(),
+        None,
+    )
+}
+
 /// Plan the finding that says why a path contributes no facts.
 ///
 /// The subject is the place the path occupies — its own spelling where the
@@ -2254,7 +2277,7 @@ rules:
         // derived a row from them files beside that row.
         for cause in CAUSES {
             let expected = match cause {
-                Cause::Undecodable(_) => FindingScope::Place,
+                Cause::Undecodable(_) | Cause::UnreadableDirectory => FindingScope::Place,
                 Cause::Unreadable
                 | Cause::UnreadBlock(_)
                 | Cause::TagBreach(_)
@@ -2582,6 +2605,7 @@ rules:
         assert_eq!(
             rederived(Decided::ByBytes),
             [
+                "directory/unreadable",
                 "document/body-bytes-not-utf8",
                 "document/frontmatter-too-large",
                 "document/frontmatter-unclosed",
@@ -3043,9 +3067,10 @@ rules:
     fn the_two_finding_families_carry_the_severity_their_effect_on_derived_state_has() {
         for cause in CAUSES {
             let expected = match cause {
-                Cause::Unreadable | Cause::Undecodable(_) | Cause::UnreadBlock(_) => {
-                    Severity::Error
-                }
+                Cause::Unreadable
+                | Cause::UnreadableDirectory
+                | Cause::Undecodable(_)
+                | Cause::UnreadBlock(_) => Severity::Error,
                 Cause::TagBreach(_) | Cause::RuleBreach(_) => Severity::Warning,
             };
             assert_eq!(cause.severity(), expected, "`{}`", cause.kind());

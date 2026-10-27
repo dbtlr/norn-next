@@ -717,6 +717,7 @@ fn leaves_document_unread(kind: FindingKind) -> bool {
     matches!(
         kind,
         FindingKind::UnreadableDocument
+            | FindingKind::UnreadableDirectory
             | FindingKind::PathBytesNotUtf8
             | FindingKind::PathNamesNoDocument
             | FindingKind::BodyBytesNotUtf8
@@ -965,14 +966,14 @@ mod tests {
     }
 
     /// **A finding about a document nothing read is skipped as unreadable,
-    /// whichever of the six kinds a quarantine or an unread block files it
-    /// under.** A quarantined file (a path derived state cannot hold, or a
+    /// whether a quarantine, unread block or broken path files it.** A quarantined file (a path derived state cannot hold, or a
     /// body that does not decode) stands under the first three; a
     /// frontmatter block nothing read, under the rest.
     #[test]
     fn a_finding_about_a_document_nothing_read_is_skipped_as_unreadable() {
         let unreadable = [
             FindingKind::UnreadableDocument,
+            FindingKind::UnreadableDirectory,
             FindingKind::PathBytesNotUtf8,
             FindingKind::PathNamesNoDocument,
             FindingKind::BodyBytesNotUtf8,

@@ -1909,3 +1909,229 @@ fn ambiguous_unicode_targets_keep_their_enumeration_hint() {
         }
     }
 }
+
+pub(crate) fn directory_mark(at: &str) -> FindingFacts {
+    let mut finding = crate::common::unread_block(at);
+    finding.kind = FindingKind::UnreadableDirectory;
+    finding.message = format!("`{at}` could not be listed; what stands beneath it is unknown");
+    finding
+}
+
+#[test]
+fn a_broken_path_link_beneath_a_marked_directory_is_not_judged() {
+    let mut vault = Judging::new(
+        "directory-gap",
+        Sensitive,
+        &[derived("ref.md", "[x](/locked/gone.md)\n")],
+    );
+    assert_eq!(vault.judged(&["ref.md"]).0.len(), 1);
+    vault
+        .store
+        .begin_request()
+        .record_finding(&directory_mark("locked"))
+        .unwrap();
+    assert!(vault.judged(&["ref.md"]).0.is_empty());
+    assert!(
+        vault
+            .store
+            .begin_request()
+            .stored_findings(&path("ref.md"))
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn filing_a_mark_discards_and_rejudges_only_links_beneath_it() {
+    let mut vault = Judging::new(
+        "directory-mark-range",
+        Sensitive,
+        &[derived(
+            "ref.md",
+            "[a](/locked/a.md) [b](/locked/b.md) [outside](/open/gone.md)\n",
+        )],
+    );
+    let mut request = vault.store.begin_request();
+    request.record_finding(&directory_mark("locked")).unwrap();
+    assert_eq!(request.counters().links_redecided(), 2);
+    let findings = request.stored_findings(&path("ref.md")).unwrap();
+    assert_eq!(findings.len(), 1);
+    assert_eq!(findings[0].target.as_deref(), Some("/open/gone.md"));
+}
+
+#[test]
+fn ending_a_mark_rejudges_links_beneath_it_in_the_same_transaction() {
+    let mut vault = Judging::new(
+        "directory-unmark",
+        Sensitive,
+        &[derived("ref.md", "[x](/locked/gone.md)\n")],
+    );
+    let mut request = vault.store.begin_request();
+    request.record_finding(&directory_mark("locked")).unwrap();
+    request
+        .discard_findings_about(
+            &path("locked"),
+            norn_store::DiscardScope::Kinds(&[FindingKind::UnreadableDirectory]),
+        )
+        .unwrap();
+    assert_eq!(
+        request.stored_findings(&path("ref.md")).unwrap()[0].kind,
+        "link/broken"
+    );
+    assert_eq!(request.counters().links_redecided(), 2);
+}
+
+#[test]
+fn the_mark_range_is_segment_aligned_and_case_folded() {
+    let mut vault = Judging::new(
+        "directory-segments",
+        Sensitive,
+        &[derived(
+            "ref.md",
+            "[inside](/locked/gone.md) [beside](/lockedx/gone.md) [file](/locked.md) [suffix](locked/gone.md)\n",
+        )],
+    );
+    vault
+        .request()
+        .record_finding(&directory_mark("Locked"))
+        .unwrap();
+    let findings = vault.judged(&["ref.md"]).0;
+    assert_eq!(
+        findings
+            .iter()
+            .map(|finding| finding.target.as_deref().unwrap())
+            .collect::<Vec<_>>(),
+        ["/lockedx/gone.md", "/locked.md", "locked/gone.md"]
+    );
+    assert_eq!(
+        vault
+            .selected(LinkSelection::Beneath(
+                &norn_store::DirectoryPrefix::new("LOCKED").unwrap()
+            ))
+            .len(),
+        0
+    );
+}
+
+#[test]
+fn the_links_column_reads_not_judged_beneath_a_mark() {
+    let mut vault = Judging::new(
+        "directory-column",
+        Sensitive,
+        &[derived(
+            "ref.md",
+            "[x](/locked/gone.md) [suffix](locked/gone.md)\n",
+        )],
+    );
+    vault
+        .request()
+        .record_finding(&directory_mark("locked"))
+        .unwrap();
+    let links = vault.links("ref.md");
+    assert_eq!(links[0].health(), LinkHealth::NotJudged);
+    assert_eq!(links[0].targets.total(), 0);
+    assert_eq!(links[1].health(), LinkHealth::Broken);
+}
+
+#[test]
+fn a_judgment_with_no_marks_runs_no_probe() {
+    let mut vault = Judging::new(
+        "directory-no-probe",
+        Sensitive,
+        &[derived("ref.md", "[x](/locked/gone.md)\n")],
+    );
+    let params = FindParams::new(self::vault())
+        .with_predicates([Predicate::path("ref.md")])
+        .with_columns([Column::links()]);
+    let snapshot = vault.snapshot();
+    let before = snapshot.counters().statements_executed();
+    let plain = snapshot.find_plans(&params, &declared()).unwrap();
+    assert_eq!(
+        snapshot.counters().statements_executed() - before,
+        plain.len() as u64
+    );
+    assert!(!plain.iter().any(|plan| matches!(
+        plan.statement,
+        norn_store::ReadStatement::Resolution(norn_store::ResolutionStatement::DirectoryMarks)
+    )));
+    drop(snapshot);
+    vault
+        .request()
+        .record_finding(&directory_mark("locked"))
+        .unwrap();
+    let snapshot = vault.snapshot();
+    let before = snapshot.counters().statements_executed();
+    let marked = snapshot.find_plans(&params, &declared()).unwrap();
+    assert_eq!(
+        snapshot.counters().statements_executed() - before,
+        marked.len() as u64
+    );
+    assert_eq!(marked.len(), plain.len() + 1);
+    assert_eq!(
+        marked
+            .iter()
+            .filter(|plan| matches!(
+                plan.statement,
+                norn_store::ReadStatement::Resolution(
+                    norn_store::ResolutionStatement::DirectoryMarks
+                )
+            ))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn every_mark_deletion_door_rejudges_its_range() {
+    for door in ["replace", "upsert", "death", "unreadable", "pin"] {
+        let mut vault = Judging::new(
+            "directory-delete-doors",
+            Sensitive,
+            &[derived("ref.md", "[x](/locked/gone.md)\n")],
+        );
+        let mut request = vault.store.begin_request();
+        request.record_finding(&directory_mark("locked")).unwrap();
+        match door {
+            "replace" => {
+                let mut finding = crate::common::unread_block("locked");
+                finding.kind = FindingKind::BodyBytesNotUtf8;
+                request
+                    .apply_increment(
+                        IncrementProvenance::Derived,
+                        [],
+                        &[norn_store::DerivedFinding {
+                            facts: finding,
+                            replaces: Some(norn_store::DiscardScope::Kinds(&[
+                                FindingKind::UnreadableDirectory,
+                            ])),
+                            bytes_hash: None,
+                        }],
+                        &declared(),
+                    )
+                    .unwrap();
+            }
+            "pin" => {
+                request.pin_vault_schema(b"changed", "changed").unwrap();
+            }
+            _ => {
+                let change = match door {
+                    "upsert" => Change::Upsert(derived("locked", "readable\n")),
+                    "death" => Change::Death {
+                        path: path("locked"),
+                        provenance: norn_store::Provenance::WatcherRemoval,
+                    },
+                    "unreadable" => Change::Unreadable {
+                        path: path("locked"),
+                    },
+                    _ => unreachable!(),
+                };
+                request
+                    .apply_increment(IncrementProvenance::Derived, [change], &[], &declared())
+                    .unwrap();
+            }
+        }
+        let findings = request.stored_findings(&path("ref.md")).unwrap();
+        assert_eq!(findings.len(), 1, "{door}");
+        assert_eq!(findings[0].kind, "link/broken", "{door}");
+    }
+}

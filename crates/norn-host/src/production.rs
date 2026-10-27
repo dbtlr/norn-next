@@ -33,6 +33,7 @@ use crate::apply::PlanGround;
 use crate::derivation::{
     Cause, Decided, Declared, Plan, PlannedFinding, Quarantine, SIDES, UNREAD_BLOCK_KINDS,
     WALKED_KINDS, decodes, document_path, plan_document, plan_quarantine, plan_unreadable,
+    plan_unreadable_directory,
 };
 use crate::evidence::{
     JobEvidence, count_changeset, count_document_derived, count_increment_work, count_rule_work,
@@ -2587,22 +2588,21 @@ where
                 .1
             {
                 norn_fs::WalkFact::Unreadable(unreadable) => {
-                    if unreadable.kind_unknown() {
-                        unreadable_names.absorb_entry(unreadable.path().as_path());
-                        pending.withhold_entry(unreadable.path().as_path());
-                    }
                     if pending.account.rolling
+                        && unreadable.kind() != norn_fs::UnreadKind::Directory
                         && is_markdown(unreadable.path().as_path())
                         && document_path(unreadable.path().as_path()).is_err()
                     {
                         files.next();
                     } else {
-                        pending.unreadable_matching(
-                            unreadable.path().as_path(),
-                            unreadable.operation(),
-                            unreadable.cause(),
+                        if pending.unreadable_fact(
+                            unreadable,
                             row.and_then(|row| row.document.as_ref()),
-                        )?;
+                        )? {
+                            unreadable_names.absorb(unreadable.path().as_path());
+                        } else if unreadable.kind() == norn_fs::UnreadKind::Unknown {
+                            unreadable_names.absorb_entry(unreadable.path().as_path());
+                        }
                         files.next();
                     }
                 }
@@ -2647,6 +2647,10 @@ where
                                 row.and_then(|row| row.document.as_ref()),
                             )?;
                             last_read_spelling = Some(spelling);
+                        }
+                        norn_fs::Opened::UnreadableFolder { folder, cause, .. } => {
+                            unreadable_names.absorb(&folder);
+                            pending.unlistable(&folder, &cause)?;
                         }
                         norn_fs::Opened::Unreadable { operation, cause } => {
                             pending.unreadable_matching(
@@ -2708,6 +2712,10 @@ where
                             norn_fs::Opened::Nothing => {
                                 rolling_death(&mut pending, row.path.clone())
                             }
+                            norn_fs::Opened::UnreadableFolder { folder, cause, .. } => {
+                                unreadable_names.absorb(&folder);
+                                pending.unlistable(&folder, &cause)?;
+                            }
                             norn_fs::Opened::Unreadable { operation, cause } => pending
                                 .unreadable_matching(
                                     Path::new(&spelling),
@@ -2718,15 +2726,11 @@ where
                         }
                     }
                     norn_fs::WalkFact::Unreadable(unreadable) => {
-                        if unreadable.kind_unknown() {
-                            pending.withhold_entry(unreadable.path().as_path());
+                        if pending.unreadable_fact(&unreadable, row.document.as_ref())? {
+                            unreadable_names.absorb(unreadable.path().as_path());
+                        } else if unreadable.kind() == norn_fs::UnreadKind::Unknown {
+                            unreadable_names.absorb_entry(unreadable.path().as_path());
                         }
-                        pending.unreadable_matching(
-                            unreadable.path().as_path(),
-                            unreadable.operation(),
-                            unreadable.cause(),
-                            row.document.as_ref(),
-                        )?;
                     }
                     norn_fs::WalkFact::Skipped(skip) => {
                         pending.passed_over(skip.path().as_path(), skip.reason());
@@ -2973,7 +2977,7 @@ where
     match &read {
         norn_fs::Opened::Read(read) => pending.account.bytes_read += read.bytes().len() as u64,
         norn_fs::Opened::Nothing => pending.withhold_entry(&path),
-        norn_fs::Opened::Unreadable { .. } => {}
+        norn_fs::Opened::Unreadable { .. } | norn_fs::Opened::UnreadableFolder { .. } => {}
     }
     Ok(read)
 }
@@ -3041,11 +3045,13 @@ fn scoped_increment(
             // The name's own stat met a path failure, which is the same fact a
             // full heal marks the document broken for.
             Err(unreadable) => {
-                pending.unreadable(
-                    unreadable.path().as_path(),
-                    unreadable.operation(),
-                    unreadable.cause(),
-                )?;
+                let standing = document_path(unreadable.path().as_path())
+                    .ok()
+                    .map(|path| pending.store.begin_request().stored_document(&path))
+                    .transpose()
+                    .map_err(store_effect)?
+                    .flatten();
+                pending.unreadable_fact(&unreadable, standing.as_ref())?;
                 continue;
             }
         };
@@ -3236,6 +3242,9 @@ fn scoped_increment(
             // regular file between the kind above and the read — and a tombstone
             // there would state the removal of a document this vault never held,
             // at a path no heal ever prunes.
+            norn_fs::Opened::UnreadableFolder { folder, cause, .. } => {
+                pending.unlistable(&folder, &cause)?;
+            }
             norn_fs::Opened::Unreadable { operation, cause } => {
                 pending.unreadable(path, operation, &cause)?
             }
@@ -3367,6 +3376,10 @@ pub(crate) fn commit_plan_changeset(
         let observed = match norn_fs::read_optional_and_hash(root, path).map_err(effect)? {
             norn_fs::Opened::Read(read) => read,
             norn_fs::Opened::Nothing => continue,
+            norn_fs::Opened::UnreadableFolder { folder, cause, .. } => {
+                pending.unlistable(&folder, &cause)?;
+                continue;
+            }
             norn_fs::Opened::Unreadable { operation, cause } => {
                 pending.unreadable(path, operation, &cause)?;
                 continue;
@@ -3479,8 +3492,13 @@ fn quarantine_subtree(
     )?;
     let mut healed = 0;
     for fact in walk {
-        let norn_fs::WalkFact::File(file) = fact.map_err(effect)? else {
-            continue;
+        let file = match fact.map_err(effect)? {
+            norn_fs::WalkFact::File(file) => file,
+            norn_fs::WalkFact::Unreadable(unreadable) => {
+                pending.unreadable_fact(&unreadable, None)?;
+                continue;
+            }
+            norn_fs::WalkFact::Skipped(_) => continue,
         };
         let path = file.path().as_path().to_owned();
         if !is_markdown(&path) {
@@ -3896,7 +3914,8 @@ impl FreedRoots {
                 | Change::Upsert(_)
                 | Change::FileBirth { .. }
                 | Change::FileDeath { .. }
-                | Change::Unreadable { .. } => {}
+                | Change::Unreadable { .. }
+                | Change::BeneathUnlistable { .. } => {}
             }
         }
     }
@@ -3926,7 +3945,8 @@ impl FreedRoots {
 /// scoped increment answers — and three of the things its acts learn outlive the
 /// scope that learned them, so they are held here rather than in [`Pending`]:
 /// the places its deaths owe a reading of, the places it filed a finding at, and
-/// the roots its walks could not say what stands at. The scopes it walked cleanly are here for
+/// the roots its walks could not inspect, including unlistable directories and
+/// stat-denied names. The scopes it walked cleanly are here for
 /// the same reason: the prune they license runs once, at the job's end, over
 /// rows every one of its flushes has already committed.
 #[derive(Default)]
@@ -4076,7 +4096,9 @@ impl Filed {
 /// it**: a document there is one no act of this job read, so a finding standing
 /// at its place is one no act of this job could re-file. A name the walk
 /// enumerated and then opened nothing at is the same answer reached a moment
-/// later, and is recorded here too.
+/// later, and is recorded here too. An unlistable directory and an unknown
+/// stat-denied name also withhold their roots. Marking a directory clears its
+/// stored content to names alone while preserving its names and spelling findings.
 ///
 /// A vanished root the vault spells as it is stored covers the places under its
 /// own spelling, because rendering is per segment and leaves an unrefused
@@ -4426,13 +4448,14 @@ impl Declaration {
 fn rows_the_changeset_leaves(changes: &[Change]) -> BTreeMap<&DocumentPath, bool> {
     changes
         .iter()
-        .map(|change| match change {
-            Change::Upsert(facts) => (&facts.path, true),
-            Change::Unreadable { path } => (path, true),
+        .filter_map(|change| match change {
+            Change::BeneathUnlistable { .. } => None,
+            Change::Upsert(facts) => Some((&facts.path, true)),
+            Change::Unreadable { path } => Some((path, true)),
             Change::Death { path, .. }
             | Change::Vacated { path }
             | Change::FileBirth { path }
-            | Change::FileDeath { path } => (path, false),
+            | Change::FileDeath { path } => Some((path, false)),
         })
         .collect()
 }
@@ -4555,17 +4578,10 @@ impl<'s> Pending<'s> {
     fn unreadable_matching(
         &mut self,
         path: &Path,
-        operation: &'static str,
+        _operation: &'static str,
         cause: &std::io::Error,
         matched: Option<&StoredDocument>,
     ) -> Result<(), JobFailure> {
-        if !is_markdown(path) {
-            return Err(effect(norn_fs::WalkError::Environment {
-                operation,
-                path: path.to_owned(),
-                source: std::io::Error::new(cause.kind(), cause.to_string()),
-            }));
-        }
         let path = match document_path(path) {
             Ok(path) => path,
             Err(quarantine) => {
@@ -4598,6 +4614,81 @@ impl<'s> Pending<'s> {
         self.push(Change::Unreadable { path: path.clone() });
         self.file(plan_unreadable(path, cause), None);
         Ok(())
+    }
+
+    /// Withhold a directory's range and file its account only on the first failure.
+    fn unlistable(&mut self, path: &Path, cause: &std::io::Error) -> Result<(), JobFailure> {
+        self.account.withheld.absorb(path);
+        let subject = DocumentPath::rendered(path);
+        self.account.filed.insert(&subject, Decided::ByBytes);
+        if self.queued.iter().any(|queued| {
+            queued.cause == Cause::UnreadableDirectory && queued.finding.path == subject
+        }) {
+            return Ok(());
+        }
+        let marked = self
+            .store
+            .begin_request()
+            .unreadable_directory_stands(&subject)
+            .map_err(store_effect)?;
+        if marked {
+            return Ok(());
+        }
+        if let Some(spelling) = addressed_range(path) {
+            self.push(Change::BeneathUnlistable {
+                prefix: DirectoryPrefix::new(spelling).expect("an admitted directory"),
+            });
+        }
+        self.file(plan_unreadable_directory(path, cause), None);
+        Ok(())
+    }
+
+    /// Apply the posture the walk's kind evidence licenses, returning whether it is a directory.
+    fn unreadable_fact(
+        &mut self,
+        fact: &norn_fs::UnreadableFact,
+        matched: Option<&StoredDocument>,
+    ) -> Result<bool, JobFailure> {
+        let path = fact.path().as_path();
+        let matched = matched.filter(|row| {
+            path_key(row.path.as_str().as_bytes(), self.store.path_order())
+                == path_key(path.as_os_str().as_encoded_bytes(), self.store.path_order())
+        });
+        let looked_up = if fact.kind() == norn_fs::UnreadKind::Unknown
+            && !is_markdown(path)
+            && matched.is_none()
+        {
+            document_path(path)
+                .ok()
+                .map(|path| self.store.begin_request().stored_document(&path))
+                .transpose()
+                .map_err(store_effect)?
+                .flatten()
+        } else {
+            None
+        };
+        let standing = matched.or(looked_up.as_ref());
+        let directory = fact.kind() == norn_fs::UnreadKind::Directory
+            || (fact.kind() == norn_fs::UnreadKind::Unknown
+                && !is_markdown(path)
+                && standing.is_none());
+        if directory {
+            if fact.kind() == norn_fs::UnreadKind::Directory
+                && let Some(row) = standing
+            {
+                self.push(Change::Death {
+                    path: row.path.clone(),
+                    provenance: Provenance::HealPrune,
+                });
+            }
+            self.unlistable(path, fact.cause())?;
+        } else {
+            if fact.kind() == norn_fs::UnreadKind::Unknown {
+                self.withhold_entry(path);
+            }
+            self.unreadable_matching(path, fact.operation(), fact.cause(), standing)?;
+        }
+        Ok(directory)
     }
 
     /// Derive a document the store holds no row for: its facts where the bytes
@@ -5012,7 +5103,8 @@ impl<'s> Pending<'s> {
                 let file = match fact {
                     Ok(norn_fs::WalkFact::File(file)) => file,
                     Ok(norn_fs::WalkFact::Unreadable(unreadable)) => {
-                        if is_markdown(unreadable.path().as_path())
+                        if unreadable.kind() != norn_fs::UnreadKind::Directory
+                            && is_markdown(unreadable.path().as_path())
                             && let Err(quarantine) = document_path(unreadable.path().as_path())
                         {
                             self.quarantine(unreadable.path().as_path(), quarantine);
@@ -12305,56 +12397,61 @@ mod tests {
         );
     }
 
-    /// **A walk that refuses takes nothing.** Prune authority is enumeration
-    /// rather than absence, and a directory this account cannot list is a scope
-    /// nothing enumerated: the refusal ends the job ahead of its own prune, so
-    /// the findings that walk was reading against stand until a walk that reads
-    /// the whole scope converges them.
-    #[cfg(unix)]
+    /// A resource failure ends the walk before its findings prune.
+    #[cfg(all(unix, feature = "induced-failure"))]
     #[test]
     fn a_walk_that_refuses_leaves_the_findings_in_its_scope_standing() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let f = Fixture::new("refused-walk-finding");
-        fs::write(f.vault().join("bad.md"), UNDECODABLE).unwrap();
-        let (ops, name) = f.ops(2);
+        const ROOT: &str = "NORN_464_RESOURCE_ROOT";
+        const DATABASE: &str = "NORN_464_RESOURCE_DATABASE";
+        let policy = ProductionPolicy::new(2, 2).unwrap();
         let progress = ProgressReporter::disconnected();
-        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
-        assert_eq!(findings_at(&mut attachment.store, "bad.md").len(), 1);
-
-        // The document leaves, so a walk that read the whole vault would take
-        // the finding standing at its place — and this walk cannot.
-        fs::remove_file(f.vault().join("bad.md")).unwrap();
-        let denied = f.vault().join("zz-denied");
-        fs::create_dir(&denied).unwrap();
-        fs::set_permissions(&denied, fs::Permissions::from_mode(0o000)).unwrap();
-        if fs::read_dir(&denied).is_ok() {
-            eprintln!("skipped: this account reads a mode-000 directory");
-            fs::set_permissions(&denied, fs::Permissions::from_mode(0o755)).unwrap();
-            ops.detach(&name, attachment);
+        if let Some(root) = std::env::var_os(ROOT) {
+            let root = PathBuf::from(root);
+            let order =
+                stored_path_order(norn_fs::Vault::open(&root, &[]).unwrap().case_sensitivity());
+            let mut store = Store::open(
+                PathBuf::from(std::env::var_os(DATABASE).unwrap()),
+                order,
+                crate::DERIVATION_VERSION,
+            )
+            .unwrap();
+            heal_documents(&mut store, &root, &[], policy, &progress.healing())
+                .expect_err("descriptor exhaustion still refuses the heal");
+            assert_eq!(findings_at(&mut store, "bad.md").len(), 1);
             return;
         }
-        let healed = ops.reconcile(
-            &name,
-            &mut attachment,
-            ReconcileWork {
-                batch: norn_fs::Batch::rescan(RescanScope::Vault),
-            },
-            &progress,
+        let f = Fixture::watcherless("refused-walk-finding");
+        let database = f.root.join("refused.sqlite3");
+        fs::write(f.vault().join("bad.md"), UNDECODABLE).unwrap();
+        let mut store =
+            Store::open(&database, proven_order(&f), crate::DERIVATION_VERSION).unwrap();
+        heal_from_zero(&mut store, &f.vault(), &[]).unwrap();
+        assert_eq!(findings_at(&mut store, "bad.md").len(), 1);
+        drop(store);
+        fs::remove_file(f.vault().join("bad.md")).unwrap();
+        fs::create_dir(f.vault().join("zz-denied")).unwrap();
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "production::tests::a_walk_that_refuses_leaves_the_findings_in_its_scope_standing",
+                "--nocapture",
+            ])
+            .env(ROOT, f.vault())
+            .env(DATABASE, &database)
+            .env("NORN_FS_WALK_ARMED_STAGES", "list=exhausted")
+            .env("NORN_FS_WALK_LIST_AT", "zz-denied")
+            .output()
+            .unwrap();
+        assert!(
+            child.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&child.stdout),
+            String::from_utf8_lossy(&child.stderr)
         );
-        fs::set_permissions(&denied, fs::Permissions::from_mode(0o755)).unwrap();
-        healed.expect_err("a directory the walk cannot list refuses the heal");
-
-        assert_eq!(
-            findings_at(&mut attachment.store, "bad.md").len(),
-            1,
-            "a walk that refused took a finding it never enumerated the scope of"
-        );
-
-        // The walk that reads the whole vault is the one that converges it.
-        heal_the_vault(&ops, &name, &mut attachment, &progress);
-        assert_eq!(finding_total(&mut attachment.store), 0);
-        ops.detach(&name, attachment);
+        let mut store = Store::open(database, proven_order(&f), crate::DERIVATION_VERSION).unwrap();
+        assert_eq!(findings_at(&mut store, "bad.md").len(), 1);
+        heal_from_zero(&mut store, &f.vault(), &[]).unwrap();
+        assert_eq!(finding_total(&mut store), 0);
     }
 
     /// **Places vacated under one root are read together.** Removing a directory

@@ -134,7 +134,9 @@ pub(in crate::production) fn prepare(
             let read = match file.read_optional().map_err(effect)? {
                 norn_fs::Opened::Read(read) => read,
                 norn_fs::Opened::Nothing => return Ok(Preparation::SourceChanged),
-                norn_fs::Opened::Unreadable { .. } => return Ok(Preparation::Declined),
+                norn_fs::Opened::Unreadable { .. } | norn_fs::Opened::UnreadableFolder { .. } => {
+                    return Ok(Preparation::Declined);
+                }
             };
             if read.content_hash().to_string() != hash {
                 return Ok(Preparation::SourceChanged);

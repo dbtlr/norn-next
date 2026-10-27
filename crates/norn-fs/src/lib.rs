@@ -140,8 +140,8 @@ pub use walk::{
     DocumentOpenFailure, deny_document_opens, exhaust_document_opens, fail_document_stats,
 };
 pub use walk::{
-    FileFact, FileKind, FileStat, LinkKind, Reach, ReadFile, SkipFact, SkipReason, UnreadableFact,
-    Vault, Walk, WalkError, WalkFact, walk, walk_subtree,
+    FileFact, FileKind, FileStat, LinkKind, Reach, ReadFile, SkipFact, SkipReason, UnreadKind,
+    UnreadableFact, Vault, Walk, WalkError, WalkFact, walk, walk_subtree,
 };
 pub use watch::{
     Batch, FirstIndexObservation, OWN_WRITE_TTL, OwnWrites, RescanScope, Subscription,

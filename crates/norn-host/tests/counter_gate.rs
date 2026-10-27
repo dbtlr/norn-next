@@ -6667,3 +6667,207 @@ fn a_vault_file_births_link_health_work_follows_its_in_links_at_both_scales() {
     )
     .assert_size_independent();
 }
+
+/// A fixed marked range costs its links and rows at either surrounding vault scale.
+#[test]
+#[ignore = "counter-lane case: runs in dedicated full-regression counter steps"]
+fn marking_and_relisting_a_directory_costs_the_same_at_both_scales() {
+    const CHILD: &str = "NORN_DIRECTORY_COST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        // Statement recording is process-wide. One exact child keeps unrelated
+        // counter cases out of both windows even when the parent runs in parallel.
+        let sandbox = Sandbox::new(
+            Path::new(env!("CARGO_TARGET_TMPDIR")),
+            "directory-cost-child",
+        )
+        .expect("a child sandbox");
+        let mut run = norn_testkit::process::Run::new(
+            &sandbox,
+            std::env::current_exe().expect("this binary"),
+        )
+        .args([
+            "--exact",
+            "marking_and_relisting_a_directory_costs_the_same_at_both_scales",
+            "--include-ignored",
+            "--nocapture",
+        ])
+        .env(CHILD, "1")
+        .deadline(Duration::from_secs(240));
+        if let Some(summary) = std::env::var_os("GITHUB_STEP_SUMMARY") {
+            run = run.env("GITHUB_STEP_SUMMARY", summary);
+        }
+        let ran = run.wait().expect("run the cost pair alone");
+        assert!(
+            ran.stdout_text().contains("running 1 test\n"),
+            "{}",
+            ran.stdout_text()
+        );
+        assert_eq!(
+            ran.status,
+            norn_testkit::process::RunStatus::Exited(0),
+            "{}\n{}",
+            ran.stdout_text(),
+            ran.stderr_text()
+        );
+        eprint!("{}", ran.stdout_text());
+        eprint!("{}", ran.stderr_text());
+        return;
+    }
+    let small = norn_fixtures::Profile::by_name("ambiguous").expect("the ambiguity profile");
+    let large = norn_fixtures::Profile::by_name("realistic").expect("the gate profile");
+    SizeIndependencePair::new(
+        "marking and relisting one fixed directory",
+        ScaleObservation::new(&small, directory_mark_and_relist(&small)),
+        ScaleObservation::new(&large, directory_mark_and_relist(&large)),
+    )
+    .assert_size_independent();
+}
+
+/// Measure mark filing plus names-only clearing, then row restoration plus mark ending.
+fn directory_mark_and_relist(profile: &norn_fixtures::Profile) -> CounterSnapshot {
+    const ROWS: usize = 3;
+    const LINKS: usize = 5;
+    const FOLDER: &str = "directory-cost-gate";
+    let sandbox = Sandbox::new(
+        Path::new(env!("CARGO_TARGET_TMPDIR")),
+        &format!("directory-cost-{}", profile.name),
+    )
+    .expect("a sandbox");
+    let vault = attach::Vault::generate(&sandbox.work_dir().join("attached"), profile.name);
+    std::fs::create_dir_all(vault.path().join(FOLDER)).expect("the fixed subtree");
+    let paths: Vec<_> = (0..ROWS)
+        .map(|at| DocumentPath::new(&format!("{FOLDER}/held-{at}.md")).unwrap())
+        .collect();
+    for path in &paths {
+        std::fs::write(vault.path().join(path.as_str()), "held bytes\n").expect("a held row");
+    }
+    let links = (0..LINKS)
+        .map(|at| format!("[x](/{FOLDER}/missing-{at}.md)\n"))
+        .collect::<String>();
+    std::fs::write(vault.path().join("directory-cost-holder.md"), links)
+        .expect("the fixed in-links");
+    {
+        let host = vault.host();
+        drop(attach::attach_and_wait(&host, vault.name()));
+    }
+    // The store is opened under the recorder so its writer has SQLite's trace.
+    // Setup and assertions are outside each measured window.
+    norn_store::induced_failure::record_statements_begun();
+    let mut store = vault.store();
+    let declared = the_pinned_declaration(&mut store);
+    norn_store::induced_failure::statements_begun();
+    let mark = norn_store::FindingFacts {
+        kind: norn_wire::FindingKind::UnreadableDirectory,
+        severity: norn_wire::Severity::Error,
+        path: DocumentPath::new(FOLDER).unwrap(),
+        class_keys: Default::default(),
+        path_keys: Default::default(),
+        target: None,
+        span: None,
+        ordinal: None,
+        candidates: Vec::new(),
+        candidates_total: 0,
+        message: format!("`{FOLDER}` could not be listed; what stands beneath it is unknown"),
+        detail: Some("Permission denied".into()),
+        rules: Default::default(),
+        value: None,
+    };
+    let mut measured = CounterSnapshot::new();
+    let mut request = store.begin_request();
+    let marked = request
+        .apply_increment(
+            IncrementProvenance::Derived,
+            [Change::BeneathUnlistable {
+                prefix: norn_store::DirectoryPrefix::new(FOLDER).unwrap(),
+            }],
+            &[norn_store::DerivedFinding {
+                facts: mark,
+                replaces: None,
+                bytes_hash: None,
+            }],
+            &declared,
+        )
+        .expect("mark and clear the fixed range together");
+    assert_eq!(marked.documents_upserted, ROWS as u64);
+    let counters = request.finish();
+    let statements = norn_store::induced_failure::statements_begun().len() as u64;
+    directory_phase_counters(&mut measured, "mark", counters, statements, LINKS as u64);
+    let projection = norn_testkit::equivalence::StoreProjection::read(&mut store).unwrap();
+    for path in &paths {
+        let held = projection
+            .document(path.as_str())
+            .expect("the name survives");
+        assert!(held.content_hash.is_none() && held.body.is_none());
+    }
+    norn_store::induced_failure::statements_begun();
+    let mut request = store.begin_request();
+    request
+        .apply_increment(
+            IncrementProvenance::Derived,
+            paths.iter().map(|path| {
+                Change::Upsert(DocumentFacts::new(
+                    path.clone(),
+                    "restored",
+                    "held bytes\n",
+                    11,
+                ))
+            }),
+            &[],
+            &declared,
+        )
+        .expect("restore the fixed rows");
+    request
+        .discard_findings_about(
+            &DocumentPath::new(FOLDER).unwrap(),
+            norn_store::DiscardScope::Kinds(&[norn_wire::FindingKind::UnreadableDirectory]),
+        )
+        .expect("end the directory mark");
+    let counters = request.finish();
+    let statements = norn_store::induced_failure::statements_begun().len() as u64;
+    norn_store::induced_failure::stop_recording_statements();
+    directory_phase_counters(&mut measured, "relist", counters, statements, LINKS as u64);
+    let findings = store
+        .begin_request()
+        .stored_findings(&DocumentPath::new("directory-cost-holder.md").unwrap())
+        .unwrap();
+    assert_eq!(findings.len(), LINKS);
+    assert!(findings.iter().all(|finding| finding.kind == "link/broken"));
+    record_the_counters(
+        &format!("directory marking and relisting over `{}`", profile.name),
+        &measured,
+    );
+    measured
+}
+
+/// Keep both phase readings separate, so a regression cannot cancel across phases.
+fn directory_phase_counters(
+    measured: &mut CounterSnapshot,
+    phase: &str,
+    counters: norn_store::DerivationCounters,
+    statements: u64,
+    links: u64,
+) {
+    assert_eq!(
+        counters.links_redecided(),
+        links,
+        "{phase}: the fixed link neighborhood"
+    );
+    assert!(
+        statements > 0,
+        "{phase}: the writer's statement trace must move"
+    );
+    let rows_written = counters
+        .readings()
+        .filter(|(name, _)| {
+            name.ends_with("_rows_written")
+                || matches!(*name, "documents_upserted" | "findings_written")
+        })
+        .map(|(_, value)| value)
+        .sum::<u64>();
+    assert!(rows_written > 0, "{phase}: the write reading must move");
+    measured.set(format!("{phase}_rows_written"), rows_written);
+    measured.set(format!("{phase}_statements"), statements);
+    for (name, value) in counters.readings() {
+        measured.set(format!("{phase}_{name}"), value);
+    }
+}

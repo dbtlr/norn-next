@@ -23,7 +23,7 @@
 use std::ffi::{OsStr, OsString};
 use std::io;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 use rustix::fs::{AtFlags, FileType, Mode, OFlags, fstat, openat, statat};
 use rustix::io::Errno;
@@ -251,10 +251,23 @@ pub(crate) fn descend(
     anchor: BorrowedFd<'_>,
     folders: &[&OsStr],
 ) -> Result<(Vec<OwnedFd>, Option<Stopped>), (usize, Errno)> {
+    descend_with(anchor, folders, |_| None)
+}
+
+/// The same descent with a failure supplied before a folder open.
+fn descend_with(
+    anchor: BorrowedFd<'_>,
+    folders: &[&OsStr],
+    mut failure: impl FnMut(usize) -> Option<Errno>,
+) -> Result<(Vec<OwnedFd>, Option<Stopped>), (usize, Errno)> {
     let mut opened: Vec<OwnedFd> = Vec::with_capacity(folders.len());
     for (at, name) in folders.iter().enumerate() {
         let holder = opened.last().map_or(anchor, AsFd::as_fd);
-        let stopped = match step_into(holder, name).map_err(|errno| (at, errno))? {
+        let step = match failure(at) {
+            Some(errno) => Err(errno),
+            None => step_into(holder, name),
+        };
+        let stopped = match step.map_err(|errno| (at, errno))? {
             Step::Into(folder) => {
                 opened.push(folder);
                 continue;
@@ -304,10 +317,21 @@ pub(crate) fn open_regular_at_with(
     let Some((last, folders)) = names.split_last() else {
         return Ok(Reached::Nothing(Unreached::not_regular(OsStr::new("."))));
     };
-    let (opened, stopped) = descend(anchor, folders).map_err(|(at, errno)| OpenError::Machine {
-        errno,
-        component: folders[at].to_owned(),
-    })?;
+    let (opened, stopped) =
+        descend_with(anchor, folders, |at| faults.opening_folder(&folders[..=at])).map_err(
+            |(at, errno)| match PathOrEnvironment::of(&io::Error::from_raw_os_error(
+                errno.raw_os_error(),
+            )) {
+                PathOrEnvironment::Path => OpenError::Folder {
+                    at: folders[..=at].iter().collect(),
+                    errno,
+                },
+                PathOrEnvironment::Environment => OpenError::Machine {
+                    errno,
+                    component: folders[at].to_owned(),
+                },
+            },
+        )?;
     match stopped {
         Some(Stopped::Missing(at, errno)) => {
             return Ok(Reached::Nothing(Unreached::missing(folders[at], errno)));
@@ -345,7 +369,9 @@ pub(crate) fn open_regular_at_with(
 /// than a denied document, and the whole path says neither.
 #[derive(Debug)]
 pub(crate) enum OpenError {
-    /// A folder component failed, or process resources could not support the open.
+    /// A folder component failed at this anchor-relative path.
+    Folder { at: PathBuf, errno: Errno },
+    /// Process resources could not support the open.
     Machine { errno: Errno, component: OsString },
     /// The final file could not be opened or stated, without a resource failure.
     Path {
@@ -358,7 +384,7 @@ pub(crate) enum OpenError {
 }
 
 impl OpenError {
-    /// Classifies only the final name; folder-component failures stay environmental.
+    /// Classifies a failure at the final name independently of its folder components.
     fn at_file(operation: &'static str, component: &OsStr, errno: Errno) -> Self {
         let component = component.to_owned();
         match PathOrEnvironment::of(&io::Error::from_raw_os_error(errno.raw_os_error())) {
@@ -381,6 +407,7 @@ impl OpenError {
     /// The name the open stopped at, which is the one the failure is about.
     pub(crate) fn component(&self) -> &OsStr {
         match self {
+            Self::Folder { at, .. } => at.file_name().expect("a folder has a final name"),
             Self::Machine { component, .. }
             | Self::Path { component, .. }
             | Self::Uncontained { component } => component,
@@ -390,7 +417,7 @@ impl OpenError {
     /// The failure stated as the error a refusal carries.
     pub(crate) fn into_error(self) -> io::Error {
         match self {
-            Self::Machine { errno, .. } | Self::Path { errno, .. } => {
+            Self::Machine { errno, .. } | Self::Path { errno, .. } | Self::Folder { errno, .. } => {
                 io::Error::from_raw_os_error(errno.raw_os_error())
             }
             Self::Uncontained { .. } => io::Error::new(

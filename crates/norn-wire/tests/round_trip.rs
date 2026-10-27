@@ -2095,6 +2095,7 @@ fn a_finding_kind_is_the_flat_namespaced_string_it_renders_as() {
         "field/type-mismatch",
         "field/shape-mismatch",
         "field/rules-conflict",
+        "directory/unreadable",
     ];
     assert_eq!(finding_kinds().len(), strings.len());
     for (kind, string) in finding_kinds().into_iter().zip(strings) {
@@ -2104,7 +2105,7 @@ fn a_finding_kind_is_the_flat_namespaced_string_it_renders_as() {
         assert_eq!(FindingKind::try_from(string), Ok(kind));
     }
     assert_eq!(
-        FindingKind::try_from("directory/unreadable"),
+        FindingKind::try_from("directory/unknown"),
         Err(UnknownFindingKind)
     );
 }
@@ -2129,6 +2130,7 @@ fn the_two_scopes_partition_the_finding_kinds() {
     assert_eq!(
         place,
         [
+            "directory/unreadable",
             "document/body-bytes-not-utf8",
             "document/path-bytes-not-utf8",
             "document/path-names-no-document",
@@ -2541,7 +2543,7 @@ fn an_enum_refuses_a_variant_it_does_not_know() {
         "a null phase read back as a phase"
     );
     assert!(
-        serde_json::from_str::<FindingKind>(r#""directory/unreadable""#).is_err(),
+        serde_json::from_str::<FindingKind>(r#""directory/unknown""#).is_err(),
         "a finding kind nobody minted read back as one"
     );
     assert!(
@@ -2962,7 +2964,7 @@ fn a_predicate_refuses_a_target_outside_the_grammar() {
         "a part carrying an addressless target read back as one"
     );
     assert!(
-        serde_json::from_str::<Predicate>(r#"{"op":"has_finding","kind":"directory/unreadable"}"#)
+        serde_json::from_str::<Predicate>(r#"{"op":"has_finding","kind":"directory/unknown"}"#)
             .is_err(),
         "a part carrying a finding kind nobody minted read back as one"
     );
@@ -6158,7 +6160,7 @@ fn every_validate_setter_lands_in_the_bytes() {
             PINNED_VAULT,
             r##","predicates":"##,
             PINNED_PREDICATES,
-            r##","kinds":["document/path-bytes-not-utf8","document/path-names-no-document","document/body-bytes-not-utf8","document/unreadable","document/frontmatter-too-large","document/frontmatter-unclosed","document/frontmatter-unreadable","document/undeclared-tag","link/broken","link/ambiguous","link/missing-anchor","link/vault-scheme","document/misplaced","document/rules-conflict","field/required-missing","field/forbidden","field/not-one-of","field/too-long","field/type-mismatch","field/shape-mismatch","field/rules-conflict"],"severity":"error","rule":"tasks","summary":true,"limit":20,"after":""##,
+            r##","kinds":["document/path-bytes-not-utf8","document/path-names-no-document","document/body-bytes-not-utf8","document/unreadable","document/frontmatter-too-large","document/frontmatter-unclosed","document/frontmatter-unreadable","document/undeclared-tag","link/broken","link/ambiguous","link/missing-anchor","link/vault-scheme","document/misplaced","document/rules-conflict","field/required-missing","field/forbidden","field/not-one-of","field/too-long","field/type-mismatch","field/shape-mismatch","field/rules-conflict","directory/unreadable"],"severity":"error","rule":"tasks","summary":true,"limit":20,"after":""##,
             PINNED_AFTER,
             r##""}"##,
         ]
@@ -12657,4 +12659,48 @@ fn collection_content_pages_round_trip_unknown_unreadable_and_known_empty_values
     assert!(json["page"].get("state").is_none());
     assert_eq!(json["page"]["rows"][0]["id"], 7);
     round_trip(&findings);
+}
+
+#[test]
+fn an_unreadable_directory_finding_marks_a_place() {
+    let kind: FindingKind =
+        serde_json::from_str(r#""directory/unreadable""#).expect("unreadable directory kind");
+    assert_eq!(kind.as_str(), "directory/unreadable");
+    assert_eq!(kind.scope(), FindingScope::Place);
+    assert_eq!(kind.default_severity(), Severity::Error);
+    round_trip(&kind);
+}
+
+#[test]
+fn a_missing_path_beneath_a_mark_round_trips_as_not_judged() {
+    use norn_wire::TargetGap;
+
+    let row = LinkRow::new(
+        LinkFamily::Markdown,
+        false,
+        None,
+        "/Locked/missing.md",
+        None,
+        None,
+        None,
+        no_head(),
+    )
+    .unwrap()
+    .with_target_gap(TargetGap::Marked);
+    assert_eq!(row.health(), LinkHealth::NotJudged);
+    assert_eq!(serde_json::to_value(&row).unwrap()["health"], "not_judged");
+    round_trip(&row);
+    let held = LinkRow::new(
+        LinkFamily::Markdown,
+        false,
+        None,
+        "/Locked/held.md",
+        None,
+        None,
+        None,
+        CandidateHead::new(vec![Candidate::new(path("Locked/held.md"), "held")], 1).unwrap(),
+    )
+    .unwrap()
+    .with_target_gap(TargetGap::Marked);
+    assert_eq!(held.health(), LinkHealth::Healthy);
 }

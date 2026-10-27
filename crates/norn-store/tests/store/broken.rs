@@ -384,3 +384,224 @@ fn field_predicates_never_match_a_broken_document() {
         }
     }
 }
+
+#[test]
+fn beneath_unlistable_clears_rows_in_range_to_names_only() {
+    let scratch = Scratch::new("directory-names-only");
+    let mut store = scratch.open();
+    for at in [
+        "Locked/a.md",
+        "locked/sub/b.md",
+        "Lockedx/c.md",
+        "Locked.md",
+    ] {
+        write_document(
+            &mut store.begin_request(),
+            &document_with_every_fact(at, "old"),
+        );
+    }
+    let mut spelling = unread_block("Locked/a.md");
+    spelling.kind = FindingKind::PathNamesNoDocument;
+    store.begin_request().record_finding(&spelling).unwrap();
+    store
+        .begin_request()
+        .record_finding(&unread_block("Locked/a.md"))
+        .unwrap();
+    let mut rowless = unread_block("Locked/bad.md");
+    rowless.kind = FindingKind::BodyBytesNotUtf8;
+    store.begin_request().record_finding(&rowless).unwrap();
+    rowless.kind = FindingKind::PathNamesNoDocument;
+    store.begin_request().record_finding(&rowless).unwrap();
+    induced_failure::execute_out_of_band(&mut store,
+        "CREATE TEMP TABLE original_directory_rows AS SELECT id, path, path_key, suffix_key FROM documents").unwrap();
+    let outcome = store
+        .begin_request()
+        .apply_increment(
+            IncrementProvenance::Derived,
+            [Change::BeneathUnlistable {
+                prefix: norn_store::DirectoryPrefix::new("LOCKED").unwrap(),
+            }],
+            &[DerivedFinding {
+                facts: crate::health::directory_mark("Locked"),
+                replaces: None,
+                bytes_hash: None,
+            }],
+            &ContentModel::none(),
+        )
+        .unwrap();
+    assert_eq!(outcome.documents_upserted, 2);
+    assert_eq!(outcome.documents_deleted, 0);
+    assert_eq!(outcome.tombstones_recorded, 0);
+    for at in ["Locked/a.md", "locked/sub/b.md"] {
+        let mut request = store.begin_request();
+        let facts = request.stored_facts(&path(at)).unwrap().unwrap();
+        assert_eq!(facts.document.content_hash, None);
+        assert_eq!(facts.body, None);
+        assert!(
+            facts.links.is_empty()
+                && facts.link_keys.is_empty()
+                && facts.headings.is_empty()
+                && facts.blocks.is_empty()
+                && facts.tags.is_empty()
+                && facts.fields.is_empty()
+        );
+        assert!(request.stored_tombstone(&path(at)).unwrap().is_none());
+    }
+    assert_eq!(
+        store
+            .begin_request()
+            .stored_findings(&path("Locked/a.md"))
+            .unwrap()
+            .iter()
+            .map(|f| f.kind.as_str())
+            .collect::<Vec<_>>(),
+        ["document/path-names-no-document"]
+    );
+    assert!(
+        store
+            .begin_request()
+            .stored_findings(&path("locked/sub/b.md"))
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        store
+            .begin_request()
+            .stored_findings(&path("Locked/bad.md"))
+            .unwrap()
+            .iter()
+            .map(|finding| finding.kind.as_str())
+            .collect::<Vec<_>>(),
+        ["document/path-names-no-document"],
+        "rowless byte-derived findings end while spelling findings stand",
+    );
+    for at in ["Lockedx/c.md", "Locked.md"] {
+        assert_eq!(
+            store
+                .begin_request()
+                .stored_document(&path(at))
+                .unwrap()
+                .unwrap()
+                .content_hash
+                .as_deref(),
+            Some("old")
+        );
+    }
+    induced_failure::execute_out_of_band(&mut store,
+        "CREATE TEMP TABLE directory_identity_check (same INTEGER CHECK(same = 1));
+         INSERT INTO directory_identity_check SELECT count(*) = 4 FROM documents d JOIN original_directory_rows o
+         ON d.id=o.id AND d.path=o.path AND d.path_key=o.path_key AND d.suffix_key=o.suffix_key").unwrap();
+    store.verify_integrity().unwrap();
+}
+
+#[test]
+fn a_suffix_link_beneath_a_marked_directory_is_judged_over_names_held() {
+    let scratch = Scratch::new("directory-held-target");
+    let mut store = scratch.open();
+    write_document(
+        &mut store.begin_request(),
+        &derived("Locked/held.md", "# Heading\n"),
+    );
+    write_document(
+        &mut store.begin_request(),
+        &derived(
+            "ref.md",
+            "[[held#Heading]] [path](/locked/held.md#Heading) [gone](/locked/gone.md)\n",
+        ),
+    );
+    store
+        .begin_request()
+        .apply_increment(
+            IncrementProvenance::Derived,
+            [Change::BeneathUnlistable {
+                prefix: norn_store::DirectoryPrefix::new("Locked").unwrap(),
+            }],
+            &[DerivedFinding {
+                facts: crate::health::directory_mark("Locked"),
+                replaces: None,
+                bytes_hash: None,
+            }],
+            &ContentModel::none(),
+        )
+        .unwrap();
+    assert!(
+        store
+            .begin_request()
+            .stored_findings(&path("ref.md"))
+            .unwrap()
+            .is_empty()
+    );
+    let class = store
+        .begin_request()
+        .target_class("held", &norn_store::AmbiguityIgnore::none())
+        .unwrap();
+    assert_eq!(
+        store.begin_request().suffix_candidates(&class).unwrap(),
+        [path("Locked/held.md")]
+    );
+    let reader = Arc::new(store.open_reader().reader.unwrap());
+    let snapshot = reader.try_take().unwrap().establish().unwrap();
+    let found = snapshot
+        .find(
+            &norn_wire::FindParams::new(norn_wire::VaultAddress::name(
+                norn_wire::VaultName::new("notes").unwrap(),
+            ))
+            .with_predicates([norn_wire::Predicate::path("ref.md")])
+            .with_columns([norn_wire::Column::links()]),
+            &ContentModel::none(),
+        )
+        .unwrap();
+    let links = crate::common::known(found.rows[0].links.as_ref().unwrap());
+    assert_eq!(
+        links
+            .items
+            .iter()
+            .map(norn_wire::LinkRow::health)
+            .collect::<Vec<_>>(),
+        [
+            norn_wire::LinkHealth::Healthy,
+            norn_wire::LinkHealth::Healthy,
+            norn_wire::LinkHealth::NotJudged
+        ]
+    );
+}
+
+#[test]
+fn withdrawing_a_directory_ends_nested_marks_and_rejudges_them() {
+    let scratch = Scratch::new("directory-nested-end");
+    let mut store = scratch.open();
+    write_document(
+        &mut store.begin_request(),
+        &derived("ref.md", "[x](/locked/sub/gone.md)\n"),
+    );
+    store
+        .begin_request()
+        .record_finding(&crate::health::directory_mark("locked/sub"))
+        .unwrap();
+    store
+        .begin_request()
+        .apply_increment(
+            IncrementProvenance::Derived,
+            [Change::BeneathUnlistable {
+                prefix: norn_store::DirectoryPrefix::new("locked").unwrap(),
+            }],
+            &[],
+            &ContentModel::none(),
+        )
+        .unwrap();
+    assert!(
+        store
+            .begin_request()
+            .stored_findings(&path("locked/sub"))
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        store
+            .begin_request()
+            .stored_findings(&path("ref.md"))
+            .unwrap()[0]
+            .kind,
+        "link/broken"
+    );
+}

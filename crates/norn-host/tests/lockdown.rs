@@ -1,9 +1,9 @@
 //! The induced-failure rows a running host has to answer.
 //!
 //! Each condition is reached through a production attachment. A full disk or
-//! an unreadable directory still refuses the job and keeps the entry untrusted.
-//! An unreadable document instead keeps a names-only row and a cause finding,
-//! and the entry reaches Ready. A tear ends the process inside a heal; what it
+//! resource exhaustion still refuses the job and keeps the entry untrusted.
+//! An unreadable path keeps names-only rows and a cause finding, and the entry
+//! reaches Ready. A tear ends the process inside a heal; what it
 //! leaves must converge without an edit to the vault.
 //!
 //! Permission loss is stated over both documents and directories. A document
@@ -493,137 +493,243 @@ fn an_armed_document_open_is_broken(answer: &str, cause: &str) {
     vault.assert_converged_from_zero("an open that answers again");
 }
 
-/// **An unreadable path is an error, never evidence of deletion.**
-///
-/// A subtree of the vault has its mode taken away between two attaches, so the
-/// heal's walk meets `EACCES` where it expected documents. The convergent
-/// answer for a path that is *gone* is to prune the row standing at it; the
-/// answer for a path that cannot be read is the opposite, because the walk
-/// learned nothing about whether a document is there. So the heal refuses and
-/// the entry stays untrusted.
-///
-/// **The forbidden outcome is the prune.** A row under the locked subtree that
-/// disappeared, or a tombstone recorded for it, would be the heal reading a
-/// denied directory as a deletion — and the vault would then be serving a
-/// smaller answer than the tree holds, with nothing saying so. Rung 3 is
-/// forbidden for the same reason a full disk forbids it.
-///
-/// **One revocation, two doors, and which one it reaches is the watcher
-/// backend's.** A vault directory is read by the heal's walk and by the backend
-/// installing change detection over the tree, so a mode taken away from a
-/// directory is met by whichever of the two gets there first:
-///
-/// - A backend that covers a tree without reading each directory under it —
-///   FSEvents — installs over the revoked subtree, and the heal's walk is what
-///   meets `EACCES`. The entry goes untrusted under
-///   [`UntrustedReason::EnvironmentalRefusal`].
-/// - A backend that adds a watch per directory — inotify — cannot add the one
-///   over the revoked subtree, so coverage fails before the heal walks. The
-///   entry goes untrusted under [`UntrustedReason::WatcherLost`] with
-///   [`WatcherLossCause::Backend`].
-///
-/// Both doors are the required outcome of the permission-loss row: the heal does
-/// not run over a tree it cannot read, trust is withdrawn naming the subtree,
-/// and nothing under it is pruned. So the reason is matched against exactly
-/// those two — not admitted by a wildcard — and every other assertion here holds
-/// whichever door the platform took. The one shape that reaches the heal's door
-/// on every platform is a revoked *document*, which is its own case above,
-/// because a document is read by nothing but the heal.
+/// A directory denial withholds names, clears unread facts and marks the gap.
+/// Both the walk and native watcher installation must let the heal reach Ready.
 #[test]
 #[ignore = "fault-lane case: induced recovery runs in full regression"]
-fn an_unreadable_subtree_refuses_the_heal_rather_than_pruning_it() {
+fn an_unreadable_subtree_is_withheld_and_marked_and_the_heal_reaches_ready() {
     let _beside = beside_the_arms();
-    let vault = Vault::new("permission-loss");
-    vault.write("open/kept.md", &readable(0));
-    vault.write("locked/inside.md", &readable(1));
-    let locked = vault.path().join("locked");
-
+    let vault = directory_gap_vault("permission-loss", "locked");
     let before = {
         let serving = vault.serving(ProductionPolicy::new(64, 64).unwrap());
-        let lease = attach_and_wait(&serving, vault.name());
-        drop(lease);
-        let mut store = vault.store();
-        StoreProjection::read(&mut store).expect("projecting the first attach")
+        drop(attach_and_wait(&serving, vault.name()));
+        StoreProjection::read(&mut vault.store()).expect("projecting the first attach")
     };
-    assert!(before.document("locked/inside.md").is_some());
-
-    let untrusted = {
-        let _revoked = Revoked::over_directory(&locked);
+    {
+        let _revoked = Revoked::over_directory(&vault.path().join("locked"));
         let serving = vault.serving(ProductionPolicy::new(64, 64).unwrap());
         let opening = serving.evidence();
-        let _lease = serving
-            .demand(vault.name())
-            .expect("request the attachment");
-        let untrusted = wait_for_untrusted(&serving, vault.name());
-        let spent = serving.evidence().since(opening);
+        let _lease = serve_or_report_the_refusal(&serving, vault.name());
+        assert_eq!(serving.state(vault.name()), Ok(TrustState::Ready));
+        assert_eq!(serving.evidence().since(opening).rebuilds_run, 0);
+        assert_unreadable_directory(&mut vault.store(), "locked");
+        let after = StoreProjection::read(&mut vault.store()).expect("projecting the marked store");
         assert_eq!(
-            spent.rebuilds_run, 0,
-            "a revoked permission reached rung 3, which discards a sound database to fix a \
-             broken environment"
+            after.document("open/kept.md"),
+            before.document("open/kept.md")
         );
-        untrusted
-    };
-    // The reason is the case's own arm attesting: it has to name the subtree
-    // whose mode was taken away, or the entry is untrusted for something this
-    // arrangement did not cause. The two arms are the two doors one revocation
-    // reaches, and they are matched rather than admitted by a wildcard: a
-    // revoked permission published as damage — which is what sends an entry to a
-    // rung that discards its database — falls through to the panic below.
-    match &untrusted {
-        UntrustedReason::EnvironmentalRefusal { detail, .. } => assert!(
-            detail.contains("locked") && detail.contains("Permission denied"),
-            "the heal refused for something that is not the revoked subtree: {detail}"
-        ),
-        UntrustedReason::WatcherLost {
-            cause: WatcherLossCause::Backend,
-            detail,
-            ..
-        } => assert!(
-            detail.contains("locked"),
-            "coverage was lost over something that is not the revoked subtree: {detail}"
-        ),
-        other => panic!(
-            "a revoked permission was published as neither of the two doors it reaches — a heal \
-             that refused, or coverage that could not be installed over the subtree: {other:?}"
-        ),
+        assert_directory_link_health(&serving, &vault, "locked", true);
     }
+    assert_directory_recovery(&vault, "locked", "a permission that was restored");
+}
 
-    let mut refused = vault.store();
-    let after = StoreProjection::read(&mut refused).expect("projecting the refused attach");
+/// The list seam constructs the directory posture even under privileged accounts.
+#[test]
+#[ignore = "fault-lane case: induced recovery runs in full regression"]
+fn a_denied_directory_listing_is_marked_and_the_heal_reaches_ready() {
+    an_armed_directory_is_withheld("list-denied", "list=denied", "list");
+}
+
+/// A denied stat over a non-Markdown directory name withholds its whole range.
+#[test]
+#[ignore = "fault-lane case: induced recovery runs in full regression"]
+fn a_stat_denied_other_name_is_marked_and_withheld() {
+    an_armed_directory_is_withheld("directory-stat-denied", "page=denied", "page");
+}
+
+/// Revocation and restoration are both taken up by the same live subscription.
+#[test]
+#[ignore = "fault-lane case: induced recovery runs in full regression"]
+fn a_directory_revoked_while_attached_is_marked_and_relisted_while_attached() {
+    let _beside = beside_the_arms();
+    let vault = directory_gap_vault("watched-permission-loss", "locked");
+    let serving = vault.serving(ProductionPolicy::new(64, 64).unwrap());
+    let lease = attach_and_wait(&serving, vault.name());
+    let opening = serving.evidence();
+    let revoked = Revoked::over_directory(&vault.path().join("locked"));
+    wait_until(
+        "the live revocation to be marked",
+        state_budget(WAIT_LIMIT),
+        || {
+            let observed = serving.state(vault.name());
+            assert!(untrusted_reason(&observed).is_none(), "{observed:?}");
+            let marked = findings_at(&mut vault.store(), "locked")
+                .iter()
+                .any(|finding| finding.kind == "directory/unreadable");
+            if marked && observed == Ok(TrustState::Ready) {
+                Observed::Met(())
+            } else {
+                Observed::pending(format!("marked={marked}, state={observed:?}"))
+            }
+        },
+    )
+    .unwrap_or_else(|failure| panic!("{failure}"));
+    assert_unreadable_directory(&mut vault.store(), "locked");
+    assert_directory_link_health(&serving, &vault, "locked", true);
+    assert_eq!(serving.evidence().since(opening).rebuilds_run, 0);
+    let marked = serving.evidence();
+    drop(revoked);
+    wait_for_derived(&serving, vault.name(), marked, "the restored directory");
+    assert_rederived_one(
+        "a directory relisted while attached",
+        serving.evidence().since(marked),
+    );
+    assert!(findings_at(&mut vault.store(), "locked").is_empty());
+    assert_directory_link_health(&serving, &vault, "locked", false);
+
+    // A delivery below the restored directory proves its native coverage returned.
+    let restored = serving.evidence();
+    vault.write("locked/inside.md", &readable(REPORTED));
+    wait_for_derived(
+        &serving,
+        vault.name(),
+        restored,
+        "a write beneath the restored directory",
+    );
+    assert_eq!(serving.evidence().since(opening).recoveries_run, 0);
+    assert_eq!(serving.evidence().since(opening).rebuilds_run, 0);
+    drop(lease);
+    drop(serving);
+    vault.assert_converged_from_zero("a directory relisted while attached");
+}
+
+/// One fixed gap fixture, including a path target and a suffix naming a held row.
+fn directory_gap_vault(label: &str, directory: &str) -> Vault {
+    let vault = Vault::new(label);
+    vault.write(
+        "open/kept.md",
+        &format!("[x](/{directory}/gone.md) [held]({directory}/inside.md)\n"),
+    );
+    vault.write(&format!("{directory}/inside.md"), &readable(1));
+    vault
+}
+
+fn an_armed_directory_is_withheld(condition: &str, stages: &str, stage: &str) {
+    let _beside = beside_the_arms();
+    // The page seam takes the first directory before exclusions are read.
+    // !locked sorts before .norn, so its stat is the one the child denies.
+    let directory = if stage == "page" { "!locked" } else { "locked" };
+    let vault = directory_gap_vault(condition, directory);
+    {
+        let serving = vault.serving(ProductionPolicy::new(64, 64).unwrap());
+        drop(attach_and_wait(&serving, vault.name()));
+    }
+    let hits = vault.records().join(format!("{condition}-arm-hits"));
+    let ran = vault.spawn(
+        &hits,
+        &[
+            (CHILD_WALK, condition),
+            (WALK_ARMED_STAGES, stages),
+            ("NORN_FS_WALK_LIST_AT", directory),
+            ("NORN_FS_WALK_REACH", "directory"),
+        ],
+    );
+    assert_eq!(ran.status, RunStatus::Exited(0), "{}", ran.stderr);
+    ran.attestation.assert_reached(
+        condition,
+        &[(SEAM, WALK_SEAM), ("stage", stage), ("answer", "denied")],
+    );
+    ran.attestation.assert_count(condition, 1);
+    assert_unreadable_directory(&mut vault.store(), directory);
+    assert_directory_recovery(&vault, directory, condition);
+}
+
+/// R-B leaves exactly the descendant name and one directory cause, without deaths.
+#[track_caller]
+fn assert_unreadable_directory(store: &mut Store, directory: &str) {
+    let projection = StoreProjection::read(store).expect("project the directory gap");
+    assert_eq!(projection.documents().len(), 2);
+    assert_eq!(
+        projection
+            .findings()
+            .iter()
+            .filter(|finding| finding.kind == "directory/unreadable")
+            .count(),
+        1
+    );
+    let document = projection
+        .document(&format!("{directory}/inside.md"))
+        .expect("the held descendant name");
+    assert_names_only(document);
     assert!(
-        after.document("locked/inside.md").is_some(),
-        "the heal read a directory it could not open as evidence that the document under it was \
-         deleted"
+        store
+            .begin_request()
+            .stored_findings(&document_path(&format!("{directory}/inside.md")))
+            .unwrap()
+            .is_empty()
     );
-    assert_eq!(
-        tombstones(&mut refused).expect("reading the tombstones"),
-        Vec::new(),
-        "the heal recorded a death for a path nothing said was gone"
+    let findings = findings_at(store, directory);
+    let [finding] = findings.as_slice() else {
+        panic!("one directory finding: {findings:?}")
+    };
+    assert_eq!(finding.kind, "directory/unreadable");
+    assert_eq!(finding.severity, "error");
+    assert!(
+        finding
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("Permission denied")),
+        "{finding:?}"
     );
-    assert_eq!(
-        after.documents(),
-        before.documents(),
-        "the refused heal changed what the store holds"
-    );
-    drop(refused);
+    assert!(tombstones(store).expect("read the tombstones").is_empty());
+    assert_operationally_valid(store, "the names held beneath an unreadable directory");
+}
 
-    // The recovery bar: with the subtree readable again, an ordinary demand
-    // converges on what a derivation from zero over this tree holds — and does
-    // it by healing the work the refusal withheld rather than by starting over.
-    // Nothing under the subtree was written and no file moved, so the work left
-    // over is nothing at all whichever door withdrew trust: the recovery writes
-    // no row and commits no changeset, where a derivation from zero writes both
-    // documents in one.
-    //
-    // One demand answers both doors. The refused host is dropped above, so this
-    // is a fresh attach: it installs its own coverage over a subtree that reads
-    // again and heals behind it, which is the same work a demand raised on the
-    // untrusted entry itself would have owed under either reason.
+/// Read the public links column as well as the materialized broken-link finding.
+fn assert_directory_link_health(serving: &Serving, vault: &Vault, directory: &str, marked: bool) {
+    let found = serving
+        .find(
+            &norn_wire::FindParams::new(norn_wire::VaultAddress::name(vault.name().clone()))
+                .with_predicates([norn_wire::Predicate::path("open/kept.md")])
+                .with_columns([norn_wire::Column::links()]),
+        )
+        .expect("the links column");
+    let [row] = found.answer.report.page.rows.as_slice() else {
+        panic!("one holder: {:?}", found.answer.report.page.rows)
+    };
+    let norn_wire::Content::Known { value: links, .. } =
+        row.links.as_ref().expect("links requested")
+    else {
+        panic!("known links")
+    };
+    assert_eq!(links.total, 2);
+    assert_eq!(
+        links.items[0].health(),
+        if marked {
+            norn_wire::LinkHealth::NotJudged
+        } else {
+            norn_wire::LinkHealth::Broken
+        }
+    );
+    assert_eq!(links.items[0].targets.total(), 0);
+    assert_eq!(links.items[1].health(), norn_wire::LinkHealth::Healthy);
+    assert_eq!(links.items[1].targets.total(), 1);
+    let findings = vault
+        .store()
+        .begin_request()
+        .stored_findings(&document_path("open/kept.md"))
+        .unwrap();
+    let absent = format!("/{directory}/gone.md");
+    assert_eq!(
+        findings
+            .iter()
+            .filter(|finding| finding.kind == "link/broken"
+                && finding.target.as_deref() == Some(absent.as_str()))
+            .count(),
+        usize::from(!marked)
+    );
+}
+
+fn assert_directory_recovery(vault: &Vault, directory: &str, subject: &str) {
     let serving = vault.serving(ProductionPolicy::new(64, 64).unwrap());
     let healed = heal_and_read(&serving, vault.name());
+    assert!(findings_at(&mut vault.store(), directory).is_empty());
+    assert_directory_link_health(&serving, vault, directory, false);
     drop(serving);
-    assert_healed_only("a permission that was restored", healed, 0, 0);
-    vault.assert_converged_from_zero("a permission that was restored");
+    // Only inside.md lost its byte-derived facts; kept.md's bytes never changed.
+    // One upsert restores that row; a rebuild would write both documents.
+    assert_rederived_one(subject, healed);
+    vault.assert_converged_from_zero(subject);
 }
 
 // ---------------------------------------------------------------------------
@@ -2122,6 +2228,19 @@ fn walk_under_the_arm(root: &Path, condition: &str) {
             a_failed_document_still_serves_the_vault(&vault, "Permission denied")
         }
         "open-failing" => a_failed_document_still_serves_the_vault(&vault, "Input/output error"),
+        "list-denied" | "directory-stat-denied" => {
+            let directory = if condition == "directory-stat-denied" {
+                "!locked"
+            } else {
+                "locked"
+            };
+            let serving = vault.serving_undrained(ProductionPolicy::new(64, 64).unwrap());
+            let opening = serving.evidence();
+            let _lease = serve_or_report_the_refusal(&serving, vault.name());
+            assert_eq!(serving.evidence().since(opening).rebuilds_run, 0);
+            assert_unreadable_directory(&mut vault.store(), directory);
+            assert_directory_link_health(&serving, &vault, directory, true);
+        }
         other => panic!("the child was given no paging condition it knows: {other:?}"),
     }
 }
@@ -2179,7 +2298,7 @@ fn serve_or_report_the_refusal(
             }
             if let Some(reason) = untrusted_reason(&observed) {
                 panic!(
-                    "the heal refused instead of reaching Ready under the document condition: {reason:?}"
+                    "the heal refused instead of reaching Ready under the path condition: {reason:?}"
                 );
             }
             assert!(
@@ -2386,20 +2505,7 @@ fn assert_unreadable_document(store: &mut Store, at: &str, cause: &str) {
     let document = projection
         .document(at)
         .expect("the name still resolves as a document");
-    assert!(document.content_hash.is_none());
-    assert!(document.byte_length.is_none());
-    assert!(document.body.is_none());
-    assert!(document.body_hash.is_none());
-    assert!(document.body_offset.is_none());
-    assert!(document.frontmatter.is_none());
-    assert!(document.frontmatter_projection_hash.is_none());
-    assert_eq!(document.frontmatter_diagnostic_count, 0);
-    assert!(document.fields.is_empty());
-    assert!(document.links.is_empty());
-    assert!(document.link_keys.is_empty());
-    assert!(document.headings.is_empty());
-    assert!(document.blocks.is_empty());
-    assert!(document.tags.is_empty());
+    assert_names_only(document);
     let findings = store.begin_request().stored_findings(&path).unwrap();
     let [finding] = findings.as_slice() else {
         panic!("exactly one unreadable finding: {findings:?}")
@@ -2415,6 +2521,25 @@ fn assert_unreadable_document(store: &mut Store, at: &str, cause: &str) {
         "{finding:?}"
     );
     assert!(tombstones(store).expect("read the tombstones").is_empty());
+}
+
+/// Names remain available while every fact derived from unread bytes is absent.
+#[track_caller]
+fn assert_names_only(document: &norn_testkit::equivalence::ProjectedDocument) {
+    assert!(document.content_hash.is_none());
+    assert!(document.byte_length.is_none());
+    assert!(document.body.is_none());
+    assert!(document.body_hash.is_none());
+    assert!(document.body_offset.is_none());
+    assert!(document.frontmatter.is_none());
+    assert!(document.frontmatter_projection_hash.is_none());
+    assert_eq!(document.frontmatter_diagnostic_count, 0);
+    assert!(document.fields.is_empty());
+    assert!(document.links.is_empty());
+    assert!(document.link_keys.is_empty());
+    assert!(document.headings.is_empty());
+    assert!(document.blocks.is_empty());
+    assert!(document.tags.is_empty());
 }
 
 /// Every derived row, a bounded page at a time.

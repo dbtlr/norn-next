@@ -22,6 +22,15 @@ pub enum Opened<T> {
     Read(T),
     /// No regular file stands at the contained name.
     Nothing,
+    /// A folder above the requested file could not be opened.
+    UnreadableFolder {
+        /// The failed folder, relative to the read's anchor.
+        folder: PathBuf,
+        /// The operation that failed.
+        operation: &'static str,
+        /// The operating system's cause.
+        cause: io::Error,
+    },
     /// This path could not be read; no content is known from this attempt.
     Unreadable {
         /// The operation that failed.
@@ -89,6 +98,11 @@ pub fn read_and_hash(anchor: &Path, relative: &Path) -> Result<ReadAndHash, Refu
     match observe(anchor, relative, &path)? {
         Observation::Read(read) => Ok(read),
         Observation::Unreadable { operation, cause } => Err(environment(operation, &path, &cause)),
+        Observation::UnreadableFolder {
+            folder,
+            operation,
+            cause,
+        } => Err(environment(operation, &anchor.join(folder), &cause)),
         Observation::Nothing(unreached) => Err(environment_at(
             unreached.operation(),
             &path,
@@ -110,8 +124,9 @@ pub fn read_and_hash(anchor: &Path, relative: &Path) -> Result<ReadAndHash, Refu
 /// walk yields no file at any of those names either.
 ///
 /// A failed file open or read answers [`Opened::Unreadable`], retaining the
-/// machine's cause. Resource failures, an unopenable anchor, and failures at
-/// folder components remain refusals.
+/// machine's cause. A folder component's path failure answers
+/// [`Opened::UnreadableFolder`] at that folder. Resource failures and an
+/// unopenable anchor remain refusals.
 pub fn read_optional_and_hash(
     anchor: &Path,
     relative: &Path,
@@ -129,6 +144,15 @@ fn read_optional_with(
         Observation::Read(read) => Opened::Read(read),
         Observation::Nothing(_) => Opened::Nothing,
         Observation::Unreadable { operation, cause } => Opened::Unreadable { operation, cause },
+        Observation::UnreadableFolder {
+            folder,
+            operation,
+            cause,
+        } => Opened::UnreadableFolder {
+            folder,
+            operation,
+            cause,
+        },
     })
 }
 
@@ -206,6 +230,17 @@ fn stream_optional_with(
     let mut file = match reach(anchor, relative, &path, faults)? {
         Observation::Read(file) => file,
         Observation::Nothing(_) => return Ok(Opened::Nothing),
+        Observation::UnreadableFolder {
+            folder,
+            operation,
+            cause,
+        } => {
+            return Ok(Opened::UnreadableFolder {
+                folder,
+                operation,
+                cause,
+            });
+        }
         Observation::Unreadable { operation, cause } => {
             return Ok(Opened::Unreadable { operation, cause });
         }
@@ -257,6 +292,11 @@ pub fn read_if_present_and_hash(
             Ok(None)
         }
         Observation::Unreadable { operation, cause } => Err(environment(operation, &path, &cause)),
+        Observation::UnreadableFolder {
+            folder,
+            operation,
+            cause,
+        } => Err(environment(operation, &anchor.join(folder), &cause)),
         Observation::Nothing(unreached) => Err(environment_at(
             unreached.operation(),
             &path,
@@ -292,6 +332,11 @@ pub(crate) fn read_if_present_bounded(
     let path = anchor.join(relative);
     let mut file = match reach(anchor, relative, &path, &WalkFaults::default())? {
         Observation::Read(file) => file,
+        Observation::UnreadableFolder {
+            folder,
+            operation,
+            cause,
+        } => return Err(environment(operation, &anchor.join(folder), &cause)),
         Observation::Unreadable { operation, cause } => {
             return Err(environment(operation, &path, &cause));
         }
@@ -329,6 +374,12 @@ enum Observation<T> {
     Read(T),
     /// A contained name that reaches no regular file.
     Nothing(Unreached),
+    /// A folder component failed before reaching the requested file.
+    UnreadableFolder {
+        folder: PathBuf,
+        operation: &'static str,
+        cause: io::Error,
+    },
     /// A path-specific failure with no content observation.
     Unreadable {
         operation: &'static str,
@@ -353,6 +404,17 @@ fn observe_with(
     let mut file = match reach(anchor, relative, path, faults)? {
         Observation::Read(file) => file,
         Observation::Nothing(unreached) => return Ok(Observation::Nothing(unreached)),
+        Observation::UnreadableFolder {
+            folder,
+            operation,
+            cause,
+        } => {
+            return Ok(Observation::UnreadableFolder {
+                folder,
+                operation,
+                cause,
+            });
+        }
         Observation::Unreadable { operation, cause } => {
             return Ok(Observation::Unreadable { operation, cause });
         }
@@ -373,7 +435,7 @@ fn observe_with(
     }))
 }
 
-/// The contained open; folder and anchor failures always remain refusals.
+/// The contained open; anchor and resource failures remain refusals.
 #[allow(clippy::disallowed_types)] // norn-fs owns file handles.
 fn reach(
     anchor: &Path,
@@ -385,6 +447,13 @@ fn reach(
         .map_err(|errno| environment("opening directory", anchor, &errno_error(errno)))?;
     let reached = match open_regular_at_with(anchor_fd.as_fd(), relative, path, faults) {
         Ok(reached) => reached,
+        Err(OpenError::Folder { at: folder, errno }) => {
+            return Ok(Observation::UnreadableFolder {
+                folder,
+                operation: "opening",
+                cause: errno_error(errno),
+            });
+        }
         Err(error @ OpenError::Path { .. }) => {
             return Ok(Observation::Unreadable {
                 operation: error.operation(),

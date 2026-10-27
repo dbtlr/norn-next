@@ -110,6 +110,21 @@ registry! {
     InsertFindingClass,
     /// One path key a finding is held under.
     InsertFindingPath,
+    /// A directory finding indexed by its subject comparison key.
+    InsertDirectoryMark,
+    /// Set-wise content withdrawal over a directory's comparison-key range.
+    WithholdDocuments,
+    DiscardLinksBeneath,
+    DiscardHeadingsBeneath,
+    DiscardBlocksBeneath,
+    DiscardTagsBeneath,
+    DiscardFieldsBeneath,
+    /// Content and outgoing-link findings; spelling findings survive.
+    DiscardContentBeneath,
+    /// Nested directory marks also end when their content is withdrawn.
+    DiscardDirectoryMarksBeneath,
+    /// Held names whose incoming links and anchors need re-decision.
+    WithheldPaths,
     /// The rule set of a fingerprint holding exactly the names a finding
     /// cites, where one stands.
     FindRuleSet,
@@ -265,6 +280,51 @@ impl WriteStatement {
             }
             Self::InsertFindingPath => {
                 "INSERT INTO finding_paths (finding, path_key) VALUES (?1, ?2)"
+            }
+            Self::WithholdDocuments => {
+                "UPDATE documents SET content_hash=NULL, byte_length=NULL,
+                body=NULL, body_hash=NULL, body_offset=NULL, frontmatter=NULL,
+                frontmatter_projection_hash=NULL, frontmatter_diagnostic_count=0,
+                generation=?3, derived_at=?4 WHERE path_key >= ?1 AND path_key < ?2"
+            }
+            Self::DiscardLinksBeneath => {
+                "DELETE FROM links WHERE document IN
+                (SELECT id FROM documents WHERE path_key >= ?1 AND path_key < ?2)"
+            }
+            Self::DiscardHeadingsBeneath => {
+                "DELETE FROM headings WHERE document IN
+                (SELECT id FROM documents WHERE path_key >= ?1 AND path_key < ?2)"
+            }
+            Self::DiscardBlocksBeneath => {
+                "DELETE FROM blocks WHERE document IN
+                (SELECT id FROM documents WHERE path_key >= ?1 AND path_key < ?2)"
+            }
+            Self::DiscardTagsBeneath => {
+                "DELETE FROM document_tags WHERE document IN
+                (SELECT id FROM documents WHERE path_key >= ?1 AND path_key < ?2)"
+            }
+            Self::DiscardFieldsBeneath => {
+                "DELETE FROM document_fields WHERE document IN
+                (SELECT id FROM documents WHERE path_key >= ?1 AND path_key < ?2)"
+            }
+            Self::DiscardContentBeneath => {
+                "DELETE FROM findings WHERE id IN (
+                    SELECT id FROM findings WHERE path IN
+                        (SELECT path FROM documents WHERE path_key >= ?1 AND path_key < ?2)
+                        AND kind NOT IN ('document/path-bytes-not-utf8', 'document/path-names-no-document')
+                    UNION
+                    SELECT id FROM findings WHERE path COLLATE NOCASE >= ?3 AND path COLLATE NOCASE < ?4
+                        AND kind NOT IN ('document/path-bytes-not-utf8', 'document/path-names-no-document'))"
+            }
+            Self::DiscardDirectoryMarksBeneath => {
+                "DELETE FROM findings WHERE id IN
+                (SELECT finding FROM directory_marks WHERE path_key >= ?1 AND path_key < ?2)"
+            }
+            Self::WithheldPaths => {
+                "SELECT path FROM documents WHERE path_key >= ?1 AND path_key < ?2"
+            }
+            Self::InsertDirectoryMark => {
+                "INSERT INTO directory_marks (finding, path_key) VALUES (?1, ?2)"
             }
             Self::FindRuleSet => {
                 "SELECT id FROM rule_sets WHERE vault_schema_fingerprint = ?1 AND rules = ?2"

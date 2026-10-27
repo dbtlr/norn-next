@@ -611,6 +611,17 @@ impl TreeView {
                     // Taken away between the descent and the read: nothing
                     // stands there now.
                     norn_fs::Opened::Nothing => self.spelled_where_absent(path)?,
+                    norn_fs::Opened::UnreadableFolder {
+                        folder,
+                        operation,
+                        cause,
+                    } => {
+                        return Err(TreeViewError::Unreadable {
+                            operation,
+                            path: self.root.join(folder),
+                            cause,
+                        });
+                    }
                     norn_fs::Opened::Unreadable { operation, cause } => {
                         return Err(TreeViewError::Unreadable {
                             operation,
@@ -648,6 +659,15 @@ impl VaultView for TreeView {
                     norn_fs::Opened::Read((wire_hash(hash), Body::Held(Arc::from(bytes))))
                 }
                 norn_fs::Opened::Nothing => norn_fs::Opened::Nothing,
+                norn_fs::Opened::UnreadableFolder {
+                    folder,
+                    operation,
+                    cause,
+                } => norn_fs::Opened::UnreadableFolder {
+                    folder,
+                    operation,
+                    cause,
+                },
                 norn_fs::Opened::Unreadable { operation, cause } => {
                     norn_fs::Opened::Unreadable { operation, cause }
                 }
@@ -671,6 +691,15 @@ impl VaultView for TreeView {
                     },
                 )),
                 norn_fs::Opened::Nothing => norn_fs::Opened::Nothing,
+                norn_fs::Opened::UnreadableFolder {
+                    folder,
+                    operation,
+                    cause,
+                } => norn_fs::Opened::UnreadableFolder {
+                    folder,
+                    operation,
+                    cause,
+                },
                 norn_fs::Opened::Unreadable { operation, cause } => {
                     norn_fs::Opened::Unreadable { operation, cause }
                 }

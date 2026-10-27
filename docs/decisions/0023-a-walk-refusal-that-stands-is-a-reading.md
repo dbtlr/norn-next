@@ -1,5 +1,6 @@
 ---
-status: accepted
+status: superseded
+superseded-by: 0046-one-unreadable-path-never-breaks-the-vault.md
 date: 2026-09-14
 ---
 

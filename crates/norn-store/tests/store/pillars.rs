@@ -4434,6 +4434,89 @@ fn write_bar(statement: WriteStatement) -> WriteBar {
         )],
         DiscardFields => &[("document_fields", Access::PrimaryKey, "(document=?)")],
         DeleteDocument | RowAt => &[("documents", Access::Index("documents_path"), "(path=?)")],
+        WithholdDocuments | WithheldPaths => &[(
+            "documents",
+            Access::Index("documents_path_key"),
+            "(path_key>? AND path_key<?)",
+        )],
+        DiscardLinksBeneath => &[
+            (
+                "documents",
+                Access::Index("documents_path_key"),
+                "(path_key>? AND path_key<?)",
+            ),
+            (
+                "links",
+                Access::Index("links_document_ordinal"),
+                "(document=?)",
+            ),
+        ],
+        DiscardHeadingsBeneath => &[
+            (
+                "documents",
+                Access::Index("documents_path_key"),
+                "(path_key>? AND path_key<?)",
+            ),
+            (
+                "headings",
+                Access::Index("headings_document_ordinal"),
+                "(document=?)",
+            ),
+        ],
+        DiscardBlocksBeneath => &[
+            (
+                "documents",
+                Access::Index("documents_path_key"),
+                "(path_key>? AND path_key<?)",
+            ),
+            (
+                "blocks",
+                Access::Index("blocks_document_ordinal"),
+                "(document=?)",
+            ),
+        ],
+        DiscardTagsBeneath => &[
+            (
+                "documents",
+                Access::Index("documents_path_key"),
+                "(path_key>? AND path_key<?)",
+            ),
+            (
+                "document_tags",
+                Access::Index("document_tags_document_ordinal"),
+                "(document=?)",
+            ),
+        ],
+        DiscardFieldsBeneath => &[
+            (
+                "documents",
+                Access::Index("documents_path_key"),
+                "(path_key>? AND path_key<?)",
+            ),
+            ("document_fields", Access::PrimaryKey, "(document=?)"),
+        ],
+        DiscardContentBeneath => &[
+            (
+                "documents",
+                Access::Index("documents_path_key"),
+                "(path_key>? AND path_key<?)",
+            ),
+            ("findings", Access::Index("findings_path"), "(path=?)"),
+            (
+                "findings",
+                Access::Index("findings_content_path_nocase"),
+                "(path>? AND path<?)",
+            ),
+            ("findings", Access::RowId, "(rowid=?)"),
+        ],
+        DiscardDirectoryMarksBeneath => &[
+            (
+                "directory_marks",
+                Access::Index("directory_marks_path_key"),
+                "(path_key>? AND path_key<?)",
+            ),
+            ("findings", Access::RowId, "(rowid=?)"),
+        ],
         // Two open ranges over the fingerprint rather than an inequality.
         DiscardStaleFindings => &[
             (
@@ -4482,6 +4565,7 @@ fn write_bar(statement: WriteStatement) -> WriteBar {
         | InsertFindingCandidate
         | InsertFindingClass
         | InsertFindingPath
+        | InsertDirectoryMark
         | InsertRuleSet
         | PutMeta => &[],
     };
