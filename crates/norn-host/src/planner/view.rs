@@ -782,12 +782,7 @@ impl VaultView for TreeView {
             match fact.map_err(TreeViewError::Walk)? {
                 norn_fs::WalkFact::File(file) => contents.take(file.path().as_path()),
                 norn_fs::WalkFact::Unreadable(unreadable) => {
-                    if unreadable
-                        .path()
-                        .as_path()
-                        .extension()
-                        .is_some_and(|suffix| suffix == "md")
-                    {
+                    if crate::production::is_markdown(unreadable.path().as_path()) {
                         contents.take(unreadable.path().as_path());
                     } else {
                         return Err(TreeViewError::Walk(norn_fs::WalkError::Environment {
@@ -1488,5 +1483,47 @@ mod tests {
             panic!("the document stands at its listed spelling");
         };
         assert_eq!(at.as_str(), "Note.md");
+    }
+
+    /// An unreadable document is a document of the folder in any ASCII case
+    /// of its extension, as it is where it reads. The walk's stat of the one
+    /// name is denied in a child process, where the environment arms it.
+    #[cfg(feature = "induced-failure")]
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: the tree a folder reads.
+    fn an_unreadable_upper_case_document_is_taken_as_a_document_of_the_folder() {
+        const CHILD_ROOT: &str = "NORN_PLANNER_UNREADABLE_CASE_ROOT";
+        const TEST: &str = "planner::view::tests::an_unreadable_upper_case_document_is_taken_as_a_document_of_the_folder";
+
+        if let Some(root) = std::env::var_os(CHILD_ROOT) {
+            let view =
+                TreeView::open(Path::new(&root), &[], &SchemaPlace::default()).expect("a vault");
+            let folder = view
+                .normalizer()
+                .normalize(Path::new("folder"))
+                .expect("a folder name");
+            let contents = view
+                .folder_contents(&folder)
+                .expect("an unreadable document does not fail the read")
+                .expect("the folder stands");
+            let documents: Vec<_> = contents.documents.iter().map(|d| d.as_str()).collect();
+            assert_eq!(documents, ["folder/c.MD"]);
+            return;
+        }
+        let scratch = Scratch::new("planner-view-unreadable-case");
+        std::fs::create_dir(scratch.join("folder")).expect("a folder");
+        std::fs::write(scratch.join("folder/c.MD"), "N").expect("a document");
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", TEST, "--nocapture"])
+            .env(CHILD_ROOT, scratch.root())
+            .env("NORN_FS_WALK_ARMED_STAGES", "page=denied")
+            .output()
+            .unwrap();
+        assert!(
+            child.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&child.stdout),
+            String::from_utf8_lossy(&child.stderr)
+        );
     }
 }
