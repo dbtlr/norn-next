@@ -473,10 +473,14 @@ impl<'a> Request<'a> {
 
     /// Whether an unreadable-directory finding stands at this subject.
     pub fn unreadable_directory_stands(&self, path: &DocumentPath) -> Result<bool, StoreError> {
-        self.store.connection().query_row(
-            "SELECT EXISTS (SELECT 1 FROM findings WHERE path = ?1 AND kind = 'directory/unreadable')",
-            params![path.as_str()], |row| row.get(0),
-        ).map_err(|error| error::sql("probing an unreadable-directory finding", error))
+        self.store
+            .connection()
+            .query_row(
+                WriteStatement::DirectoryMarkAt.sql(),
+                params![path.as_str()],
+                |row| row.get(0),
+            )
+            .map_err(|error| error::sql("probing an unreadable-directory finding", error))
     }
 
     /// Discard every finding recorded **about** one path, and report what went.

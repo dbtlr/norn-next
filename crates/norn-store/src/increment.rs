@@ -16,7 +16,9 @@ use norn_wire::{FindingKind, fold_tag};
 use crate::counters::{Counter, DerivationCounters};
 use crate::ddl;
 use crate::error::{self, StoreError};
-use crate::facts::{DocumentFacts, FindingFacts, Invalidation, LinkAnchor, Provenance};
+use crate::facts::{
+    DocumentFacts, FindingFacts, Invalidation, LinkAnchor, Provenance, StoredPathOrder,
+};
 use crate::fields::{ContentModel, FieldRow, OffsetSpelling};
 use crate::hash;
 use crate::health::{self, Redecided};
@@ -41,6 +43,8 @@ pub enum Change {
     /// content-derived fact is cleared in this transaction.
     Unreadable { path: DocumentPath },
     /// Keep descendant names and keys while clearing every fact derived from bytes.
+    /// The range follows the store's filesystem path order, preserving readable
+    /// case-twin siblings on roots that tell case apart.
     BeneathUnlistable { prefix: DirectoryPrefix },
     /// A vault file no longer admitted at this path. Its class and path keys
     /// re-judge the same link neighborhood a document death reaches.
@@ -291,6 +295,7 @@ pub(crate) fn apply(
     // One clock reading for the changeset, as there is one generation. Nothing
     // orders by it; it is what a person reads in a report.
     let recorded_at = request::unix_seconds();
+    let path_order = store.path_order();
     // Findings and changed paths share one comparison key for both axes.
     let class_space = SuffixKey::Comparison;
     let transaction = store
@@ -310,7 +315,14 @@ pub(crate) fn apply(
         let mut statements = Statements::prepare(&transaction)?;
         for (index, change) in std::iter::once(first).chain(entries).enumerate() {
             if let Change::BeneathUnlistable { prefix } = &change {
-                beneath_unlistable(&transaction, prefix, stamp, recorded_at, &mut tally)?;
+                beneath_unlistable(
+                    &transaction,
+                    prefix,
+                    path_order,
+                    stamp,
+                    recorded_at,
+                    &mut tally,
+                )?;
                 continue;
             }
             let subject = subject(&change);
@@ -1207,11 +1219,14 @@ fn discard_affected_paths(
 fn beneath_unlistable(
     transaction: &Transaction<'_>,
     prefix: &DirectoryPrefix,
+    order: StoredPathOrder,
     generation: i64,
     derived_at: i64,
     tally: &mut Tally,
 ) -> Result<(), StoreError> {
-    let (lower, upper) = health::statement::directory_bounds(prefix);
+    let lower = format!("{}/", prefix.as_str());
+    let upper = format!("{}0", prefix.as_str());
+    let folded = matches!(order, StoredPathOrder::AsciiCaseInsensitive);
     for statement in [
         WriteStatement::DiscardLinksBeneath,
         WriteStatement::DiscardHeadingsBeneath,
@@ -1220,7 +1235,7 @@ fn beneath_unlistable(
         WriteStatement::DiscardFieldsBeneath,
     ] {
         tally.fact_rows_discarded += transaction
-            .execute(statement.sql(), params![lower, upper])
+            .execute(statement.sql(), params![lower, upper, folded])
             .map_err(|error| {
                 error::sql("discarding content beneath an unlistable directory", error)
             })? as u64;
@@ -1230,24 +1245,13 @@ fn beneath_unlistable(
     tally.findings_discarded += request::discard_collecting_directories(
         transaction,
         WriteStatement::DiscardContentBeneath.sql(),
-        params![
-            lower,
-            upper,
-            format!("{}/", prefix.as_str()),
-            format!("{}0", prefix.as_str())
-        ],
-        &mut tally.directories,
-    )?;
-    tally.findings_discarded += request::discard_collecting_directories(
-        transaction,
-        WriteStatement::DiscardDirectoryMarksBeneath.sql(),
-        params![lower, upper],
+        params![lower, upper, folded],
         &mut tally.directories,
     )?;
     tally.documents_upserted += transaction
         .execute(
             WriteStatement::WithholdDocuments.sql(),
-            params![lower, upper, generation, derived_at],
+            params![lower, upper, folded, generation, derived_at],
         )
         .map_err(|error| error::sql("withdrawing content beneath an unlistable directory", error))?
         as u64;
@@ -1256,7 +1260,7 @@ fn beneath_unlistable(
         .prepare(WriteStatement::WithheldPaths.sql())
         .map_err(|error| error::sql("reading withheld names", error))?;
     let paths = statement
-        .query_map(params![lower, upper], |row| row.get::<_, String>(0))
+        .query_map(params![lower, upper, folded], |row| row.get::<_, String>(0))
         .map_err(|error| error::sql("reading withheld names", error))?;
     for path in paths {
         let path =

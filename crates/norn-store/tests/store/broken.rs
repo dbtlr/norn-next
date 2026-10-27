@@ -388,7 +388,7 @@ fn field_predicates_never_match_a_broken_document() {
 #[test]
 fn beneath_unlistable_clears_rows_in_range_to_names_only() {
     let scratch = Scratch::new("directory-names-only");
-    let mut store = scratch.open();
+    let mut store = scratch.open_under(norn_store::StoredPathOrder::AsciiCaseInsensitive);
     for at in [
         "Locked/a.md",
         "locked/sub/b.md",

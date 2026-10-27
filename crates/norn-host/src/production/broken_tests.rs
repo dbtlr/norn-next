@@ -944,3 +944,56 @@ fn an_unlistable_directory_is_withheld_and_marked_at_first_build() {
     assert_eq!(stored_paths(&mut attachment.store), ["kept.md"]);
     ops.detach(&name, attachment);
 }
+
+#[cfg(unix)]
+#[test]
+fn marking_a_directory_leaves_its_readable_case_twin_untouched() {
+    const ROOT: &str = "NORN_464_TWIN_ROOT";
+    const DATABASE: &str = "NORN_464_TWIN_DATABASE";
+    if let Some(root) = std::env::var_os(ROOT) {
+        let root = PathBuf::from(root);
+        let order = stored_path_order(norn_fs::Vault::open(&root, &[]).unwrap().case_sensitivity());
+        let mut store = Store::open(PathBuf::from(std::env::var_os(DATABASE).unwrap()), order, crate::DERIVATION_VERSION).unwrap();
+        let sibling = DocumentPath::new("locked/b.md").unwrap();
+        let before = store.begin_request().stored_facts(&sibling).unwrap();
+        let findings = findings_at(&mut store, sibling.as_str());
+        let already_marked = store.begin_request().unreadable_directory_stands(&DocumentPath::new("Locked").unwrap()).unwrap();
+        let generation = store.begin_request().write_generation().unwrap();
+        let progress = ProgressReporter::disconnected();
+        heal_documents(&mut store, &root, &[], ProductionPolicy::new(8, 2).unwrap(), &progress.healing()).unwrap();
+        assert_eq!(store.begin_request().stored_facts(&sibling).unwrap(), before,
+            "the readable sibling's bytes remain known");
+        assert_eq!(findings_at(&mut store, sibling.as_str()), findings);
+        if already_marked {
+            assert_eq!(store.begin_request().write_generation().unwrap(), generation,
+                "the still-denied directory writes nothing");
+        }
+        assert_eq!(findings_at(&mut store, "Locked")[0].kind, "directory/unreadable");
+        assert!(store.begin_request().stored_document(&DocumentPath::new("Locked/inside.md").unwrap()).unwrap().unwrap().content_hash.is_none());
+        return;
+    }
+    let f = Fixture::watcherless("unlistable-case-twin");
+    let root = f.vault();
+    if !norn_testkit::churn::runs_where_the_volume_tells_case_apart(
+        norn_testkit::churn::folding(&root).unwrap(), "unlistable case twins",
+    ) {
+        return;
+    }
+    fs::create_dir(root.join("Locked")).unwrap();
+    fs::create_dir(root.join("locked")).unwrap();
+    fs::write(root.join("Locked/inside.md"), "unread later\n").unwrap();
+    fs::write(root.join("locked/b.md"), "# Heading\n\n#tag [[nowhere]]\n").unwrap();
+    let database = f.root.join("twins.sqlite3");
+    let mut store = Store::open(&database, proven_order(&f), crate::DERIVATION_VERSION).unwrap();
+    heal_from_zero(&mut store, &root, &[]).unwrap();
+    drop(store);
+    // Each enumerating heal gets one directory failure, including under root.
+    for _ in 0..2 {
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "production::tests::broken_documents::marking_a_directory_leaves_its_readable_case_twin_untouched", "--nocapture"])
+            .env(ROOT, &root).env(DATABASE, &database)
+            .env("NORN_FS_WALK_ARMED_STAGES", "list=denied")
+            .env("NORN_FS_WALK_LIST_AT", "Locked").output().unwrap();
+        assert!(child.status.success(), "{}\n{}", String::from_utf8_lossy(&child.stdout), String::from_utf8_lossy(&child.stderr));
+    }
+}

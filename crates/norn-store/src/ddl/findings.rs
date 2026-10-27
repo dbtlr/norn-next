@@ -293,6 +293,10 @@
 //! re-decide the path-link range `[key/, key0)` through `finding_paths` and
 //! the path-only link index.
 //!
+//! Content withdrawal also reaches rowless quarantines through the subject's
+//! filesystem-ordered range. The partial content-path index supports its folded
+//! arm while excluding spelling findings that the withdrawal must preserve.
+//!
 //! # Findings outlive their subject, and the class owns their lifecycle
 //!
 //! A finding is keyed by **path, class and path key**, never by a document row.

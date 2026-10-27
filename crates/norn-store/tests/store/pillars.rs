@@ -4434,16 +4434,30 @@ fn write_bar(statement: WriteStatement) -> WriteBar {
         )],
         DiscardFields => &[("document_fields", Access::PrimaryKey, "(document=?)")],
         DeleteDocument | RowAt => &[("documents", Access::Index("documents_path"), "(path=?)")],
-        WithholdDocuments | WithheldPaths => &[(
-            "documents",
-            Access::Index("documents_path_key"),
-            "(path_key>? AND path_key<?)",
-        )],
+        WithholdDocuments | WithheldPaths => &[
+            ("documents", Access::RowId, "(rowid=?)"),
+            (
+                "documents",
+                Access::Index("documents_path"),
+                "(path>? AND path<?)",
+            ),
+            (
+                "documents",
+                Access::Index("documents_path_nocase"),
+                "(path>? AND path<?)",
+            ),
+        ],
+        DirectoryMarkAt => &[("findings", Access::Index("findings_path"), "(path=?)")],
         DiscardLinksBeneath => &[
             (
                 "documents",
-                Access::Index("documents_path_key"),
-                "(path_key>? AND path_key<?)",
+                Access::Index("documents_path"),
+                "(path>? AND path<?)",
+            ),
+            (
+                "documents",
+                Access::Index("documents_path_nocase"),
+                "(path>? AND path<?)",
             ),
             (
                 "links",
@@ -4454,8 +4468,13 @@ fn write_bar(statement: WriteStatement) -> WriteBar {
         DiscardHeadingsBeneath => &[
             (
                 "documents",
-                Access::Index("documents_path_key"),
-                "(path_key>? AND path_key<?)",
+                Access::Index("documents_path"),
+                "(path>? AND path<?)",
+            ),
+            (
+                "documents",
+                Access::Index("documents_path_nocase"),
+                "(path>? AND path<?)",
             ),
             (
                 "headings",
@@ -4466,8 +4485,13 @@ fn write_bar(statement: WriteStatement) -> WriteBar {
         DiscardBlocksBeneath => &[
             (
                 "documents",
-                Access::Index("documents_path_key"),
-                "(path_key>? AND path_key<?)",
+                Access::Index("documents_path"),
+                "(path>? AND path<?)",
+            ),
+            (
+                "documents",
+                Access::Index("documents_path_nocase"),
+                "(path>? AND path<?)",
             ),
             (
                 "blocks",
@@ -4478,8 +4502,13 @@ fn write_bar(statement: WriteStatement) -> WriteBar {
         DiscardTagsBeneath => &[
             (
                 "documents",
-                Access::Index("documents_path_key"),
-                "(path_key>? AND path_key<?)",
+                Access::Index("documents_path"),
+                "(path>? AND path<?)",
+            ),
+            (
+                "documents",
+                Access::Index("documents_path_nocase"),
+                "(path>? AND path<?)",
             ),
             (
                 "document_tags",
@@ -4490,30 +4519,26 @@ fn write_bar(statement: WriteStatement) -> WriteBar {
         DiscardFieldsBeneath => &[
             (
                 "documents",
-                Access::Index("documents_path_key"),
-                "(path_key>? AND path_key<?)",
+                Access::Index("documents_path"),
+                "(path>? AND path<?)",
+            ),
+            (
+                "documents",
+                Access::Index("documents_path_nocase"),
+                "(path>? AND path<?)",
             ),
             ("document_fields", Access::PrimaryKey, "(document=?)"),
         ],
         DiscardContentBeneath => &[
             (
-                "documents",
-                Access::Index("documents_path_key"),
-                "(path_key>? AND path_key<?)",
+                "findings",
+                Access::Index("findings_path"),
+                "(path>? AND path<?)",
             ),
-            ("findings", Access::Index("findings_path"), "(path=?)"),
             (
                 "findings",
                 Access::Index("findings_content_path_nocase"),
                 "(path>? AND path<?)",
-            ),
-            ("findings", Access::RowId, "(rowid=?)"),
-        ],
-        DiscardDirectoryMarksBeneath => &[
-            (
-                "directory_marks",
-                Access::Index("directory_marks_path_key"),
-                "(path_key>? AND path_key<?)",
             ),
             ("findings", Access::RowId, "(rowid=?)"),
         ],

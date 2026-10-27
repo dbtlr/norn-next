@@ -92,9 +92,11 @@ spelling, not marked broken: the spelling alone settles that cause.
 
 **A directory a walk cannot list is withheld and marked, and the walk continues.** Its places
 are not pruned: every document beneath it keeps its name, id and keys, without a tombstone.
+The affected range follows the directory's own spelling in the store's filesystem path
+order: a readable case-twin directory stays untouched where the root tells case apart.
 In the transaction that first files the directory's finding, these rows become names-only:
-content hashes and bodies are NULL, byte-derived facts and content-side findings are deleted,
-and findings about their outgoing links end. Spelling-side findings stay. No per-document
+content hashes and bodies are NULL and byte-derived facts are deleted. Content-side findings
+throughout that range, including places without rows, and outgoing-link findings end. Spelling-side findings stay. No per-document
 unreadable finding is filed. A place-scoped **unreadable-directory** finding stands at the
 directory's own path, carrying the cause, and the walk goes on through every other directory
 and concludes everywhere else. Names still resolve, and NULL hashes require fresh derivation
