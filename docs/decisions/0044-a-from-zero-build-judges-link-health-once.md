@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 date: 2026-10-26
 ---
 
@@ -58,7 +58,7 @@ at any price.
 
 ## Link health is re-decided inside the changeset
 
-**Link health** is a validate finding family with three kinds, each a finding about exactly
+**Link health** is a validate finding family with four kinds, each a finding about exactly
 one link, and it follows the addressing and eligibility rules every surface already reads a
 link's health by:
 
@@ -85,6 +85,9 @@ link's health by:
   name resolves as any link to that name does. Its anchor is unjudged where the names-only
   row holds no body. A suffix-addressed link cannot be tied to one directory, so it is judged
   over the names the store holds, and the directory's finding marks the gap those names may have.
+
+A link written through `vault://` that resolves to one candidate carries a **vault-scheme**
+finding unless its missing anchor takes precedence.
 
 An embed is a link and carries the same kinds. Every link-health finding has warning
 severity.
@@ -136,7 +139,7 @@ headings, blocks, and the keys a link is read through. The anchor rule is a pred
 readings stored per heading, per block and per link, so the whole judgment is one SQL
 predicate. The findings are judged against the facts the transaction holds once every entry
 of the changeset is written. The exception admits exactly the link-health family: broken,
-ambiguous and missing anchor, each a finding about exactly one link, filed to the findings
+ambiguous, missing anchor and vault-scheme, each a finding about exactly one link, filed to the findings
 pillar. It is never an aggregate over the set, and never a write to another pillar. A
 from-zero build is the one write that judges the same family by the same predicate at
 another time, as the next section rules.
@@ -242,7 +245,8 @@ judgment then judges again the links that path reaches — the set a changeset w
 killing that path re-decides — before it ends, so every finding it files is judged over the
 facts the store holds when it ends. Facts accepted after the judgment ends are reconciled
 before `Ready` as ordinary changesets, under the per-changeset rule. The judgment's working
-memory is a bounded chunk of links and the candidates they resolve against, never the vault.
+memory is a bounded chunk of links and the candidates they resolve against, plus one count
+per distinct key naming more than a candidate head.
 The finished store's findings equal the findings per-changeset re-decision files over the
 same tree, finding order included, so incremental equals rebuild holds for every store a
 reader can adopt, apart from the accepted delay in refreshing a still-broken document's
@@ -257,7 +261,8 @@ a reader from a tear between a row and the findings judged over it. A from-zero 
 readers of the rows it has completed, but it withholds the findings surface, not the store,
 until the judgment has run: no reader reads a link-health finding before then, and an open
 after a crash before the transaction that ends construction commits discards the
-construction whole. Working memory is bounded by the chunk. The
+construction whole. Working memory is bounded by the chunk and its candidates, plus one
+count per distinct key naming more than a candidate head. The
 work bar measures a write against its blast radius, and a from-zero build's blast radius is
 the whole vault: judging each link once is the least work that blast radius admits, where
 per-changeset re-decision exceeds it.
@@ -365,7 +370,8 @@ duration. That stall is an accepted cost.
 obligation requires the re-decided set to be judged in the statement and streamed out of it,
 never materialized beyond a bounded chunk of rows, so that a hub costs time inside the
 transaction and not memory; a memory bar is what tests it. A from-zero build's single
-judgment is held to the same bar.
+judgment is held to the same bar: a bounded chunk of links and the candidates they resolve
+against, plus one count per distinct key naming more than a candidate head.
 
 **A full tree heal of an existing store still re-decides common-stem classes once per
 chunk.** A heal that maintains an existing store — an attach over a store it adopts, or a
@@ -382,3 +388,8 @@ first build, as ADR 0045 rules.
 **Warm writes still re-decide by ADR 0027's set.** A write that changes no name, heading or
 block still re-decides every link the set names for the paths it writes. Narrowing that set
 for such writes is a separate decision, not taken here.
+
+## Changelog
+
+- 2026-10-27: Accepted. Corrected the four link-health kinds and recorded the retained
+  per-common-key totals in the judgment’s memory bound.
