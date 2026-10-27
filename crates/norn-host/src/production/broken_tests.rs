@@ -192,6 +192,41 @@ fn a_warm_scoped_increment_marks_an_unreadable_document_broken() {
     );
 }
 #[test]
+fn a_failing_final_name_stat_in_a_scoped_increment_marks_the_document_broken() {
+    let f = Fixture::watcherless("scoped-failing-stat");
+    let root = f.vault();
+    fs::create_dir_all(root.join("notes")).unwrap();
+    fs::write(root.join("notes/a.md"), "# Heading\n\n[[absent]]\n").unwrap();
+    let mut store = Store::open(
+        f.root.join("broken.sqlite3"),
+        proven_order(&f),
+        crate::DERIVATION_VERSION,
+    )
+    .unwrap();
+    heal_from_zero(&mut store, &root, &[]).unwrap();
+    let _failing = norn_fs::fail_document_stats(&root.join("notes/a.md"));
+    let progress = ProgressReporter::disconnected();
+    scoped_increment(
+        &mut store,
+        &root,
+        &dirty_path(&root, "notes/a.md"),
+        ProductionPolicy::new(8, 2).unwrap(),
+        &progress.healing(),
+        &[],
+    )
+    .expect("a path failure at the name's stat does not refuse the job");
+    let stored = store
+        .begin_request()
+        .stored_document(&DocumentPath::new("notes/a.md").unwrap())
+        .unwrap()
+        .expect("the name stands");
+    assert!(stored.content_hash.is_none());
+    let findings = findings_at(&mut store, "notes/a.md");
+    assert_eq!(findings.len(), 1);
+    assert_eq!(findings[0].kind, "document/unreadable");
+}
+
+#[test]
 fn a_warm_subtree_heal_marks_an_unreadable_document_broken() {
     under_denied_open(
         "a_warm_subtree_heal_marks_an_unreadable_document_broken",

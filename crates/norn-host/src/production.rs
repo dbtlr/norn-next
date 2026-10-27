@@ -3023,7 +3023,20 @@ fn scoped_increment(
         // spelling, and every read and every row below is taken there, so the
         // order the reports are applied in does not decide the spelling a row
         // lands at.
-        let (kind, rendered) = match vault.reach(path).map_err(effect)? {
+        let reached = match vault.reach_or_unreadable(path).map_err(effect)? {
+            Ok(reached) => reached,
+            // The name's own stat met a path failure, which is the same fact a
+            // full heal marks the document broken for.
+            Err(unreadable) => {
+                pending.unreadable(
+                    unreadable.path().as_path(),
+                    unreadable.operation(),
+                    unreadable.cause(),
+                )?;
+                continue;
+            }
+        };
+        let (kind, rendered) = match reached {
             norn_fs::Reach::Refused(skip) => {
                 pending.flush()?;
                 prune_refused_root(

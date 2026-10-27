@@ -548,7 +548,24 @@ impl TreeView {
         path: &NormalizedPath,
         read: impl FnOnce(&Path, &Path) -> Result<norn_fs::Opened<(ContentHash, Body)>, Refusal>,
     ) -> Result<Entry, TreeViewError> {
-        let (kind, at) = match self.reach(path.as_path())? {
+        let reached = match self
+            .vault
+            .reach_or_unreadable(path.as_path())
+            .map_err(TreeViewError::Walk)?
+        {
+            Ok(reached) => reached,
+            Err(unreadable) => {
+                return Err(TreeViewError::Unreadable {
+                    operation: unreadable.operation(),
+                    path: self.root.join(unreadable.path().as_path()),
+                    cause: std::io::Error::new(
+                        unreadable.cause().kind(),
+                        unreadable.cause().to_string(),
+                    ),
+                });
+            }
+        };
+        let (kind, at) = match reached {
             Reach::Refused(skip) => {
                 let root = skip.path().as_path().display();
                 let (detail, barrier) = match skip.reason() {

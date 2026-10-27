@@ -740,13 +740,31 @@ mod tests {
     /// while an independent document still contributes its fix.
     #[cfg(feature = "induced-failure")]
     #[test]
-    #[allow(clippy::disallowed_methods)] // Harness scaffolding: the files repair reads.
     fn a_path_failure_during_a_repair_tree_read_skips_only_that_documents_fix() {
+        skips_only_the_document_armed_by("repair-tree-unreadable", norn_fs::deny_document_opens);
+    }
+
+    /// The same skip where the failure is the stat of the document's own name.
+    #[cfg(feature = "induced-failure")]
+    #[test]
+    fn a_failing_stat_of_the_name_skips_only_that_documents_fix() {
+        skips_only_the_document_armed_by(
+            "repair-tree-unreadable-stat",
+            norn_fs::fail_document_stats,
+        );
+    }
+
+    #[cfg(feature = "induced-failure")]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: the files repair reads.
+    fn skips_only_the_document_armed_by(
+        label: &str,
+        arm: impl FnOnce(&std::path::Path) -> norn_fs::DocumentOpenFailure,
+    ) {
         use crate::planner::control::SchemaPlace;
         use crate::planner::links::testing::EmptyStore;
         use crate::planner::view::{Remembered, TreeView};
 
-        let scratch = norn_testkit::scratch::Scratch::new("repair-tree-unreadable");
+        let scratch = norn_testkit::scratch::Scratch::new(label);
         for name in ["a.md", "b.md"] {
             std::fs::write(scratch.join(name), "---\ntype: task\n---\n# Task\n").unwrap();
         }
@@ -778,7 +796,7 @@ mod tests {
             row.target = Some("status".to_owned());
             row
         });
-        let _denied = norn_fs::deny_document_opens(&scratch.join("a.md"));
+        let _armed = arm(&scratch.join("a.md"));
 
         let planned = super::plan(
             &rows,
