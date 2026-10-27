@@ -18,12 +18,37 @@ def validate_paths(actual: list[str], expected: list[str], limit: int) -> None:
         raise ValueError("a result does not match the authored workload")
 
 
+CONTENT_COLUMNS = ("fields", "body", "links", "headings", "blocks", "tags")
+
+
+def known(value):
+    """The value inside a known content carrier; unknown content is never a timed success."""
+    if (isinstance(value, dict) and value.get("state") in ("known", "unknown")
+            and set(value) <= {"state", "value", "reason"}):
+        if value["state"] != "known":
+            raise ValueError(f"current answer content is unknown: {value.get('reason')}")
+        return value["value"]
+    return value
+
+
+def decode_content(report: dict) -> dict:
+    """Unwrap the wire's known/unknown content carriers in place, once, before any check reads them."""
+    document = report.get("document")
+    if isinstance(document, dict):
+        for column in CONTENT_COLUMNS:
+            if column in document:
+                document[column] = known(document[column])
+    if "body" in report:
+        report["body"] = known(report["body"])
+    return report
+
+
 def payload(engine: str, response: dict) -> dict:
     if engine == "current":
         answer = response["answer"]
         if answer.get("unsatisfied"):
             raise ValueError(f"current request was partially satisfied: {answer['unsatisfied']}")
-        return answer["report"]
+        return decode_content(answer["report"])
     if response.get("isError"):
         raise ValueError("legacy tool reported failure")
     answer = response["structuredContent"]
@@ -116,6 +141,7 @@ def distribution(values: list[int]) -> dict:
 
 def whole_get_answer(stage, *, first_index=False):
     """Keep the complete record while comparing finding content across store epochs."""
+    decode_content(stage["answer"]["report"])
     answer = copy.deepcopy(stage["answer"])
     report = answer["report"]
     document = report.get("document", {})

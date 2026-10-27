@@ -130,6 +130,16 @@ class AnswerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_paths(["a.md"], ["a.md", "b.md"], 25)
 
+    def test_a_get_reads_its_content_through_the_wire_carrier(self):
+        def answer(body):
+            return {"answer": {"report": {"document": {"path": "a.md", "body": body,
+                "fields": {"state": "known", "value": {"status": {"raw": "draft"}}}}}}}
+        known = {"state": "known", "value": {"text": "Body\n", "byte_length": 5}}
+        self.assertEqual(record("current", answer(known)),
+                         {"path": "a.md", "body": "Body\n", "fields": {"status": "draft"}})
+        with self.assertRaises(ValueError):
+            record("current", answer({"state": "unknown", "reason": "unreadable"}))
+
     def test_truncated_content_and_uncommitted_writes_are_not_successes(self):
         with self.assertRaises(ValueError):
             record("current", {"answer": {"report": {"document": {
