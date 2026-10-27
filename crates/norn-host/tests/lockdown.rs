@@ -325,6 +325,82 @@ fn a_full_disk_refuses_the_heal_and_the_entry_stays_untrusted() {
     vault.assert_converged_from_zero("a full disk that was cleared");
 }
 
+/// **A first build a full disk refused leaves its mark, and the next attach
+/// builds the vault from zero.**
+///
+/// The store's connection is held to the page count a freshly created database
+/// has, so the first build's own derivation reports `SQLITE_FULL`. The entry goes
+/// untrusted saying the environment refused, rung 3 does not run, and the store
+/// still carries the under-construction mark — read through a handle of its own,
+/// because opening it as the store would rebuild it. With room again, the next
+/// attach finds the mark, builds the whole vault from zero rather than resuming
+/// over whatever the refusal left, and reaches `Ready` on a store equal to a
+/// derivation built from zero over the same tree.
+#[test]
+#[ignore = "fault-lane case: induced recovery runs in full regression"]
+fn a_first_build_refused_for_a_full_disk_leaves_the_mark_and_the_next_attach_rebuilds() {
+    let _exclusive = arming_the_process();
+    let vault = Vault::new("full-disk-first-build");
+    for index in 0..40 {
+        vault.write(&format!("note-{index:03}.md"), &readable(index));
+    }
+
+    // A freshly created store holds exactly the pages a create writes, and the
+    // build that follows has no room for a row beyond them.
+    let created = {
+        let mut store = vault.store();
+        induced_failure::page_count(&mut store).expect("the page count of a created store")
+    };
+
+    let _disarmed = Disarmed;
+    {
+        induced_failure::cap_the_pages(created);
+        let serving = vault.serving(ProductionPolicy::new(64, 64).unwrap());
+        let opening = serving.evidence();
+        let _lease = serving
+            .demand(vault.name())
+            .expect("request the attachment");
+        let untrusted = wait_for_untrusted(&serving, vault.name());
+        let spent = serving.evidence().since(opening);
+        assert_eq!(
+            spent.rebuilds_run, 0,
+            "a full disk reached rung 3, which discards a sound database to fix a broken \
+             environment"
+        );
+        assert!(
+            spent.from_zero_builds >= 1,
+            "the first build did not run: {spent:?}"
+        );
+        let UntrustedReason::EnvironmentalRefusal { detail, .. } = &untrusted else {
+            panic!(
+                "a full disk was published as something other than a broken environment: {untrusted:?}"
+            )
+        };
+        assert!(detail.contains("full"), "{detail}");
+    }
+    induced_failure::uncap_the_pages();
+
+    let open = norn_db::open_read_only(&vault.database());
+    let marked = norn_db::meta::get_meta::<norn_db::rusqlite::types::Value>(
+        open.adopted.expect("a read-only open").connection(),
+        "under_construction",
+    )
+    .expect("reading the mark")
+    .is_some();
+    assert!(marked, "the refused build cleared its mark");
+
+    let serving = vault.serving(ProductionPolicy::new(64, 64).unwrap());
+    let rebuilt = heal_and_read(&serving, vault.name());
+    drop(serving);
+    assert_eq!(rebuilt.from_zero_builds, 1, "{rebuilt:?}");
+    assert_eq!(
+        rebuilt.documents_upserted, 40,
+        "the next attach resumed over what the refusal left rather than building the vault \
+         from zero: {rebuilt:?}"
+    );
+    vault.assert_converged_from_zero("a first build a full disk refused");
+}
+
 // ---------------------------------------------------------------------------
 // Rung 2: document and directory permission loss
 // ---------------------------------------------------------------------------

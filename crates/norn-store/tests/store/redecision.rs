@@ -1865,6 +1865,9 @@ fn a_tear_inside_the_redecision_leaves_the_prior_findings() {
                 &declared(),
             )
             .expect("writing the holders");
+        store
+            .finish_construction()
+            .expect("finishing the seed's construction");
     }
 
     let child = Command::new(std::env::current_exe().expect("this suite's own executable"))

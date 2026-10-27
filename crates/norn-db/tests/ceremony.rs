@@ -757,3 +757,14 @@ fn a_read_only_open_of_a_database_that_is_not_in_wal_refuses_without_authorizing
         "the refusal names something other than the journal mode: {message}"
     );
 }
+
+#[test]
+fn deleting_a_pinned_scalar_removes_it_and_an_absent_key_is_not_an_error() {
+    let scratch = Scratch::new("delete-meta");
+    let (connection, _) = open(&scratch.database(), Answer::Keep).expect("a first open");
+    assert_eq!(label(&connection).as_deref(), Some("first"));
+
+    meta::delete_meta(&connection, TRIAL_LABEL).expect("deleting a key that is set");
+    assert_eq!(label(&connection), None);
+    meta::delete_meta(&connection, TRIAL_LABEL).expect("deleting a key that is absent");
+}

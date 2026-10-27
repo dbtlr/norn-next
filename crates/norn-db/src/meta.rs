@@ -111,6 +111,18 @@ pub fn put_meta(connection: &Connection, key: &str, value: impl ToSql) -> Result
     Ok(())
 }
 
+/// The statement [`delete_meta`] emits.
+pub const DELETE_META_SQL: &str = "DELETE FROM meta WHERE key = ?1";
+
+/// Remove one pinned scalar. A key that is not set is not an error: the
+/// postcondition, that the key is absent, already holds.
+pub fn delete_meta(connection: &Connection, key: &str) -> Result<(), DbError> {
+    connection
+        .execute(DELETE_META_SQL, rusqlite::params![key])
+        .map_err(|error| error::sql("deleting a pinned value", error))?;
+    Ok(())
+}
+
 /// Read one pinned scalar, or `None` where the key is not set.
 pub fn get_meta<T: rusqlite::types::FromSql>(
     connection: &Connection,

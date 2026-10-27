@@ -460,6 +460,16 @@ pub const REQUIRED_CASES: &[Case] = &[
         feature: Some(INDUCED_FAILURE),
     },
     Case {
+        id: "induced-full-disk-first-build-rebuilds",
+        suite: Suite::InducedFailure,
+        lane: Lane::RealWatcher,
+        states: "a first build a full disk refused leaves its under-construction mark, and the \
+                 next attach builds the vault from zero",
+        carrier: "crates/norn-host/tests/lockdown.rs::\
+                  a_first_build_refused_for_a_full_disk_leaves_the_mark_and_the_next_attach_rebuilds",
+        feature: Some(INDUCED_FAILURE),
+    },
+    Case {
         id: "induced-unreadable-document-recovers",
         suite: Suite::InducedFailure,
         lane: Lane::RealWatcher,
@@ -467,6 +477,27 @@ pub const REQUIRED_CASES: &[Case] = &[
                  the vault reaches Ready and the document re-derives when it reads again",
         carrier: "crates/norn-host/tests/lockdown.rs::\
                   an_unreadable_document_is_marked_broken_and_the_heal_reaches_ready",
+        feature: Some(INDUCED_FAILURE),
+    },
+    Case {
+        id: "induced-denied-document-open-recovers",
+        suite: Suite::InducedFailure,
+        lane: Lane::Any,
+        states: "a document open the file seam denies holds names alone and one unreadable \
+                 finding naming the denial; the vault reaches Ready and the document re-derives \
+                 when it reads again",
+        carrier: "crates/norn-host/tests/lockdown.rs::\
+                  a_denied_document_open_is_marked_broken_and_the_heal_reaches_ready",
+        feature: Some(INDUCED_FAILURE),
+    },
+    Case {
+        id: "induced-io-failing-document-open-recovers",
+        suite: Suite::InducedFailure,
+        lane: Lane::Any,
+        states: "a document open failing with an I/O error takes the same broken posture as a \
+                 denial, and the vault reaches Ready",
+        carrier: "crates/norn-host/tests/lockdown.rs::\
+                  an_io_failing_document_open_is_marked_broken_and_the_heal_reaches_ready",
         feature: Some(INDUCED_FAILURE),
     },
     Case {
@@ -524,14 +555,14 @@ pub const REQUIRED_CASES: &[Case] = &[
         feature: Some(INDUCED_FAILURE),
     },
     Case {
-        id: "induced-paging-window-denied-stat-refuses",
+        id: "induced-paging-window-denied-md-stat-recovers",
         suite: Suite::InducedFailure,
         lane: Lane::Any,
-        states: "a paging stat the machine refuses leaves the entry untrusted naming the path, \
-                 prunes nothing, and reaches no rung 3 — the window converges on absence and on \
-                 nothing else",
+        states: "a paging stat the machine denies at a listed Markdown name marks that document \
+                 broken while every other name derives, prunes nothing, and reaches no rung 3; \
+                 recovery re-derives exactly that document",
         carrier: "crates/norn-host/tests/lockdown.rs::\
-                  an_entry_the_machine_will_not_stat_refuses_the_heal_rather_than_dropping_it",
+                  a_stat_denied_md_name_is_marked_broken_and_the_heal_reaches_ready",
         feature: Some(INDUCED_FAILURE),
     },
     Case {
@@ -555,6 +586,16 @@ pub const REQUIRED_CASES: &[Case] = &[
                  tear lost returns through the heal's ordinary content-hash comparison",
         carrier: "crates/norn-host/tests/kill_recovery.rs::\
                   next_attach_converges_after_process_death_mid_increment",
+        feature: Some(INDUCED_FAILURE),
+    },
+    Case {
+        id: "induced-kill-mid-build-rebuilds-from-zero",
+        suite: Suite::InducedFailure,
+        lane: Lane::RealWatcher,
+        states: "the next attach after a process died mid-way through a first build finds the \
+                 under-construction mark and builds from zero rather than resuming",
+        carrier: "crates/norn-host/tests/kill_recovery.rs::\
+                  next_attach_rebuilds_from_zero_after_process_death_mid_build",
         feature: Some(INDUCED_FAILURE),
     },
     Case {

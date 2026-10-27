@@ -36,6 +36,16 @@ pub trait LoadingProbe: Send + Sync {
     fn at(&self, boundary: LoadingBoundary<'_>);
 }
 
+/// Whether a from-zero build may publish early reads from the store it fills.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum EarlyReads {
+    /// The attach leg that created the store: [`Construction`] begins when its
+    /// own proof holds (created, empty, first-index authority).
+    FirstAttach,
+    /// Rung 3, recovery and reload: nothing is published early.
+    Declined,
+}
+
 pub(super) struct CleanupRecord {
     role: String,
     receipt: TemporaryCleanupReceipt,
@@ -95,10 +105,81 @@ impl ProductionEntryOps {
         self.record_cleanup_failure(format!("{role} construction: {error:?}"));
     }
 
-    pub(super) fn initial_loading_heal(
+    /// The one construction path from empty to complete: every derivation into a
+    /// store under construction runs here, and the mark clears when it ends.
+    ///
+    /// The routes are an attach after a create or an open-time rebuild, the
+    /// inline rung 3 and the `rebuild` leg, and the recovery or reload that
+    /// pins a readable declaration over a store an undeclarable attach left
+    /// empty. The ordinary heal maintains only a finished store.
+    ///
+    /// **The mark clears only when the derivation has completed**, after the
+    /// watcher coverage window has closed cleanly, so a failure of any kind —
+    /// damage, the environment, lost maintainership, a watcher failure, a full
+    /// disk — leaves it for the next open to rebuild over. Rung 3 alone clears
+    /// it later still, after its integrity verification
+    /// ([`Self::construct_from_zero`]). This is its own
+    /// transaction until the five steps give the build a final transaction to
+    /// carry it.
+    ///
+    /// `admission` is who may publish early reads from the store being built.
+    /// Only the attach after a create does, as [`Construction`] always has;
+    /// rung 3, recovery and reload build with [`EarlyReads::Declined`] even
+    /// though a rebuilt store is created and empty, because the claim that
+    /// makes publication safe belongs to the attach leg. Early reads for every
+    /// from-zero build are the later layer's.
+    pub(super) fn build_from_zero(
         &self,
         attachment: &mut ProductionAttachment,
         progress: &ProgressReporter<ProductionAttachment>,
+        admission: EarlyReads,
+    ) -> Result<(), JobFailure> {
+        self.construct_from_zero(attachment, progress, admission)?;
+        attachment.store.finish_construction().map_err(store_effect)
+    }
+
+    /// Count a from-zero build and derive the vault into the store under
+    /// construction, leaving the under-construction mark standing.
+    ///
+    /// The one construction path: [`Self::build_from_zero`] clears the mark
+    /// after it, and a caller that owes the result a verification first
+    /// (rung 3) clears it only once that passes, so a store that fails the
+    /// verification is rebuilt again by the next open rather than adopted.
+    pub(super) fn construct_from_zero(
+        &self,
+        attachment: &mut ProductionAttachment,
+        progress: &ProgressReporter<ProductionAttachment>,
+        admission: EarlyReads,
+    ) -> Result<(), JobFailure> {
+        debug_assert!(
+            attachment.store.under_construction(),
+            "a from-zero build ran over a finished store"
+        );
+        self.evidence.count_from_zero_build();
+        Self::under_coverage(attachment, |attachment| {
+            self.derive_into_empty(attachment, progress, admission)
+        })
+    }
+
+    /// Derive the vault into the store the caller holds: a build from zero if
+    /// the store is under construction, the ordinary heal if it is finished.
+    pub(super) fn derive_vault(
+        &self,
+        attachment: &mut ProductionAttachment,
+        progress: &ProgressReporter<ProductionAttachment>,
+    ) -> Result<(), JobFailure> {
+        if attachment.store.under_construction() {
+            self.build_from_zero(attachment, progress, EarlyReads::Declined)
+        } else {
+            self.heal_under_coverage(attachment, progress)
+        }
+    }
+
+    fn derive_into_empty(
+        &self,
+        attachment: &mut ProductionAttachment,
+        progress: &ProgressReporter<ProductionAttachment>,
+        admission: EarlyReads,
     ) -> Result<(), JobFailure> {
         if !attachment
             .maintainership
@@ -111,12 +192,14 @@ impl ProductionEntryOps {
         let order = attachment.store.path_order();
         // These reads belong to the canonical store. Their damage must reach
         // the ordinary rung instead of being filed as disposable construction.
-        let fresh = matches!(
-            attachment.store.open_outcome(),
-            norn_store::OpenOutcome::Created
-        ) && HealScope::Vault
-            .page(&mut attachment.store, None, self.policy, order)?
-            .is_empty();
+        let fresh = admission == EarlyReads::FirstAttach
+            && matches!(
+                attachment.store.open_outcome(),
+                norn_store::OpenOutcome::Created
+            )
+            && HealScope::Vault
+                .page(&mut attachment.store, None, self.policy, order)?
+                .is_empty();
         let pin = if fresh {
             attachment
                 .store
@@ -126,15 +209,23 @@ impl ProductionEntryOps {
         } else {
             None
         };
-        let mut loading = match Construction::begin(self, attachment, progress, fresh, pin) {
-            Ok(loading) => loading,
-            Err(error) => {
-                self.loading_failed("catalogue", &error);
-                progress.loading_failed(
-                    ReaderUnavailable::new("first-index catalogue construction failed"),
-                    false,
-                );
+        let mut loading = match admission {
+            EarlyReads::Declined => {
+                progress.decline_loading();
                 None
+            }
+            EarlyReads::FirstAttach => {
+                match Construction::begin(self, attachment, progress, fresh, pin) {
+                    Ok(loading) => loading,
+                    Err(error) => {
+                        self.loading_failed("catalogue", &error);
+                        progress.loading_failed(
+                            ReaderUnavailable::new("first-index catalogue construction failed"),
+                            false,
+                        );
+                        None
+                    }
+                }
             }
         };
         if let Some(construction) = loading.as_mut() {

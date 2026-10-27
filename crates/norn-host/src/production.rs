@@ -6,6 +6,7 @@ pub(crate) mod loading;
 #[cfg(test)]
 mod reader_tests;
 mod rolling;
+use loading::EarlyReads;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -950,7 +951,7 @@ impl ProductionEntryOps {
         attachment.pin(&candidate)?;
         attachment.controls = candidate;
         self.dispatch_config(attachment);
-        self.heal_under_coverage(attachment, progress)?;
+        self.derive_vault(attachment, progress)?;
         self.owe_semantic(name, attachment, progress);
         Ok(())
     }
@@ -1005,7 +1006,7 @@ impl ProductionEntryOps {
         attachment.controls = candidate;
         attachment.read_pinned_model()?;
         self.dispatch_config(attachment);
-        self.heal_under_coverage(attachment, progress)?;
+        self.derive_vault(attachment, progress)?;
         self.owe_semantic(name, attachment, progress);
         Ok(judgment)
     }
@@ -1257,6 +1258,10 @@ impl ProductionEntryOps {
     ) -> Result<(), JobFailure> {
         #[cfg(feature = "induced-failure")]
         let _timing = norn_store::profiling::span("host.heal");
+        debug_assert!(
+            !attachment.store.under_construction(),
+            "the ordinary heal ran over a store under construction"
+        );
         if !attachment
             .maintainership
             .still_current()
@@ -1519,13 +1524,17 @@ impl ProductionEntryOps {
     /// no row; the heal that follows is the same hash-authoritative walk an
     /// attach over an empty database runs, reading every document under the
     /// registered root through the same code path. There is nothing here that a
-    /// first attach does not do, which is what makes the result equal to a first
-    /// attach's rather than merely close to it.
+    /// first attach does not do — it is the same [`Self::construct_from_zero`]
+    /// that [`Self::build_from_zero`] runs — which is what makes the result
+    /// equal to a first attach's rather than merely close to it.
     ///
     /// The verification afterwards is the other half: a rebuilt database that
     /// cannot answer for itself is not derived state anything may be published
     /// over, and reporting damage here rather than `Ready` is what keeps a
-    /// second damaged store from being served as a sound one.
+    /// second damaged store from being served as a sound one. The
+    /// replacement's under-construction mark is cleared only after that
+    /// verification passes, so a store that fails it stays marked and the next
+    /// open rebuilds it from zero instead of adopting it.
     ///
     /// Coverage stands through all of it. The watcher and the maintainer lock
     /// were not what was damaged, and the facts the watcher reports during the
@@ -1577,7 +1586,7 @@ impl ProductionEntryOps {
         Self::pin_candidate(&mut attachment.store, &attachment.controls)?;
         attachment.read_pinned_model()?;
         let derived = self
-            .heal_under_coverage(&mut attachment, progress)
+            .construct_from_zero(&mut attachment, progress, EarlyReads::Declined)
             .and_then(|()| {
                 attachment
                     .store
@@ -1589,7 +1598,8 @@ impl ProductionEntryOps {
                         )),
                         other => other,
                     })
-            });
+            })
+            .and_then(|()| attachment.store.finish_construction().map_err(store_effect));
         match derived {
             Ok(()) => Ok(attachment),
             Err(failure) => {
@@ -1835,9 +1845,12 @@ impl EntryOps for ProductionEntryOps {
         // same page.
         let (attachment, healed) = {
             let mut attachment = attachment;
-            let healed = Self::under_coverage(&mut attachment, |attachment| {
-                self.initial_loading_heal(attachment, progress)
-            });
+            let healed = if attachment.store.under_construction() {
+                self.build_from_zero(&mut attachment, progress, EarlyReads::FirstAttach)
+            } else {
+                progress.decline_loading();
+                self.heal_under_coverage(&mut attachment, progress)
+            };
             (attachment, healed)
         };
         let mut attached = match healed {
@@ -3397,7 +3410,8 @@ fn a_document_stands_at(reach: &norn_fs::Reach, path: &DocumentPath) -> bool {
 }
 
 /// Derive the whole vault at `root` into `store` by the heal a first attach
-/// runs: the oracle a changeset is compared against.
+/// runs, and end its construction as the attach does: the oracle a changeset is
+/// compared against, and a seed a later open reuses rather than rebuilds.
 #[cfg(test)]
 pub(crate) fn heal_from_zero(
     store: &mut Store,
@@ -3411,8 +3425,8 @@ pub(crate) fn heal_from_zero(
         exclusions,
         ProductionPolicy::new(64, 64).expect("a legal policy"),
         &progress.healing(),
-    )
-    .map(|_| ())
+    )?;
+    store.finish_construction().map_err(store_effect)
 }
 
 /// The roots a walk of the vault at `root` does not enter on account of
@@ -13591,6 +13605,305 @@ mod tests {
         ops.detach(&name, attachment);
     }
 
+    /// Whether the store at `database` still carries its under-construction
+    /// mark, read through a read-only handle that is none of the attachment's.
+    fn mark_stands(database: &Path) -> bool {
+        let open = norn_db::open_read_only(database);
+        let database = open.adopted.expect("a read-only open of the store");
+        norn_db::meta::get_meta::<norn_db::rusqlite::types::Value>(
+            database.connection(),
+            "under_construction",
+        )
+        .expect("reading the mark")
+        .is_some()
+    }
+
+    fn from_zero_builds(ops: &ProductionEntryOps) -> u64 {
+        ops.evidence.read().from_zero_builds
+    }
+
+    /// **Every derivation into a store under construction runs through one
+    /// entry, and a finished store is never built.** A first attach, an attach
+    /// over a store whose derivation moved, the inline rung 3 that meets damage
+    /// and the `rebuild` leg each count one from-zero build; an attach over a
+    /// finished store counts none. After each the mark is gone and the store
+    /// holds what a from-scratch derivation does.
+    #[test]
+    fn every_from_zero_build_runs_through_one_entry() {
+        let policy = ProductionPolicy::new(64, 2).unwrap();
+        let progress = ProgressReporter::disconnected();
+
+        // A first attach, then an attach over the finished store.
+        let f = Fixture::new("one-entry-first");
+        write_a_vault_of_documents(&f, 120);
+        let (ops, name) = f.ops(64);
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let database = attachment.store.path().to_path_buf();
+        assert_eq!(from_zero_builds(&ops), 1, "a first attach");
+        assert!(!mark_stands(&database), "a first attach left its mark");
+        assert_eq!(
+            derived_vault(&mut attachment.store, f.vault().as_path()),
+            from_scratch(&f, "one-entry-first-oracle", policy)
+        );
+        ops.detach(&name, attachment);
+        let upserted = ops.evidence.read().documents_upserted;
+        let attachment = ops.attach(&f.registration(), &progress).unwrap();
+        assert_eq!(*attachment.store.open_outcome(), OpenOutcome::Reused);
+        assert_eq!(from_zero_builds(&ops), 1, "an attach over a finished store");
+        assert_eq!(ops.evidence.read().documents_upserted, upserted);
+        ops.detach(&name, attachment);
+
+        // The inline rung 3 an attach meets damage with.
+        corrupt_the_document_pages(&f, &database);
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        assert_eq!(from_zero_builds(&ops), 2, "an attach over a corrupt store");
+        assert!(!mark_stands(&database), "inline rung 3 left its mark");
+        assert_eq!(
+            derived_vault(&mut attachment.store, f.vault().as_path()),
+            from_scratch(&f, "one-entry-corrupt-oracle", policy)
+        );
+        ops.detach(&name, attachment);
+
+        // An attach over a store an earlier derivation wrote.
+        // One fixture holds the machine's watcher lease at a time.
+        drop(f);
+        let f = Fixture::new("one-entry-earlier");
+        fs::write(f.vault().join("note.md"), "# Title\n\nA body.\n").unwrap();
+        let (ops, name) = f.ops(64);
+        let earlier = norn_store::DerivationVersion::new(crate::DERIVATION_VERSION.get() - 1);
+        let mut stale = Store::open(dirs_store(&f, &name), proven_order(&f), earlier).unwrap();
+        stale.finish_construction().unwrap();
+        drop(stale);
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        assert_eq!(
+            from_zero_builds(&ops),
+            1,
+            "an attach over an earlier derivation"
+        );
+        assert!(!mark_stands(attachment.store.path()));
+        assert_eq!(
+            derived_vault(&mut attachment.store, f.vault().as_path()),
+            from_scratch(&f, "one-entry-earlier-oracle", policy)
+        );
+        ops.detach(&name, attachment);
+
+        // The rebuild leg a recovery owes.
+        // One fixture holds the machine's watcher lease at a time.
+        drop(f);
+        let f = Fixture::new("one-entry-rebuild");
+        write_two_spellings_of_one_stem(&f);
+        let (ops, name) = f.ops(64);
+        let proven = proven_order(&f);
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        assert_eq!(from_zero_builds(&ops), 1);
+        attachment.store = attachment
+            .store
+            .discard_and_reopen(other_order(proven))
+            .unwrap();
+        derive_stale_rows(&mut attachment.store);
+        ops.recover(&name, &mut attachment, &progress)
+            .expect_err("a recovery over a store derived under the other order");
+        assert_eq!(from_zero_builds(&ops), 1, "a recovery that owes rung 3");
+        let mut attachment = ops.rebuild(&name, attachment, &progress).unwrap();
+        assert_eq!(from_zero_builds(&ops), 2, "the rebuild leg");
+        assert!(!mark_stands(attachment.store.path()));
+        assert_eq!(
+            derived_vault(&mut attachment.store, f.vault().as_path()),
+            from_scratch(&f, "one-entry-rebuild-oracle", policy)
+        );
+        ops.detach(&name, attachment);
+    }
+
+    /// **An attach over a schema this build cannot read leaves the store
+    /// unbuilt, and the recovery that reads a declaration builds it.** The
+    /// store stays marked and empty through the attach, so a restart in
+    /// between rebuilds rather than adopting an empty store as finished.
+    #[test]
+    fn an_undeclarable_attach_leaves_the_store_unbuilt_and_the_recovery_that_reads_it_builds_it() {
+        let f = Fixture::new("undeclarable-then-recover");
+        let schema = f.vault().join(".norn/schema.yaml");
+        fs::write(&schema, "version: 9\n").unwrap();
+        write_a_vault_of_documents(&f, 12);
+        let (ops, name) = f.ops(64);
+        let policy = ProductionPolicy::new(64, 2).unwrap();
+        let progress = ProgressReporter::disconnected();
+
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let database = attachment.store.path().to_path_buf();
+        assert!(attachment.controls.undeclarable().is_some());
+        assert!(mark_stands(&database), "the unbuilt store lost its mark");
+        assert_eq!(from_zero_builds(&ops), 0, "an attach that derives nothing");
+        assert!(stored_paths(&mut attachment.store).is_empty());
+
+        fs::write(&schema, "version: 1\n").unwrap();
+        ops.recover(&name, &mut attachment, &progress).unwrap();
+        assert_eq!(from_zero_builds(&ops), 1, "the recovery that reads it");
+        assert!(!mark_stands(&database), "the recovery left the mark");
+        assert_eq!(
+            derived_vault(&mut attachment.store, f.vault().as_path()),
+            from_scratch(&f, "undeclarable-then-recover-oracle", policy)
+        );
+        ops.detach(&name, attachment);
+    }
+
+    /// Records, at every canonical page of a build, whether the mark stood.
+    #[cfg(feature = "induced-failure")]
+    struct MarkWitness {
+        database: PathBuf,
+        stood: std::sync::Mutex<Vec<bool>>,
+    }
+
+    #[cfg(feature = "induced-failure")]
+    impl crate::LoadingProbe for MarkWitness {
+        fn at(&self, boundary: crate::LoadingBoundary<'_>) {
+            if matches!(boundary, crate::LoadingBoundary::CanonicalPage) {
+                self.stood.lock().unwrap().push(mark_stands(&self.database));
+            }
+        }
+    }
+
+    /// **The mark stands through the build and clears when it ends.** Every page
+    /// of a first build sees it, and the attach does not return with it set.
+    #[cfg(feature = "induced-failure")]
+    #[test]
+    fn the_mark_stands_through_the_build_and_clears_when_it_ends() {
+        let f = Fixture::new("mark-through-build");
+        write_a_vault_of_documents(&f, 12);
+        let (ops, name) = f.ops(4);
+        let witness = Arc::new(MarkWitness {
+            database: dirs_store(&f, &name),
+            stood: Default::default(),
+        });
+        let ops = ops.with_loading_probe(witness.clone());
+        let progress = ProgressReporter::disconnected();
+
+        let attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let stood = witness.stood.lock().unwrap().clone();
+        assert!(stood.len() >= 2, "the build crossed {} pages", stood.len());
+        assert!(stood.iter().all(|stood| *stood), "{stood:?}");
+        assert!(!mark_stands(attachment.store.path()));
+        ops.detach(&name, attachment);
+    }
+
+    /// **An inline rung 3 leaves its replacement marked until its own build
+    /// ends.** The attach finds a finished store damaged, discards it, and the
+    /// store that replaces it is built — and marked — as any other.
+    #[cfg(feature = "induced-failure")]
+    #[test]
+    fn an_inline_rung_three_leaves_its_replacement_marked_until_its_build_ends() {
+        let f = Fixture::new("rung-three-marked");
+        write_a_vault_of_documents(&f, 120);
+        let (ops, name) = f.ops(16);
+        let progress = ProgressReporter::disconnected();
+        let attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let database = attachment.store.path().to_path_buf();
+        ops.detach(&name, attachment);
+        corrupt_the_document_pages(&f, &database);
+
+        let witness = Arc::new(MarkWitness {
+            database: database.clone(),
+            stood: Default::default(),
+        });
+        let (ops, name) = f.ops(16);
+        let ops = ops.with_loading_probe(witness.clone());
+        let attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let stood = witness.stood.lock().unwrap().clone();
+        assert!(
+            !stood.is_empty(),
+            "the replacement was built outside the entry"
+        );
+        assert!(stood.iter().all(|stood| *stood), "{stood:?}");
+        assert!(!mark_stands(attachment.store.path()));
+        ops.detach(&name, attachment);
+    }
+
+    /// Writes a row that references no document into the store at `database`
+    /// the instant its build's canonical walk completes, through a handle that
+    /// is none of the attachment's: the rebuilt store then fails the
+    /// foreign-key half of `verify_integrity`.
+    #[cfg(feature = "induced-failure")]
+    struct OrphanAtBuildEnd {
+        database: PathBuf,
+    }
+
+    #[cfg(feature = "induced-failure")]
+    impl crate::LoadingProbe for OrphanAtBuildEnd {
+        fn at(&self, boundary: crate::LoadingBoundary<'_>) {
+            if matches!(boundary, crate::LoadingBoundary::CanonicalComplete) {
+                norn_db::rusqlite::Connection::open(&self.database)
+                    .expect("opening the store out of band")
+                    .execute_batch(
+                        "PRAGMA foreign_keys = OFF;
+                         INSERT INTO document_trigrams (trigram, document) VALUES ('zzz', 999999999)",
+                    )
+                    .expect("writing the orphan row");
+            }
+        }
+    }
+
+    /// **A rung-3 rebuild that fails verification keeps its mark.** The
+    /// replacement is only a finished store once it has answered for itself;
+    /// a damaged one left unmarked would be adopted by the next attach and
+    /// healed without an integrity check.
+    #[cfg(feature = "induced-failure")]
+    #[test]
+    fn a_rung_three_rebuild_that_fails_verification_keeps_its_mark() {
+        let f = Fixture::new("rung-three-verification-fails");
+        write_a_vault_of_documents(&f, 120);
+        let (ops, name) = f.ops(16);
+        let progress = ProgressReporter::disconnected();
+        let attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let database = attachment.store.path().to_path_buf();
+        ops.detach(&name, attachment);
+        corrupt_the_document_pages(&f, &database);
+
+        let (ops, _) = f.ops(16);
+        let ops = ops.with_loading_probe(Arc::new(OrphanAtBuildEnd {
+            database: database.clone(),
+        }));
+        let failure = ops
+            .attach(&f.registration(), &progress)
+            .err()
+            .expect("a rung 3 whose rebuilt store fails verification");
+        assert!(
+            matches!(failure, JobFailure::StoreDamaged(_)),
+            "{failure:?}"
+        );
+        assert!(mark_stands(&database), "the damaged rebuild lost its mark");
+
+        let (ops, name) = f.ops(16);
+        let attachment = ops.attach(&f.registration(), &progress).unwrap();
+        assert!(
+            matches!(
+                attachment.store.open_outcome(),
+                OpenOutcome::RebuiltFromZero(_)
+            ),
+            "{:?}",
+            attachment.store.open_outcome()
+        );
+        assert!(!mark_stands(attachment.store.path()));
+        ops.detach(&name, attachment);
+    }
+
+    /// **An attach over a finished store builds nothing and derives nothing.**
+    #[test]
+    fn an_attach_over_a_finished_store_builds_nothing_and_derives_nothing() {
+        let f = Fixture::new("finished-attach");
+        write_a_vault_of_documents(&f, 12);
+        let (ops, name) = f.ops(4);
+        let progress = ProgressReporter::disconnected();
+        let attachment = ops.attach(&f.registration(), &progress).unwrap();
+        ops.detach(&name, attachment);
+
+        let before = ops.evidence.read();
+        let attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let spent = ops.evidence.read().since(before);
+        assert_eq!(*attachment.store.open_outcome(), OpenOutcome::Reused);
+        assert_eq!(spent.from_zero_builds, 0);
+        assert_eq!(spent.documents_upserted, 0);
+        ops.detach(&name, attachment);
+    }
+
     /// Two documents whose stems share the comparison key: `Foo` names
     /// both `a/Foo.md` and `b/foo.md` on every filesystem order.
     fn write_two_spellings_of_one_stem(f: &Fixture) {
@@ -13712,6 +14025,7 @@ mod tests {
         )
         .unwrap();
         derive_stale_rows(&mut stale);
+        stale.finish_construction().unwrap();
         let stale_epoch = stale.epoch().to_string();
         drop(stale);
 
@@ -13838,6 +14152,7 @@ mod tests {
                 &norn_store::ContentModel::none(),
             )
             .unwrap();
+        stale.finish_construction().unwrap();
         let stale_epoch = stale.epoch().to_string();
         drop(stale);
 
