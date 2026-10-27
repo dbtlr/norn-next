@@ -484,3 +484,64 @@ fn a_broken_file_does_not_withhold_its_loading_name() {
     assert!(pending.account.withheld.roots.is_empty() && !pending.account.withheld.rendered);
     assert_broken(pending.store, "a.md");
 }
+
+#[test]
+fn a_rolling_revisit_does_not_replay_over_facts_a_watcher_turn_derived() {
+    let f = Fixture::new("rolling-revisit-recovered");
+    let path = f.vault().join("a.md");
+    fs::write(&path, "body\n").unwrap();
+    let (ops, name) = f.ops(1);
+    let progress = ProgressReporter::disconnected();
+    let failing = norn_fs::deny_document_opens(&path);
+    let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+    attachment.subscription.take();
+    let broken = findings_at(&mut attachment.store, "a.md");
+    assert_eq!(broken.len(), 1);
+    assert_eq!(broken[0].kind, "document/unreadable");
+    attachment.rolling.due = Instant::now();
+    for _ in 0..1000 {
+        rolling::slice(&mut attachment, ops.policy).unwrap();
+        if attachment
+            .rolling
+            .status()
+            .pass
+            .is_some_and(|pass| pass.phase == norn_wire::RollingHealPhase::Finishing)
+        {
+            break;
+        }
+    }
+    // Healing recorded the broken row; a watcher turn then derives the file.
+    drop(failing);
+    ops.reconcile(
+        &name,
+        &mut attachment,
+        ReconcileWork {
+            batch: dirty_batch(f.vault().as_path(), &["a.md"]),
+        },
+        &progress,
+    )
+    .unwrap();
+    let derived = |store: &mut Store| {
+        store
+            .begin_request()
+            .stored_facts(&DocumentPath::new("a.md").unwrap())
+            .unwrap()
+            .expect("the name stands")
+            .document
+            .content_hash
+            .is_some()
+    };
+    assert!(derived(&mut attachment.store));
+    // The revisit's replay must not undo what the watcher turn derived.
+    let _failing = norn_fs::deny_document_opens(&path);
+    for _ in 0..1000 {
+        rolling::slice(&mut attachment, ops.policy).unwrap();
+        if attachment.rolling.last_completed.is_some() {
+            break;
+        }
+    }
+    assert!(attachment.rolling.last_completed.is_some());
+    assert!(derived(&mut attachment.store));
+    assert!(findings_at(&mut attachment.store, "a.md").is_empty());
+    ops.detach(&name, attachment);
+}
