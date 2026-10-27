@@ -1863,6 +1863,15 @@ pub(crate) fn check_callers_finding(finding: &FindingFacts) -> Result<(), StoreE
             what: "a finding about a link",
         });
     }
+    // A keyed discard does not re-decide the links beneath a mark, so a mark
+    // must be reachable by its subject alone.
+    if finding.kind == FindingKind::UnreadableDirectory
+        && (!finding.class_keys.is_empty() || !finding.path_keys.is_empty())
+    {
+        return Err(StoreError::KeySpace {
+            what: "an unreadable-directory finding keyed beyond its subject",
+        });
+    }
     Ok(())
 }
 

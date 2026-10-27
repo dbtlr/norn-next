@@ -13,7 +13,7 @@ use norn_store::{
     AnchorReadings, BlockFact, CANDIDATE_HEAD, Change, ClassKey, ContentModel, DocumentFacts,
     ExplainedStatement, FindingFacts, HeadingFact, IncrementProvenance, KeySummaries, LinkAnchor,
     LinkFact, LinkFamily, LinkSelection, PathKey, Request, Snapshot, SnapshotReader, Span, Store,
-    StoredPathOrder, SuffixKey, Validation, induced_failure,
+    StoreError, StoredPathOrder, SuffixKey, Validation, induced_failure,
 };
 use norn_testkit::explain::{Access, PlanRow, QueryPlan};
 use norn_wire::{
@@ -1915,6 +1915,24 @@ pub(crate) fn directory_mark(at: &str) -> FindingFacts {
     finding.kind = FindingKind::UnreadableDirectory;
     finding.message = format!("`{at}` could not be listed; what stands beneath it is unknown");
     finding
+}
+
+/// **A directory mark is ended by its subject alone.** A keyed discard does
+/// not re-decide the links beneath a mark, so a mark carrying a class or path
+/// key is refused rather than filed where such a discard could take it.
+#[test]
+fn a_directory_mark_keyed_beyond_its_subject_is_refused() {
+    let mut vault = Judging::new("directory-mark-keys", Sensitive, &[]);
+    let mut keyed = directory_mark("locked");
+    keyed
+        .path_keys
+        .insert(PathKey::new("locked/x.md").expect("a path key"));
+    assert_eq!(
+        vault.store.begin_request().record_finding(&keyed),
+        Err(StoreError::KeySpace {
+            what: "an unreadable-directory finding keyed beyond its subject"
+        })
+    );
 }
 
 #[test]
