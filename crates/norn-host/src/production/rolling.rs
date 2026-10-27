@@ -210,13 +210,11 @@ pub(super) fn slice(
                         if unreadable.kind_unknown() {
                             pending.withhold_entry(unreadable.path().as_path());
                         }
-                        // Healing already recorded an admitted spelling's broken row;
-                        // replaying it here would undo facts a watcher turn derived since.
-                        if is_markdown(unreadable.path().as_path())
-                            && let Err(quarantine) = document_path(unreadable.path().as_path())
-                        {
-                            pending.quarantine(unreadable.path().as_path(), quarantine);
-                        }
+                        pending.unreadable(
+                            unreadable.path().as_path(),
+                            unreadable.operation(),
+                            unreadable.cause(),
+                        )?;
                     }
                     norn_fs::WalkFact::Skipped(skip) => {
                         pending.passed_over(skip.path().as_path(), skip.reason())

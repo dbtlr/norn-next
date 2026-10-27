@@ -486,7 +486,7 @@ fn a_broken_file_does_not_withhold_its_loading_name() {
 }
 
 #[test]
-fn a_rolling_revisit_does_not_replay_over_facts_a_watcher_turn_derived() {
+fn a_rolling_revisit_marks_a_document_broken_that_turned_unreadable_since_healing() {
     let f = Fixture::new("rolling-revisit-recovered");
     let path = f.vault().join("a.md");
     fs::write(&path, "body\n").unwrap();
@@ -532,7 +532,9 @@ fn a_rolling_revisit_does_not_replay_over_facts_a_watcher_turn_derived() {
             .is_some()
     };
     assert!(derived(&mut attachment.store));
-    // The revisit's replay must not undo what the watcher turn derived.
+    // The revisit re-observes each name as it replays it, so an open denied
+    // now is newer evidence than the watcher turn's read: the store keeps
+    // nothing derived from bytes it can no longer read.
     let _failing = norn_fs::deny_document_opens(&path);
     for _ in 0..1000 {
         rolling::slice(&mut attachment, ops.policy).unwrap();
@@ -541,7 +543,10 @@ fn a_rolling_revisit_does_not_replay_over_facts_a_watcher_turn_derived() {
         }
     }
     assert!(attachment.rolling.last_completed.is_some());
-    assert!(derived(&mut attachment.store));
-    assert!(findings_at(&mut attachment.store, "a.md").is_empty());
+    assert!(!derived(&mut attachment.store));
+    assert_broken(&mut attachment.store, "a.md");
+    let broken = findings_at(&mut attachment.store, "a.md");
+    assert_eq!(broken.len(), 1);
+    assert_eq!(broken[0].kind, "document/unreadable");
     ops.detach(&name, attachment);
 }
