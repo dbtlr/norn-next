@@ -98,6 +98,11 @@ fn host(
         VaultName::new("notes").unwrap(),
         VaultRoot::new(root).unwrap(),
     );
+    // The fixture's scratch directory, outside the vault, takes the sentinel.
+    let scratch = root
+        .parent()
+        .expect("the vault sits in its scratch directory");
+    norn_fs::watch::settle_prior_changes(scratch, BUDGET.work()).unwrap();
     Host::new(
         RegistryRead::from_entries([registration]),
         PreHeld {
