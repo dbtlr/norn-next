@@ -148,13 +148,17 @@ mod targeted_open {
     /// takes precedence while both causes are held. A failing-stat arm answers
     /// only the final-name stat of a reach and never an open. Available only
     /// with `induced-failure`.
+    ///
+    /// Both the supplied spelling and its resolved-parent spelling are armed
+    /// where the parent resolves. The final name is kept as given: the arm
+    /// neither follows a final symlink nor folds case.
     #[must_use = "dropping the guard withdraws its open failure"]
     pub struct DocumentOpenFailure {
-        path: PathBuf,
+        paths: Vec<PathBuf>,
         errno: Errno,
     }
 
-    /// Exhausts contained file opens at exactly this absolute spelling with `EMFILE`.
+    /// Exhausts contained file opens at this absolute path with `EMFILE`.
     ///
     /// Hold over a worker's failed leg and recovery refusal, then drop before
     /// successful recovery. The environment's one-shot walk arm is not consumed.
@@ -166,7 +170,7 @@ mod targeted_open {
         arm(path, Errno::MFILE)
     }
 
-    /// Denies contained file opens at exactly this absolute spelling with `EACCES`.
+    /// Denies contained file opens at this absolute path with `EACCES`.
     ///
     /// The denial stands across threads and repeated opens until the last denial
     /// guard for the path is dropped. It does not consume the one-shot walk arm.
@@ -178,7 +182,7 @@ mod targeted_open {
         arm(path, Errno::ACCESS)
     }
 
-    /// Fails the final-name stat a reach makes at exactly this absolute spelling
+    /// Fails the final-name stat a reach makes at this absolute path
     /// with `EIO`.
     ///
     /// The failure stands across threads and repeated reaches until the last
@@ -191,21 +195,31 @@ mod targeted_open {
         arm(path, Errno::IO)
     }
 
+    #[allow(clippy::disallowed_methods)] // Resolve only ancestors of the test-support arm.
     fn arm(path: &Path, errno: Errno) -> DocumentOpenFailure {
         assert!(
             path.is_absolute(),
             "an open-failure arm requires an absolute path"
         );
+        let mut paths = vec![path.to_owned()];
+        if let Some(parent) = path.parent()
+            && let Some(name) = path.file_name()
+            && let Ok(parent) = std::fs::canonicalize(parent)
+        {
+            let resolved = parent.join(name);
+            if !paths.contains(&resolved) {
+                paths.push(resolved);
+            }
+        }
         let mut arms = ARMS
             .get_or_init(Mutex::default)
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        *arms.entry(path.to_owned()).or_default().count(errno) += 1;
-        ACTIVE.fetch_add(1, Ordering::Release);
-        DocumentOpenFailure {
-            path: path.to_owned(),
-            errno,
+        for path in &paths {
+            *arms.entry(path.to_owned()).or_default().count(errno) += 1;
         }
+        ACTIVE.fetch_add(1, Ordering::Release);
+        DocumentOpenFailure { paths, errno }
     }
 
     impl Drop for DocumentOpenFailure {
@@ -215,10 +229,12 @@ mod targeted_open {
                 .expect("a registered arm")
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner());
-            let held = arms.get_mut(&self.path).expect("a held arm");
-            *held.count(self.errno) -= 1;
-            if held.denied == 0 && held.exhausted == 0 && held.failing_stat == 0 {
-                arms.remove(&self.path);
+            for path in &self.paths {
+                let held = arms.get_mut(path).expect("a held arm");
+                *held.count(self.errno) -= 1;
+                if held.denied == 0 && held.exhausted == 0 && held.failing_stat == 0 {
+                    arms.remove(path);
+                }
             }
             ACTIVE.fetch_sub(1, Ordering::Release);
         }

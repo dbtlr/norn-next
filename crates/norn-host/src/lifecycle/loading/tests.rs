@@ -65,6 +65,7 @@ fn an_established_closed_hold_survives_host_destruction_without_retaining_covera
         norn_config::registry::VaultRoot::new(&root).unwrap(),
     );
     let pause = Arc::new(Pause::default());
+    norn_fs::watch::settle_prior_changes(scratch.root(), budget.work()).unwrap();
     let host = Host::new(
         RegistryRead::from_entries([registration]),
         ProductionEntryOps::new(

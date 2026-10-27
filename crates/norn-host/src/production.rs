@@ -6258,6 +6258,10 @@ mod tests {
             },
         )
         .unwrap();
+        // FSEvents can deliver the fixture's own writes after the watch's
+        // history marker; a batch at attach would schedule maintenance the
+        // cases built on this host assert has not run.
+        norn_fs::watch::settle_prior_changes(f.root.root(), lifecycle_budget().work()).unwrap();
         let lease = host.demand(&name).unwrap();
         wait_state(&host, &name, norn_wire::TrustState::Ready);
         (host, name, lease)
@@ -9582,12 +9586,10 @@ mod tests {
             (host, name, lease, armed, recoveries, engines, injected)
         }
 
-        /// Write `path` as a document this account cannot read, or answer
-        /// `false` where the account reads it anyway.
+        /// Write `path` as a document and hold its opens exhausted with `EMFILE`.
         ///
         /// A heal that reaches the document refuses environmentally. The
-        /// watcher only reports a change at the file: no backend adds a watch
-        /// for a file, so its mode cannot fail the watcher.
+        /// injected document-open failure does not affect watcher coverage.
         #[cfg(unix)]
         fn exhausted_document(path: &Path) -> impl Drop {
             fs::write(path, "omega omega\n").unwrap();
@@ -9812,6 +9814,7 @@ mod tests {
                 let _ = delivery_resumes.recv();
             });
 
+            norn_fs::watch::settle_prior_changes(f.root.root(), lifecycle_budget().work()).unwrap();
             let _lease = host.demand(&name).unwrap();
             delivery_entered
                 .recv_timeout(Duration::from_secs(15))
@@ -20446,6 +20449,9 @@ mod tests {
         fn an_unregistered_vault_discards_its_derived_state_and_keeps_its_lock_file() {
             let f = Fixture::new("unregister-discards");
             fs::write(f.vault().join("a.md"), "# A\n").unwrap();
+            // The loading directory below exists only if the first attach
+            // began early reads, which a late FSEvents delivery would withdraw.
+            norn_fs::watch::settle_prior_changes(f.root.root(), lifecycle_budget().work()).unwrap();
             let (host, dirs) = empty_host(&f);
             register(&host, &f.vault()).expect("the vault is registered");
             attach_and_idle(&host);
@@ -21111,6 +21117,9 @@ mod tests {
             let f = Fixture::new("set-root-move");
             fs::write(f.vault().join("only-at-a.md"), "# A\n").unwrap();
             let moved = another_root(&f, &[("only-at-b.md", "# B\n")]);
+            // The loading directory below exists only if the first attach
+            // began early reads, which a late FSEvents delivery would withdraw.
+            norn_fs::watch::settle_prior_changes(f.root.root(), lifecycle_budget().work()).unwrap();
             let (host, dirs) = empty_host(&f);
             register(&host, &f.vault()).expect("the vault is registered");
             let (before, epoch_before) = attached_and_found(&host);

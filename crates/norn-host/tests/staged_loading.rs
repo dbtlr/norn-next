@@ -190,6 +190,7 @@ impl Fixture {
         policy: ProductionPolicy,
     ) -> Host<ProductionEntryOps> {
         let registration = Registration::new(name(), VaultRoot::new(&self.root).unwrap());
+        norn_fs::watch::settle_prior_changes(self.scratch.root(), BUDGET.work()).unwrap();
         Host::new(
             RegistryRead::from_entries([registration]),
             ProductionEntryOps::new(self.dirs.clone(), policy).with_loading_probe(probe),
@@ -1134,7 +1135,7 @@ fn complete_canonical_store_matches_an_ordinary_reused_empty_store_after_public_
     let reference_path = reference_dirs.derived_dir(&name()).join("store.sqlite3");
     let seed = norn_store::Store::open(
         &reference_path,
-        norn_store::StoredPathOrder::Sensitive,
+        proven_order(&fixture.root),
         norn_host::DERIVATION_VERSION,
     )
     .unwrap();
@@ -1167,13 +1168,13 @@ fn complete_canonical_store_matches_an_ordinary_reused_empty_store_after_public_
     );
     let mut actual = norn_store::Store::open(
         fixture.dirs.derived_dir(&name()).join("store.sqlite3"),
-        norn_store::StoredPathOrder::Sensitive,
+        proven_order(&fixture.root),
         norn_host::DERIVATION_VERSION,
     )
     .unwrap();
     let mut ordinary = norn_store::Store::open(
         &reference_path,
-        norn_store::StoredPathOrder::Sensitive,
+        proven_order(&fixture.root),
         norn_host::DERIVATION_VERSION,
     )
     .unwrap();
@@ -1210,15 +1211,19 @@ impl LoadingProbe for BrokenConstructor {
 #[test]
 fn a_failed_constructor_waits_for_first_index_expiry_and_keeps_failure_receipts() {
     let fixture = Fixture::new("public-stage-constructor-failure");
-    let construction = Probe::new([Point::MetadataComplete]);
+    let construction = Probe::new([Point::CatalogueComplete, Point::MetadataComplete]);
     let failure = Arc::new(BrokenConstructor {
         inner: construction.clone(),
         broke: std::sync::atomic::AtomicBool::new(false),
     });
     let host = fixture.host_bound(failure.clone(), Duration::from_millis(200));
+    let _demand = host.demand(&name()).unwrap();
     std::thread::scope(|scope| {
         let _release = Release(&construction);
+        construction.wait(Point::CatalogueComplete);
         let first = spawn_get(scope, &host, "first");
+        waits(&host, 1);
+        construction.release();
         construction.wait(Point::MetadataComplete);
         assert!(failure.broke.load(std::sync::atomic::Ordering::SeqCst));
         let error = first.recv_timeout(BUDGET.work()).unwrap().unwrap_err();
@@ -1505,7 +1510,7 @@ fn a_real_first_index_overflow_withdraws_early_sources_and_still_reaches_complet
         assert!(host.get(&get("first")).is_ok());
         let mut store = norn_store::Store::open(
             fixture.dirs.derived_dir(&name()).join("store.sqlite3"),
-            norn_store::StoredPathOrder::Sensitive,
+            proven_order(&fixture.root),
             norn_host::DERIVATION_VERSION,
         )
         .unwrap();
@@ -1624,6 +1629,7 @@ fn root_loss_before_binding_declines_provisional_waiters_while_canonical_work_is
     let registered = fixture.scratch.join("registered");
     std::os::unix::fs::symlink(&fixture.root, &registered).unwrap();
     let probe = Probe::new([Point::AuthorityCaptured, Point::CanonicalPage]);
+    norn_fs::watch::settle_prior_changes(fixture.scratch.root(), BUDGET.work()).unwrap();
     let host = Host::new(
         RegistryRead::from_entries([Registration::new(
             name(),
@@ -1654,4 +1660,14 @@ fn root_loss_before_binding_declines_provisional_waiters_while_canonical_work_is
         assert_eq!(host.read_evidence().settle_expiries, 0);
         probe.release();
     });
+}
+
+/// The order the attach opens a store over `vault` under: the one the root
+/// proves. An open under the other one would rebuild the store it is reading.
+fn proven_order(vault: &std::path::Path) -> norn_store::StoredPathOrder {
+    norn_host::stored_path_order(
+        norn_fs::PathNormalizer::detect(vault)
+            .expect("detect the vault's case behaviour")
+            .case_sensitivity(),
+    )
 }

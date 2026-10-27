@@ -59,6 +59,7 @@ fn public_get_answers_the_requested_slug_during_first_attach_before_ready() {
     let registration = Registration::new(name.clone(), VaultRoot::new(&root).unwrap());
     let dirs = ConfigDirs::new(scratch.join("config"), scratch.join("data")).unwrap();
     let gate = Arc::new(AttachGate::default());
+    norn_fs::watch::settle_prior_changes(scratch.root(), OUTER.work()).unwrap();
     let host = Host::new(
         RegistryRead::from_entries([registration]),
         HeldAttach {
