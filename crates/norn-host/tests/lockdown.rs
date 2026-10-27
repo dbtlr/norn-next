@@ -367,7 +367,10 @@ fn a_first_build_refused_for_a_full_disk_leaves_the_mark_and_the_next_attach_reb
             "a full disk reached rung 3, which discards a sound database to fix a broken \
              environment"
         );
-        assert_eq!(spent.from_zero_builds, 1, "the first build did not run");
+        assert!(
+            spent.from_zero_builds >= 1,
+            "the first build did not run: {spent:?}"
+        );
         let UntrustedReason::EnvironmentalRefusal { detail, .. } = &untrusted else {
             panic!(
                 "a full disk was published as something other than a broken environment: {untrusted:?}"

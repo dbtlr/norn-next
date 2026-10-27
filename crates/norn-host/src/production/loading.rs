@@ -192,7 +192,10 @@ impl ProductionEntryOps {
             None
         };
         let mut loading = match admission {
-            EarlyReads::Declined => None,
+            EarlyReads::Declined => {
+                progress.decline_loading();
+                None
+            }
             EarlyReads::FirstAttach => {
                 match Construction::begin(self, attachment, progress, fresh, pin) {
                     Ok(loading) => loading,
