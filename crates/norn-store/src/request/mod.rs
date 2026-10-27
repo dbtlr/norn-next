@@ -2206,6 +2206,9 @@ fn redecide_directories(
     if directories.is_empty() {
         return Ok(health::Redecided::default());
     }
+    // No declared ignore is needed here: a verdict reads each candidate's
+    // stored `admitting_segments`, which its derivation wrote under the
+    // declared ignore, so the ignore passed to the judgment is not consulted.
     health::redecide(
         transaction,
         work,
