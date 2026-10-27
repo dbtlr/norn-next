@@ -19,6 +19,8 @@ def validate_paths(actual: list[str], expected: list[str], limit: int) -> None:
 
 
 CONTENT_COLUMNS = ("fields", "body", "links", "headings", "blocks", "tags")
+# A section or block answer carries its anchor row and body in the same carrier.
+ANCHORED_CONTENT = ("heading", "block", "body")
 
 
 def known(value):
@@ -38,8 +40,9 @@ def decode_content(report: dict) -> dict:
         for column in CONTENT_COLUMNS:
             if column in document:
                 document[column] = known(document[column])
-    if "body" in report:
-        report["body"] = known(report["body"])
+    for key in ANCHORED_CONTENT:
+        if key in report:
+            report[key] = known(report[key])
     return report
 
 
