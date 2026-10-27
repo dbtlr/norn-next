@@ -84,6 +84,7 @@ pub struct JobEvidence {
     findings_discarded: AtomicU64,
     findings_written: AtomicU64,
     links_redecided: AtomicU64,
+    links_judged: AtomicU64,
     link_health_keys_resolved: AtomicU64,
     link_health_candidates_read: AtomicU64,
     changeset_read_steps: AtomicU64,
@@ -173,9 +174,11 @@ pub struct EvidenceReading {
     /// increment however many ways it was reached
     /// ([`norn_store::DerivationCounters::links_redecided`]).
     pub links_redecided: u64,
-    /// Keys the increments' re-decisions resolved.
+    /// Links judged once after a from-zero build landed its facts.
+    pub links_judged: u64,
+    /// Keys the increments and complete from-zero judgments resolved.
     pub link_health_keys_resolved: u64,
-    /// Candidates the increments' re-decisions read.
+    /// Candidates the increments and complete from-zero judgments read.
     pub link_health_candidates_read: u64,
     /// Virtual-machine steps the increments' multi-row reads took, as the
     /// store's request reads them ([`norn_store::Request::read_steps`]): the
@@ -314,6 +317,7 @@ impl EvidenceReading {
                 .findings_written
                 .saturating_sub(earlier.findings_written),
             links_redecided: self.links_redecided.saturating_sub(earlier.links_redecided),
+            links_judged: self.links_judged.saturating_sub(earlier.links_judged),
             link_health_keys_resolved: self
                 .link_health_keys_resolved
                 .saturating_sub(earlier.link_health_keys_resolved),
@@ -436,6 +440,7 @@ impl JobEvidence {
             findings_discarded: get(&self.findings_discarded),
             findings_written: get(&self.findings_written),
             links_redecided: get(&self.links_redecided),
+            links_judged: get(&self.links_judged),
             link_health_keys_resolved: get(&self.link_health_keys_resolved),
             link_health_candidates_read: get(&self.link_health_candidates_read),
             changeset_read_steps: get(&self.changeset_read_steps),
@@ -584,6 +589,8 @@ impl JobEvidence {
             .fetch_add(changesets.findings_written, Ordering::Relaxed);
         self.links_redecided
             .fetch_add(changesets.links_redecided, Ordering::Relaxed);
+        self.links_judged
+            .fetch_add(changesets.links_judged, Ordering::Relaxed);
         self.link_health_keys_resolved
             .fetch_add(changesets.link_health_keys_resolved, Ordering::Relaxed);
         self.link_health_candidates_read
@@ -684,6 +691,7 @@ struct ChangesetTally {
     findings_discarded: u64,
     findings_written: u64,
     links_redecided: u64,
+    links_judged: u64,
     link_health_keys_resolved: u64,
     link_health_candidates_read: u64,
     read_steps: u64,
@@ -698,6 +706,7 @@ thread_local! {
         findings_discarded: 0,
         findings_written: 0,
         links_redecided: 0,
+        links_judged: 0,
         link_health_keys_resolved: 0,
         link_health_candidates_read: 0,
         read_steps: 0,
@@ -738,6 +747,7 @@ pub(crate) fn count_increment_work(counters: &DerivationCounters, read_steps: u6
         let mut tally = cell.get();
         tally.findings_written += counters.findings_written();
         tally.links_redecided += counters.links_redecided();
+        tally.links_judged += counters.links_judged();
         tally.link_health_keys_resolved += counters.link_health_keys_resolved();
         tally.link_health_candidates_read += counters.link_health_candidates_read();
         tally.read_steps += read_steps;

@@ -1,4 +1,4 @@
-//! Fresh-store construction and bounded checkpoints. Canonical derivation stays ordinary.
+//! From-zero construction: ordinary derivation with one complete link-health judgment.
 use super::*;
 use crate::lifecycle::loading::{Diagnostics, Operation};
 use norn_fs::walk::inventory::InventoryWalk;
@@ -24,6 +24,7 @@ pub enum LoadingBoundary<'a> {
     MetadataRecord(&'a Path),
     MetadataComplete,
     CanonicalPage,
+    LinkHealthChunk,
     CanonicalComplete,
     QueryEstablished,
     QueryBuilt,
@@ -113,7 +114,7 @@ impl ProductionEntryOps {
     /// pins a readable declaration over a store an undeclarable attach left
     /// empty. The ordinary heal maintains only a finished store.
     ///
-    /// **The mark clears only when the derivation has completed**, after the
+    /// **The mark clears only after the derivation and link-health judgment**, after the
     /// watcher coverage window has closed cleanly, so a failure of any kind —
     /// damage, the environment, lost maintainership, a watcher failure, a full
     /// disk — leaves it for the next open to rebuild over. Rung 3 alone clears
@@ -155,6 +156,7 @@ impl ProductionEntryOps {
             attachment.store.under_construction(),
             "a from-zero build ran over a finished store"
         );
+        attachment.store.defer_link_health().map_err(store_effect)?;
         self.evidence.count_from_zero_build();
         Self::under_coverage(attachment, |attachment| {
             self.derive_into_empty(attachment, progress, admission)
@@ -264,6 +266,18 @@ impl ProductionEntryOps {
                 self.loading_boundary(LoadingBoundary::CanonicalPage);
             },
         )?;
+        let declared = Declaration::read(&mut attachment.store)?;
+        let mut request = attachment.store.begin_request();
+        let result = request.judge_link_health_once(declared.model.content_model(), &mut || {
+            if let Some(construction) = loading.as_mut() {
+                construction.checkpoint();
+            }
+            #[cfg(feature = "induced-failure")]
+            self.loading_boundary(LoadingBoundary::LinkHealthChunk);
+        });
+        let steps = request.read_steps();
+        crate::evidence::count_increment_work(&request.finish(), steps);
+        result.map_err(store_effect)?;
         #[cfg(feature = "induced-failure")]
         self.loading_boundary(LoadingBoundary::CanonicalComplete);
         // Publications live in the entry, independently of this construction owner.

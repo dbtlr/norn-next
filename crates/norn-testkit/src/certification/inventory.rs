@@ -630,6 +630,14 @@ pub const REQUIRED_CASES: &[Case] = &[
         feature: Some(INDUCED_FAILURE),
     },
     Case {
+        id: "induced-kill-mid-judgment-rebuilds-from-zero",
+        suite: Suite::InducedFailure,
+        lane: Lane::RealWatcher,
+        states: "a committed judgment chunk leaves the construction mark after process death; the next attach rebuilds from zero and equals the oracle",
+        carrier: "crates/norn-host/tests/kill_recovery.rs::next_attach_rebuilds_from_zero_after_process_death_mid_judgment",
+        feature: Some(INDUCED_FAILURE),
+    },
+    Case {
         id: "induced-write-kernel-drifted-destination",
         suite: Suite::InducedFailure,
         lane: Lane::Any,
