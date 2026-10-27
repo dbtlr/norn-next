@@ -576,6 +576,15 @@ fn an_unreadable_subtree_refuses_the_heal_rather_than_pruning_it() {
 fn a_tear_at_a_chunk_boundary_leaves_every_committed_chunk_whole() {
     let _beside = beside_the_arms();
     let vault = Vault::new("chunk-tear");
+    // Reuse a canonical store: a fresh attach first increments its disposable
+    // metadata database, which would spend the process-wide tear before the
+    // canonical heal. Keep this baseline empty so every row below is the torn
+    // heal's own, and its first committed chunk is exactly two documents.
+    {
+        let serving = vault.serving(ProductionPolicy::new(8, 2).unwrap());
+        let lease = attach_and_wait(&serving, vault.name());
+        drop(lease);
+    }
     for index in 0..6 {
         vault.write(&format!("note-{index:03}.md"), &readable(index));
     }
@@ -631,6 +640,11 @@ fn a_tear_at_a_chunk_boundary_leaves_every_committed_chunk_whole() {
     let healed = heal_and_read(&serving, vault.name());
     drop(serving);
     assert_healed_only("a chunk boundary that was torn", healed, 4, 2);
+    assert_eq!(
+        (healed.documents_upserted, healed.changesets_applied),
+        (4, 2),
+        "the heal did not write exactly the two chunks the tear withheld"
+    );
     vault.assert_converged_from_zero("a chunk boundary that was torn");
 }
 
