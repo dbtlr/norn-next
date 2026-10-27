@@ -1135,7 +1135,7 @@ fn complete_canonical_store_matches_an_ordinary_reused_empty_store_after_public_
     let reference_path = reference_dirs.derived_dir(&name()).join("store.sqlite3");
     let seed = norn_store::Store::open(
         &reference_path,
-        norn_store::StoredPathOrder::Sensitive,
+        proven_order(&fixture.root),
         norn_host::DERIVATION_VERSION,
     )
     .unwrap();
@@ -1168,13 +1168,13 @@ fn complete_canonical_store_matches_an_ordinary_reused_empty_store_after_public_
     );
     let mut actual = norn_store::Store::open(
         fixture.dirs.derived_dir(&name()).join("store.sqlite3"),
-        norn_store::StoredPathOrder::Sensitive,
+        proven_order(&fixture.root),
         norn_host::DERIVATION_VERSION,
     )
     .unwrap();
     let mut ordinary = norn_store::Store::open(
         &reference_path,
-        norn_store::StoredPathOrder::Sensitive,
+        proven_order(&fixture.root),
         norn_host::DERIVATION_VERSION,
     )
     .unwrap();
@@ -1510,7 +1510,7 @@ fn a_real_first_index_overflow_withdraws_early_sources_and_still_reaches_complet
         assert!(host.get(&get("first")).is_ok());
         let mut store = norn_store::Store::open(
             fixture.dirs.derived_dir(&name()).join("store.sqlite3"),
-            norn_store::StoredPathOrder::Sensitive,
+            proven_order(&fixture.root),
             norn_host::DERIVATION_VERSION,
         )
         .unwrap();
@@ -1660,4 +1660,14 @@ fn root_loss_before_binding_declines_provisional_waiters_while_canonical_work_is
         assert_eq!(host.read_evidence().settle_expiries, 0);
         probe.release();
     });
+}
+
+/// The order the attach opens a store over `vault` under: the one the root
+/// proves. An open under the other one would rebuild the store it is reading.
+fn proven_order(vault: &std::path::Path) -> norn_store::StoredPathOrder {
+    norn_host::stored_path_order(
+        norn_fs::PathNormalizer::detect(vault)
+            .expect("detect the vault's case behaviour")
+            .case_sensitivity(),
+    )
 }
