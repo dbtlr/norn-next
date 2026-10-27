@@ -9582,8 +9582,7 @@ mod tests {
             (host, name, lease, armed, recoveries, engines, injected)
         }
 
-        /// Write `path` as a document this account cannot read, or answer
-        /// `false` where the account reads it anyway.
+        /// Write `path` as a document and hold its opens exhausted with `EMFILE`.
         ///
         /// A heal that reaches the document refuses environmentally. The
         /// watcher only reports a change at the file: no backend adds a watch
