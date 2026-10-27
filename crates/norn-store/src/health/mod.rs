@@ -1,6 +1,6 @@
 //! Link health: the findings the store judges about a selection of links —
-//! **broken**, **ambiguous** and **missing anchor**, each a finding about
-//! exactly one link, at warning severity ([ADR 0027]).
+//! **broken**, **ambiguous**, **missing anchor** and **vault-scheme**, each a finding about
+//! exactly one link, at warning severity ([ADR 0044]).
 //!
 //! # The rules are the ones every surface reads a link's health by
 //!
@@ -83,7 +83,7 @@
 //!
 //! After every entry of a changeset is written, the store judges the links
 //! the changeset reaches and files these findings in the same transaction
-//! ([`redecide`], [ADR 0027]): the links its written documents hold, read a
+//! ([`redecide`], [ADR 0044]): the links its written documents hold, read a
 //! chunk at a time off the generation the write stamped them with; then, for
 //! each class it changed, the findings standing under the class, discarded a
 //! chunk at a time with the links they were about that no key of the class
@@ -101,7 +101,7 @@
 //! a selection and files nothing, and the plan seam bars each statement
 //! either runs.
 //!
-//! [ADR 0027]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0027-link-health-rides-the-changeset.md
+//! [ADR 0044]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0044-a-from-zero-build-judges-link-health-once.md
 
 pub(crate) mod resolution;
 pub(crate) mod run;
@@ -163,7 +163,7 @@ const VAULT_SCHEME: &str = "the link resolves through `vault://`, a scheme Obsid
 /// ([`crate::IncrementOutcome::affected_classes`],
 /// [`crate::IncrementOutcome::affected_paths`]).
 ///
-/// [ADR 0027]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0027-link-health-rides-the-changeset.md
+/// [ADR 0044]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0044-a-from-zero-build-judges-link-health-once.md
 #[derive(Clone, Copy, Debug)]
 pub enum LinkSelection<'a> {
     /// Every link the documents at these paths hold. A path named twice holds
@@ -225,7 +225,7 @@ struct Summary {
 
 /// What each key a judgment has resolved names, so a judgment taken in chunks
 /// resolves a key once across a run of consecutive chunks that hold it, and
-/// counts a filled key's total once however many runs hold it ([ADR 0027]'s
+/// counts a filled key's total once however many runs hold it ([ADR 0044]'s
 /// fifth condition) — and how each candidate its findings carried is named,
 /// so a candidate is named once while its key is held. A set nothing evicts
 /// from, as the public judgment door's, resolves each distinct key once.
@@ -237,7 +237,9 @@ struct Summary {
 /// headings and blocks, under the same declaration — and a judgment after a
 /// write that moves one takes a new one. Findings are no input to a
 /// judgment, so filing them between chunks leaves a set valid, as the
-/// changeset's re-decision does. It holds one summary per distinct key it has
+/// changeset's re-decision and the complete from-zero judgment do. The latter
+/// holds the store mutably, so no fact write interleaves between its chunks.
+/// It holds one summary per distinct key it has
 /// resolved and not forgotten, each a head of at most [`CANDIDATE_HEAD`]
 /// documents, and a name for at most those heads' documents, so the caller
 /// bounds its size by the keys it chooses to resolve against it: the
@@ -246,7 +248,7 @@ struct Summary {
 /// whose head filled, one key and one count each, so a key resolved again
 /// reads its bounded head and never counts what it names twice.
 ///
-/// [ADR 0027]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0027-link-health-rides-the-changeset.md
+/// [ADR 0044]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0044-a-from-zero-build-judges-link-health-once.md
 #[derive(Debug, Default)]
 pub struct KeySummaries {
     summaries: BTreeMap<Key, Summary>,
@@ -407,6 +409,7 @@ struct Pages<'a> {
 /// What a paged selection selects by.
 enum PagedBy<'a> {
     Written(i64),
+    Every,
     Class(&'a ClassKey),
     Path(&'a PathKey),
     /// Path-addressed links whose comparison keys lie beneath this directory.
@@ -451,6 +454,15 @@ impl<'a> Pages<'a> {
         }
     }
 
+    /// Every stored link, once, in binary path and ordinal order.
+    fn every() -> Self {
+        Pages {
+            selected: Selected::Every,
+            by: PagedBy::Every,
+            after: Some(After::written_start()),
+        }
+    }
+
     /// The pages of the links held under exactly `key`, of either kind,
     /// read as a path key's are: an equality seek of the link index.
     fn by_key(key: &'a str) -> Self {
@@ -475,6 +487,7 @@ impl<'a> Pages<'a> {
             return Ok(None);
         };
         let values = match self.by {
+            PagedBy::Every => statement::every_parameters(&after, LINK_HEALTH_CHUNK),
             PagedBy::Written(generation) => {
                 statement::written_parameters(generation, &after, LINK_HEALTH_CHUNK)
             }
@@ -496,6 +509,78 @@ impl<'a> Pages<'a> {
     }
 }
 
+/// Judge every link after a from-zero build has landed all facts. Each page
+/// commits before its checkpoint; a failure leaves construction unfinished.
+/// The mutable store excludes intervening fact writes, keeping the summaries
+/// valid across commits. Filled-key totals last for the whole judgment.
+pub(crate) fn judge_every_link(
+    store: &mut crate::Store,
+    work: &ReadWork,
+    ignore: &AmbiguityIgnore,
+    counters: &mut crate::DerivationCounters,
+    checkpoint: &mut impl FnMut(),
+) -> Result<(), StoreError> {
+    use crate::counters::Counter;
+    #[cfg(feature = "induced-failure")]
+    let _timing = norn_db::profiling::span("store.link_health_once");
+    let mut pages = Pages::every();
+    let mut summaries = KeySummaries::default();
+    while pages.after.is_some() {
+        let transaction = store
+            .database
+            .immediate_transaction("opening a link-health judgment chunk")?;
+        let Some(links) = pages.next(
+            &OnWriter {
+                connection: &transaction,
+                work,
+            },
+            SuffixKey::Comparison,
+        )?
+        else {
+            break;
+        };
+        let fingerprint: String =
+            norn_db::meta::get_meta(&transaction, crate::ddl::meta::VAULT_SCHEMA_FINGERPRINT)?
+                .unwrap_or_default();
+        let subjects: Vec<_> = links
+            .iter()
+            .map(|held| (held.holder.as_str(), held.ordinal))
+            .collect();
+        let discarded = transaction
+            .execute(
+                &statement::judged_discard_sql(),
+                params_from_iter(statement::judged_discard_parameters(
+                    &subjects,
+                    &fingerprint,
+                )?),
+            )
+            .map_err(|error| crate::error::sql("discarding a judged page's findings", error))?;
+        let resolved = summaries.keys_resolved();
+        let candidates = summaries.candidates_read();
+        let findings = judge_links(&transaction, work, ignore, &links, &mut summaries)?;
+        for finding in &findings {
+            request::write_finding(&transaction, finding)?;
+        }
+        transaction
+            .commit()
+            .map_err(|error| crate::error::sql("committing a link-health judgment chunk", error))?;
+        counters.add(Counter::LinksJudged, links.len() as u64);
+        counters.add(Counter::FindingsDiscarded, discarded as u64);
+        counters.add(Counter::FindingsWritten, findings.len() as u64);
+        counters.add(
+            Counter::LinkHealthKeysResolved,
+            summaries.keys_resolved() - resolved,
+        );
+        counters.add(
+            Counter::LinkHealthCandidatesRead,
+            summaries.candidates_read() - candidates,
+        );
+        summaries.keep_only_keys_of(&links);
+        checkpoint();
+    }
+    Ok(())
+}
+
 /// What one changeset's link-health re-decision did.
 #[derive(Debug, Default)]
 pub(crate) struct Redecided {
@@ -515,7 +600,7 @@ pub(crate) struct Redecided {
 
 /// Re-decide the link health of every link the changeset that stamped
 /// `generation` reaches, inside its `transaction`, and file the findings:
-/// [ADR 0027]'s re-decided set, which is
+/// [ADR 0044]'s re-decided set, which is
 ///
 /// 1. every link a document the changeset wrote holds — those stamped with
 ///    `generation`;
@@ -576,7 +661,7 @@ pub(crate) struct Redecided {
 /// changeset and the work stays the links plus the candidates: the totals
 /// kept are one per distinct filled key the re-decided links hold.
 ///
-/// [ADR 0027]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0027-link-health-rides-the-changeset.md
+/// [ADR 0044]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0044-a-from-zero-build-judges-link-health-once.md
 pub(crate) fn redecide(
     transaction: &Transaction<'_>,
     work: &ReadWork,

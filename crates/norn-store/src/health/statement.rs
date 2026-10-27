@@ -39,6 +39,8 @@ pub(crate) enum Selected {
     /// `documents_change_feed` at one generation, in path order, then of
     /// `links_document_ordinal` per document. Read a page at a time.
     Written,
+    /// Every stored link, paged by binary document path and link ordinal.
+    Every,
     /// By a class: a range seek of the link index over the class's keys. Read
     /// a page at a time.
     Class,
@@ -157,6 +159,13 @@ pub(crate) fn links_sql(key: SuffixKey, selected: Selected) -> String {
          WHERE l.id = j.value AND d.id = l.document"
             );
         }
+        Selected::Every => "SELECT lw.id AS link, dw.path AS after_text,
+                        lw.ordinal AS after_first, 0 AS after_second
+                 FROM documents AS dw CROSS JOIN links AS lw
+                 WHERE dw.path >= ?2 AND lw.document = dw.id
+                   AND lw.ordinal > CASE WHEN dw.path = ?2 THEN ?3 ELSE -1 END
+                 ORDER BY dw.path, lw.ordinal LIMIT ?5"
+            .to_string(),
         Selected::Written => "SELECT lw.id AS link, dw.path AS after_text,
                         lw.ordinal AS after_first, 0 AS after_second
                  FROM documents AS dw CROSS JOIN links AS lw
@@ -197,6 +206,45 @@ pub(crate) fn links_sql(key: SuffixKey, selected: Selected) -> String {
          LEFT JOIN link_keys AS k ON k.link = l.id
          WHERE l.id = p.link AND d.id = l.document"
     )
+}
+
+/// The values for a page of every stored link; no generation filters it.
+pub(crate) fn every_parameters(after: &After, limit: usize) -> Vec<Value> {
+    paged(Value::Null, after, limit)
+}
+
+/// Discard only the link-health findings about a page's links, by the same
+/// fingerprint, path and ordinal that make each link's finding unique.
+pub(crate) fn judged_discard_sql() -> String {
+    "DELETE FROM findings WHERE id IN (
+        SELECT f.id FROM json_each(?1) AS j CROSS JOIN findings AS f
+        WHERE f.vault_schema_fingerprint = ?2
+          AND f.path = json_extract(j.value, '$[0]')
+          AND f.ordinal = json_extract(j.value, '$[1]')
+          AND f.kind IN ('link/broken', 'link/ambiguous', 'link/missing-anchor', 'link/vault-scheme'))".to_string()
+}
+
+/// The links a page's discard replaces and the fingerprint they are filed under.
+pub(crate) fn judged_discard_parameters(
+    links: &[(&str, u64)],
+    fingerprint: &str,
+) -> Result<Vec<Value>, StoreError> {
+    Ok(vec![
+        Value::Text(canonical_json(&FrontmatterValue::Sequence(
+            links
+                .iter()
+                .map(|(path, ordinal)| {
+                    FrontmatterValue::Sequence(vec![
+                        FrontmatterValue::String((*path).to_string()),
+                        FrontmatterValue::Int(
+                            i64::try_from(*ordinal).expect("a stored ordinal fits i64"),
+                        ),
+                    ])
+                })
+                .collect(),
+        ))?),
+        Value::Text(fingerprint.to_string()),
+    ])
 }
 
 /// The values [`links_sql`] binds over one page of the links the write

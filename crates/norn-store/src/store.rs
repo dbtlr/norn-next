@@ -1070,6 +1070,7 @@ pub struct Store {
     /// outcome, because a create and a rebuild both record the mark and a reuse
     /// found none.
     under_construction: bool,
+    pub(crate) link_health_deferred: bool,
     torn_down: bool,
 }
 
@@ -1191,6 +1192,7 @@ impl Store {
             derivation,
             outcome,
             under_construction,
+            link_health_deferred: false,
             torn_down: false,
         })
     }
@@ -1255,14 +1257,43 @@ impl Store {
         self.under_construction
     }
 
+    /// Defer link health until the from-zero build's complete judgment.
+    ///
+    /// This in-memory deferral is independent of the construction mark: ordinary
+    /// stores and disposable early-read sources keep per-changeset judgment.
+    /// Repeating it during a build is harmless; a finished store refuses it.
+    pub fn defer_link_health(&mut self) -> Result<(), StoreError> {
+        if !self.under_construction {
+            return Err(StoreError::Lifecycle {
+                operation: "deferring link health",
+                path: self.path().to_path_buf(),
+                message: "a finished store cannot defer link health".into(),
+            });
+        }
+        self.link_health_deferred = true;
+        Ok(())
+    }
+
+    /// Whether the from-zero build still owes its complete link-health judgment.
+    pub fn link_health_deferred(&self) -> bool {
+        self.link_health_deferred
+    }
+
     /// End the from-zero build that fills this store: delete the
     /// under-construction mark in one transaction of its own.
     ///
     /// It is not a changeset, so neither the epoch nor the write generation
     /// moves; on a finished store it deletes nothing. A build that fails never
     /// reaches this, which is what leaves the mark for the next open to rebuild
-    /// over.
+    /// over. A build still deferring link health is refused.
     pub fn finish_construction(&mut self) -> Result<(), StoreError> {
+        if self.link_health_deferred {
+            return Err(StoreError::Lifecycle {
+                operation: "finishing construction",
+                path: self.path().to_path_buf(),
+                message: "the build still owes its link-health judgment".into(),
+            });
+        }
         let transaction = self
             .database
             .immediate_transaction("opening the construction-finish transaction")?;
