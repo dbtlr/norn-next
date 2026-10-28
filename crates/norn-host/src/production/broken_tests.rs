@@ -151,7 +151,7 @@ fn under_denied_open(test: &str, scope: &str) {
         fs::remove_dir_all(f.vault().join("notes/a.md")).unwrap();
         fs::write(f.vault().join("notes/a.md"), "now a file\n").unwrap();
     }
-    let child = std::process::Command::new(std::env::current_exe().unwrap())
+    let child = crate::child_gate::output_of_test_binary(std::process::Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
             &format!("production::tests::broken_documents::{test}"),
@@ -167,7 +167,7 @@ fn under_denied_open(test: &str, scope: &str) {
                 "open=denied"
             },
         )
-        .output()
+        )
         .unwrap();
     assert!(
         child.status.success(),
@@ -823,7 +823,7 @@ fn directory_under_the_list_arm(test: &str, scope: &str) {
         fs::create_dir(root.join("locked.md")).unwrap();
         fs::write(root.join("locked.md/inside.md"), "new child\n").unwrap();
     }
-    let output = std::process::Command::new(std::env::current_exe().unwrap())
+    let output = crate::child_gate::output_of_test_binary(std::process::Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
             &format!("production::tests::broken_documents::{test}"),
@@ -848,7 +848,7 @@ fn directory_under_the_list_arm(test: &str, scope: &str) {
                 "locked"
             },
         )
-        .output()
+        )
         .unwrap();
     assert!(
         output.status.success(),
@@ -915,10 +915,10 @@ fn a_directory_row_at_a_known_directory_name_dies() {
 fn an_unlistable_directory_is_withheld_and_marked_at_first_build() {
     const CHILD: &str = "NORN_464_FIRST_DIRECTORY_CHILD";
     if std::env::var_os(CHILD).is_none() {
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
+        let output = crate::child_gate::output_of_test_binary(std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "production::tests::broken_documents::an_unlistable_directory_is_withheld_and_marked_at_first_build", "--nocapture"])
             .env(CHILD, "1").env("NORN_FS_WALK_ARMED_STAGES", "list=denied")
-            .env("NORN_FS_WALK_LIST_AT", "locked").output().unwrap();
+            .env("NORN_FS_WALK_LIST_AT", "locked")).unwrap();
         assert!(
             output.status.success(),
             "{}\n{}",
@@ -989,11 +989,11 @@ fn marking_a_directory_leaves_its_readable_case_twin_untouched() {
     drop(store);
     // Each enumerating heal gets one directory failure, including under root.
     for _ in 0..2 {
-        let child = std::process::Command::new(std::env::current_exe().unwrap())
+        let child = crate::child_gate::output_of_test_binary(std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "production::tests::broken_documents::marking_a_directory_leaves_its_readable_case_twin_untouched", "--nocapture"])
             .env(ROOT, &root).env(DATABASE, &database)
             .env("NORN_FS_WALK_ARMED_STAGES", "list=denied")
-            .env("NORN_FS_WALK_LIST_AT", "Locked").output().unwrap();
+            .env("NORN_FS_WALK_LIST_AT", "Locked")).unwrap();
         assert!(child.status.success(), "{}\n{}", String::from_utf8_lossy(&child.stdout), String::from_utf8_lossy(&child.stderr));
     }
 }

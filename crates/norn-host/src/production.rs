@@ -12438,7 +12438,7 @@ mod tests {
         drop(store);
         fs::remove_file(f.vault().join("bad.md")).unwrap();
         fs::create_dir(f.vault().join("zz-denied")).unwrap();
-        let child = std::process::Command::new(std::env::current_exe().unwrap())
+        let child = crate::child_gate::output_of_test_binary(std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
                 "production::tests::a_walk_that_refuses_leaves_the_findings_in_its_scope_standing",
@@ -12448,7 +12448,7 @@ mod tests {
             .env(DATABASE, &database)
             .env("NORN_FS_WALK_ARMED_STAGES", "list=exhausted")
             .env("NORN_FS_WALK_LIST_AT", "zz-denied")
-            .output()
+            )
             .unwrap();
         assert!(
             child.status.success(),
