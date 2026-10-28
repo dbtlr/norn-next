@@ -716,25 +716,29 @@ pub(crate) fn document_path(path: &Path) -> Result<DocumentPath, Quarantine> {
 pub(crate) struct Derived {
     pub(crate) facts: DocumentFacts,
     pub(crate) unread_frontmatter: Option<UnreadFrontmatter>,
+    body_origin: norn_text::SourceSpan,
 }
 
 /// Derive one document's facts from its bytes, the field rows' typed half
 /// under `model`.
+#[cfg(test)]
 pub(crate) fn map_document(
     path: &str,
     bytes: &[u8],
     hash: String,
     model: &ContentModel,
 ) -> Result<Derived, Quarantine> {
-    map_document_parts(path, bytes, hash, model, true)
+    let mut derived = map_document_read(path, bytes, hash, model, true)?;
+    map_structure(&mut derived.facts, derived.body_origin);
+    Ok(derived)
 }
 
-fn map_document_parts(
+fn map_document_read(
     path: &str,
     bytes: &[u8],
     hash: String,
     model: &ContentModel,
-    rich: bool,
+    frontmatter_facts: bool,
 ) -> Result<Derived, Quarantine> {
     #[cfg(feature = "induced-failure")]
     let _timing = norn_store::profiling::span("host.parse_map");
@@ -762,14 +766,6 @@ fn map_document_parts(
             cause: UnreadBlock::of(refusal),
             problem: refusal.problem(),
         });
-    // The body is read once, and before the facts take their own copy of it:
-    // the scan builds a tree of several bodies and frees it as it returns, so
-    // a copy made first would stand beside that tree.
-    let scan = rich.then(|| {
-        #[cfg(feature = "induced-failure")]
-        let _timing = norn_store::profiling::span("host.body_scan");
-        document.source_scan()
-    });
     let mut facts = DocumentFacts::new(document_path, hash, document.body(), bytes.len() as u64)
         .with_frontmatter(document.frontmatter().map(map_value), model);
     facts.body_offset = document.body_start() as u64;
@@ -778,50 +774,66 @@ fn map_document_parts(
         .iter()
         .filter(|d| d.code.frontmatter_scoped())
         .count() as u32;
-    if let Some(scan) = scan {
-        facts.links = links_of(&document, &scan);
-        facts.headings = scan
-            .headings()
-            .iter()
-            .map(|h| HeadingFact {
-                level: h.level,
-                text: h.text.clone(),
-                reading: norn_text::heading_reading(&h.text),
-                slug: h.slug.clone(),
-                span: span(h.span),
-                body_offset: h.body_offset as u64,
-                inside_container: h.inside_container,
-            })
-            .collect();
-        facts.blocks = scan
-            .block_ids()
+    if frontmatter_facts {
+        facts.links = document
+            .frontmatter_field_wikilinks()
             .into_iter()
-            .map(|b| BlockFact {
-                block_id: b.id,
-                span: Some(span(b.span)),
-            })
+            .map(map_frontmatter_link)
             .collect();
-        // The file's order: the frontmatter stands before the body, so its tags
-        // come first, and a tag's ordinal is where the file writes it.
         facts.tags = document
             .frontmatter_tags()
             .into_iter()
-            .map(|t| TagFact {
-                name: t.name,
-                source: TagSource::Frontmatter,
-                span: t.span.map(span),
-            })
-            .chain(scan.tags().into_iter().map(|t| TagFact {
-                name: t.name,
-                source: TagSource::Body,
-                span: t.span.map(span),
-            }))
+            .map(|tag| map_tag(tag, TagSource::Frontmatter))
             .collect();
     }
     Ok(Derived {
         facts,
         unread_frontmatter,
+        body_origin: norn_text::SourceSpan::at(source, document.body_start()),
     })
+}
+
+/// Append body facts behind frontmatter facts so the store's ordinals stay in
+/// source order. Both ordinary derivation and construction use this mapping.
+fn map_structure(facts: &mut DocumentFacts, origin: norn_text::SourceSpan) {
+    #[cfg(feature = "induced-failure")]
+    let _timing = norn_store::profiling::span("host.body_scan");
+    let scan = norn_text::SourceScan::over_body(&facts.body, origin);
+    facts.links.extend(scan.links().into_iter().map(map_link));
+    facts.headings = scan.headings().into_iter().map(map_heading).collect();
+    facts.blocks = scan
+        .block_ids()
+        .into_iter()
+        .map(|block| BlockFact {
+            block_id: block.id,
+            span: Some(span(block.span)),
+        })
+        .collect();
+    facts.tags.extend(
+        scan.tags()
+            .into_iter()
+            .map(|tag| map_tag(tag, TagSource::Body)),
+    );
+}
+
+fn map_heading(heading: norn_text::Heading) -> HeadingFact {
+    HeadingFact {
+        level: heading.level,
+        reading: norn_text::heading_reading(&heading.text),
+        text: heading.text,
+        slug: heading.slug,
+        span: span(heading.span),
+        body_offset: heading.body_offset as u64,
+        inside_container: heading.inside_container,
+    }
+}
+
+fn map_tag(tag: norn_text::Tag, source: TagSource) -> TagFact {
+    TagFact {
+        name: tag.name,
+        source,
+        span: tag.span.map(span),
+    }
 }
 
 /// One finding a plan asks a job to file: the subject it stands at, the cause
@@ -942,7 +954,16 @@ pub(crate) fn plan_document(
     declared: &Declared,
     case: CaseFold,
 ) -> Plan {
-    plan_document_parts(path, spelling, bytes, hash, stored, declared, case, true)
+    let (mut plan, origin) =
+        plan_content_document(path, spelling, bytes, hash, stored, declared, case);
+    if let Some(Change::Upsert(facts)) = &mut plan.change {
+        plan.findings.extend(plan_structure_document(
+            facts,
+            origin.expect("a derived document has a body origin"),
+            declared,
+        ));
+    }
+    plan
 }
 
 /// Read fields and body without deriving rich Markdown facts for metadata construction.
@@ -955,11 +976,21 @@ pub(crate) fn plan_base_document(
     declared: &Declared,
     case: CaseFold,
 ) -> Plan {
-    plan_document_parts(path, spelling, bytes, hash, stored, declared, case, false)
+    #[cfg(feature = "induced-failure")]
+    let _timing = norn_store::profiling::span("host.document_plan");
+    plan_mapped_document(
+        path,
+        map_document_read(spelling, bytes, hash, declared.content_model(), false),
+        stored,
+        declared,
+        case,
+    )
 }
 
-#[allow(clippy::too_many_arguments)] // Both experimental depths share the canonical judgment.
-fn plan_document_parts(
+/// Derive content without scanning Markdown. The from-zero content step in
+/// NORN-467 will persist the origin beside its frontmatter fact counts.
+/// Metadata construction stays on `plan_base_document`, which omits those facts.
+pub(crate) fn plan_content_document(
     path: &Path,
     spelling: &str,
     bytes: &[u8],
@@ -967,15 +998,36 @@ fn plan_document_parts(
     stored: Option<&DocumentPath>,
     declared: &Declared,
     case: CaseFold,
-    rich: bool,
-) -> Plan {
+) -> (Plan, Option<norn_text::SourceSpan>) {
     #[cfg(feature = "induced-failure")]
     let _timing = norn_store::profiling::span("host.document_plan");
-    let mapped = if rich {
-        map_document(spelling, bytes, hash, declared.content_model())
-    } else {
-        map_document_parts(spelling, bytes, hash, declared.content_model(), false)
-    };
+    let mapped = map_document_read(spelling, bytes, hash, declared.content_model(), true);
+    let origin = mapped.as_ref().ok().map(|derived| derived.body_origin);
+    (
+        plan_mapped_document(path, mapped, stored, declared, case),
+        origin,
+    )
+}
+
+/// Derive structure from the stored body and its source origin, then judge all
+/// tags in frontmatter-first order. The from-zero structure step in NORN-467
+/// will use this same seam after content lands; no bytes are reopened here.
+pub(crate) fn plan_structure_document(
+    facts: &mut DocumentFacts,
+    origin: norn_text::SourceSpan,
+    declared: &Declared,
+) -> Vec<PlannedFinding> {
+    map_structure(facts, origin);
+    plan_tag_facet(&facts.path, facts, declared.schema())
+}
+
+fn plan_mapped_document(
+    path: &Path,
+    mapped: Result<Derived, Quarantine>,
+    stored: Option<&DocumentPath>,
+    declared: &Declared,
+    case: CaseFold,
+) -> Plan {
     match mapped {
         Ok(derived) => {
             let subject = derived.facts.path.clone();
@@ -1009,9 +1061,6 @@ fn plan_document_parts(
                     findings.extend(judged);
                     rule_work = work;
                 }
-            }
-            if rich {
-                findings.extend(plan_tag_facet(&subject, &derived.facts, declared.schema()));
             }
             Plan {
                 change: Some(Change::Upsert(derived.facts)),
@@ -1098,7 +1147,7 @@ pub(crate) fn judge_block(
 }
 
 /// What the frontmatter block of the document `bytes` spell came to, read as
-/// a derivation reads it ([`map_document`]); `None` where the bytes decode as
+/// a derivation reads it ([`plan_content_document`]); `None` where the bytes decode as
 /// no document.
 pub(crate) fn frontmatter_block(bytes: &[u8]) -> Option<HeldBlock> {
     let source = document_source(bytes).ok()?;
@@ -1677,6 +1726,278 @@ fn map_value(value: &Value) -> FrontmatterValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The rich plan before the split is the oracle, including finding order
+    /// and the frontmatter-first ordering that becomes store ordinals.
+    #[test]
+    fn content_then_structure_equals_the_rich_plan() {
+        let requiring = Declared::pinned(
+            VaultSchema::parse(b"version: 1\nfields:\n  weight: { type: number }\nrules:\n  owned: { required: { owner: } }\ntags:\n  declared: [front]\n  undeclared: report\n").expect("fields, rules and tag facet"),
+            "requiring",
+        );
+        for declared in [undeclaring(), reporting(), requiring] {
+            for bom in ["", "\u{feff}"] {
+                for ending in ["\n", "\r\n", "\r"] {
+                    for frontmatter in [
+                        "",
+                        "---\nlink: '[[Front]]'\ntags: [front, Draft]\n---\n",
+                        "---\nlink: '[[Front]]'\ntags: [front, Draft]\n---\r",
+                        "---\nlink: '[[Front]]'\ntags: [front, Draft]\n",
+                        "---\nbad: [\n---\n",
+                        "---\nweight: 12\nowner: keeper\ntags: [front, Draft]\n---\n",
+                        "---\nweight: wrong\n---\n",
+                    ] {
+                        for body in [
+                            "",
+                            "# First\n[[Body]] [label](other.md) #draft #other ^block\n",
+                            "> ## Nested\n> [[Other#Heading]] #nested\n\n```\n# hidden\n```\n",
+                        ] {
+                            let source = format!(
+                                "{bom}{}{}",
+                                frontmatter.replace('\n', ending),
+                                body.replace('\n', ending)
+                            );
+                            let bytes = source.as_bytes();
+                            let hash = norn_fs::ContentHash::of(bytes).to_string();
+                            let expected = rich_plan_before_split(
+                                Path::new("note.md"),
+                                "note.md",
+                                bytes,
+                                hash.clone(),
+                                None,
+                                &declared,
+                                CaseFold::Exact,
+                            );
+                            let (mut content, origin) = plan_content_document(
+                                Path::new("note.md"),
+                                "note.md",
+                                bytes,
+                                hash.clone(),
+                                None,
+                                &declared,
+                                CaseFold::Exact,
+                            );
+                            if let Some(Change::Upsert(facts)) = &mut content.change {
+                                assert!(facts.headings.is_empty() && facts.blocks.is_empty());
+                                assert!(facts.links.iter().all(|link| link.field.is_some()));
+                                assert!(
+                                    facts
+                                        .tags
+                                        .iter()
+                                        .all(|tag| tag.source == TagSource::Frontmatter)
+                                );
+                                content.findings.extend(plan_structure_document(
+                                    facts,
+                                    origin.expect("read body origin"),
+                                    &declared,
+                                ));
+                            }
+                            assert_eq!(content, expected, "{source:?}");
+                            assert_eq!(
+                                plan_document(
+                                    Path::new("note.md"),
+                                    "note.md",
+                                    bytes,
+                                    hash,
+                                    None,
+                                    &declared,
+                                    CaseFold::Exact
+                                ),
+                                expected,
+                                "{source:?}"
+                            );
+                        }
+                    }
+                }
+            }
+            // Quarantines keep the ordinary death and finding behavior.
+            for bytes in [b"\xff".as_slice(), b"\xc0\x80".as_slice()] {
+                for stored in [None, Some(DocumentPath::new("note.md").expect("path"))] {
+                    let hash = norn_fs::ContentHash::of(bytes).to_string();
+                    let expected = rich_plan_before_split(
+                        Path::new("note.md"),
+                        "note.md",
+                        bytes,
+                        hash.clone(),
+                        stored.as_ref(),
+                        &declared,
+                        CaseFold::Exact,
+                    );
+                    let (content, origin) = plan_content_document(
+                        Path::new("note.md"),
+                        "note.md",
+                        bytes,
+                        hash,
+                        stored.as_ref(),
+                        &declared,
+                        CaseFold::Exact,
+                    );
+                    assert_eq!(content, expected);
+                    assert!(origin.is_none());
+                }
+            }
+        }
+    }
+
+    // Frozen pre-split rich derivation. Keep independent of the new seams.
+    fn rich_map_before_split(
+        path: &str,
+        bytes: &[u8],
+        hash: String,
+        model: &ContentModel,
+    ) -> Result<Derived, Quarantine> {
+        #[cfg(feature = "induced-failure")]
+        let _timing = norn_store::profiling::span("host.parse_map");
+        // Identity before content: a path that names no document has nothing to
+        // say about its own bytes.
+        let document_path = document_path(Path::new(path))?;
+        let source = document_source(bytes).map_err(|problem| Quarantine {
+            cause: Undecodable::BodyBytes,
+            problem: problem.to_string(),
+        })?;
+        let document = {
+            #[cfg(feature = "induced-failure")]
+            let _timing = norn_store::profiling::span("host.frontmatter_parse");
+            Document::parse(source)
+        };
+        // The text layer reads a block only up to its own bound and says so rather
+        // than parsing past it, so this costs the bound at worst however the block
+        // is shaped. A block nothing read — unclosed, not well-formed, or past the
+        // bound — leaves the fields unknown, which the document reports as state:
+        // the facts below are derived without them, and the finding beside them is
+        // where the absence is stated.
+        let unread_frontmatter = document
+            .frontmatter_refusal()
+            .map(|refusal| UnreadFrontmatter {
+                cause: UnreadBlock::of(refusal),
+                problem: refusal.problem(),
+            });
+        // The body is read once, and before the facts take their own copy of it:
+        // the scan builds a tree of several bodies and frees it as it returns, so
+        // a copy made first would stand beside that tree.
+        let scan = Some({
+            #[cfg(feature = "induced-failure")]
+            let _timing = norn_store::profiling::span("host.body_scan");
+            document.source_scan()
+        });
+        let mut facts =
+            DocumentFacts::new(document_path, hash, document.body(), bytes.len() as u64)
+                .with_frontmatter(document.frontmatter().map(map_value), model);
+        facts.body_offset = document.body_start() as u64;
+        facts.frontmatter_diagnostic_count = document
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code.frontmatter_scoped())
+            .count() as u32;
+        if let Some(scan) = scan {
+            facts.links = links_of(&document, &scan);
+            facts.headings = scan
+                .headings()
+                .iter()
+                .map(|h| HeadingFact {
+                    level: h.level,
+                    text: h.text.clone(),
+                    reading: norn_text::heading_reading(&h.text),
+                    slug: h.slug.clone(),
+                    span: span(h.span),
+                    body_offset: h.body_offset as u64,
+                    inside_container: h.inside_container,
+                })
+                .collect();
+            facts.blocks = scan
+                .block_ids()
+                .into_iter()
+                .map(|b| BlockFact {
+                    block_id: b.id,
+                    span: Some(span(b.span)),
+                })
+                .collect();
+            // The file's order: the frontmatter stands before the body, so its tags
+            // come first, and a tag's ordinal is where the file writes it.
+            facts.tags = document
+                .frontmatter_tags()
+                .into_iter()
+                .map(|t| TagFact {
+                    name: t.name,
+                    source: TagSource::Frontmatter,
+                    span: t.span.map(span),
+                })
+                .chain(scan.tags().into_iter().map(|t| TagFact {
+                    name: t.name,
+                    source: TagSource::Body,
+                    span: t.span.map(span),
+                }))
+                .collect();
+        }
+        Ok(Derived {
+            facts,
+            unread_frontmatter,
+            body_origin: norn_text::SourceSpan::at(source, document.body_start()),
+        })
+    }
+    fn rich_plan_before_split(
+        path: &Path,
+        spelling: &str,
+        bytes: &[u8],
+        hash: String,
+        stored: Option<&DocumentPath>,
+        declared: &Declared,
+        case: CaseFold,
+    ) -> Plan {
+        #[cfg(feature = "induced-failure")]
+        let _timing = norn_store::profiling::span("host.document_plan");
+        let mapped = rich_map_before_split(spelling, bytes, hash, declared.content_model());
+        match mapped {
+            Ok(derived) => {
+                let subject = derived.facts.path.clone();
+                let mut findings = Vec::new();
+                let mut rule_work = RuleWork::default();
+                match derived.unread_frontmatter {
+                    Some(unread) => {
+                        let detail = match unread.problem {
+                            Some(problem) => format!("{path:?}: {problem}"),
+                            None => format!("{path:?}"),
+                        };
+                        findings.push(PlannedFinding::of(
+                            subject.clone(),
+                            Cause::UnreadBlock(unread.cause),
+                            detail,
+                            None,
+                        ));
+                    }
+                    // A block nothing read leaves the fields unknown rather than
+                    // absent, so no rule is judged against them: a required field
+                    // would be reported missing from a block that may hold it.
+                    // The unread block's own finding is what stands instead.
+                    None => {
+                        let (judged, work) = plan_rule_judgment(
+                            path,
+                            &subject,
+                            derived.facts.frontmatter(),
+                            declared.schema(),
+                            case,
+                        );
+                        findings.extend(judged);
+                        rule_work = work;
+                    }
+                }
+                findings.extend(plan_tag_facet(&subject, &derived.facts, declared.schema()));
+                Plan {
+                    change: Some(Change::Upsert(derived.facts)),
+                    findings,
+                    rule_work,
+                }
+            }
+            Err(quarantine) => Plan {
+                change: stored.map(|row| Change::Death {
+                    path: row.clone(),
+                    provenance: Provenance::Quarantine,
+                }),
+                findings: vec![plan_quarantine(path, quarantine)],
+                rule_work: RuleWork::default(),
+            },
+        }
+    }
 
     /// **The bar on one decode rule for held and streamed bytes.** For every
     /// file in a corpus of encodings — valid characters of every width, an
