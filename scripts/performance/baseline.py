@@ -8,6 +8,8 @@ import platform
 import shutil
 import subprocess
 import sys
+import struct
+from statistics import median
 import time
 from pathlib import Path
 
@@ -28,6 +30,50 @@ READS = [
     ("get_section", {"op": "get", "target": "bench/large.md#Details"}),
 ]
 WRITES = ["set_field", "create", "rename", "rename_hub"]
+
+
+def wal_position(root):
+    """Read committed frames from SQLite's WAL index, whose length survives resets.
+
+    The worker is idle at both endpoints. The salt distinguishes WAL epochs;
+    retained WAL file length cannot measure writes after an autocheckpoint.
+    """
+    stores = list((root / "data").rglob("store.sqlite3"))
+    if len(stores) != 1:
+        raise ValueError("WAL readings require exactly one store.sqlite3")
+    db = stores[0]
+    wal, shm = Path(str(db) + "-wal"), Path(str(db) + "-shm")
+    if not wal.exists() or wal.stat().st_size == 0:
+        return None
+    with wal.open("rb") as file:
+        header = file.read(32)
+    with shm.open("rb") as file:
+        index = file.read(48)
+    if len(header) != 32 or len(index) != 48:
+        raise ValueError("incomplete WAL header or WAL index")
+    return header[16:24].hex(), int.from_bytes(header[8:12], "big"), struct.unpack_from("=I", index, 16)[0]
+
+
+def wal_pages_written(before, after):
+    """Count appended frames; an epoch reset makes the observation incomplete."""
+    if before is None:
+        return after[2] if after is not None else 0
+    if after is None or before[:2] != after[:2] or after[2] < before[2]:
+        return None
+    return after[2] - before[2]
+
+
+def write_phase_summary(samples):
+    """Keep cold-write debt separate from the writes after its first 200 operations."""
+    result = {}
+    for phase, selected in [("first_200", [s for s in samples if s["iteration"] < 200]),
+                            ("after_payoff", [s for s in samples if s["iteration"] >= 200])]:
+        pages = [s["wal_pages_per_write"] for s in selected if s["wal_pages_per_write"] is not None]
+        result[phase] = {"writes": len(selected),
+                         "median_ns": median([s["round_trip_ns"] for s in selected]) if selected else None,
+                         "median_wal_pages_per_write": median(pages) if pages else None,
+                         "wal_observations": len(pages)}
+    return result
 
 
 def write_json(path, value):
@@ -137,20 +183,29 @@ def run_worker(args, engine, size, repetition, fixture, manifest, samples):
 
         for name, base_command in READS + [(name, None) for name in WRITES]:
             before = resources(worker.process.pid)
+            writes = []
             for iteration in range(args.warmups + args.samples):
                 command = base_command or mutation(name, iteration)
                 before_path = "bench/subject.md" if command["op"] == "set" else command.get("from")
                 before_bytes = (root / "vault" / before_path).read_bytes() if before_path is not None else None
+                wal_before = wal_position(root) if base_command is None and engine == "current" else None
                 response, elapsed = worker.call(command)
+                wal_after = wal_position(root) if base_command is None and engine == "current" else None
                 if base_command is not None:
                     validate_read(engine, command, response, manifest)
                     readback = None
                     readback_diagnostics = None
                 else:
                     readback, readback_diagnostics = verify_mutation(worker, engine, command, root, response, state, before_bytes)
+                if base_command is None:
+                    writes.append({"iteration": iteration, "round_trip_ns": elapsed,
+                                   "wal_pages_per_write": wal_pages_written(wal_before, wal_after) if engine == "current" else None})
                 if iteration == args.warmups:
                     write_json(root / f"{name}-example.json", {"command": command, "response": response})
                 append(samples, {**context, "kind": "sample", "scenario": name,
+                                 "write_phase": ("first_200" if iteration < 200 else "after_payoff") if base_command is None else None,
+                                 "wal_pages_per_write": wal_pages_written(wal_before, wal_after) if base_command is None and engine == "current" else None,
+                                 "wal_epoch_reset": (wal_before is not None and wal_pages_written(wal_before, wal_after) is None) if base_command is None and engine == "current" else None,
                                  "iteration": iteration, "warmup": iteration < args.warmups,
                                  "command": command, "round_trip_ns": elapsed,
                                  "host_ns": response.get("host_ns"),
@@ -161,6 +216,9 @@ def run_worker(args, engine, size, repetition, fixture, manifest, samples):
                                  "readback_diagnostics": readback_diagnostics,
                                  "write_and_readback_ns": elapsed + readback if readback is not None else None,
                                  "verified": True})
+            if writes:
+                append(samples, {**context, "kind": "write_phases", "scenario": name,
+                                 "phases": write_phase_summary(writes)})
             append(samples, {**context, "kind": "resources", "scenario": name,
                              "before": before, "after": resources(worker.process.pid)})
             print(f"{engine} {size} round {repetition}: {name} verified", flush=True)
@@ -206,7 +264,7 @@ def main():
     parser.add_argument("--output", type=Path, required=True, help="new, short absolute directory outside the repository")
     parser.add_argument("--fixtures", type=Path, help="previous run's frozen fixtures directory")
     parser.add_argument("--sizes", type=int, nargs="+", default=[300, 2000, 10000])
-    parser.add_argument("--samples", type=int, default=25)
+    parser.add_argument("--samples", type=int, default=25, help="use at least 400 for first-200 and after-payoff write comparison")
     parser.add_argument("--warmups", type=int, default=5)
     parser.add_argument("--repetitions", type=int, default=2)
     args = parser.parse_args()
