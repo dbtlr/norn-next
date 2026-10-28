@@ -350,3 +350,29 @@ class WritePhaseTests(unittest.TestCase):
         self.assertEqual(summary["after_payoff"]["median_wal_pages_per_write"], 4)
         samples[0]["wal_pages_per_write"] = None
         self.assertEqual(write_phase_summary(samples)["first_200"]["wal_observations"], 199)
+
+class LiveWalPagesTests(unittest.TestCase):
+    def test_committed_frames_match_sqlites_report_across_a_checkpoint(self):
+        import sqlite3
+        from baseline import wal_position, wal_pages_written
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "data").mkdir()
+            connection = sqlite3.connect(root / "data" / "store.sqlite3")
+            try:
+                connection.execute("PRAGMA journal_mode=WAL")
+                connection.execute("PRAGMA wal_autocheckpoint=0")
+                connection.execute("CREATE TABLE payload(value BLOB)")
+                connection.commit()
+                before = wal_position(root)
+                connection.execute("INSERT INTO payload VALUES (?)", (bytes(16000),))
+                connection.commit()
+                after = wal_position(root)
+                self.assertGreater(wal_pages_written(before, after), 0)
+                busy, logged, checkpointed = connection.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
+                self.assertEqual((busy, logged, checkpointed), (0, after[2], after[2]))
+                connection.execute("INSERT INTO payload VALUES (?)", (bytes(16000),))
+                connection.commit()
+                self.assertIsNone(wal_pages_written(after, wal_position(root)))
+            finally:
+                connection.close()

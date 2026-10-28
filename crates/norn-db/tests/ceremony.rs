@@ -768,3 +768,42 @@ fn deleting_a_pinned_scalar_removes_it_and_an_absent_key_is_not_an_error() {
     assert_eq!(label(&connection), None);
     meta::delete_meta(&connection, TRIAL_LABEL).expect("deleting a key that is absent");
 }
+
+#[test]
+fn an_unfinished_build_is_adopted_before_digest_but_keep_still_checks_damage() {
+    struct Building(TrialClient);
+    impl Client for Building {
+        type Error = TrialError;
+        fn record(&self, connection: &Connection) -> Result<(), TrialError> {
+            self.0.record(connection)?;
+            meta::put_meta(connection, "building", 1_i64)?;
+            Ok(())
+        }
+        fn adopt(&self, connection: &Connection, path: &Path) -> Result<Adoption, TrialError> {
+            self.0.adopt(connection, path)
+        }
+        fn unfinished_build_key(&self) -> Option<&'static str> {
+            Some("building")
+        }
+    }
+    for answer in [Answer::Keep, Answer::Rebuild, Answer::Refuse] {
+        let scratch = Scratch::new("unfinished-before-digest");
+        let client = Building(TrialClient::new(answer));
+        let (connection, _) = norn_db::open(&scratch.database(), &schema(), &client).unwrap();
+        connection.execute_batch("DROP TABLE notes").unwrap();
+        drop(connection);
+        let result = norn_db::open(&scratch.database(), &schema(), &client);
+        assert_eq!(client.0.adoptions.get(), 1);
+        match answer {
+            Answer::Refuse => assert!(matches!(result, Err(TrialError::Refused))),
+            Answer::Rebuild => assert!(matches!(
+                result.unwrap().1,
+                OpenOutcome::RebuiltFromZero(RebuildReason::Client { .. })
+            )),
+            Answer::Keep => assert!(matches!(
+                result.unwrap().1,
+                OpenOutcome::RebuiltFromZero(RebuildReason::Damaged { .. })
+            )),
+        }
+    }
+}

@@ -15864,21 +15864,27 @@ mod tests {
     /// length is exactly how far the create wrote — and every byte past that
     /// mark in this database was appended by a later write. A fraction of the
     /// finished file names the same boundary only until the schema next grows.
-    fn corrupt_the_document_pages(f: &Fixture, database: &Path) {
-        let measured = f.root.join("created-length.sqlite3");
-        Store::open(&measured, proven_order(f), crate::DERIVATION_VERSION)
-            .expect("creating a store to measure a create by")
-            .close()
-            .expect("closing the measured store");
-        let head = fs::metadata(&measured).unwrap().len() as usize;
+    fn corrupt_the_document_pages(_f: &Fixture, database: &Path) {
+        let opened = norn_db::open_read_only(database).adopted.unwrap();
+        let root: usize = opened
+            .connection()
+            .query_row(
+                "SELECT rootpage FROM sqlite_schema WHERE name = 'documents'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(opened);
         let mut bytes = fs::read(database).unwrap();
-        assert!(
-            bytes.len() > head,
-            "the database holds no pages past the ones its create wrote"
-        );
-        for byte in bytes.iter_mut().skip(head) {
-            *byte = 0x5a;
-        }
+        let encoded_size = u16::from_be_bytes([bytes[16], bytes[17]]);
+        let page_size = if encoded_size == 1 {
+            65_536
+        } else {
+            usize::from(encoded_size)
+        };
+        // Index construction changes page placement, so an offset past an
+        // empty create can hit only indexes or free pages rather than data.
+        bytes[(root - 1) * page_size..root * page_size].fill(0x5a);
         fs::write(database, &bytes).unwrap();
     }
 

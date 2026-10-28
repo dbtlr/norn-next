@@ -226,6 +226,24 @@ fn finishing_restores_the_created_schema_digest() {
         "NOT EXISTS(SELECT 1 FROM meta WHERE key = 'under_construction')",
     );
     store.verify_integrity().unwrap();
+    let schema_text = |store: &Store| {
+        let opened = norn_db::open_read_only(store.path()).adopted.unwrap();
+        opened
+            .connection()
+            .prepare("SELECT type, name, sql FROM sqlite_schema ORDER BY type, name")
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    assert_eq!(schema_text(&store), schema_text(&oracle));
     let audit = norn_store::startup_audit::audit(store.path(), |_, _, _| Ok(())).unwrap();
     for table in ["documents_fts_vocab", "documents_fts_docsize"] {
         assert_eq!(
@@ -928,10 +946,6 @@ fn construction_write_census_scans_no_vault_sized_table() {
     let mut scans = Vec::new();
     for phase in [Step::Names, Step::Content, Step::Structure] {
         for statement in WriteStatement::all() {
-            // A names pass cannot delete a document: only content can withdraw it.
-            if phase == Step::Names && statement == WriteStatement::DeleteDocument {
-                continue;
-            }
             let plan = store
                 .begin_request()
                 .emitted_plan(ExplainedStatement::Write(statement))

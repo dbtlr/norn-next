@@ -188,6 +188,9 @@ fn a_database_recording_no_epoch_is_rebuilt_from_zero() {
         &mut store.begin_request(),
         &document(subject.as_str(), "hash-1", "a body\n"),
     );
+    store
+        .finish_construction()
+        .expect("finish before damaging a completed store");
     let recorded = store.recorded_store_schema().expect("the recorded schema");
     let discarded = store.epoch().to_string();
     induced_failure::execute_out_of_band(&mut store, "DELETE FROM meta WHERE key = 'store_epoch'")
@@ -333,6 +336,9 @@ fn a_schema_that_no_longer_holds_what_it_was_created_with_is_rebuilt_from_zero()
         &mut store.begin_request(),
         &document(subject.as_str(), "hash-1", "a body\n"),
     );
+    store
+        .finish_construction()
+        .expect("finish before damaging a completed store");
     let recorded = store.recorded_store_schema().expect("the recorded schema");
 
     // The unique index on `path` is what makes a path one document. Without it a

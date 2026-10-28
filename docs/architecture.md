@@ -150,8 +150,10 @@ may not be added.
   under-construction mark in `meta` when it is created, in the transaction that records its
   fingerprint, path order and derivation version, as a rebuild input beside them, and clears
   it in the transaction that ends step 5 and installs the full-text triggers — rung 3's,
-  once its integrity verification has passed over the completed full-text index. An open that finds the mark rebuilds from zero and reports the
-  store's own rebuild reason before judging the temporarily incomplete schema; mode adoption still refuses a throwaway open over a durable store. Thus an interrupted build is never resumed over what it left. A
+  once its integrity verification has passed over the completed full-text index. An open
+  that finds the mark rebuilds from zero and reports the store's own rebuild reason before
+  judging the temporarily incomplete schema; mode adoption still refuses a throwaway open
+  over a durable store. An interrupted build is never resumed over what it left. A
   build that failed while the process lives is not resumed either: the recovery or reload it owes
   meets the partial store and owes rung 3, which discards it and builds from empty. Every
   from-zero build — a first build, an open-time rebuild, rung 3 and the deferred first build
