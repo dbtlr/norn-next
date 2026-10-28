@@ -25,6 +25,7 @@ pub enum LoadingBoundary<'a> {
     MetadataComplete,
     CanonicalPage,
     LinkHealthChunk,
+    FullTextBatch,
     CanonicalComplete,
     QueryEstablished,
     QueryBuilt,
@@ -114,14 +115,14 @@ impl ProductionEntryOps {
     /// pins a readable declaration over a store an undeclarable attach left
     /// empty. The ordinary heal maintains only a finished store.
     ///
-    /// **The mark clears only after the derivation and link-health judgment**, after the
+    /// **The mark clears after derivation, link-health judgment and full text**, after the
     /// watcher coverage window has closed cleanly, so a failure of any kind —
     /// damage, the environment, lost maintainership, a watcher failure, a full
     /// disk — leaves it for the next open to rebuild over. Rung 3 alone clears
     /// it later still, after its integrity verification
-    /// ([`Self::construct_from_zero`]). This is its own
-    /// transaction until the five steps give the build a final transaction to
-    /// carry it.
+    /// ([`Self::construct_from_zero`]). The closing transaction installs the
+    /// full-text triggers, checks the schema digest and clears the mark. The
+    /// construction checkpoint follows, before the ordinary reconcile.
     ///
     /// `admission` is who may publish early reads from the store being built.
     /// Only the attach after a create does, as [`Construction`] always has;
@@ -135,17 +136,35 @@ impl ProductionEntryOps {
         progress: &ProgressReporter<ProductionAttachment>,
         admission: EarlyReads,
     ) -> Result<(), JobFailure> {
-        self.construct_from_zero(attachment, progress, admission)?;
-        attachment.store.finish_construction().map_err(store_effect)
+        let built = self
+            .construct_from_zero(attachment, progress, admission)
+            .and_then(|()| self.finish_construction(&mut attachment.store));
+        // A failed build's store may stay parked for the recovery it owes,
+        // which discards it rather than building over it ([`Self::derive_vault`]).
+        if built.is_err()
+            && let Err(error) = attachment.store.restore_construction_settings()
+        {
+            self.record_cleanup_failure(format!("construction settings: {error}"));
+        }
+        built
+    }
+
+    pub(super) fn finish_construction(&self, store: &mut Store) -> Result<(), JobFailure> {
+        let finished = store.finish_construction().map_err(store_effect)?;
+        if finished.checkpoint_busy {
+            self.evidence.count_construction_checkpoint_busy();
+        }
+        Ok(())
     }
 
     /// Count a from-zero build and derive the vault into the store under
-    /// construction, leaving the under-construction mark standing.
+    /// construction, leaving the under-construction mark standing and FTS triggers absent.
     ///
     /// The one construction path: [`Self::build_from_zero`] clears the mark
     /// after it, and a caller that owes the result a verification first
     /// (rung 3) clears it only once that passes, so a store that fails the
-    /// verification is rebuilt again by the next open rather than adopted.
+    /// verification is rebuilt again by the next open rather than adopted. Stored
+    /// bodies are fully indexed before returning, so that verification covers full text.
     pub(super) fn construct_from_zero(
         &self,
         attachment: &mut ProductionAttachment,
@@ -157,6 +176,7 @@ impl ProductionEntryOps {
             "a from-zero build ran over a finished store"
         );
         attachment.store.defer_link_health().map_err(store_effect)?;
+        attachment.store.begin_steps().map_err(store_effect)?;
         self.evidence.count_from_zero_build();
         Self::under_coverage(attachment, |attachment| {
             self.derive_into_empty(attachment, progress, admission)
@@ -165,12 +185,23 @@ impl ProductionEntryOps {
 
     /// Derive the vault into the store the caller holds: a build from zero if
     /// the store is under construction, the ordinary heal if it is finished.
+    ///
+    /// A store whose from-zero build began and failed holds that build's
+    /// partial rows and full text, and the attachment kept it parked for this
+    /// recovery or reload. No build runs over it: it owes rung 3, which
+    /// discards it and builds from an empty store under the controls the leg
+    /// has just taken.
     pub(super) fn derive_vault(
         &self,
         attachment: &mut ProductionAttachment,
         progress: &ProgressReporter<ProductionAttachment>,
     ) -> Result<(), JobFailure> {
-        if attachment.store.under_construction() {
+        if attachment.store.construction_began() {
+            Err(JobFailure::StoreDamaged(
+                "a from-zero build that failed left a partial store, which is rebuilt from empty"
+                    .into(),
+            ))
+        } else if attachment.store.under_construction() {
             self.build_from_zero(attachment, progress, EarlyReads::Declined)
         } else {
             self.heal_under_coverage(attachment, progress)
@@ -278,6 +309,21 @@ impl ProductionEntryOps {
         let steps = request.read_steps();
         crate::evidence::count_increment_work(&request.finish(), steps);
         result.map_err(store_effect)?;
+        loop {
+            let mut request = attachment.store.begin_request();
+            let result = request.full_text_batch(self.policy.changeset_size);
+            let steps = request.read_steps();
+            crate::evidence::count_increment_work(&request.finish(), steps);
+            let complete = result.map_err(store_effect)?;
+            if let Some(construction) = loading.as_mut() {
+                construction.checkpoint();
+            }
+            #[cfg(feature = "induced-failure")]
+            self.loading_boundary(LoadingBoundary::FullTextBatch);
+            if complete {
+                break;
+            }
+        }
         #[cfg(feature = "induced-failure")]
         self.loading_boundary(LoadingBoundary::CanonicalComplete);
         // Publications live in the entry, independently of this construction owner.

@@ -112,6 +112,8 @@ fn performance_worker() {
             "store.document_row",
             "store.link_health",
             "store.link_health_once",
+            "store.step.full_text",
+            "store.step.finish",
             "store.commit",
             "store.write_finding",
             "health.discard",
@@ -187,10 +189,11 @@ fn performance_worker() {
             "changesets_applied": e.changesets_applied, "documents_upserted": e.documents_upserted,
             "documents_deleted": e.documents_deleted, "findings_written": e.findings_written,
             "findings_discarded": e.findings_discarded, "links_redecided": e.links_redecided, "links_judged": e.links_judged,
+            "full_text_rows_indexed": e.full_text_rows_indexed,
             "link_health_keys_resolved": e.link_health_keys_resolved,
             "link_health_candidates_read": e.link_health_candidates_read,
             "changeset_read_steps": e.changeset_read_steps, "recoveries_run": e.recoveries_run,
-            "rebuilds_run": e.rebuilds_run, "watcher_polls": e.watcher_polls}),
+            "rebuilds_run": e.rebuilds_run, "construction_checkpoint_busy": e.construction_checkpoint_busy, "watcher_polls": e.watcher_polls}),
         )
     };
     #[cfg(not(feature = "induced-failure"))]

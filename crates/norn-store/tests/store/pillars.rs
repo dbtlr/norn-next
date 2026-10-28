@@ -1060,6 +1060,9 @@ fn barred_by(statement: ExplainedStatement<'_>) -> &'static str {
         ExplainedStatement::FindingRules(_) => {
             "a_finding_rules_chunk_seeks_each_finding_and_its_rule_set_by_row_id"
         }
+        ExplainedStatement::FullTextLast
+        | ExplainedStatement::FullTextBatch
+        | ExplainedStatement::FullTextRemaining => "full_text_cursor_statements_seek_document_ids",
         ExplainedStatement::LinkHealthEveryLink | ExplainedStatement::LinkHealthJudgedDiscard => {
             "the_complete_judgment_seeks_each_page_and_its_findings_without_sorting"
         }
@@ -1471,6 +1474,7 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
     .into_iter()
     .chain(crate::health::LINK_HEALTH)
     .chain(crate::judgment::JUDGMENT)
+    .chain(crate::construction::FULL_TEXT)
     .chain(ENUMERATIONS.iter().copied())
     .chain(FEEDS.iter().copied())
     .chain(ExplainedStatement::point_reads(&subject))
@@ -1505,6 +1509,7 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
             "every_write_path_statement_scans_no_table_and_each_keyed_one_seeks",
             "the_link_health_judgment_seeks_every_row_it_reads",
             "the_complete_judgment_seeks_each_page_and_its_findings_without_sorting",
+            "full_text_cursor_statements_seek_document_ids",
             "the_path_discard_seeks_finding_paths_path_key",
             "stem_statements_seek_without_scans_or_sorts",
         ]
@@ -1838,6 +1843,9 @@ fn point_read_bar(statement: ExplainedStatement<'_>) -> Option<PointReadBar> {
         | ExplainedStatement::LinkHealthWrittenLinks
         | ExplainedStatement::LinkHealthEveryLink
         | ExplainedStatement::LinkHealthJudgedDiscard
+        | ExplainedStatement::FullTextLast
+        | ExplainedStatement::FullTextBatch
+        | ExplainedStatement::FullTextRemaining
         | ExplainedStatement::LinkHealthClassFindings
         | ExplainedStatement::LinkHealthFoundLinks
         | ExplainedStatement::LinkHealthDiscard

@@ -1071,6 +1071,7 @@ pub struct Store {
     /// found none.
     under_construction: bool,
     pub(crate) link_health_deferred: bool,
+    pub(crate) steps: Option<crate::construction::Steps>,
     torn_down: bool,
 }
 
@@ -1193,6 +1194,7 @@ impl Store {
             outcome,
             under_construction,
             link_health_deferred: false,
+            steps: None,
             torn_down: false,
         })
     }
@@ -1279,32 +1281,80 @@ impl Store {
         self.link_health_deferred
     }
 
-    /// End the from-zero build that fills this store: delete the
-    /// under-construction mark in one transaction of its own.
+    /// End construction after full text is exhausted and link health is judged.
     ///
-    /// It is not a changeset, so neither the epoch nor the write generation
-    /// moves; on a finished store it deletes nothing. A build that fails never
-    /// reaches this, which is what leaves the mark for the next open to rebuild
-    /// over. A build still deferring link health is refused.
-    pub fn finish_construction(&mut self) -> Result<(), StoreError> {
+    /// For a stepped build, one transaction installs the full-text triggers,
+    /// verifies the recorded schema digest, and clears the construction mark.
+    /// Rung 3 verifies integrity before this call. After commit, restore the opened
+    /// WAL autocheckpoint and truncate the WAL; a busy checkpoint is evidence,
+    /// not a failure. Neither synchronous nor cache size changes.
+    ///
+    /// Stores whose steps never began only delete the mark, as ordinary oracles
+    /// and disposable sources do. Neither epoch nor write generation moves.
+    pub fn finish_construction(&mut self) -> Result<crate::ConstructionFinish, StoreError> {
+        #[cfg(feature = "induced-failure")]
+        let _timing = norn_db::profiling::span("store.step.finish");
         if self.link_health_deferred {
-            return Err(StoreError::Lifecycle {
-                operation: "finishing construction",
-                path: self.path().to_path_buf(),
-                message: "the build still owes its link-health judgment".into(),
-            });
+            return Err(crate::construction::refused(
+                self,
+                "finishing construction",
+                "the build still owes its link-health judgment",
+            ));
+        }
+        if self
+            .steps
+            .as_ref()
+            .is_some_and(|steps| steps.step != crate::construction::Step::FullTextComplete)
+        {
+            return Err(crate::construction::refused(
+                self,
+                "finishing construction",
+                "full text is not exhausted",
+            ));
         }
         let transaction = self
             .database
             .immediate_transaction("opening the construction-finish transaction")?;
-        norn_db::meta::delete_meta(&transaction, ddl::meta::UNDER_CONSTRUCTION)?;
-        transaction.commit().map_err(|error| StoreError::Sql {
-            operation: "finishing construction",
-            condition: None,
-            message: error.to_string(),
-        })?;
+        if self.steps.is_some() {
+            for statement in ddl::fts::statements()
+                .into_iter()
+                .filter(|sql| sql.starts_with("CREATE TRIGGER "))
+            {
+                transaction
+                    .execute_batch(&statement)
+                    .map_err(|e| error::sql("installing full-text triggers", e))?;
+            }
+            let recorded: Option<String> = meta::get_meta(&transaction, meta::SCHEMA_DIGEST)?;
+            let actual = norn_db::schema_digest(&transaction)
+                .map_err(|e| error::sql("checking the finished schema", e))?;
+            if recorded.as_deref() != Some(actual.as_str()) {
+                return Err(StoreError::Damaged {
+                    what: "the finished construction schema differs from its recorded digest"
+                        .into(),
+                });
+            }
+        }
+        meta::delete_meta(&transaction, ddl::meta::UNDER_CONSTRUCTION)?;
+        transaction
+            .commit()
+            .map_err(|e| error::sql("finishing construction", e))?;
         self.under_construction = false;
-        Ok(())
+        if self.steps.is_none() {
+            return Ok(crate::ConstructionFinish::default());
+        }
+        // The build has finished once the mark is gone, so the steps end before
+        // anything below can fail: a finished store never reads as one whose
+        // build began and failed.
+        let restored = self.restore_construction_settings();
+        self.steps = None;
+        restored?;
+        let busy: bool = self
+            .connection()
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))
+            .map_err(|e| error::sql("checkpointing construction", e))?;
+        Ok(crate::ConstructionFinish {
+            checkpoint_busy: busy,
+        })
     }
 
     /// How the open ended up with this database.

@@ -419,6 +419,16 @@ impl<'a> Request<'a> {
         Ok(())
     }
 
+    /// Index one committed batch of at most 2,048 documents by id, including
+    /// names-only rows. Returns true once every document has been indexed.
+    /// Link health must be judged first; document writes are then refused until
+    /// construction finishes. Each call holds no document bodies in Rust memory.
+    pub fn full_text_batch(&mut self, limit: usize) -> Result<bool, StoreError> {
+        let (rows, complete) = crate::construction::full_text_batch(self.store, limit)?;
+        self.counters.add(Counter::FullTextRowsIndexed, rows);
+        Ok(complete)
+    }
+
     /// Only disposable metadata readers may observe rows with omitted bodies.
     pub fn apply_intake_increment(
         &mut self,

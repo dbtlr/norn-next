@@ -18,11 +18,12 @@
 //!
 //! # The index is maintained by triggers, so it cannot be forgotten
 //!
-//! Three triggers on `documents` carry it, and they are the only thing that
-//! writes to `documents_fts`. A caller cannot maintain the index wrongly
-//! because a caller does not maintain it at all: full-text state is
-//! transactionally consistent with `documents.body` for every write path that
-//! exists now and every one added later.
+//! Three triggers on `documents` maintain a finished store's index. A from-zero
+//! construction deliberately drops them: step 5 indexes stored bodies in committed
+//! batches, including NULL-body names-only rows. Document writes are refused once
+//! full text begins. The closing transaction installs these same trigger statements,
+//! checks the schema digest, and clears the construction mark. Rung 3 verifies the
+//! completed index before that transaction. Every later write is trigger-maintained.
 //!
 //! Triggers can be dropped, though, and an external-content index whose
 //! triggers are gone drifts silently: the terms it holds still answer a `MATCH`,

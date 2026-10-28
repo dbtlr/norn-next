@@ -638,6 +638,14 @@ pub const REQUIRED_CASES: &[Case] = &[
         feature: Some(INDUCED_FAILURE),
     },
     Case {
+        id: "induced-kill-mid-full-text-rebuilds-from-zero",
+        suite: Suite::InducedFailure,
+        lane: Lane::RealWatcher,
+        states: "a committed full-text batch leaves the construction mark and absent triggers after process death; the next attach rebuilds with a new epoch and equals the oracle",
+        carrier: "crates/norn-host/tests/kill_recovery.rs::next_attach_rebuilds_from_zero_after_process_death_mid_full_text",
+        feature: Some(INDUCED_FAILURE),
+    },
+    Case {
         id: "induced-write-kernel-drifted-destination",
         suite: Suite::InducedFailure,
         lane: Lane::Any,

@@ -128,6 +128,7 @@ pub mod similarity;
 pub use norn_db::profiling;
 
 mod anchor;
+mod construction;
 mod count;
 mod counters;
 mod describe;
@@ -164,6 +165,7 @@ mod store;
 mod validate;
 mod write_path;
 
+pub use construction::ConstructionFinish;
 pub use count::{
     COUNT_RESULT_STATEMENTS, COUNT_STATEMENTS, CountPlan, CountResultStatement,
     CountRetentionPolicy, CountStatement, CountWork, Counted, GroupMember,

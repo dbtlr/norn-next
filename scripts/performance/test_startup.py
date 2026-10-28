@@ -77,7 +77,7 @@ class StartupAccountingTests(unittest.TestCase):
                 baseline_build(receipt, source)
 
     def ready(self):
-        return {"startup_complete_ns": 30, "timings": {
+        return {"startup_complete_ns": 37, "timings": {
             "unknown_labels": 0, "unfinished_spans": 0,
             "entries": [
                 {"label": "host.document_plan", "calls": 2, "elapsed_ns": 7},
@@ -86,12 +86,14 @@ class StartupAccountingTests(unittest.TestCase):
                 {"label": "store.link_health", "calls": 1, "elapsed_ns": 5},
                 {"label": "store.commit", "calls": 1, "elapsed_ns": 1},
                 {"label": "store.link_health_once", "calls": 1, "elapsed_ns": 3},
+                {"label": "store.step.full_text", "calls": 2, "elapsed_ns": 4},
+                {"label": "store.step.finish", "calls": 1, "elapsed_ns": 3},
             ]}}
 
     def test_parent_and_child_times_are_not_added_twice(self):
         self.assertEqual(partition(self.ready()), {
             "document_plan": 7, "row_and_index_writes": 4, "link_health": 5,
-            "link_health_once": 3, "commit": 1, "other_increment": 2, "other_startup": 8})
+            "link_health_once": 3, "full_text": 7, "commit": 1, "other_increment": 2, "other_startup": 8})
 
     def test_incomplete_or_overlapping_timings_cannot_be_presented_as_a_breakdown(self):
         for field in ("unknown_labels", "unfinished_spans"):
@@ -109,7 +111,7 @@ class StartupAccountingTests(unittest.TestCase):
             partition(ready)
 
     def test_disabled_timing_is_not_reported_as_zero_cost(self):
-        self.assertIsNone(partition({"startup_complete_ns": 30, "timings": None}))
+        self.assertIsNone(partition({"startup_complete_ns": 37, "timings": None}))
 
     def test_report_requires_each_requested_fresh_and_restart_sample_once(self):
         metadata = {"completed": True, "sizes": [300], "batches": [128],

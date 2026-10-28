@@ -85,12 +85,14 @@ pub struct JobEvidence {
     findings_written: AtomicU64,
     links_redecided: AtomicU64,
     links_judged: AtomicU64,
+    full_text_rows_indexed: AtomicU64,
     link_health_keys_resolved: AtomicU64,
     link_health_candidates_read: AtomicU64,
     changeset_read_steps: AtomicU64,
     recoveries_run: AtomicU64,
     rebuilds_run: AtomicU64,
     from_zero_builds: AtomicU64,
+    construction_checkpoint_busy: AtomicU64,
     watcher_polls: AtomicU64,
     watcher_rescans_reported: AtomicU64,
     mint_statements_under_the_gate: AtomicU64,
@@ -176,6 +178,8 @@ pub struct EvidenceReading {
     pub links_redecided: u64,
     /// Links judged once after a from-zero build landed its facts.
     pub links_judged: u64,
+    /// Document rows indexed by from-zero full-text batches, including NULL bodies.
+    pub full_text_rows_indexed: u64,
     /// Keys the increments and complete from-zero judgments resolved.
     pub link_health_keys_resolved: u64,
     /// Candidates the increments and complete from-zero judgments read.
@@ -196,6 +200,8 @@ pub struct EvidenceReading {
     /// under construction, whichever route reached it. An attach over a finished
     /// store adds none.
     pub from_zero_builds: u64,
+    /// Construction checkpoints a reader prevented from truncating the WAL.
+    pub construction_checkpoint_busy: u64,
     /// Watcher polls taken over an attachment, however each one answered.
     ///
     /// One per poll of an entry's attachment — a pass of the dispatcher's
@@ -318,6 +324,9 @@ impl EvidenceReading {
                 .saturating_sub(earlier.findings_written),
             links_redecided: self.links_redecided.saturating_sub(earlier.links_redecided),
             links_judged: self.links_judged.saturating_sub(earlier.links_judged),
+            full_text_rows_indexed: self
+                .full_text_rows_indexed
+                .saturating_sub(earlier.full_text_rows_indexed),
             link_health_keys_resolved: self
                 .link_health_keys_resolved
                 .saturating_sub(earlier.link_health_keys_resolved),
@@ -332,6 +341,9 @@ impl EvidenceReading {
             from_zero_builds: self
                 .from_zero_builds
                 .saturating_sub(earlier.from_zero_builds),
+            construction_checkpoint_busy: self
+                .construction_checkpoint_busy
+                .saturating_sub(earlier.construction_checkpoint_busy),
             watcher_polls: self.watcher_polls.saturating_sub(earlier.watcher_polls),
             watcher_rescans_reported: self
                 .watcher_rescans_reported
@@ -441,12 +453,14 @@ impl JobEvidence {
             findings_written: get(&self.findings_written),
             links_redecided: get(&self.links_redecided),
             links_judged: get(&self.links_judged),
+            full_text_rows_indexed: get(&self.full_text_rows_indexed),
             link_health_keys_resolved: get(&self.link_health_keys_resolved),
             link_health_candidates_read: get(&self.link_health_candidates_read),
             changeset_read_steps: get(&self.changeset_read_steps),
             recoveries_run: get(&self.recoveries_run),
             rebuilds_run: get(&self.rebuilds_run),
             from_zero_builds: get(&self.from_zero_builds),
+            construction_checkpoint_busy: get(&self.construction_checkpoint_busy),
             watcher_polls: get(&self.watcher_polls),
             watcher_rescans_reported: get(&self.watcher_rescans_reported),
             mint_statements_under_the_gate: get(&self.mint_statements_under_the_gate),
@@ -471,6 +485,11 @@ impl JobEvidence {
 
     pub(crate) fn count_rebuild(&self) {
         self.rebuilds_run.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn count_construction_checkpoint_busy(&self) {
+        self.construction_checkpoint_busy
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     pub(crate) fn count_from_zero_build(&self) {
@@ -591,6 +610,8 @@ impl JobEvidence {
             .fetch_add(changesets.links_redecided, Ordering::Relaxed);
         self.links_judged
             .fetch_add(changesets.links_judged, Ordering::Relaxed);
+        self.full_text_rows_indexed
+            .fetch_add(changesets.full_text_rows_indexed, Ordering::Relaxed);
         self.link_health_keys_resolved
             .fetch_add(changesets.link_health_keys_resolved, Ordering::Relaxed);
         self.link_health_candidates_read
@@ -692,6 +713,7 @@ struct ChangesetTally {
     findings_written: u64,
     links_redecided: u64,
     links_judged: u64,
+    full_text_rows_indexed: u64,
     link_health_keys_resolved: u64,
     link_health_candidates_read: u64,
     read_steps: u64,
@@ -707,6 +729,7 @@ thread_local! {
         findings_written: 0,
         links_redecided: 0,
         links_judged: 0,
+        full_text_rows_indexed: 0,
         link_health_keys_resolved: 0,
         link_health_candidates_read: 0,
         read_steps: 0,
@@ -748,6 +771,7 @@ pub(crate) fn count_increment_work(counters: &DerivationCounters, read_steps: u6
         tally.findings_written += counters.findings_written();
         tally.links_redecided += counters.links_redecided();
         tally.links_judged += counters.links_judged();
+        tally.full_text_rows_indexed += counters.full_text_rows_indexed();
         tally.link_health_keys_resolved += counters.link_health_keys_resolved();
         tally.link_health_candidates_read += counters.link_health_candidates_read();
         tally.read_steps += read_steps;
