@@ -302,11 +302,6 @@ class ProcessTests(unittest.TestCase):
                 pass
             process.wait(timeout=5)
             process.stdout.close()
-
-
-if __name__ == "__main__":
-    unittest.main()
-
 class WalPagesTests(unittest.TestCase):
     def test_wal_pages_count_committed_frames_not_retained_file_length(self):
         from baseline import wal_position, wal_pages_written
@@ -376,3 +371,6 @@ class LiveWalPagesTests(unittest.TestCase):
                 self.assertIsNone(wal_pages_written(after, wal_position(root)))
             finally:
                 connection.close()
+
+if __name__ == "__main__":
+    unittest.main()
