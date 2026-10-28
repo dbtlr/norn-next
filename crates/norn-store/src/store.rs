@@ -1283,7 +1283,8 @@ impl Store {
 
     /// End construction after full text is exhausted and link health is judged.
     ///
-    /// For a stepped build, one transaction installs the full-text triggers,
+    /// For a stepped build, one transaction restores any absent deferred index,
+    /// installs the full-text triggers,
     /// verifies the recorded schema digest, and clears the construction mark.
     /// Rung 3 verifies integrity before this call. After commit, restore the opened
     /// WAL autocheckpoint and truncate the WAL; a busy checkpoint is evidence,
@@ -1316,6 +1317,14 @@ impl Store {
             .database
             .immediate_transaction("opening the construction-finish transaction")?;
         if self.steps.is_some() {
+            for (name, _) in ddl::construction::DEFERRED {
+                let exists: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'index' AND name = ?1)", [name], |r| r.get(0)).map_err(|e| error::sql("checking deferred index", e))?;
+                if !exists {
+                    transaction
+                        .execute_batch(&ddl::construction::statement(name))
+                        .map_err(|e| error::sql("restoring deferred index", e))?;
+                }
+            }
             for statement in ddl::fts::statements()
                 .into_iter()
                 .filter(|sql| sql.starts_with("CREATE TRIGGER "))
@@ -2169,6 +2178,10 @@ impl norn_db::Client for StoreClient {
         norn_db::meta::put_meta(transaction, ddl::meta::UNDER_CONSTRUCTION, 1_i64)?;
         norn_db::meta::put_meta(transaction, meta::WRITE_GENERATION, 0_i64)?;
         Ok(())
+    }
+
+    fn unfinished_build_key(&self) -> Option<&'static str> {
+        Some(ddl::meta::UNDER_CONSTRUCTION)
     }
 
     /// Judge the mode, path order and derivation version.

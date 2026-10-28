@@ -42,7 +42,7 @@ impl Store {
     /// Begin from-zero steps on an empty, freshly created store with link health deferred.
     ///
     /// Creates TEMP progress and deferred-spelling tables and drops the three
-    /// full-text triggers atomically, then raises WAL autocheckpoint
+    /// full-text triggers and deferred secondary indexes atomically, then raises WAL autocheckpoint
     /// to 10,000 pages. The opened setting and progress live only in memory: a crash
     /// leaves the construction mark, so the next open rebuilds instead of resuming.
     /// A second call is refused: a build that began and failed leaves a partial
@@ -90,6 +90,14 @@ impl Store {
              CREATE TEMP TABLE construction_spellings(path BLOB PRIMARY KEY) WITHOUT ROWID",
             )
             .map_err(|e| error::sql("deferring full-text triggers", e))?;
+        for (name, _) in crate::ddl::construction::DEFERRED {
+            if crate::ddl::construction::needed_during_names(name) {
+                continue;
+            }
+            transaction
+                .execute_batch(&format!("DROP INDEX {name}"))
+                .map_err(|e| error::sql("deferring construction indexes", e))?;
+        }
         transaction
             .commit()
             .map_err(|e| error::sql("beginning construction steps", e))?;
@@ -184,6 +192,7 @@ pub(crate) fn full_text_batch(store: &mut Store, limit: usize) -> Result<(u64, b
         ));
     }
     if steps.step == Step::FullTextComplete {
+        store.build_step_indexes(Step::FullTextComplete)?;
         return Ok((0, true));
     }
     let cursor = steps.fts_cursor;
@@ -211,6 +220,9 @@ pub(crate) fn full_text_batch(store: &mut Store, limit: usize) -> Result<(u64, b
     } else {
         Step::FullTextComplete
     };
+    if !more {
+        store.build_step_indexes(Step::FullTextComplete)?;
+    }
     Ok((rows as u64, !more))
 }
 
@@ -278,7 +290,9 @@ impl Store {
     }
 
     /// Advance an exhausted step. Progress remains in TEMP until construction
-    /// finishes; it is never a resume record for an interrupted build.
+    /// finishes; it is never a resume record for an interrupted build. Each
+    /// secondary index due at this boundary is created in its own transaction
+    /// before the next step can admit readers.
     pub fn finish_step(&mut self, step: Step) -> Result<(), StoreError> {
         if self.construction_step() != Some(step)
             || self.steps.as_ref().is_some_and(|s| s.group_guard)
@@ -316,6 +330,7 @@ impl Store {
                 "documents remain in this step",
             ));
         }
+        self.build_step_indexes(step)?;
         self.steps.as_mut().expect("steps").step = next;
         Ok(())
     }
@@ -818,4 +833,36 @@ fn stored_structure(row: &norn_db::rusqlite::Row<'_>) -> crate::request::Reading
         frontmatter_links: row.get(8)?,
         frontmatter_tags: row.get(9)?,
     }))
+}
+
+impl Store {
+    /// Commit each index independently before publishing this step's boundary.
+    fn build_step_indexes(&mut self, step: Step) -> Result<(), StoreError> {
+        #[cfg(feature = "induced-failure")]
+        let _timing = norn_db::profiling::span("store.step.index_build");
+        for (name, boundary) in crate::ddl::construction::DEFERRED {
+            if *boundary != step {
+                continue;
+            }
+            let transaction = self
+                .database
+                .immediate_transaction("building a construction index")?;
+            let exists: bool = transaction
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'index' AND name = ?1)",
+                    [name],
+                    |r| r.get(0),
+                )
+                .map_err(|e| error::sql("checking construction index", e))?;
+            if !exists {
+                transaction
+                    .execute_batch(&crate::ddl::construction::statement(name))
+                    .map_err(|e| error::sql("building construction index", e))?;
+            }
+            transaction
+                .commit()
+                .map_err(|e| error::sql("committing construction index", e))?;
+        }
+        Ok(())
+    }
 }

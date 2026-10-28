@@ -65,6 +65,7 @@
 //! class-scoped maintenance. The `findings` area in this tree states the whole of
 //! it beside its own statements.
 
+pub(crate) mod construction;
 pub(crate) mod content_quarantines;
 pub(crate) mod documents;
 pub(crate) mod facts;
