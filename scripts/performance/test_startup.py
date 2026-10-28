@@ -92,8 +92,17 @@ class StartupAccountingTests(unittest.TestCase):
 
     def test_parent_and_child_times_are_not_added_twice(self):
         self.assertEqual(partition(self.ready()), {
-            "content": 0, "structure": 0, "document_plan": 7, "row_and_index_writes": 4, "link_health": 5,
+            "content": 0, "structure": 0, "index_build": 0, "document_plan": 7, "row_and_index_writes": 4, "link_health": 5,
             "link_health_once": 3, "full_text": 7, "commit": 1, "other_increment": 2, "other_startup": 8})
+
+    def test_index_build_is_a_separate_bucket_before_capabilities_publish(self):
+        ready = self.ready()
+        ready["startup_complete_ns"] += 6
+        ready["timings"]["entries"].append({"label": "store.step.index_build", "calls": 24, "elapsed_ns": 6})
+        buckets = partition(ready)
+        self.assertEqual(buckets["index_build"], 6)
+        self.assertEqual(buckets["other_startup"], 8)
+        self.assertEqual(sum(buckets.values()), ready["startup_complete_ns"])
 
     def test_document_steps_count_outer_scopes_once(self):
         ready = self.ready()

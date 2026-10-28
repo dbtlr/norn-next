@@ -42,8 +42,10 @@ impl Store {
     /// Begin from-zero steps on an empty, freshly created store with link health deferred.
     ///
     /// Creates TEMP progress and deferred-spelling tables and drops the three
-    /// full-text triggers atomically, then raises WAL autocheckpoint
-    /// to 10,000 pages. The opened setting and progress live only in memory: a crash
+    /// full-text triggers and deferred secondary indexes atomically; the indexes
+    /// construction maintains row by row (the `KEPT` list beside `DEFERRED`)
+    /// stay.
+    /// Then raises WAL autocheckpoint to 10,000 pages. The opened setting and progress live only in memory: a crash
     /// leaves the construction mark, so the next open rebuilds instead of resuming.
     /// A second call is refused: a build that began and failed leaves a partial
     /// build's rows and full text, so a retry discards the store and builds from
@@ -90,6 +92,11 @@ impl Store {
              CREATE TEMP TABLE construction_spellings(path BLOB PRIMARY KEY) WITHOUT ROWID",
             )
             .map_err(|e| error::sql("deferring full-text triggers", e))?;
+        for (name, _) in crate::ddl::construction::DEFERRED {
+            transaction
+                .execute_batch(&format!("DROP INDEX {name}"))
+                .map_err(|e| error::sql("deferring construction indexes", e))?;
+        }
         transaction
             .commit()
             .map_err(|e| error::sql("beginning construction steps", e))?;
@@ -184,6 +191,9 @@ pub(crate) fn full_text_batch(store: &mut Store, limit: usize) -> Result<(u64, b
         ));
     }
     if steps.step == Step::FullTextComplete {
+        #[cfg(feature = "induced-failure")]
+        drop(_timing);
+        store.build_step_indexes(Step::FullTextComplete)?;
         return Ok((0, true));
     }
     let cursor = steps.fts_cursor;
@@ -211,6 +221,11 @@ pub(crate) fn full_text_batch(store: &mut Store, limit: usize) -> Result<(u64, b
     } else {
         Step::FullTextComplete
     };
+    #[cfg(feature = "induced-failure")]
+    drop(_timing);
+    if !more {
+        store.build_step_indexes(Step::FullTextComplete)?;
+    }
     Ok((rows as u64, !more))
 }
 
@@ -278,7 +293,9 @@ impl Store {
     }
 
     /// Advance an exhausted step. Progress remains in TEMP until construction
-    /// finishes; it is never a resume record for an interrupted build.
+    /// finishes; it is never a resume record for an interrupted build. Each
+    /// secondary index due at this boundary is created in its own transaction
+    /// before the next step can admit readers.
     pub fn finish_step(&mut self, step: Step) -> Result<(), StoreError> {
         if self.construction_step() != Some(step)
             || self.steps.as_ref().is_some_and(|s| s.group_guard)
@@ -303,11 +320,7 @@ impl Store {
         };
         let remaining: bool = self
             .connection()
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM temp.construction_progress WHERE stage = ?1)",
-                [stage],
-                |r| r.get(0),
-            )
+            .query_row(EXHAUSTED_SQL, [stage], |r| r.get(0))
             .map_err(|e| error::sql("checking step exhaustion", e))?;
         if remaining {
             return Err(refused(
@@ -316,6 +329,7 @@ impl Store {
                 "documents remain in this step",
             ));
         }
+        self.build_step_indexes(step)?;
         self.steps.as_mut().expect("steps").step = next;
         Ok(())
     }
@@ -531,7 +545,18 @@ impl crate::Request<'_> {
                     .iter()
                     .all(|tag| tag.source == crate::TagSource::Frontmatter)
             );
-            connection.execute("UPDATE temp.construction_progress SET stage = 2, body_line = ?2, body_column = ?3, frontmatter_links = ?4, frontmatter_tags = ?5 WHERE document = ?1", norn_db::rusqlite::params![id,origin.line,origin.column,facts.links.len(),facts.tags.len()]).map_err(|e| error::sql("advancing content progress", e))?;
+            connection
+                .execute(
+                    CONTENT_PROGRESS_SQL,
+                    norn_db::rusqlite::params![
+                        id,
+                        origin.line,
+                        origin.column,
+                        facts.links.len(),
+                        facts.tags.len()
+                    ],
+                )
+                .map_err(|e| error::sql("advancing content progress", e))?;
             self.counters
                 .add(crate::counters::Counter::ContentRowsWritten, 1);
             self.counters.add(
@@ -574,13 +599,10 @@ impl crate::Request<'_> {
         let connection = self.store.connection();
         if let Some(id) = content_id(connection, path, 1)? {
             connection
-                .execute(
-                    "DELETE FROM temp.construction_progress WHERE document = ?1",
-                    [id],
-                )
+                .execute(WITHDRAW_PROGRESS_SQL, [id])
                 .map_err(|e| error::sql("withdrawing content progress", e))?;
             connection
-                .execute("DELETE FROM documents WHERE id = ?1", [id])
+                .execute(WITHDRAW_SQL, [id])
                 .map_err(|e| error::sql("withdrawing a provisional document", e))?;
         }
         Ok(())
@@ -620,7 +642,9 @@ impl crate::Request<'_> {
                 skipped.insert(input.facts.path.as_str());
                 continue;
             };
-            let (links,tags): (usize,usize) = connection.query_row("SELECT frontmatter_links, frontmatter_tags FROM temp.construction_progress WHERE document = ?1", [id], |r| Ok((r.get(0)?,r.get(1)?))).map_err(|e| error::sql("reading ordinal offsets", e))?;
+            let (links, tags): (usize, usize) = connection
+                .query_row(ORDINALS_SQL, [id], |r| Ok((r.get(0)?, r.get(1)?)))
+                .map_err(|e| error::sql("reading ordinal offsets", e))?;
             debug_assert_eq!(
                 (links, tags),
                 (input.frontmatter_links, input.frontmatter_tags)
@@ -643,10 +667,7 @@ impl crate::Request<'_> {
                 tags,
             )?;
             connection
-                .execute(
-                    "UPDATE temp.construction_progress SET stage = 3 WHERE document = ?1",
-                    [id],
-                )
+                .execute(STRUCTURE_PROGRESS_SQL, [id])
                 .map_err(|e| error::sql("advancing structure progress", e))?;
             self.counters
                 .add(crate::counters::Counter::StructureRowsWritten, 1);
@@ -738,7 +759,10 @@ fn content_id(
     stage: i64,
 ) -> Result<Option<i64>, StoreError> {
     use norn_db::rusqlite::OptionalExtension;
-    connection.query_row("SELECT d.id FROM documents AS d JOIN temp.construction_progress AS p ON p.document = d.id WHERE d.path = ?1 AND p.stage = ?2", (path.as_str(),stage), |r| r.get(0)).optional().map_err(|e| error::sql("reading construction identity", e))
+    connection
+        .query_row(CONTENT_ID_SQL, (path.as_str(), stage), |r| r.get(0))
+        .optional()
+        .map_err(|e| error::sql("reading construction identity", e))
 }
 
 pub(crate) const CONTENT_PAGE_SQL: &str = "SELECT d.path FROM temp.construction_progress AS p JOIN documents AS d ON d.id = p.document WHERE p.stage = 1 ORDER BY p.document LIMIT ?1";
@@ -818,4 +842,95 @@ fn stored_structure(row: &norn_db::rusqlite::Row<'_>) -> crate::request::Reading
         frontmatter_links: row.get(8)?,
         frontmatter_tags: row.get(9)?,
     }))
+}
+
+impl Store {
+    /// Commit each index independently before publishing this step's boundary.
+    fn build_step_indexes(&mut self, step: Step) -> Result<(), StoreError> {
+        #[cfg(feature = "induced-failure")]
+        let _timing = norn_db::profiling::span("store.step.index_build");
+        for (name, boundary) in crate::ddl::construction::DEFERRED {
+            if *boundary != step {
+                continue;
+            }
+            let transaction = self
+                .database
+                .immediate_transaction("building a construction index")?;
+            let exists: bool = transaction
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'index' AND name = ?1)",
+                    [name],
+                    |r| r.get(0),
+                )
+                .map_err(|e| error::sql("checking construction index", e))?;
+            if !exists {
+                transaction
+                    .execute_batch(&crate::ddl::construction::statement(name))
+                    .map_err(|e| error::sql("building construction index", e))?;
+            }
+            transaction
+                .commit()
+                .map_err(|e| error::sql("committing construction index", e))?;
+        }
+        Ok(())
+    }
+}
+
+const CONTENT_ID_SQL: &str = "SELECT d.id FROM documents AS d JOIN temp.construction_progress AS p ON p.document = d.id WHERE d.path = ?1 AND p.stage = ?2";
+
+const CONTENT_PROGRESS_SQL: &str = "UPDATE temp.construction_progress SET stage = 2, body_line = ?2, body_column = ?3, frontmatter_links = ?4, frontmatter_tags = ?5 WHERE document = ?1";
+
+const WITHDRAW_PROGRESS_SQL: &str = "DELETE FROM temp.construction_progress WHERE document = ?1";
+
+const WITHDRAW_SQL: &str = "DELETE FROM documents WHERE id = ?1";
+
+const ORDINALS_SQL: &str = "SELECT frontmatter_links, frontmatter_tags FROM temp.construction_progress WHERE document = ?1";
+
+const STRUCTURE_PROGRESS_SQL: &str =
+    "UPDATE temp.construction_progress SET stage = 3 WHERE document = ?1";
+
+const EXHAUSTED_SQL: &str =
+    "SELECT EXISTS(SELECT 1 FROM temp.construction_progress WHERE stage = ?1)";
+
+#[cfg(test)]
+mod plan_tests {
+    use super::*;
+
+    #[test]
+    fn construction_writes_and_progress_seek_under_deferral() {
+        let scratch = norn_testkit::scratch::Scratch::new("construction-private-plans");
+        let mut store = Store::open(
+            scratch.join("store.sqlite3"),
+            crate::StoredPathOrder::Sensitive,
+            crate::DerivationVersion::new(1),
+        )
+        .unwrap();
+        store.defer_link_health().unwrap();
+        store.begin_steps().unwrap();
+        for phase in [Step::Names, Step::Content, Step::Structure] {
+            for sql in [
+                CONTENT_ID_SQL,
+                CONTENT_WRITE_SQL,
+                CONTENT_PROGRESS_SQL,
+                WITHDRAW_PROGRESS_SQL,
+                WITHDRAW_SQL,
+                ORDINALS_SQL,
+                STRUCTURE_PROGRESS_SQL,
+                EXHAUSTED_SQL,
+            ] {
+                let count = store.connection().prepare(sql).unwrap().parameter_count();
+                let parameters = vec![norn_db::rusqlite::types::Value::Integer(1); count];
+                let plan = store
+                    .database
+                    .emitted_plan(sql, norn_db::rusqlite::params_from_iter(parameters))
+                    .unwrap();
+                assert!(
+                    !plan.steps.iter().any(|row| row.detail.starts_with("SCAN ")
+                        && !row.detail.starts_with("SCAN CONSTANT ROW")),
+                    "{phase:?}: {plan:?}"
+                );
+            }
+            store.finish_step(phase).unwrap();
+        }
+    }
 }

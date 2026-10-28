@@ -302,7 +302,75 @@ class ProcessTests(unittest.TestCase):
                 pass
             process.wait(timeout=5)
             process.stdout.close()
+class WalPagesTests(unittest.TestCase):
+    def test_wal_pages_count_committed_frames_not_retained_file_length(self):
+        from baseline import wal_position, wal_pages_written
+        import struct
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = root / "data"
+            data.mkdir()
+            db = data / "store.sqlite3"
+            db.touch()
+            wal = db.with_name(db.name + "-wal")
+            shm = db.with_name(db.name + "-shm")
+            header = bytearray(32)
+            header[8:12] = (4096).to_bytes(4, "big")
+            header[16:24] = b"abcdefgh"
+            wal.write_bytes(header + bytes(100000))
+            index = bytearray(48)
+            index[16:20] = struct.pack("=I", 5)
+            shm.write_bytes(index)
+            before = wal_position(root)
+            index[16:20] = struct.pack("=I", 8)
+            shm.write_bytes(index)
+            self.assertEqual(wal_pages_written(before, wal_position(root)), 3)
+            header[16:24] = b"ijklmnop"
+            wal.write_bytes(header)
+            self.assertIsNone(wal_pages_written(before, wal_position(root)))
 
+    def test_empty_wal_counts_the_first_transaction_and_truncation_is_unknown(self):
+        from baseline import wal_pages_written
+        self.assertEqual(wal_pages_written(None, ("salt", 4096, 9)), 9)
+        self.assertIsNone(wal_pages_written(("salt", 4096, 9), None))
+        self.assertEqual(wal_pages_written(None, None), 0)
+
+class WritePhaseTests(unittest.TestCase):
+    def test_phases_include_the_first_write_and_separate_payoff(self):
+        from baseline import write_phase_summary
+        samples = [{"iteration": i, "round_trip_ns": (100 if i < 200 else 50), "wal_pages_per_write": (8 if i < 200 else 4)} for i in range(400)]
+        summary = write_phase_summary(samples)
+        self.assertEqual(summary["first_200"], {"writes": 200, "median_ns": 100, "median_wal_pages_per_write": 8, "wal_observations": 200})
+        self.assertEqual(summary["after_payoff"]["median_ns"], 50)
+        self.assertEqual(summary["after_payoff"]["median_wal_pages_per_write"], 4)
+        samples[0]["wal_pages_per_write"] = None
+        self.assertEqual(write_phase_summary(samples)["first_200"]["wal_observations"], 199)
+
+class LiveWalPagesTests(unittest.TestCase):
+    def test_committed_frames_match_sqlites_report_across_a_checkpoint(self):
+        import sqlite3
+        from baseline import wal_position, wal_pages_written
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "data").mkdir()
+            connection = sqlite3.connect(root / "data" / "store.sqlite3")
+            try:
+                connection.execute("PRAGMA journal_mode=WAL")
+                connection.execute("PRAGMA wal_autocheckpoint=0")
+                connection.execute("CREATE TABLE payload(value BLOB)")
+                connection.commit()
+                before = wal_position(root)
+                connection.execute("INSERT INTO payload VALUES (?)", (bytes(16000),))
+                connection.commit()
+                after = wal_position(root)
+                self.assertGreater(wal_pages_written(before, after), 0)
+                busy, logged, checkpointed = connection.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
+                self.assertEqual((busy, logged, checkpointed), (0, after[2], after[2]))
+                connection.execute("INSERT INTO payload VALUES (?)", (bytes(16000),))
+                connection.commit()
+                self.assertIsNone(wal_pages_written(after, wal_position(root)))
+            finally:
+                connection.close()
 
 if __name__ == "__main__":
     unittest.main()

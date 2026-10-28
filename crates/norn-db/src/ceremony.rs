@@ -34,7 +34,10 @@
 //! [`Client::adopt`] once the mechanics call the database usable. Whether a
 //! file outlives its handle, which model a projection was computed under: what
 //! those keys mean is not knowable here, so the client answers keep, rebuild
-//! with a detail, or refuse.
+//! with a detail, or refuse. A client can name an unfinished-build meta key
+//! through [`Client::unfinished_build_key`]: when it is present, adoption runs
+//! before the schema digest check so a temporary schema cannot hide a refusal
+//! or the client's rebuild reason. A keep answer still validates the schema.
 //!
 //! # Damage is resolved; a broken environment is refused
 //!
@@ -229,10 +232,11 @@ pub enum Adoption {
 
 /// The crate that owns what a statement list means.
 ///
-/// The ceremony calls back into it at three hooks: [`Client::record`], once
+/// The ceremony calls back into it through [`Client::record`], once
 /// inside the create transaction, to record the keys the client pins;
 /// [`Client::adopt`], once after the mechanics verdict, to take the verdict
-/// over those keys; and [`Client::armed_failure`], once ahead of every
+/// over those keys; [`Client::unfinished_build_key`], to allow that adoption
+/// before schema validation for an interrupted build; and [`Client::armed_failure`], once ahead of every
 /// statement of the list, to ask whether a suite arranged one to fail.
 pub trait Client {
     /// The refusal this client reports. Every substrate refusal crosses into
@@ -250,9 +254,17 @@ pub trait Client {
     /// again, so every open after it rebuilds too.
     fn record(&self, transaction: &Connection) -> Result<(), Self::Error>;
 
-    /// Judge the client's own keys in a database the mechanics call usable —
+    /// Judge the client's own keys in a usable database or an unfinished build —
     /// keep it, rebuild it, or refuse it.
     fn adopt(&self, connection: &Connection, path: &Path) -> Result<Adoption, Self::Error>;
+
+    /// A client-owned meta key marking an unfinished build. Its presence asks
+    /// adoption to judge refusal and rebuild policy before the schema digest,
+    /// since construction may temporarily remove schema objects. A client that
+    /// keeps the database still receives the ordinary digest check.
+    fn unfinished_build_key(&self) -> Option<&'static str> {
+        None
+    }
 
     /// The error a statement of the list meets where an arrangement armed one.
     ///
@@ -278,29 +290,44 @@ pub fn open<C: Client>(
 ) -> Result<(Connection, OpenOutcome), C::Error> {
     prepare_parent(path)?;
     match connect(path)? {
-        Attempt::Connected(connection) => match inspect(&connection, schema)? {
-            Verdict::Fresh => {
-                create(&connection, schema, client)?;
-                Ok((connection, OpenOutcome::Created))
-            }
-            Verdict::Usable => match client.adopt(&connection, path)? {
-                Adoption::Keep => Ok((connection, OpenOutcome::Reused)),
-                Adoption::Rebuild { detail } => {
+        Attempt::Connected(connection) => {
+            match inspect(&connection, schema, client.unfinished_build_key())? {
+                Verdict::Fresh => {
+                    create(&connection, schema, client)?;
+                    Ok((connection, OpenOutcome::Created))
+                }
+                verdict @ (Verdict::Usable | Verdict::ClientFirst) => match client
+                    .adopt(&connection, path)?
+                {
+                    Adoption::Keep => {
+                        if matches!(verdict, Verdict::ClientFirst)
+                            && let Verdict::Rebuild(reason) = inspect(&connection, schema, None)?
+                        {
+                            drop(connection);
+                            return Ok((
+                                rebuild(path, schema, client)?,
+                                OpenOutcome::RebuiltFromZero(reason),
+                            ));
+                        }
+                        Ok((connection, OpenOutcome::Reused))
+                    }
+                    Adoption::Rebuild { detail } => {
+                        drop(connection);
+                        Ok((
+                            rebuild(path, schema, client)?,
+                            OpenOutcome::RebuiltFromZero(RebuildReason::Client { detail }),
+                        ))
+                    }
+                },
+                Verdict::Rebuild(reason) => {
                     drop(connection);
                     Ok((
                         rebuild(path, schema, client)?,
-                        OpenOutcome::RebuiltFromZero(RebuildReason::Client { detail }),
+                        OpenOutcome::RebuiltFromZero(reason),
                     ))
                 }
-            },
-            Verdict::Rebuild(reason) => {
-                drop(connection);
-                Ok((
-                    rebuild(path, schema, client)?,
-                    OpenOutcome::RebuiltFromZero(reason),
-                ))
             }
-        },
+        }
         Attempt::Unreadable { detail } => Ok((
             rebuild(path, schema, client)?,
             OpenOutcome::RebuiltFromZero(RebuildReason::Damaged { detail }),
@@ -336,6 +363,8 @@ enum Verdict {
     Fresh,
     /// The shape this build writes.
     Usable,
+    /// The client must judge an unfinished build before schema validation.
+    ClientFirst,
     Rebuild(RebuildReason),
 }
 
@@ -347,7 +376,11 @@ enum Verdict {
 /// environment. That matters most for the `meta` reads — a busy database, a
 /// revoked permission or an I/O error on one of them is not evidence that the
 /// stored state is wrong.
-fn inspect(connection: &Connection, schema: &Schema) -> Result<Verdict, DbError> {
+fn inspect(
+    connection: &Connection,
+    schema: &Schema,
+    unfinished_build_key: Option<&str>,
+) -> Result<Verdict, DbError> {
     let reading = schema.operations.reading;
     let objects: i64 =
         match connection.query_row("SELECT count(*) FROM sqlite_schema", [], |row| row.get(0)) {
@@ -395,6 +428,20 @@ fn inspect(connection: &Connection, schema: &Schema) -> Result<Verdict, DbError>
             expected,
             found,
         }));
+    }
+
+    if let Some(key) = unfinished_build_key {
+        let present: bool = match connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM meta WHERE key = ?1)",
+            [key],
+            |row| row.get(0),
+        ) {
+            Ok(present) => present,
+            Err(error) => return rebuild_or_fail(reading, error).map(Verdict::Rebuild),
+        };
+        if present {
+            return Ok(Verdict::ClientFirst);
+        }
     }
 
     let recorded: Option<String> = match meta::read_meta(connection, meta::SCHEMA_DIGEST) {

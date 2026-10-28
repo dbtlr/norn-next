@@ -487,6 +487,18 @@ fn read_the_store_raw(database: &Path) -> (bool, usize, String) {
     let epoch: String = norn_db::meta::get_meta(connection, norn_db::meta::STORE_EPOCH)
         .expect("reading the epoch")
         .expect("a created store has an epoch");
+    if marked {
+        let absent: bool = connection.query_row("SELECT NOT EXISTS(SELECT 1 FROM sqlite_schema WHERE name = 'documents_content_hash')", [], |r| r.get(0)).unwrap();
+        assert!(absent, "the killed stepped build still held its late index");
+        assert!(matches!(
+            Store::open_throwaway(
+                database.path(),
+                StoredPathOrder::Sensitive,
+                norn_host::DERIVATION_VERSION
+            ),
+            Err(norn_store::StoreError::Lifecycle { .. })
+        ));
+    }
     (marked, rows as usize, epoch)
 }
 

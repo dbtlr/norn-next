@@ -16,3 +16,6 @@ certification-logs/
 
 # The qualification record a lane emits, where a local run names a sink.
 qualification-record.json
+
+# Local implementation experiments and proving logs.
+/.scratch/

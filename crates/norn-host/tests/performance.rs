@@ -118,6 +118,7 @@ fn performance_worker() {
             "store.step.content",
             "store.step.structure",
             "store.step.full_text",
+            "store.step.index_build",
             "store.step.finish",
             "store.commit",
             "store.write_finding",

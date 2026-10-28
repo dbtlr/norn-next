@@ -226,6 +226,24 @@ fn finishing_restores_the_created_schema_digest() {
         "NOT EXISTS(SELECT 1 FROM meta WHERE key = 'under_construction')",
     );
     store.verify_integrity().unwrap();
+    let schema_text = |store: &Store| {
+        let opened = norn_db::open_read_only(store.path()).adopted.unwrap();
+        opened
+            .connection()
+            .prepare("SELECT type, name, sql FROM sqlite_schema ORDER BY type, name")
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    assert_eq!(schema_text(&store), schema_text(&oracle));
     let audit = norn_store::startup_audit::audit(store.path(), |_, _, _| Ok(())).unwrap();
     for table in ["documents_fts_vocab", "documents_fts_docsize"] {
         assert_eq!(
@@ -343,7 +361,7 @@ fn a_schema_mismatch_rolls_back_the_closing_transaction() {
     store.begin_steps().unwrap();
     judge(&mut store);
     assert!(store.begin_request().full_text_batch(2).unwrap());
-    induced_failure::execute_out_of_band(&mut store, "DROP INDEX documents_content_hash").unwrap();
+    induced_failure::execute_out_of_band(&mut store, "DROP INDEX documents_path").unwrap();
     assert!(matches!(
         store.finish_construction(),
         Err(StoreError::Damaged { .. })
@@ -862,4 +880,198 @@ fn a_step_group_never_exceeds_2048_documents() {
     group.commit().unwrap();
     assert!(store.begin_request().content_page(1024).unwrap().is_empty());
     store.finish_step(Step::Content).unwrap();
+}
+
+#[test]
+fn interrupted_steps_are_construction_not_damage_and_refuse_throwaway() {
+    use norn_store::{OpenOutcome, RebuildReason, StoredPathOrder};
+    let scratch = Scratch::new("interrupted-steps-adoption");
+    let mut store = scratch.open();
+    store.defer_link_health().unwrap();
+    store.begin_steps().unwrap();
+    drop(store);
+    assert!(matches!(
+        Store::open_throwaway(
+            scratch.database(),
+            StoredPathOrder::Sensitive,
+            crate::common::DERIVATION
+        ),
+        Err(StoreError::Lifecycle { .. })
+    ));
+    let store = scratch.open();
+    assert!(
+        matches!(store.open_outcome(), OpenOutcome::RebuiltFromZero(RebuildReason::Client { detail }) if detail.contains("construction never finished")),
+        "{:?}",
+        store.open_outcome()
+    );
+}
+
+#[test]
+fn deferred_indexes_appear_at_their_step() {
+    use norn_store::Step;
+    let scratch = Scratch::new("deferred-index-boundaries");
+    let mut store = scratch.open();
+    let indexes = |store: &Store| {
+        let opened = norn_db::open_read_only(store.path()).adopted.unwrap();
+        let connection = opened.connection();
+        connection.prepare("SELECT name FROM sqlite_schema WHERE type = 'index' AND sql LIKE 'CREATE INDEX %' AND tbl_name IN ('documents','vault_files','document_fields','link_keys','headings','blocks','document_tags','document_trigrams') ORDER BY name").unwrap().query_map([], |r| r.get::<_,String>(0)).unwrap().collect::<Result<Vec<_>,_>>().unwrap()
+    };
+    let original = indexes(&store);
+    store.defer_link_health().unwrap();
+    store.begin_steps().unwrap();
+    // Kept throughout construction: two that steps 1 and 2 seek, and four whose
+    // bulk-built packing would cost every later hub rename extra WAL pages.
+    assert_eq!(
+        indexes(&store),
+        [
+            "document_fields_least_raw",
+            "document_fields_raw",
+            "document_fields_value_type",
+            "document_trigrams_document_trigram",
+            "documents_path_key",
+            "documents_path_nocase"
+        ]
+    );
+    for (step, count) in [
+        (Step::Names, 12),
+        (Step::Content, 17),
+        (Step::Structure, 24),
+    ] {
+        store.finish_step(step).unwrap();
+        assert_eq!(indexes(&store).len(), count, "{step:?}");
+    }
+    judge(&mut store);
+    assert!(store.begin_request().full_text_batch(128).unwrap());
+    assert_eq!(indexes(&store), original);
+    store.finish_construction().unwrap();
+}
+
+#[test]
+fn construction_write_census_scans_no_vault_sized_table() {
+    use norn_store::{Step, WriteStatement};
+    let scratch = Scratch::new("construction-write-census");
+    let mut store = scratch.open();
+    store.defer_link_health().unwrap();
+    store.begin_steps().unwrap();
+    let mut scans = Vec::new();
+    for phase in [Step::Names, Step::Content, Step::Structure] {
+        for statement in WriteStatement::all() {
+            let plan = store
+                .begin_request()
+                .emitted_plan(ExplainedStatement::Write(statement))
+                .unwrap();
+            for row in plan.steps.iter().filter(|s| {
+                s.detail.starts_with("SCAN ") && !s.detail.starts_with("SCAN CONSTANT ROW")
+            }) {
+                scans.push(format!("{phase:?} {statement:?}: {}", row.detail));
+            }
+        }
+        store.finish_step(phase).unwrap();
+    }
+    assert!(scans.is_empty(), "{scans:#?}");
+}
+
+#[test]
+fn finish_defensively_restores_a_missing_deferred_index() {
+    let scratch = Scratch::new("construction-defensive-index");
+    let mut store = scratch.open();
+    store.defer_link_health().unwrap();
+    store.begin_steps().unwrap();
+    judge(&mut store);
+    assert!(store.begin_request().full_text_batch(2).unwrap());
+    induced_failure::execute_out_of_band(&mut store, "DROP INDEX documents_content_hash").unwrap();
+    store.finish_construction().unwrap();
+    drop(store);
+    assert!(matches!(
+        scratch.open().open_outcome(),
+        norn_store::OpenOutcome::Reused
+    ));
+}
+
+#[test]
+fn construction_page_read_steps_per_document_stay_flat_at_four_times_the_vault() {
+    use crate::common::path;
+    use norn_store::{
+        Change, ContentModel, ContentWrite, DocumentFacts, IncrementProvenance, Span, Step,
+    };
+    let measure = |n: usize| {
+        let scratch = Scratch::new(&format!("construction-flat-{n}"));
+        let mut store = scratch.open();
+        store.defer_link_health().unwrap();
+        store.begin_steps().unwrap();
+        for start in (0..n).step_by(128) {
+            store
+                .begin_request()
+                .apply_increment(
+                    IncrementProvenance::Derived,
+                    (start..(start + 128).min(n)).map(|i| Change::Named {
+                        path: path(&format!("document-{i:05}.md")),
+                    }),
+                    &[],
+                    &ContentModel::none(),
+                )
+                .unwrap();
+        }
+        store.finish_step(Step::Names).unwrap();
+        let mut content_steps = 0;
+        loop {
+            let mut group = store.step_group().unwrap();
+            let mut request = group.begin_request();
+            let rows = request.content_page(128).unwrap();
+            content_steps += request.read_steps();
+            let rows: Vec<_> = rows
+                .into_iter()
+                .map(|path| ContentWrite {
+                    facts: DocumentFacts::new(path, "hash", "body", 4),
+                    origin: Span {
+                        line: 1,
+                        column: 1,
+                        byte_offset: 0,
+                    },
+                })
+                .collect();
+            let empty = rows.is_empty();
+            request
+                .write_content(&rows, &[], &ContentModel::none())
+                .unwrap();
+            request.finish();
+            group.commit().unwrap();
+            if empty {
+                break;
+            }
+        }
+        store.finish_step(Step::Content).unwrap();
+        let mut structure_steps = 0;
+        loop {
+            let mut group = store.step_group().unwrap();
+            let mut request = group.begin_request();
+            let mut rows = request.structure_page(128).unwrap();
+            for input in &mut rows {
+                request.load_structure_tags(input).unwrap();
+            }
+            structure_steps += request.read_steps();
+            let empty = rows.is_empty();
+            request
+                .write_structure(&rows, &[], &ContentModel::none())
+                .unwrap();
+            request.finish();
+            group.commit().unwrap();
+            if empty {
+                break;
+            }
+        }
+        store.finish_step(Step::Structure).unwrap();
+        [
+            content_steps as f64 / n as f64,
+            structure_steps as f64 / n as f64,
+        ]
+    };
+    let small = measure(256);
+    let large = measure(1024);
+    for (small, large) in small.into_iter().zip(large) {
+        assert!(
+            small > 0.0 && large <= small * 1.02,
+            "read steps/document {small} -> {large}"
+        );
+    }
 }
