@@ -2,27 +2,19 @@
 
 use crate::Step;
 
-/// Non-unique indexes and the boundary before their readers can run.
-/// Unique indexes and primary keys remain throughout construction. Findings,
-/// directory marks, rule sets, tombstones and quarantines keep every index:
-/// construction maintains them incrementally. The reverse trigram index is
-/// retained during names: document upsert foreign-key plans already seek it.
-/// The NOCASE path index likewise stays for unreadable-directory ranges.
-/// These two entries name their latest boundary but are needed before it.
+/// Non-unique indexes and the boundary before their readers can run: dropped
+/// when construction begins and created once, from the create ceremony's own
+/// text, when that step ends. Unique indexes and primary keys remain
+/// throughout construction, and so do every index on findings, directory
+/// marks, rule sets, tombstones and quarantines, and the indexes in [`KEPT`].
 pub(crate) const DEFERRED: &[(&str, Step)] = &[
-    ("documents_path_key", Step::Names),
-    ("documents_path_nocase", Step::Names),
     ("documents_suffix_key", Step::Names),
     ("documents_admitted_suffix_key", Step::Names),
     ("vault_files_path_nocase", Step::Names),
     ("vault_files_path_key", Step::Names),
     ("vault_files_suffix_key", Step::Names),
     ("vault_files_admitted_suffix_key", Step::Names),
-    ("document_trigrams_document_trigram", Step::Names),
-    ("document_fields_value_type", Step::Content),
-    ("document_fields_raw", Step::Content),
     ("document_fields_typed", Step::Content),
-    ("document_fields_least_raw", Step::Content),
     ("document_fields_least_typed", Step::Content),
     ("document_fields_presence", Step::Content),
     ("document_fields_offset", Step::Content),
@@ -50,13 +42,35 @@ pub(crate) fn statement(name: &str) -> String {
         .expect("deferred index belongs to the create ceremony")
 }
 
-/// Names already runs upserts and unreadable-directory range statements.
-pub(crate) fn needed_during_names(name: &str) -> bool {
-    matches!(
-        name,
-        "documents_path_nocase" | "document_trigrams_document_trigram"
+/// Non-unique indexes on the deferred tables that construction maintains row
+/// by row, as an ordinary build does.
+///
+/// - `document_trigrams_document_trigram` and `documents_path_nocase`: the
+///   names step already seeks them, the first through a document upsert's
+///   foreign-key plan and the second through unreadable-directory ranges.
+/// - `documents_path_key`, `document_fields_value_type`, `document_fields_raw`
+///   and `document_fields_least_raw`: a hub rename moves a cluster of their
+///   entries between two key regions on every write. Built in bulk, they are
+///   packed so full that each reinsertion splits a page and each emptied page
+///   merges back, so every later hub rename wrote about nine more WAL pages
+///   than an ordinary build's, indefinitely. Maintained row by row they keep
+///   an ordinary build's fill, and steady-state writes cost what they always
+///   did.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "names what begin_steps keeps; the partition test checks it"
     )
-}
+)]
+pub(crate) const KEPT: &[&str] = &[
+    "document_trigrams_document_trigram",
+    "documents_path_nocase",
+    "documents_path_key",
+    "document_fields_value_type",
+    "document_fields_raw",
+    "document_fields_least_raw",
+];
 
 #[cfg(test)]
 mod tests {
@@ -87,9 +101,18 @@ mod tests {
                 tables.contains(&table).then(|| name.trim().to_owned())
             })
             .collect();
-        let actual: BTreeSet<_> = DEFERRED.iter().map(|(name, _)| name.to_string()).collect();
-        assert_eq!(actual.len(), DEFERRED.len(), "duplicate deferred index");
-        assert_eq!(actual, expected);
+        let deferred: BTreeSet<_> = DEFERRED.iter().map(|(name, _)| name.to_string()).collect();
+        let kept: BTreeSet<_> = KEPT.iter().map(|name| name.to_string()).collect();
+        assert_eq!(deferred.len(), DEFERRED.len(), "duplicate deferred index");
+        assert_eq!(kept.len(), KEPT.len(), "duplicate kept index");
+        assert!(
+            deferred.is_disjoint(&kept),
+            "an index both deferred and kept"
+        );
+        assert_eq!(&deferred | &kept, expected);
+        for name in KEPT {
+            assert!(statement(name).starts_with("CREATE INDEX "));
+        }
         for (name, _) in DEFERRED {
             assert!(statement(name).starts_with("CREATE INDEX "));
         }

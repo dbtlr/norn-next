@@ -42,8 +42,9 @@ impl Store {
     /// Begin from-zero steps on an empty, freshly created store with link health deferred.
     ///
     /// Creates TEMP progress and deferred-spelling tables and drops the three
-    /// full-text triggers and deferred secondary indexes atomically. The NOCASE
-    /// document-path and reverse trigram indexes stay for the names pass itself.
+    /// full-text triggers and deferred secondary indexes atomically; the indexes
+    /// construction maintains row by row (the `KEPT` list beside `DEFERRED`)
+    /// stay.
     /// Then raises WAL autocheckpoint to 10,000 pages. The opened setting and progress live only in memory: a crash
     /// leaves the construction mark, so the next open rebuilds instead of resuming.
     /// A second call is refused: a build that began and failed leaves a partial
@@ -92,9 +93,6 @@ impl Store {
             )
             .map_err(|e| error::sql("deferring full-text triggers", e))?;
         for (name, _) in crate::ddl::construction::DEFERRED {
-            if crate::ddl::construction::needed_during_names(name) {
-                continue;
-            }
             transaction
                 .execute_batch(&format!("DROP INDEX {name}"))
                 .map_err(|e| error::sql("deferring construction indexes", e))?;

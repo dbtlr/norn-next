@@ -919,14 +919,24 @@ fn deferred_indexes_appear_at_their_step() {
     let original = indexes(&store);
     store.defer_link_health().unwrap();
     store.begin_steps().unwrap();
+    // Kept throughout construction: two that steps 1 and 2 seek, and four whose
+    // bulk-built packing would cost every later hub rename extra WAL pages.
     assert_eq!(
         indexes(&store),
         [
+            "document_fields_least_raw",
+            "document_fields_raw",
+            "document_fields_value_type",
             "document_trigrams_document_trigram",
+            "documents_path_key",
             "documents_path_nocase"
         ]
     );
-    for (step, count) in [(Step::Names, 9), (Step::Content, 17), (Step::Structure, 24)] {
+    for (step, count) in [
+        (Step::Names, 12),
+        (Step::Content, 17),
+        (Step::Structure, 24),
+    ] {
         store.finish_step(step).unwrap();
         assert_eq!(indexes(&store).len(), count, "{step:?}");
     }
