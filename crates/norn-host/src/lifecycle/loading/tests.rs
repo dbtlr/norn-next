@@ -144,6 +144,8 @@ fn watcher_withdrawal_moves_the_host_signal_without_a_dispatcher_or_gate_retake(
         isolation::REAL_WATCHER,
         isolation::acquisition_budget(budget),
     );
+    // FSEvents can deliver the fixture's writes after the host attaches.
+    norn_fs::watch::settle_prior_changes(scratch.root(), budget.work()).unwrap();
     let name = VaultName::new("notes").unwrap();
     let pause = Arc::new(Pause {
         before_catalogue: true,

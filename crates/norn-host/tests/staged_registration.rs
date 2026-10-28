@@ -221,6 +221,9 @@ fn fixture(label: &str) -> (Scratch, std::path::PathBuf, ConfigDirs, Lease) {
         isolation::REAL_WATCHER,
         isolation::acquisition_budget(BUDGET),
     );
+    // FSEvents can deliver the fixture's writes after a host attaches, and a
+    // case that builds its host itself never passes through `host`'s settle.
+    norn_fs::watch::settle_prior_changes(scratch.root(), BUDGET.work()).unwrap();
     (scratch, root, dirs, lease)
 }
 fn name() -> VaultName {
@@ -371,6 +374,7 @@ fn dynamic_registration_and_replacement_reobserve_storage_before_any_read() {
                 std::fs::create_dir_all(moved.join(".norn")).unwrap();
                 std::fs::write(moved.join(".norn/schema.yaml"), "version: 1\n").unwrap();
                 std::fs::write(moved.join("doc1.md"), "# Moved\nWhole body.\n").unwrap();
+                norn_fs::watch::settle_prior_changes(scratch.root(), BUDGET.work()).unwrap();
                 host.vault_set(
                     &VaultSetParams::new(name())
                         .with_root(VaultReplace::set(VaultRoot::new(&moved).unwrap())),

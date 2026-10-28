@@ -190,6 +190,30 @@ impl Fixture {
         bound: Duration,
         policy: ProductionPolicy,
     ) -> Host<ProductionEntryOps> {
+        self.host_ticking(probe, bound, policy, Duration::from_millis(25))
+    }
+    /// A host whose dispatcher does not tick during a case. A read bounded to
+    /// zero takes the entry gate with one try, so a tick holding the gate at
+    /// that instant would refuse it for the gate rather than for readiness.
+    fn host_without_ticks(
+        &self,
+        probe: Arc<dyn LoadingProbe>,
+        bound: Duration,
+    ) -> Host<ProductionEntryOps> {
+        self.host_ticking(
+            probe,
+            bound,
+            ProductionPolicy::new(2, 2).unwrap(),
+            Duration::from_secs(3600),
+        )
+    }
+    fn host_ticking(
+        &self,
+        probe: Arc<dyn LoadingProbe>,
+        bound: Duration,
+        policy: ProductionPolicy,
+        tick: Duration,
+    ) -> Host<ProductionEntryOps> {
         let registration = Registration::new(name(), VaultRoot::new(&self.root).unwrap());
         norn_fs::watch::settle_prior_changes(self.scratch.root(), BUDGET.work()).unwrap();
         Host::new(
@@ -198,7 +222,7 @@ impl Fixture {
             LifecyclePolicy {
                 idle_after: Duration::from_secs(7200),
                 worker_slots: 1,
-                watch_poll_interval: Duration::from_millis(25),
+                watch_poll_interval: tick,
                 read_settle_bound: bound,
             },
         )
@@ -455,7 +479,7 @@ fn incoming_targets_and_complete_find_remain_available_through_later_constructio
 fn an_early_source_available_at_the_deadline_gets_first_index_expiry() {
     let fixture = Fixture::new("public-stage-publication-deadline");
     let probe = Probe::new([Point::MetadataComplete]);
-    let host = fixture.host_bound(probe.clone(), Duration::ZERO);
+    let host = fixture.host_without_ticks(probe.clone(), Duration::ZERO);
     let _release = Release(&probe);
     let _demand = host.demand(&name()).unwrap();
     probe.wait(Point::MetadataComplete);
