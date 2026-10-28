@@ -15851,19 +15851,13 @@ mod tests {
         derived_vault(&mut store, registration.root.as_path())
     }
 
-    /// Overwrite the pages a database keeps its documents in, leaving the store
+    /// Overwrite the root page of the `documents` table, leaving the store
     /// schema an open reads intact.
     ///
-    /// A database is created holding its store schema, and every page written
-    /// after that is appended past it, so the tail is documents and the head is
-    /// the schema. This is real corruption rather than an injected verdict: what
-    /// the store meets is a page SQLite refuses to read.
-    ///
-    /// **The boundary is measured, not a share of the file.** A store created
-    /// beside this one holds the same store schema and no documents, so its
-    /// length is exactly how far the create wrote — and every byte past that
-    /// mark in this database was appended by a later write. A fraction of the
-    /// finished file names the same boundary only until the schema next grows.
+    /// This is real corruption rather than an injected verdict: what the store
+    /// meets is a page SQLite refuses to read. The page is found by its root in
+    /// `sqlite_schema`, not by an offset past an empty create, because a
+    /// from-zero build places index pages wherever their step builds them.
     fn corrupt_the_document_pages(_f: &Fixture, database: &Path) {
         let opened = norn_db::open_read_only(database).adopted.unwrap();
         let root: usize = opened
