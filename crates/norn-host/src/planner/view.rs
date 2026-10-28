@@ -1542,12 +1542,13 @@ mod tests {
         let scratch = Scratch::new("planner-view-unreadable-case");
         std::fs::create_dir(scratch.join("folder")).expect("a folder");
         std::fs::write(scratch.join("folder/c.MD"), "N").expect("a document");
-        let child = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", TEST, "--nocapture"])
-            .env(CHILD_ROOT, scratch.root())
-            .env("NORN_FS_WALK_ARMED_STAGES", "page=denied")
-            .output()
-            .unwrap();
+        let child = crate::child_gate::output_of_test_binary(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", TEST, "--nocapture"])
+                .env(CHILD_ROOT, scratch.root())
+                .env("NORN_FS_WALK_ARMED_STAGES", "page=denied"),
+        )
+        .unwrap();
         assert!(
             child.status.success(),
             "{}\n{}",
