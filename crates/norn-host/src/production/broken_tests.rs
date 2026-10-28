@@ -998,8 +998,13 @@ fn marking_a_directory_leaves_its_readable_case_twin_untouched() {
     }
 }
 
-/// A contained step-2 open can discover an unlistable ancestor after names
-/// have committed. Every descendant leaves the progress queue as broken.
+/// **A directory step 1 listed and step 2 cannot is a held directory that
+/// stopped listing.** Every descendant leaves the progress queue as a
+/// names-only row with no tombstone, beneath the directory's finding: what
+/// ADR 0046 gives a store that held those rows when the mark is first filed.
+/// That is the ordinary build to compare with — the tree as step 1 listed it,
+/// then the heal that meets the mark — not a build from zero over the final
+/// tree, which never saw the names and so holds no rows beneath it.
 #[test]
 fn a_mark_found_when_content_opens() {
     const CHILD: &str = "NORN_STEP_CONTENT_DIRECTORY_CHILD";
