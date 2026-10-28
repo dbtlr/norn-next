@@ -53,10 +53,11 @@ def partition(ready: dict) -> dict | None:
     full_text = values.get("store.step.full_text", 0) + values.get("store.step.finish", 0)
     content = values.get("host.step.content", 0) + values.get("store.step.content", 0)
     structure = values.get("host.step.structure", 0)
-    result = {"content": content, "structure": structure, "full_text": full_text, "link_health_once": once, "document_plan": plan, "row_and_index_writes": rows,
+    index_build = values.get("store.step.index_build", 0)
+    result = {"index_build": index_build, "content": content, "structure": structure, "full_text": full_text, "link_health_once": once, "document_plan": plan, "row_and_index_writes": rows,
               "link_health": health, "commit": commit,
               "other_increment": increment - rows - health - commit,
-              "other_startup": ready["startup_complete_ns"] - plan - increment - once - full_text - content - structure}
+              "other_startup": ready["startup_complete_ns"] - plan - increment - once - full_text - content - structure - index_build}
     if any(value < 0 for value in result.values()):
         raise ValueError("timing scopes overlap or exceed the startup clock")
     return result

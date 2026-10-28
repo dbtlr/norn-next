@@ -193,6 +193,8 @@ pub(crate) fn full_text_batch(store: &mut Store, limit: usize) -> Result<(u64, b
         ));
     }
     if steps.step == Step::FullTextComplete {
+        #[cfg(feature = "induced-failure")]
+        drop(_timing);
         store.build_step_indexes(Step::FullTextComplete)?;
         return Ok((0, true));
     }
@@ -221,6 +223,8 @@ pub(crate) fn full_text_batch(store: &mut Store, limit: usize) -> Result<(u64, b
     } else {
         Step::FullTextComplete
     };
+    #[cfg(feature = "induced-failure")]
+    drop(_timing);
     if !more {
         store.build_step_indexes(Step::FullTextComplete)?;
     }
