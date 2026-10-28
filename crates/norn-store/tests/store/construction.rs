@@ -1,6 +1,12 @@
 //! From-zero construction defers full text until the document rows are final.
 
-use norn_store::{Store, StoreError, induced_failure};
+use norn_store::{ExplainedStatement, Store, StoreError, induced_failure};
+
+pub(crate) const FULL_TEXT: [ExplainedStatement<'static>; 3] = [
+    ExplainedStatement::FullTextLast,
+    ExplainedStatement::FullTextBatch,
+    ExplainedStatement::FullTextRemaining,
+];
 
 use crate::common::Scratch;
 
@@ -367,14 +373,9 @@ fn steps_refuse_documents_vault_files_or_tombstones() {
 
 #[test]
 fn full_text_cursor_statements_seek_document_ids() {
-    use norn_store::ExplainedStatement;
     let scratch = Scratch::new("construction-cursor-plans");
     let mut store = scratch.open();
-    for statement in [
-        ExplainedStatement::FullTextLast,
-        ExplainedStatement::FullTextBatch,
-        ExplainedStatement::FullTextRemaining,
-    ] {
+    for statement in FULL_TEXT {
         let plan = store.begin_request().emitted_plan(statement).unwrap();
         assert!(
             plan.steps.iter().any(|step| step
