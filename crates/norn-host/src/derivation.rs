@@ -728,9 +728,23 @@ pub(crate) fn map_document(
     hash: String,
     model: &ContentModel,
 ) -> Result<Derived, Quarantine> {
-    let mut derived = map_document_read(path, bytes, hash, model, true)?;
-    map_structure(&mut derived.facts, derived.body_origin);
-    Ok(derived)
+    map_document_read(path, bytes, hash, model, Depth::Rich)
+}
+
+/// How much of a document one read derives.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Depth {
+    /// Fields and body only, for metadata construction.
+    Base,
+    /// Fields, body and the frontmatter's own links and tags: what the
+    /// from-zero content step writes.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "NORN-467's content step reads at this depth.")
+    )]
+    Content,
+    /// Everything, the body scanned in the same read.
+    Rich,
 }
 
 fn map_document_read(
@@ -738,7 +752,7 @@ fn map_document_read(
     bytes: &[u8],
     hash: String,
     model: &ContentModel,
-    frontmatter_facts: bool,
+    depth: Depth,
 ) -> Result<Derived, Quarantine> {
     #[cfg(feature = "induced-failure")]
     let _timing = norn_store::profiling::span("host.parse_map");
@@ -766,6 +780,11 @@ fn map_document_read(
             cause: UnreadBlock::of(refusal),
             problem: refusal.problem(),
         });
+    let body_origin = norn_text::SourceSpan::at(source, document.body_start());
+    // The body is read once, and before the facts take their own copy of it:
+    // the scan builds a tree of several bodies and frees it as it returns, so
+    // a copy made first would stand beside that tree.
+    let body = (depth == Depth::Rich).then(|| scan_body(document.body(), body_origin));
     let mut facts = DocumentFacts::new(document_path, hash, document.body(), bytes.len() as u64)
         .with_frontmatter(document.frontmatter().map(map_value), model);
     facts.body_offset = document.body_start() as u64;
@@ -774,7 +793,7 @@ fn map_document_read(
         .iter()
         .filter(|d| d.code.frontmatter_scoped())
         .count() as u32;
-    if frontmatter_facts {
+    if depth != Depth::Base {
         facts.links = document
             .frontmatter_field_wikilinks()
             .into_iter()
@@ -786,34 +805,59 @@ fn map_document_read(
             .map(|tag| map_tag(tag, TagSource::Frontmatter))
             .collect();
     }
+    if let Some(body) = body {
+        body.append_to(&mut facts);
+    }
     Ok(Derived {
         facts,
         unread_frontmatter,
-        body_origin: norn_text::SourceSpan::at(source, document.body_start()),
+        body_origin,
     })
 }
 
-/// Append body facts behind frontmatter facts so the store's ordinals stay in
-/// source order. Both ordinary derivation and construction use this mapping.
-fn map_structure(facts: &mut DocumentFacts, origin: norn_text::SourceSpan) {
+/// The facts one scan of a body derives, in source coordinates.
+struct BodyFacts {
+    links: Vec<LinkFact>,
+    headings: Vec<HeadingFact>,
+    blocks: Vec<BlockFact>,
+    tags: Vec<TagFact>,
+}
+
+/// Scan `body`, which starts at `origin` in its source. Ordinary derivation
+/// scans the body it has just decoded; the from-zero structure step scans the
+/// body its content step stored. Both map the scan here.
+fn scan_body(body: &str, origin: norn_text::SourceSpan) -> BodyFacts {
     #[cfg(feature = "induced-failure")]
     let _timing = norn_store::profiling::span("host.body_scan");
-    let scan = norn_text::SourceScan::over_body(&facts.body, origin);
-    facts.links.extend(scan.links().into_iter().map(map_link));
-    facts.headings = scan.headings().into_iter().map(map_heading).collect();
-    facts.blocks = scan
-        .block_ids()
-        .into_iter()
-        .map(|block| BlockFact {
-            block_id: block.id,
-            span: Some(span(block.span)),
-        })
-        .collect();
-    facts.tags.extend(
-        scan.tags()
+    let scan = norn_text::SourceScan::over_body(body, origin);
+    BodyFacts {
+        links: scan.links().into_iter().map(map_link).collect(),
+        headings: scan.headings().into_iter().map(map_heading).collect(),
+        blocks: scan
+            .block_ids()
             .into_iter()
-            .map(|tag| map_tag(tag, TagSource::Body)),
-    );
+            .map(|block| BlockFact {
+                block_id: block.id,
+                span: Some(span(block.span)),
+            })
+            .collect(),
+        tags: scan
+            .tags()
+            .into_iter()
+            .map(|tag| map_tag(tag, TagSource::Body))
+            .collect(),
+    }
+}
+
+impl BodyFacts {
+    /// Append behind the frontmatter's facts: the file's order, so a link's or
+    /// tag's ordinal is where the file writes it.
+    fn append_to(self, facts: &mut DocumentFacts) {
+        facts.links.extend(self.links);
+        facts.headings = self.headings;
+        facts.blocks = self.blocks;
+        facts.tags.extend(self.tags);
+    }
 }
 
 fn map_heading(heading: norn_text::Heading) -> HeadingFact {
@@ -954,14 +998,13 @@ pub(crate) fn plan_document(
     declared: &Declared,
     case: CaseFold,
 ) -> Plan {
-    let (mut plan, origin) =
-        plan_content_document(path, spelling, bytes, hash, stored, declared, case);
-    if let Some(Change::Upsert(facts)) = &mut plan.change {
-        plan.findings.extend(plan_structure_document(
-            facts,
-            origin.expect("a derived document has a body origin"),
-            declared,
-        ));
+    #[cfg(feature = "induced-failure")]
+    let _timing = norn_store::profiling::span("host.document_plan");
+    let mapped = map_document_read(spelling, bytes, hash, declared.content_model(), Depth::Rich);
+    let mut plan = plan_mapped_document(path, mapped, stored, declared, case);
+    if let Some(Change::Upsert(facts)) = &plan.change {
+        plan.findings
+            .extend(plan_tag_facet(&facts.path, facts, declared.schema()));
     }
     plan
 }
@@ -980,7 +1023,7 @@ pub(crate) fn plan_base_document(
     let _timing = norn_store::profiling::span("host.document_plan");
     plan_mapped_document(
         path,
-        map_document_read(spelling, bytes, hash, declared.content_model(), false),
+        map_document_read(spelling, bytes, hash, declared.content_model(), Depth::Base),
         stored,
         declared,
         case,
@@ -990,6 +1033,10 @@ pub(crate) fn plan_base_document(
 /// Derive content without scanning Markdown. The from-zero content step in
 /// NORN-467 will persist the origin beside its frontmatter fact counts.
 /// Metadata construction stays on `plan_base_document`, which omits those facts.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "NORN-467's content step consumes this seam.")
+)]
 pub(crate) fn plan_content_document(
     path: &Path,
     spelling: &str,
@@ -1001,7 +1048,13 @@ pub(crate) fn plan_content_document(
 ) -> (Plan, Option<norn_text::SourceSpan>) {
     #[cfg(feature = "induced-failure")]
     let _timing = norn_store::profiling::span("host.document_plan");
-    let mapped = map_document_read(spelling, bytes, hash, declared.content_model(), true);
+    let mapped = map_document_read(
+        spelling,
+        bytes,
+        hash,
+        declared.content_model(),
+        Depth::Content,
+    );
     let origin = mapped.as_ref().ok().map(|derived| derived.body_origin);
     (
         plan_mapped_document(path, mapped, stored, declared, case),
@@ -1012,12 +1065,16 @@ pub(crate) fn plan_content_document(
 /// Derive structure from the stored body and its source origin, then judge all
 /// tags in frontmatter-first order. The from-zero structure step in NORN-467
 /// will use this same seam after content lands; no bytes are reopened here.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "NORN-467's structure step consumes this seam.")
+)]
 pub(crate) fn plan_structure_document(
     facts: &mut DocumentFacts,
     origin: norn_text::SourceSpan,
     declared: &Declared,
 ) -> Vec<PlannedFinding> {
-    map_structure(facts, origin);
+    scan_body(&facts.body, origin).append_to(facts);
     plan_tag_facet(&facts.path, facts, declared.schema())
 }
 
