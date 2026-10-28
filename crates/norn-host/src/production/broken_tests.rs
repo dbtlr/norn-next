@@ -1072,3 +1072,30 @@ fn a_broken_content_open_finishes_without_structure() {
     let rows = store.begin_request().structure_page(2).unwrap();
     assert_eq!(rows.len(), 1); assert_eq!(rows[0].facts.path.as_str(), "b.md");
 }
+
+/// **A flush that holds content rows and a change writes both.** The content
+/// queued for one document lands, and the change filed beside it for another
+/// is applied after it: neither is dropped for sharing the flush.
+#[test]
+fn a_flush_holding_content_and_a_change_writes_both() {
+    let f = Fixture::watcherless("content-beside-a-change");
+    for path in ["a.md", "b.md"] { fs::write(f.vault().join(path), "# Heading\n[[missing]] #tag\n").unwrap(); }
+    let mut store = Store::open(f.root.join("steps.sqlite3"), proven_order(&f), crate::DERIVATION_VERSION).unwrap();
+    let paths: Vec<_> = ["a.md", "b.md"].map(|p| DocumentPath::new(p).unwrap()).into();
+    store.defer_link_health().unwrap(); store.begin_steps().unwrap();
+    store.begin_request().apply_increment(IncrementProvenance::Derived, paths.iter().cloned().map(|path| Change::Named { path }), &[], &ContentModel::none()).unwrap();
+    store.finish_step(norn_store::Step::Names).unwrap();
+    let (ops, _) = f.ops(4);
+    let source = norn_fs::Vault::open(&f.vault(), &[]).unwrap();
+    let root = f.vault();
+    let mut account = Account::default();
+    let mut group = store.step_group().unwrap();
+    let mut pending = Pending::new(group.store(), 4, &root, &[], &mut account).unwrap();
+    loading::steps::content_chunk(&ops, &mut pending, &source, &paths[..1]).unwrap();
+    pending.unreadable(Path::new("b.md"), "opening a document", &std::io::Error::from_raw_os_error(13)).unwrap();
+    pending.flush().unwrap(); drop(pending); group.commit().unwrap();
+    assert_broken(&mut store, "b.md");
+    assert!(store.begin_request().content_page(2).unwrap().is_empty(), "a queued content row was dropped");
+    let rows = store.begin_request().structure_page(2).unwrap();
+    assert_eq!(rows.len(), 1); assert_eq!(rows[0].facts.path.as_str(), "a.md");
+}

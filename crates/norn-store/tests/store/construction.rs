@@ -657,16 +657,37 @@ fn a_document_run_ahead_is_not_written_twice() {
         (front_links, front_tags)
     );
     rows[0].facts = facts.clone();
+    // The structure step's own finding rides with its rows: a repeated call
+    // for a document past the step files it no second time.
+    let structure_finding = [norn_store::DerivedFinding {
+        facts: crate::common::violation("a.md"),
+        replaces: None,
+        bytes_hash: None,
+    }];
     let mut request = group.begin_request();
     request
-        .write_structure(&rows, &[], &ContentModel::none())
+        .write_structure(&rows, &structure_finding, &ContentModel::none())
         .unwrap();
     request
-        .write_structure(&rows, &[], &ContentModel::none())
+        .write_structure(&rows, &structure_finding, &ContentModel::none())
         .unwrap();
     assert_eq!(request.counters().structure_rows_written(), 1);
     request.finish();
     group.commit().unwrap();
+    let filed: i64 = norn_db::open_read_only(store.path())
+        .adopted
+        .unwrap()
+        .connection()
+        .query_row(
+            "SELECT count(*) FROM findings WHERE path = 'a.md'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        filed, 1,
+        "a repeated structure write filed its finding again"
+    );
     assert!(store.begin_request().content_page(8).unwrap().is_empty());
     assert!(store.begin_request().structure_page(8).unwrap().is_empty());
     let got = store

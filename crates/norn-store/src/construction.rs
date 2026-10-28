@@ -482,6 +482,7 @@ impl crate::Request<'_> {
         crate::increment::refuse_a_declaration_the_store_does_not_pin(declared, pinned.as_deref())?;
         let stamp = norn_db::meta::next_generation(connection)?;
         let mut statements = crate::increment::Statements::prepare(connection)?;
+        let mut skipped = std::collections::BTreeSet::new();
         for ContentWrite { facts, origin } in rows {
             crate::increment::refuse_a_document_that_does_not_add_up(facts)?;
             crate::increment::refuse_typed_values_the_pin_does_not_derive(
@@ -494,6 +495,7 @@ impl crate::Request<'_> {
                 .transpose()?;
             let id = content_id(connection, &facts.path, 1)?;
             let Some(id) = id else {
+                skipped.insert(facts.path.as_str());
                 continue;
             };
             connection
@@ -549,9 +551,10 @@ impl crate::Request<'_> {
                 u64::from(projection.is_some()),
             );
         }
+        let findings = owed_findings(findings, &skipped);
         let discarded = crate::increment::write_derived_findings(
             connection,
-            findings,
+            &findings,
             &mut Default::default(),
         )?;
         self.counters
@@ -611,8 +614,10 @@ impl crate::Request<'_> {
             norn_db::meta::get_meta(connection, crate::ddl::meta::VAULT_SCHEMA_FINGERPRINT)?;
         crate::increment::refuse_a_declaration_the_store_does_not_pin(declared, pinned.as_deref())?;
         let mut statements = crate::increment::Statements::prepare(connection)?;
+        let mut skipped = std::collections::BTreeSet::new();
         for input in rows {
             let Some(id) = content_id(connection, &input.facts.path, 2)? else {
+                skipped.insert(input.facts.path.as_str());
                 continue;
             };
             let (links,tags): (usize,usize) = connection.query_row("SELECT frontmatter_links, frontmatter_tags FROM temp.construction_progress WHERE document = ?1", [id], |r| Ok((r.get(0)?,r.get(1)?))).map_err(|e| error::sql("reading ordinal offsets", e))?;
@@ -672,9 +677,10 @@ impl crate::Request<'_> {
                 input.facts.blocks.len() as u64,
             );
         }
+        let findings = owed_findings(findings, &skipped);
         let discarded = crate::increment::write_derived_findings(
             connection,
-            findings,
+            &findings,
             &mut Default::default(),
         )?;
         self.counters
@@ -685,6 +691,24 @@ impl crate::Request<'_> {
         );
         Ok(())
     }
+}
+
+/// The findings a step writer files beside its rows: none about a document it
+/// skipped because that document no longer owes the step, whose own write has
+/// already filed them. A finding about a path the call passed no row for (a
+/// withdrawn, byte-quarantined document's content finding) still stands.
+fn owed_findings<'f, 'a>(
+    findings: &'f [crate::DerivedFinding<'a>],
+    skipped: &std::collections::BTreeSet<&str>,
+) -> std::borrow::Cow<'f, [crate::DerivedFinding<'a>]> {
+    if skipped.is_empty() {
+        return std::borrow::Cow::Borrowed(findings);
+    }
+    findings
+        .iter()
+        .filter(|finding| !skipped.contains(finding.facts.path.as_str()))
+        .cloned()
+        .collect()
 }
 
 /// Reject a writer invoked outside its construction phase.

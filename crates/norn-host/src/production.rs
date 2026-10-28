@@ -4943,21 +4943,27 @@ impl<'s> Pending<'s> {
         if self.changes.is_empty() && self.content.is_empty() && findings.is_empty() {
             return Ok(());
         }
+        // The content step's rows land first. A change filed beside them (an
+        // unreadable document or directory) is about other paths and is applied
+        // after them, carrying the findings; alone, the rows carry them.
         if self.store.construction_step() == Some(norn_store::Step::Content)
-            && self.changes.is_empty()
+            && (self.changes.is_empty() || !self.content.is_empty())
         {
+            let alone = self.changes.is_empty();
             let mut request = self.store.begin_request();
             request
                 .write_content(
                     &self.content,
-                    &findings,
+                    if alone { &findings } else { &[] },
                     self.declared.model.content_model(),
                 )
                 .map_err(store_effect)?;
             let steps = request.read_steps();
             count_increment_work(&request.finish(), steps);
             self.content.clear();
-            return Ok(());
+            if alone {
+                return Ok(());
+            }
         }
         let applied = !self.changes.is_empty();
         if applied {

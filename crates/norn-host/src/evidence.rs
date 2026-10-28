@@ -185,15 +185,16 @@ pub struct EvidenceReading {
     pub links_redecided: u64,
     /// Links judged once after a from-zero build landed its facts.
     pub links_judged: u64,
-    /// Document rows indexed by from-zero full-text batches, including NULL bodies.
-    /// Work performed by the from-zero document steps.
+    /// Names-only rows the from-zero names step wrote, one per document path.
     pub documents_named: u64,
-    /// Work performed by the from-zero document steps.
+    /// Documents whose content the from-zero content step wrote.
     pub content_rows_written: u64,
-    /// Work performed by the from-zero document steps.
+    /// Documents whose structure the from-zero structure step wrote.
     pub structure_rows_written: u64,
-    /// Work performed by the from-zero document steps.
+    /// Fact rows discarded to be written again; a from-zero build writes each
+    /// fact once, so its legs read zero.
     pub fact_rows_discarded: u64,
+    /// Document rows indexed by from-zero full-text batches, including NULL bodies.
     pub full_text_rows_indexed: u64,
     /// Keys the increments and complete from-zero judgments resolved.
     pub link_health_keys_resolved: u64,
