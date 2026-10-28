@@ -422,16 +422,25 @@ fn a_scan_over_a_stored_body_equals_the_source_scan() {
                     assert_eq!(stored.block_ids(), whole.block_ids(), "{source:?}");
                     // An independent whole-source position check keeps this bar
                     // meaningful when Document delegates to the stored-body seam.
-                    for at in stored
+                    let actual: Vec<_> = stored
                         .headings()
                         .iter()
                         .map(|h| h.span)
                         .chain(stored.links().iter().filter_map(|l| l.span))
                         .chain(stored.tags().iter().filter_map(|t| t.span))
                         .chain(stored.block_ids().iter().map(|b| b.span))
-                    {
-                        assert_eq!(at, SourceSpan::at(&source, at.byte_offset), "{source:?}");
-                    }
+                        .collect();
+                    let body_scan = document.scan_body();
+                    let expected: Vec<_> = body_scan
+                        .headings()
+                        .iter()
+                        .map(|h| h.span)
+                        .chain(body_scan.links().iter().filter_map(|l| l.span))
+                        .chain(body_scan.tags().iter().filter_map(|t| t.span))
+                        .chain(body_scan.block_ids().iter().map(|b| b.span))
+                        .map(|at| SourceSpan::at(&source, document.body_start() + at.byte_offset))
+                        .collect();
+                    assert_eq!(actual, expected, "{source:?}");
                     for (source_heading, body_heading) in stored
                         .headings()
                         .iter()
