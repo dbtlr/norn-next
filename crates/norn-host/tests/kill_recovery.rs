@@ -12,7 +12,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use norn_config::ConfigDirs;
@@ -149,18 +148,16 @@ fn next_attach_converges_after_process_death_mid_increment() {
     }
 }
 
-/// Ends the process at the second canonical page of the build it is installed on.
-///
-/// The canonical page boundary is the only one that counts: intake changesets
-/// into the disposable metadata database advance the same changeset counter as
-/// the canonical store's, so a counter-armed abort would fire inside them.
-struct DieAtTheSecondPage(AtomicUsize);
+/// Kill after names commit: a names page may now precede its transaction's
+/// commit, so a page count cannot establish that provisional rows reached disk.
+struct DieAfterNames;
 
-impl LoadingProbe for DieAtTheSecondPage {
+impl LoadingProbe for DieAfterNames {
     fn at(&self, boundary: LoadingBoundary<'_>) {
-        if matches!(boundary, LoadingBoundary::CanonicalPage)
-            && self.0.fetch_add(1, Ordering::SeqCst) + 1 == 2
-        {
+        if matches!(
+            boundary,
+            LoadingBoundary::StepComplete(norn_store::Step::Names)
+        ) {
             std::process::abort();
         }
     }
@@ -174,11 +171,11 @@ fn body_of(index: usize) -> String {
 /// the next attach builds from zero instead of resuming.**
 ///
 /// The child attaches a fresh vault of eight documents through the real host,
-/// two to a page, and ends at the second canonical page: at least one changeset
-/// of the build has committed and the build has not ended. The parent reads the
+/// and ends just after names commit: provisional rows reached disk and content
+/// has not begun. The parent reads the
 /// store through a read-only handle before any attach — so the case cannot pass
 /// by killing the child before it wrote anything, or after it finished — and
-/// finds the mark standing over some but not all of the rows. The next attach
+/// finds the mark standing over the provisional rows. The next attach
 /// opens a rebuilt store (a new epoch, so no row was carried), reaches `Ready`,
 /// and holds every document at the hash of its bytes with the mark gone.
 #[test]
@@ -219,7 +216,7 @@ fn next_attach_rebuilds_from_zero_after_process_death_mid_build() {
     let (marked, rows, epoch) = read_the_store_raw(&fixture.database);
     assert!(marked, "the killed build left no mark");
     assert!(
-        0 < rows && rows < BUILD_DOCUMENTS,
+        rows == BUILD_DOCUMENTS,
         "the child ended with {rows} of {BUILD_DOCUMENTS} rows, so the kill did not land mid-build"
     );
 
@@ -505,7 +502,7 @@ fn die_mid_build(root: &Path) -> ! {
         &root.join("vault"),
         &name,
         ProductionPolicy::new(2, 2).unwrap(),
-        |ops| ops.with_loading_probe(Arc::new(DieAtTheSecondPage(AtomicUsize::new(0)))),
+        |ops| ops.with_loading_probe(Arc::new(DieAfterNames)),
     );
     attach_and_wait(host, &name);
     panic!("the build finished instead of being killed")
@@ -691,4 +688,154 @@ fn production_host(
         },
     )
     .expect("production host")
+}
+
+/// Abort only after a document-step group committed, with more work queued.
+/// CanonicalPage also fires within a transaction, so an independent reader
+/// deliberately looks only at the preceding committed group.
+struct DieMidDocumentStep {
+    database: PathBuf,
+    structure: bool,
+}
+impl LoadingProbe for DieMidDocumentStep {
+    fn at(&self, boundary: LoadingBoundary<'_>) {
+        if !matches!(boundary, LoadingBoundary::CanonicalPage) {
+            return;
+        }
+        let opened = norn_db::open_read_only(&self.database);
+        let Ok(database) = opened.adopted else {
+            return;
+        };
+        let sql = if self.structure {
+            "SELECT count(DISTINCT document) FROM headings"
+        } else {
+            "SELECT count(*) FROM documents WHERE body IS NOT NULL"
+        };
+        let done: usize = database
+            .connection()
+            .query_row(sql, [], |r| r.get(0))
+            .unwrap();
+        if done > 0 && done < STEP_DOCUMENTS {
+            std::process::abort();
+        }
+    }
+}
+const STEP_DOCUMENTS: usize = 2050;
+
+/// Prove that a killed step is disposable, never resumed over its committed prefix.
+fn killed_document_step(case: &str, structure: bool) {
+    const CHILD: &str = "NORN_HOST_KILLED_DOCUMENT_STEP_CHILD";
+    if let Some(root) = std::env::var_os(CHILD) {
+        let root = Path::new(&root);
+        let _lease = Lease::hold(
+            isolation::REAL_WATCHER,
+            isolation::acquisition_budget(attach::state_budget(WAIT_LIMIT)),
+        );
+        let name = VaultName::new("notes").unwrap();
+        let dirs = ConfigDirs::new(root.join("config"), root.join("data")).unwrap();
+        let database = dirs.derived_dir(&name).join("store.sqlite3");
+        attach_and_wait(
+            production_host(
+                root,
+                &root.join("vault"),
+                &name,
+                ProductionPolicy::new(128, 128).unwrap(),
+                |ops| {
+                    ops.with_loading_probe(Arc::new(DieMidDocumentStep {
+                        database,
+                        structure,
+                    }))
+                },
+            ),
+            &name,
+        );
+        panic!("the document step completed without the kill");
+    }
+    let mut fixture = Fixture::unleased(Scratch::new(case));
+    for index in 0..STEP_DOCUMENTS {
+        fixture.write(
+            &format!("doc-{index:04}.md"),
+            "# Heading\n[[missing]] #tag\n",
+        );
+    }
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", case, "--nocapture", "--include-ignored"])
+        .env(CHILD, fixture.root.root())
+        .output()
+        .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(
+            output.status.signal(),
+            Some(6),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let (marked, rows, epoch) = read_the_store_raw(&fixture.database);
+    assert!(marked);
+    assert_eq!(rows, STEP_DOCUMENTS);
+    let database = norn_db::open_read_only(&fixture.database).adopted.unwrap();
+    let (content, headings, triggers): (usize,usize,usize) = database.connection().query_row(
+        "SELECT (SELECT count(*) FROM documents WHERE body IS NOT NULL), (SELECT count(DISTINCT document) FROM headings), (SELECT count(*) FROM sqlite_schema WHERE name LIKE 'documents_fts_%' AND type = 'trigger')", [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+    assert_eq!(triggers, 0);
+    if structure {
+        assert_eq!(content, STEP_DOCUMENTS);
+        assert!(headings > 0 && headings < STEP_DOCUMENTS);
+    } else {
+        assert!(content > 0 && content < STEP_DOCUMENTS);
+        assert_eq!(headings, 0);
+    }
+    drop(database);
+    fixture.lease();
+    attach_and_wait(fixture.host(), &fixture.name);
+    let mut store = Store::open(
+        &fixture.database,
+        proven_order(&fixture.vault),
+        norn_host::DERIVATION_VERSION,
+    )
+    .unwrap();
+    assert_ne!(store.epoch(), epoch);
+    assert!(!store.under_construction());
+    store.verify_integrity().unwrap();
+    let recovered = norn_testkit::equivalence::StoreProjection::read(&mut store).unwrap();
+    drop(store);
+    drop(fixture);
+    let oracle = Fixture::new();
+    for index in 0..STEP_DOCUMENTS {
+        oracle.write(
+            &format!("doc-{index:04}.md"),
+            "# Heading\n[[missing]] #tag\n",
+        );
+    }
+    attach_and_wait(oracle.host(), &oracle.name);
+    let mut store = Store::open(
+        &oracle.database,
+        proven_order(&oracle.vault),
+        norn_host::DERIVATION_VERSION,
+    )
+    .unwrap();
+    assert_eq!(
+        recovered,
+        norn_testkit::equivalence::StoreProjection::read(&mut store).unwrap()
+    );
+}
+
+#[test]
+#[ignore = "fault-lane case: induced recovery runs in full regression"]
+fn next_attach_rebuilds_from_zero_after_process_death_mid_content() {
+    killed_document_step(
+        "next_attach_rebuilds_from_zero_after_process_death_mid_content",
+        false,
+    );
+}
+
+#[test]
+#[ignore = "fault-lane case: induced recovery runs in full regression"]
+fn next_attach_rebuilds_from_zero_after_process_death_mid_structure() {
+    killed_document_step(
+        "next_attach_rebuilds_from_zero_after_process_death_mid_structure",
+        true,
+    );
 }

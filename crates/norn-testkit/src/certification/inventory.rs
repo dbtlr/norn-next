@@ -638,6 +638,22 @@ pub const REQUIRED_CASES: &[Case] = &[
         feature: Some(INDUCED_FAILURE),
     },
     Case {
+        id: "induced-kill-mid-structure-rebuilds-from-zero",
+        suite: Suite::InducedFailure,
+        lane: Lane::RealWatcher,
+        states: "a committed structure group leaves the construction mark and absent triggers after process death; the next attach rebuilds under a new epoch and equals the oracle",
+        carrier: "crates/norn-host/tests/kill_recovery.rs::next_attach_rebuilds_from_zero_after_process_death_mid_structure",
+        feature: Some(INDUCED_FAILURE),
+    },
+    Case {
+        id: "induced-kill-mid-content-rebuilds-from-zero",
+        suite: Suite::InducedFailure,
+        lane: Lane::RealWatcher,
+        states: "a committed content group leaves the construction mark and absent triggers after process death; the next attach rebuilds under a new epoch and equals the oracle",
+        carrier: "crates/norn-host/tests/kill_recovery.rs::next_attach_rebuilds_from_zero_after_process_death_mid_content",
+        feature: Some(INDUCED_FAILURE),
+    },
+    Case {
         id: "induced-kill-mid-full-text-rebuilds-from-zero",
         suite: Suite::InducedFailure,
         lane: Lane::RealWatcher,

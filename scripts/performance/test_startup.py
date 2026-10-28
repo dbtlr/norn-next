@@ -95,6 +95,21 @@ class StartupAccountingTests(unittest.TestCase):
             "content": 0, "structure": 0, "document_plan": 7, "row_and_index_writes": 4, "link_health": 5,
             "link_health_once": 3, "full_text": 7, "commit": 1, "other_increment": 2, "other_startup": 8})
 
+    def test_document_steps_count_outer_scopes_once(self):
+        ready = self.ready()
+        ready["startup_complete_ns"] += 35
+        ready["timings"]["entries"].extend([
+            {"label": "host.step.content", "calls": 1, "elapsed_ns": 10},
+            {"label": "host.content_plan", "calls": 1, "elapsed_ns": 3},
+            {"label": "store.step.content", "calls": 1, "elapsed_ns": 5},
+            {"label": "host.step.structure", "calls": 1, "elapsed_ns": 20},
+            {"label": "store.step.structure", "calls": 1, "elapsed_ns": 7},
+        ])
+        buckets = partition(ready)
+        self.assertEqual((buckets["content"], buckets["structure"]), (15, 20))
+        self.assertEqual(buckets["other_startup"], 8)
+        self.assertEqual(sum(buckets.values()), ready["startup_complete_ns"])
+
     def test_incomplete_or_overlapping_timings_cannot_be_presented_as_a_breakdown(self):
         for field in ("unknown_labels", "unfinished_spans"):
             ready = self.ready()

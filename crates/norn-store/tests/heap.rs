@@ -264,3 +264,129 @@ fn a_complete_judgment_holds_heap_within_a_chunk() {
         assert!(large <= small + FLAT, "{}: {small} -> {large}", shape.label);
     }
 }
+
+/// The progress queue stays in TEMP: increasing the vault tenfold cannot
+/// retain the content plans or structure rows of previous host chunks.
+#[test]
+#[ignore = "memory-lane case: isolated construction heap measurement"]
+fn construction_steps_hold_heap_within_one_chunk() {
+    let small = construction_peak(16);
+    let large = construction_peak(160);
+    eprintln!("construction steps: 16 documents {small:?} bytes; 160 documents {large:?} bytes");
+    assert!(
+        large.0 <= small.0 + FLAT && large.1 <= small.1 + FLAT,
+        "steps retained a vault's work: {small:?} -> {large:?}"
+    );
+    // Eight documents, each with 700 frontmatter links and 300 tags;
+    // structure adds 100 links and 1,000 tags. Measured floors are 1,386,808
+    // and 882,504 bytes. Headroom below 2 KiB rejects eight bytes per fact.
+    assert!(
+        large.0 <= 1_388_000 && large.1 <= 884_000,
+        "dense chunk floors: {large:?}"
+    );
+}
+
+/// Measure both document steps after names exist, using the same chunk width
+/// and fact density at each vault size.
+fn construction_peak(documents: usize) -> (usize, usize) {
+    use norn_store::{ContentWrite, Step};
+    let scratch = Scratch::new("construction-heap");
+    let mut store = Store::open_throwaway(
+        scratch.join("store.sqlite3"),
+        StoredPathOrder::Sensitive,
+        DerivationVersion::new(1),
+    )
+    .unwrap();
+    store.defer_link_health().unwrap();
+    store.begin_steps().unwrap();
+    store
+        .begin_request()
+        .apply_increment(
+            IncrementProvenance::Derived,
+            (0..documents).map(|n| Change::Named {
+                path: DocumentPath::new(&format!("doc-{n:04}.md")).unwrap(),
+            }),
+            &[],
+            &ContentModel::none(),
+        )
+        .unwrap();
+    store.finish_step(Step::Names).unwrap();
+    let mark = heap::Mark::set();
+    loop {
+        let mut group = store.step_group().unwrap();
+        let paths = group.begin_request().content_page(8).unwrap();
+        if paths.is_empty() {
+            group.commit().unwrap();
+            break;
+        }
+        let rows: Vec<_> = paths
+            .into_iter()
+            .map(|path| ContentWrite {
+                facts: {
+                    let mut facts = DocumentFacts::new(path, "hash", "body\n", 5);
+                    facts.links =
+                        holder(facts.path.as_str(), 700, Some("https"), &|_| "x".into()).links;
+                    for link in &mut facts.links {
+                        link.field = Some("refs".into());
+                        link.span = None;
+                    }
+                    facts.tags = (0..300)
+                        .map(|_| norn_store::TagFact {
+                            name: "tag".into(),
+                            source: norn_store::TagSource::Frontmatter,
+                            span: None,
+                        })
+                        .collect();
+                    facts
+                },
+                origin: Span {
+                    line: 1,
+                    column: 1,
+                    byte_offset: 0,
+                },
+            })
+            .collect();
+        group
+            .begin_request()
+            .write_content(&rows, &[], &ContentModel::none())
+            .unwrap();
+        group.commit().unwrap();
+    }
+    let content_peak = mark.peak_above();
+    store.finish_step(Step::Content).unwrap();
+    let mark = heap::Mark::set();
+    loop {
+        let mut group = store.step_group().unwrap();
+        let mut rows = group.begin_request().structure_page(8).unwrap();
+        if rows.is_empty() {
+            group.commit().unwrap();
+            break;
+        }
+        for input in &mut rows {
+            group.begin_request().load_structure_tags(input).unwrap();
+            input.facts.links = holder(input.facts.path.as_str(), 100, Some("https"), &|_| {
+                "example.test".into()
+            })
+            .links;
+            input
+                .facts
+                .tags
+                .extend((0..1000).map(|_| norn_store::TagFact {
+                    name: "tag".into(),
+                    source: norn_store::TagSource::Body,
+                    span: Some(Span {
+                        line: 1,
+                        column: 1,
+                        byte_offset: 0,
+                    }),
+                }));
+        }
+        group
+            .begin_request()
+            .write_structure(&rows, &[], &ContentModel::none())
+            .unwrap();
+        group.commit().unwrap();
+    }
+    store.finish_step(Step::Structure).unwrap();
+    (content_peak, mark.peak_above())
+}

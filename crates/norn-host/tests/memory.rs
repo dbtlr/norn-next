@@ -1906,12 +1906,24 @@ fn derived_alone(
     at: &str,
     bytes: usize,
 ) -> usize {
+    derived_source(vault, store, at, unlinked_body(bytes))
+}
+
+/// Derive one authored shape through the live host under a settled heap mark.
+fn derived_source(
+    vault: &attach::Vault,
+    store: &mut norn_store::Store,
+    at: &str,
+    source: Vec<u8>,
+) -> usize {
+    let bytes = source.len();
     let staged = vault
         .path()
         .parent()
         .expect("the folder the vault stands in")
         .join(format!("staged-{bytes}.md"));
-    std::fs::write(&staged, unlinked_body(bytes)).expect("staging a derivation control");
+    std::fs::write(&staged, &source).expect("staging a derivation control");
+    drop(source);
     let landing = vault.path().join(at);
     std::fs::create_dir_all(landing.parent().expect("a control's folder"))
         .expect("creating a control's folder");
@@ -2762,4 +2774,95 @@ fn a_read_reading_stands_only_on_a_report_of_every_shape_answering_as_pinned() {
     let garbled =
         ReadReport::from_stdout("read everything\n").expect_err("a line that is no report");
     assert!(garbled.contains("no read report"), "{garbled}");
+}
+
+/// Dense facts have a measured heap floor of their own: a plain-body size
+/// pair cannot detect an extra allocation per link, tag or frontmatter value.
+#[test]
+#[ignore = "memory-lane case: runs in the ci memory job, not the workspace suite"]
+#[allow(clippy::disallowed_macros)] // Machine-consumed child measurements.
+fn fact_dense_derivation_stays_at_its_heap_floor() {
+    const CASE: &str = "fact_dense_derivation_stays_at_its_heap_floor";
+    if let Some(root) = std::env::var_os(HARNESS_ENV) {
+        let root = attach::accepted_harness_root(&root, HARNESS_TOKEN_ENV);
+        let vault = attach::Vault::adopt(&root);
+        let host = vault.host();
+        let _lease = attach::attach_and_wait(&host, vault.name());
+        let mut store = vault.store();
+        for shape in ["tags", "links", "frontmatter"] {
+            for scale in [1, 10] {
+                let source = dense_source(shape, scale);
+                let path = format!("dense-{shape}-{scale}.md");
+                let peak = derived_source(&vault, &mut store, &path, source.into_bytes());
+                let facts = store
+                    .begin_request()
+                    .stored_facts(&StorePath::new(&path).unwrap())
+                    .unwrap()
+                    .unwrap();
+                match shape {
+                    "tags" => assert_eq!(facts.tags.len(), scale * 1000),
+                    "links" => assert_eq!(facts.links.len(), scale * 1000),
+                    _ => {
+                        assert_eq!(facts.links.len(), scale * 70);
+                        assert_eq!(facts.tags.len(), scale * 30);
+                    }
+                }
+                println!("dense {shape} {scale} {peak}");
+            }
+        }
+        return;
+    }
+    let (_, report) = child_run("dense-derivation", "ambiguous", CASE, |_| {});
+    eprintln!("{report}");
+    for shape in ["tags", "links", "frontmatter"] {
+        let peak = |scale| -> usize {
+            report
+                .lines()
+                .find_map(|line| {
+                    let fields: Vec<_> = line.split_whitespace().collect();
+                    (fields.len() == 4
+                        && fields[0] == "dense"
+                        && fields[1] == shape
+                        && fields[2] == format!("{scale}"))
+                    .then(|| fields[3].parse().unwrap())
+                })
+                .unwrap_or_else(|| panic!("missing {shape}/{scale}: {report}"))
+        };
+        let (small, large) = (peak(1), peak(10));
+        eprintln!("dense {shape}: {small} -> {large}");
+        // Ordinary derivation floors at 1k/10k tags or links, and 100/1k
+        // frontmatter facts. A further eight bytes per added fact exceeds
+        // the allowance (4 KiB for body facts; 2 KiB for frontmatter).
+        let allowance = match shape {
+            "tags" => 1_557_200,
+            "links" => 5_890_000,
+            _ => 494_500,
+        };
+        assert!(
+            large <= small + allowance,
+            "{shape}: derive heap grew by {}",
+            large.saturating_sub(small)
+        );
+    }
+}
+
+/// The large frontmatter shape has 700 links and 300 tags within the 16 KiB block bound.
+fn dense_source(shape: &str, scale: usize) -> String {
+    match shape {
+        "tags" => "#tag ".repeat(1000 * scale),
+        "links" => "[[https://example.test]] ".repeat(1000 * scale),
+        "frontmatter" => {
+            let mut source = String::from("---\nrefs:\n");
+            for _ in 0..70 * scale {
+                source.push_str("  - '[[x]]'\n");
+            }
+            source.push_str("tags:\n");
+            for _ in 0..30 * scale {
+                source.push_str("  - tag\n");
+            }
+            source.push_str("---\nbody\n");
+            source
+        }
+        _ => unreachable!(),
+    }
 }
