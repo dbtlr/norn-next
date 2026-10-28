@@ -4561,7 +4561,22 @@ impl<'s> Pending<'s> {
     }
 
     fn push(&mut self, change: Change) {
+        debug_assert!(
+            self.content.is_empty(),
+            "a change queued beside the content step's rows: settle the content first"
+        );
         self.changes.push(change);
+    }
+
+    /// Land the content step's queued rows and their findings before a change
+    /// is queued beside them. A change in that step marks a document or a
+    /// directory, and a mark ends what stands beneath it, the findings the
+    /// rows' bytes derived included: it can only do so once they have landed.
+    fn settle_content(&mut self) -> Result<(), JobFailure> {
+        if self.content.is_empty() {
+            return Ok(());
+        }
+        self.flush()
     }
 
     /// Keep an unreadable document's names and discard facts no bytes support.
@@ -4583,6 +4598,7 @@ impl<'s> Pending<'s> {
         cause: &std::io::Error,
         matched: Option<&StoredDocument>,
     ) -> Result<(), JobFailure> {
+        self.settle_content()?;
         let path = match document_path(path) {
             Ok(path) => path,
             Err(quarantine) => {
@@ -4622,6 +4638,7 @@ impl<'s> Pending<'s> {
 
     /// Withhold a directory's range and file its account only on the first failure.
     fn unlistable(&mut self, path: &Path, cause: &std::io::Error) -> Result<(), JobFailure> {
+        self.settle_content()?;
         self.account.withheld.absorb(path);
         let subject = DocumentPath::rendered(path);
         self.account.filed.insert(&subject, Decided::ByBytes);
@@ -4653,6 +4670,7 @@ impl<'s> Pending<'s> {
         fact: &norn_fs::UnreadableFact,
         matched: Option<&StoredDocument>,
     ) -> Result<bool, JobFailure> {
+        self.settle_content()?;
         let path = fact.path().as_path();
         let matched = matched.filter(|row| {
             path_key(row.path.as_str().as_bytes(), self.store.path_order())
@@ -4943,27 +4961,23 @@ impl<'s> Pending<'s> {
         if self.changes.is_empty() && self.content.is_empty() && findings.is_empty() {
             return Ok(());
         }
-        // The content step's rows land first. A change filed beside them (an
-        // unreadable document or directory) is about other paths and is applied
-        // after them, carrying the findings; alone, the rows carry them.
+        // The content step's rows never share a flush with a change: every
+        // change in that step settles them first ([`Self::settle_content`]).
         if self.store.construction_step() == Some(norn_store::Step::Content)
-            && (self.changes.is_empty() || !self.content.is_empty())
+            && self.changes.is_empty()
         {
-            let alone = self.changes.is_empty();
             let mut request = self.store.begin_request();
             request
                 .write_content(
                     &self.content,
-                    if alone { &findings } else { &[] },
+                    &findings,
                     self.declared.model.content_model(),
                 )
                 .map_err(store_effect)?;
             let steps = request.read_steps();
             count_increment_work(&request.finish(), steps);
             self.content.clear();
-            if alone {
-                return Ok(());
-            }
+            return Ok(());
         }
         let applied = !self.changes.is_empty();
         if applied {

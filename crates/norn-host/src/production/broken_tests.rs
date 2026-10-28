@@ -1099,3 +1099,33 @@ fn a_flush_holding_content_and_a_change_writes_both() {
     let rows = store.begin_request().structure_page(2).unwrap();
     assert_eq!(rows.len(), 1); assert_eq!(rows[0].facts.path.as_str(), "a.md");
 }
+
+/// **A directory mark filed beside a content row beneath it leaves no content
+/// finding standing.** The mark makes the row names-only and ends what stands
+/// beneath it, so the frontmatter finding derived from the bytes it no longer
+/// holds goes with them, as when the mark is filed in a flush of its own.
+#[test]
+fn a_mark_filed_beside_content_beneath_it_ends_that_content_s_findings() {
+    let f = Fixture::watcherless("mark-beside-content");
+    fs::create_dir(f.vault().join("dir")).unwrap();
+    fs::write(f.vault().join("dir/a.md"), "---\nbad: [\n---\nbody\n").unwrap();
+    let mut store = Store::open(f.root.join("steps.sqlite3"), proven_order(&f), crate::DERIVATION_VERSION).unwrap();
+    let paths: Vec<_> = ["dir/a.md"].map(|p| DocumentPath::new(p).unwrap()).into();
+    store.defer_link_health().unwrap(); store.begin_steps().unwrap();
+    store.begin_request().apply_increment(IncrementProvenance::Derived, paths.iter().cloned().map(|path| Change::Named { path }), &[], &ContentModel::none()).unwrap();
+    store.finish_step(norn_store::Step::Names).unwrap();
+    let (ops, _) = f.ops(4);
+    let source = norn_fs::Vault::open(&f.vault(), &[]).unwrap();
+    let root = f.vault();
+    let mut account = Account::default();
+    let mut group = store.step_group().unwrap();
+    let mut pending = Pending::new(group.store(), 4, &root, &[], &mut account).unwrap();
+    loading::steps::content_chunk(&ops, &mut pending, &source, &paths).unwrap();
+    pending.unlistable(Path::new("dir"), &std::io::Error::from_raw_os_error(13)).unwrap();
+    pending.flush().unwrap(); drop(pending); group.commit().unwrap();
+    assert!(store.begin_request().content_page(2).unwrap().is_empty());
+    let filed: Vec<String> = norn_db::open_read_only(store.path()).adopted.unwrap().connection()
+        .prepare("SELECT kind FROM findings WHERE path = 'dir/a.md'").unwrap()
+        .query_map([], |row| row.get(0)).unwrap().map(Result::unwrap).collect();
+    assert!(filed.is_empty(), "a names-only row kept its content's findings: {filed:?}");
+}
