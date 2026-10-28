@@ -1,7 +1,7 @@
 //! Positions: the source span type, and where a frontmatter string's bytes
 //! really are.
 
-use norn_text::{Document, SourceSpan, Value};
+use norn_text::{Document, SourceScan, SourceSpan, Value};
 
 // ── SourceSpan ───────────────────────────────────────────────────────────
 
@@ -386,4 +386,74 @@ fn frontmatter_values_are_text_this_crate_reads_no_syntax_in() {
     // The Markdown-link value holds no wikilink, and this crate reads no other
     // link syntax.
     assert!(norn_text::parse_wikilinks_in_text(entries[1].text).is_empty());
+}
+
+/// Stored bodies retain the complete source coordinates without retaining the
+/// frontmatter bytes. Cross the boundary shapes with every Markdown fixture.
+#[test]
+fn a_scan_over_a_stored_body_equals_the_source_scan() {
+    for bom in ["", "\u{feff}"] {
+        for ending in ["\n", "\r\n", "\r"] {
+            for frontmatter in [
+                "",
+                "---\ntitle: t\n---\n",
+                "---\ntitle: t\n",
+                "---\ntitle: t\n---\r",
+            ] {
+                for body in [
+                    "",
+                    "# First\n[[Target]] [label](other.md) #tag ^block\n",
+                    "> ## Nested\n> [[Other#Heading]] #nested\n\n```\n# hidden\n```\n",
+                    "é [[Target]]\n\nSetext\n======\ntext ^id\n",
+                ] {
+                    let source = format!(
+                        "{bom}{}{}",
+                        frontmatter.replace('\n', ending),
+                        body.replace('\n', ending)
+                    );
+                    let document = Document::parse(&source);
+                    let origin = SourceSpan::at(&source, document.body_start());
+                    let stored = SourceScan::over_body(document.body(), origin);
+                    let whole = document.source_scan();
+                    assert_eq!(stored.headings(), whole.headings(), "{source:?}");
+                    assert_eq!(stored.wikilinks(), whole.wikilinks(), "{source:?}");
+                    assert_eq!(stored.links(), whole.links(), "{source:?}");
+                    assert_eq!(stored.tags(), whole.tags(), "{source:?}");
+                    assert_eq!(stored.block_ids(), whole.block_ids(), "{source:?}");
+                    // An independent whole-source position check keeps this bar
+                    // meaningful when Document delegates to the stored-body seam.
+                    let actual: Vec<_> = stored
+                        .headings()
+                        .iter()
+                        .map(|h| h.span)
+                        .chain(stored.links().iter().filter_map(|l| l.span))
+                        .chain(stored.tags().iter().filter_map(|t| t.span))
+                        .chain(stored.block_ids().iter().map(|b| b.span))
+                        .collect();
+                    let body_scan = document.scan_body();
+                    let expected: Vec<_> = body_scan
+                        .headings()
+                        .iter()
+                        .map(|h| h.span)
+                        .chain(body_scan.links().iter().filter_map(|l| l.span))
+                        .chain(body_scan.tags().iter().filter_map(|t| t.span))
+                        .chain(body_scan.block_ids().iter().map(|b| b.span))
+                        .map(|at| SourceSpan::at(&source, document.body_start() + at.byte_offset))
+                        .collect();
+                    assert_eq!(actual, expected, "{source:?}");
+                    for (source_heading, body_heading) in stored
+                        .headings()
+                        .iter()
+                        .zip(document.scan_body().headings())
+                    {
+                        assert_eq!(
+                            source_heading.body_offset,
+                            document.body_start() + body_heading.body_offset,
+                            "{source:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 }

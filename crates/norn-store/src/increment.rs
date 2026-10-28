@@ -9,7 +9,7 @@
 use std::collections::BTreeSet;
 
 use norn_db::rusqlite::{
-    CachedStatement, OptionalExtension, Transaction, params, params_from_iter,
+    CachedStatement, Connection, OptionalExtension, Transaction, params, params_from_iter,
 };
 use norn_wire::{FindingKind, fold_tag};
 
@@ -285,18 +285,7 @@ pub(crate) fn apply(
     }
     // Every bound is read before the transaction, so a refused finding costs no
     // lock and leaves nothing half applied.
-    for finding in findings {
-        request::check_callers_finding(&finding.facts)?;
-        if let Some(scope) = finding.replaces {
-            request::check_callers_discard(scope)?;
-        }
-        request::check_finding_bounds(&finding.facts)?;
-        request::check_finding_classes(&finding.facts)?;
-        request::check_finding_paths(&finding.facts)?;
-        if finding.bytes_hash.is_some() {
-            request::check_content_finding(&finding.facts)?;
-        }
-    }
+    check_derived_findings(findings)?;
 
     // The boundary between two acts: everything before this one has committed
     // whole, and this one has taken no lock and opened no transaction. A build
@@ -451,30 +440,8 @@ pub(crate) fn apply(
     // changeset filed. Each one that
     // names a scope replaces that scope at its subject first, which is
     // discard-then-record for a subject the changeset does not name.
-    for DerivedFinding {
-        facts,
-        replaces,
-        bytes_hash,
-    } in findings
-    {
-        if let Some(scope) = replaces {
-            tally.findings_discarded += request::discard_about_in(
-                &transaction,
-                &facts.path,
-                *scope,
-                &mut tally.directories,
-            )?;
-        }
-        request::write_finding(&transaction, facts)?;
-        request::note_directory(
-            facts.kind.as_str(),
-            facts.path.as_str(),
-            &mut tally.directories,
-        )?;
-        if let Some(hash) = bytes_hash {
-            request::record_content_quarantine(&transaction, facts, hash)?;
-        }
-    }
+    tally.findings_discarded +=
+        write_derived_findings(&transaction, findings, &mut tally.directories)?;
 
     // Link health, re-decided last, so every fact it reads is the one this
     // changeset leaves: the subject discard took the findings at each written
@@ -579,7 +546,7 @@ struct Tally {
 /// would compile the same SQL once per document, and holding the entries would
 /// make a changeset cost its own size in facts on top of the rows it writes —
 /// the iterator hands one over at a time and nothing here keeps it.
-struct Statements<'t> {
+pub(crate) struct Statements<'t> {
     upsert_file: CachedStatement<'t>,
     delete_file: CachedStatement<'t>,
     upsert_document: CachedStatement<'t>,
@@ -629,7 +596,7 @@ impl FindingsDiscard {
 }
 
 impl<'t> Statements<'t> {
-    fn prepare(transaction: &'t Transaction<'_>) -> Result<Self, StoreError> {
+    pub(crate) fn prepare(transaction: &'t Connection) -> Result<Self, StoreError> {
         // Every statement but the three findings discards is taken from the
         // registry, which is the one place a write statement's text is spelled:
         // see [`crate::write_path`]. The discards are the plan seam's own
@@ -795,7 +762,76 @@ fn upsert(
         }
     }
 
-    for (ordinal, link) in facts.links.iter().enumerate() {
+    insert_fact_rows(statements, document, facts, FactPart::All, 0, 0)?;
+
+    tally.documents_upserted += 1;
+    tally.link_rows += facts.links.len() as u64;
+    tally.heading_rows += facts.headings.len() as u64;
+    tally.block_rows += facts.blocks.len() as u64;
+    tally.tag_rows += facts.tags.len() as u64;
+    tally.field_rows += facts.fields().rows().len() as u64;
+    if projection.is_some() {
+        tally.projections += 1;
+    }
+    Ok(())
+}
+
+/// The from-zero content and structure steps in NORN-467 append facts through
+/// these parts. Ordinary upserts keep the caller's complete ordinal order.
+#[derive(Clone, Copy)]
+pub(crate) enum FactPart {
+    All,
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "NORN-467's content step consumes this part.")
+    )]
+    Frontmatter,
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "NORN-467's structure step consumes this part.")
+    )]
+    Body,
+}
+
+impl FactPart {
+    fn frontmatter(self) -> bool {
+        matches!(self, Self::All | Self::Frontmatter)
+    }
+    fn body(self) -> bool {
+        matches!(self, Self::All | Self::Body)
+    }
+    fn links(self, link: &crate::LinkFact) -> bool {
+        if link.field.is_some() {
+            self.frontmatter()
+        } else {
+            self.body()
+        }
+    }
+    fn tags(self, tag: &crate::TagFact) -> bool {
+        if tag.source == crate::TagSource::Frontmatter {
+            self.frontmatter()
+        } else {
+            self.body()
+        }
+    }
+}
+
+/// Write one derived part using the ordinary row mapping. Offsets put body
+/// links and tags after their frontmatter ordinals in from-zero construction.
+pub(crate) fn insert_fact_rows(
+    statements: &mut Statements<'_>,
+    document: i64,
+    facts: &DocumentFacts,
+    part: FactPart,
+    link_offset: usize,
+    tag_offset: usize,
+) -> Result<(), StoreError> {
+    for (ordinal, link) in facts
+        .links
+        .iter()
+        .filter(|link| part.links(link))
+        .enumerate()
+    {
         let (anchor, readings, block_ref) = match &link.anchor {
             Some(LinkAnchor::Heading { written, readings }) => {
                 (Some(written), Some(readings), None)
@@ -807,7 +843,7 @@ fn upsert(
             .insert_link
             .insert(params![
                 document,
-                ordinal as i64,
+                (link_offset + ordinal) as i64,
                 link.family.as_str(),
                 link.embed,
                 link.protocol,
@@ -832,7 +868,7 @@ fn upsert(
         }
     }
 
-    for (ordinal, heading) in facts.headings.iter().enumerate() {
+    for (ordinal, heading) in facts.headings.iter().filter(|_| part.body()).enumerate() {
         statements
             .insert_heading
             .execute(params![
@@ -851,7 +887,7 @@ fn upsert(
             .map_err(|error| error::sql("writing a heading row", error))?;
     }
 
-    for (ordinal, block) in facts.blocks.iter().enumerate() {
+    for (ordinal, block) in facts.blocks.iter().filter(|_| part.body()).enumerate() {
         statements
             .insert_block
             .execute(params![
@@ -865,12 +901,12 @@ fn upsert(
             .map_err(|error| error::sql("writing a block row", error))?;
     }
 
-    for (ordinal, tag) in facts.tags.iter().enumerate() {
+    for (ordinal, tag) in facts.tags.iter().filter(|tag| part.tags(tag)).enumerate() {
         statements
             .insert_tag
             .execute(params![
                 document,
-                ordinal as i64,
+                (tag_offset + ordinal) as i64,
                 facts.path.as_str(),
                 tag.name,
                 fold_tag(&tag.name),
@@ -882,7 +918,7 @@ fn upsert(
             .map_err(|error| error::sql("writing a tag row", error))?;
     }
 
-    for row in facts.fields().rows() {
+    for row in facts.fields().rows().iter().filter(|_| part.frontmatter()) {
         let (container, raw, typed, least_raw, least_typed, offset, folded, value_type) = match row
         {
             FieldRow::Presence { container, .. } => (
@@ -939,16 +975,51 @@ fn upsert(
             .map_err(|error| error::sql("writing a field row", error))?;
     }
 
-    tally.documents_upserted += 1;
-    tally.link_rows += facts.links.len() as u64;
-    tally.heading_rows += facts.headings.len() as u64;
-    tally.block_rows += facts.blocks.len() as u64;
-    tally.tag_rows += facts.tags.len() as u64;
-    tally.field_rows += facts.fields().rows().len() as u64;
-    if projection.is_some() {
-        tally.projections += 1;
+    Ok(())
+}
+
+/// Check findings before any write lock is taken, including construction's
+/// content writes, so a refusal leaves the whole act unapplied.
+pub(crate) fn check_derived_findings(findings: &[DerivedFinding<'_>]) -> Result<(), StoreError> {
+    for finding in findings {
+        request::check_callers_finding(&finding.facts)?;
+        if let Some(scope) = finding.replaces {
+            request::check_callers_discard(scope)?;
+        }
+        request::check_finding_bounds(&finding.facts)?;
+        request::check_finding_classes(&finding.facts)?;
+        request::check_finding_paths(&finding.facts)?;
+        if finding.bytes_hash.is_some() {
+            request::check_content_finding(&finding.facts)?;
+        }
     }
     Ok(())
+}
+
+/// Record derived findings after discards, retaining directory marks for the
+/// same transaction's maintenance. Construction content uses this seam too.
+pub(crate) fn write_derived_findings(
+    transaction: &Transaction<'_>,
+    findings: &[DerivedFinding<'_>],
+    directories: &mut BTreeSet<DirectoryPrefix>,
+) -> Result<u64, StoreError> {
+    let mut discarded = 0;
+    for DerivedFinding {
+        facts,
+        replaces,
+        bytes_hash,
+    } in findings
+    {
+        if let Some(scope) = replaces {
+            discarded += request::discard_about_in(transaction, &facts.path, *scope, directories)?;
+        }
+        request::write_finding(transaction, facts)?;
+        request::note_directory(facts.kind.as_str(), facts.path.as_str(), directories)?;
+        if let Some(hash) = bytes_hash {
+            request::record_content_quarantine(transaction, facts, hash)?;
+        }
+    }
+    Ok(discarded)
 }
 
 /// Write the names alone and clear every fact no unread bytes can support.
@@ -1285,4 +1356,158 @@ fn beneath_unlistable(
             .insert(path.path_key_in(SuffixKey::Comparison));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        BlockFact, FrontmatterValue, HeadingFact, LinkFact, LinkFamily, Span, TagFact, TagSource,
+    };
+
+    #[test]
+    fn frontmatter_then_body_rows_equal_an_ordinary_upsert() {
+        let root = norn_testkit::scratch::Scratch::new("norn-store-fact-parts");
+        let mut store = Store::open_throwaway(
+            root.join("store.sqlite3"),
+            StoredPathOrder::Sensitive,
+            crate::DerivationVersion::new(1),
+        )
+        .expect("store");
+        let mut facts = DocumentFacts::new(
+            DocumentPath::new("note.md").expect("path"),
+            "hash",
+            "# Heading\ntext\n",
+            15,
+        )
+        .with_frontmatter(
+            Some(FrontmatterValue::Map(vec![(
+                "status".into(),
+                FrontmatterValue::String("open".into()),
+            )])),
+            &ContentModel::none(),
+        );
+        let at = Span {
+            line: 1,
+            column: 1,
+            byte_offset: 0,
+        };
+        for (field, target) in [
+            (Some("first"), "Front"),
+            (Some("second"), "Other"),
+            (None, "Body"),
+            (None, "Last"),
+        ] {
+            facts.links.push(LinkFact {
+                field: field.map(str::to_string),
+                family: LinkFamily::Wikilink,
+                embed: false,
+                protocol: None,
+                target: target.into(),
+                title: None,
+                anchor: None,
+                span: field.is_none().then_some(at),
+            });
+        }
+        for source in [
+            TagSource::Frontmatter,
+            TagSource::Frontmatter,
+            TagSource::Body,
+            TagSource::Body,
+        ] {
+            facts.tags.push(TagFact {
+                name: "Repeated".into(),
+                source,
+                span: (source == TagSource::Body).then_some(at),
+            });
+        }
+        facts.headings.push(HeadingFact {
+            level: 1,
+            text: "Heading".into(),
+            reading: "Heading".into(),
+            slug: "heading".into(),
+            span: at,
+            body_offset: 10,
+            inside_container: false,
+        });
+        facts.blocks.push(BlockFact {
+            block_id: "id".into(),
+            span: Some(at),
+        });
+        let document = {
+            let transaction = store
+                .database
+                .immediate_transaction("test upsert")
+                .expect("transaction");
+            let mut statements = Statements::prepare(&transaction).expect("statements");
+            upsert(
+                &mut statements,
+                1,
+                1,
+                &facts,
+                1,
+                &mut Tally::default(),
+                false,
+            )
+            .expect("ordinary upsert");
+            let document: i64 = transaction
+                .query_row("SELECT id FROM documents", [], |row| row.get(0))
+                .expect("document id");
+            drop(statements);
+            transaction.commit().expect("commit");
+            document
+        };
+        let expected = store
+            .begin_request()
+            .stored_facts(&facts.path)
+            .expect("read")
+            .expect("facts");
+        {
+            let transaction = store
+                .database
+                .immediate_transaction("test content")
+                .expect("transaction");
+            let mut statements = Statements::prepare(&transaction).expect("statements");
+            for discard in &mut statements.discard_facts {
+                discard.execute(params![document]).expect("clear facts");
+            }
+            insert_fact_rows(
+                &mut statements,
+                document,
+                &facts,
+                FactPart::Frontmatter,
+                0,
+                0,
+            )
+            .expect("frontmatter rows");
+            drop(statements);
+            transaction.commit().expect("commit");
+        }
+        let content = store
+            .begin_request()
+            .stored_facts(&facts.path)
+            .expect("read")
+            .expect("facts");
+        assert_eq!(content.links.len(), 2);
+        assert_eq!(content.tags.len(), 2);
+        assert!(content.headings.is_empty() && content.blocks.is_empty());
+        assert_eq!(content.fields, expected.fields);
+        {
+            let transaction = store
+                .database
+                .immediate_transaction("test structure")
+                .expect("transaction");
+            let mut statements = Statements::prepare(&transaction).expect("statements");
+            insert_fact_rows(&mut statements, document, &facts, FactPart::Body, 2, 2)
+                .expect("body rows");
+            drop(statements);
+            transaction.commit().expect("commit");
+        }
+        let composed = store
+            .begin_request()
+            .stored_facts(&facts.path)
+            .expect("read")
+            .expect("facts");
+        assert_eq!(composed, expected);
+    }
 }
