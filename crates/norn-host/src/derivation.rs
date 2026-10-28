@@ -815,23 +815,27 @@ fn map_document_read(
     })
 }
 
-/// The facts one scan of a body derives, in source coordinates.
+/// The facts one scan of a body derives, in source coordinates. Links and
+/// tags stay as the scan read them until they are appended: mapping them into
+/// vectors of their own first would hold two vectors of facts beside each
+/// other while the frontmatter's grew to take them.
 struct BodyFacts {
-    links: Vec<LinkFact>,
+    links: Vec<norn_text::Link>,
     headings: Vec<HeadingFact>,
     blocks: Vec<BlockFact>,
-    tags: Vec<TagFact>,
+    tags: Vec<norn_text::Tag>,
 }
 
 /// Scan `body`, which starts at `origin` in its source. Ordinary derivation
 /// scans the body it has just decoded; the from-zero structure step scans the
-/// body its content step stored. Both map the scan here.
+/// body its content step stored. Both map the scan here and through
+/// [`BodyFacts::append_to`].
 fn scan_body(body: &str, origin: norn_text::SourceSpan) -> BodyFacts {
     #[cfg(feature = "induced-failure")]
     let _timing = norn_store::profiling::span("host.body_scan");
     let scan = norn_text::SourceScan::over_body(body, origin);
     BodyFacts {
-        links: scan.links().into_iter().map(map_link).collect(),
+        links: scan.links(),
         headings: scan.headings().into_iter().map(map_heading).collect(),
         blocks: scan
             .block_ids()
@@ -841,11 +845,7 @@ fn scan_body(body: &str, origin: norn_text::SourceSpan) -> BodyFacts {
                 span: Some(span(block.span)),
             })
             .collect(),
-        tags: scan
-            .tags()
-            .into_iter()
-            .map(|tag| map_tag(tag, TagSource::Body))
-            .collect(),
+        tags: scan.tags(),
     }
 }
 
@@ -853,10 +853,16 @@ impl BodyFacts {
     /// Append behind the frontmatter's facts: the file's order, so a link's or
     /// tag's ordinal is where the file writes it.
     fn append_to(self, facts: &mut DocumentFacts) {
-        facts.links.extend(self.links);
+        facts.links.reserve_exact(self.links.len());
+        facts.links.extend(self.links.into_iter().map(map_link));
         facts.headings = self.headings;
         facts.blocks = self.blocks;
-        facts.tags.extend(self.tags);
+        facts.tags.reserve_exact(self.tags.len());
+        facts.tags.extend(
+            self.tags
+                .into_iter()
+                .map(|tag| map_tag(tag, TagSource::Body)),
+        );
     }
 }
 
