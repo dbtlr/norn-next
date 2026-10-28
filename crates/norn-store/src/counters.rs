@@ -82,6 +82,8 @@
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Counter {
     DocumentsUpserted,
+    /// Document rows indexed by the from-zero full-text pass, including NULL bodies.
+    FullTextRowsIndexed,
     DocumentsDeleted,
     LinkRowsWritten,
     HeadingRowsWritten,
@@ -117,6 +119,7 @@ impl Counter {
     /// Every counter, in the order a reading reports them.
     const ALL: &'static [Counter] = &[
         Counter::DocumentsUpserted,
+        Counter::FullTextRowsIndexed,
         Counter::DocumentsDeleted,
         Counter::LinkRowsWritten,
         Counter::HeadingRowsWritten,
@@ -142,6 +145,7 @@ impl Counter {
     const fn name(self) -> &'static str {
         match self {
             Counter::DocumentsUpserted => "documents_upserted",
+            Counter::FullTextRowsIndexed => "full_text_rows_indexed",
             Counter::DocumentsDeleted => "documents_deleted",
             Counter::LinkRowsWritten => "link_rows_written",
             Counter::HeadingRowsWritten => "heading_rows_written",
@@ -225,6 +229,11 @@ impl DerivationCounters {
     /// Candidates this request's re-decision read.
     pub fn link_health_candidates_read(&self) -> u64 {
         self.value(Counter::LinkHealthCandidatesRead)
+    }
+
+    /// Document rows indexed by the from-zero full-text pass.
+    pub fn full_text_rows_indexed(&self) -> u64 {
+        self.value(Counter::FullTextRowsIndexed)
     }
 
     pub(crate) fn add(&mut self, counter: Counter, amount: u64) {

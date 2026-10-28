@@ -136,7 +136,15 @@ impl ProductionEntryOps {
         admission: EarlyReads,
     ) -> Result<(), JobFailure> {
         self.construct_from_zero(attachment, progress, admission)?;
-        attachment.store.finish_construction().map_err(store_effect)
+        self.finish_construction(&mut attachment.store)
+    }
+
+    fn finish_construction(&self, store: &mut Store) -> Result<(), JobFailure> {
+        let finished = store.finish_construction().map_err(store_effect)?;
+        if finished.checkpoint_busy {
+            self.evidence.count_construction_checkpoint_busy();
+        }
+        Ok(())
     }
 
     /// Count a from-zero build and derive the vault into the store under

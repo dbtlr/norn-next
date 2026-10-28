@@ -91,6 +91,7 @@ pub struct JobEvidence {
     recoveries_run: AtomicU64,
     rebuilds_run: AtomicU64,
     from_zero_builds: AtomicU64,
+    construction_checkpoint_busy: AtomicU64,
     watcher_polls: AtomicU64,
     watcher_rescans_reported: AtomicU64,
     mint_statements_under_the_gate: AtomicU64,
@@ -196,6 +197,8 @@ pub struct EvidenceReading {
     /// under construction, whichever route reached it. An attach over a finished
     /// store adds none.
     pub from_zero_builds: u64,
+    /// Construction checkpoints a reader prevented from truncating the WAL.
+    pub construction_checkpoint_busy: u64,
     /// Watcher polls taken over an attachment, however each one answered.
     ///
     /// One per poll of an entry's attachment — a pass of the dispatcher's
@@ -332,6 +335,9 @@ impl EvidenceReading {
             from_zero_builds: self
                 .from_zero_builds
                 .saturating_sub(earlier.from_zero_builds),
+            construction_checkpoint_busy: self
+                .construction_checkpoint_busy
+                .saturating_sub(earlier.construction_checkpoint_busy),
             watcher_polls: self.watcher_polls.saturating_sub(earlier.watcher_polls),
             watcher_rescans_reported: self
                 .watcher_rescans_reported
@@ -447,6 +453,7 @@ impl JobEvidence {
             recoveries_run: get(&self.recoveries_run),
             rebuilds_run: get(&self.rebuilds_run),
             from_zero_builds: get(&self.from_zero_builds),
+            construction_checkpoint_busy: get(&self.construction_checkpoint_busy),
             watcher_polls: get(&self.watcher_polls),
             watcher_rescans_reported: get(&self.watcher_rescans_reported),
             mint_statements_under_the_gate: get(&self.mint_statements_under_the_gate),
@@ -471,6 +478,11 @@ impl JobEvidence {
 
     pub(crate) fn count_rebuild(&self) {
         self.rebuilds_run.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn count_construction_checkpoint_busy(&self) {
+        self.construction_checkpoint_busy
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     pub(crate) fn count_from_zero_build(&self) {

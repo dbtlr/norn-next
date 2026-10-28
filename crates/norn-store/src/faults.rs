@@ -172,6 +172,23 @@ pub mod induced_failure {
             .map_err(|error| error::sql("running SQL out of band", error))
     }
 
+    /// Read WAL autocheckpoint, cache size and synchronous on the writer connection.
+    /// Independent read-only connections do not share these connection settings.
+    pub fn construction_pragmas(store: &Store) -> Result<[i64; 3], StoreError> {
+        let mut values = [0; 3];
+        for (value, name) in
+            values
+                .iter_mut()
+                .zip(["wal_autocheckpoint", "cache_size", "synchronous"])
+        {
+            *value = store
+                .connection()
+                .pragma_query_value(None, name, |row| row.get(0))
+                .map_err(|e| error::sql("reading construction pragmas out of band", e))?;
+        }
+        Ok(values)
+    }
+
     /// Record a finding through no caller's door: one the store judges and
     /// files itself — a link-health finding, or one about a link — which
     /// [`crate::Request::record_finding`] refuses

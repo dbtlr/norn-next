@@ -103,6 +103,7 @@ impl IntakeBuilder {
                 outcome: OpenOutcome::Created,
                 under_construction: true,
                 link_health_deferred: false,
+                steps: None,
                 // TemporaryFile owns cleanup, including on failed construction.
                 torn_down: true,
             }),

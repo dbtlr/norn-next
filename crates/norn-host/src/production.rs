@@ -1601,7 +1601,7 @@ impl ProductionEntryOps {
                         other => other,
                     })
             })
-            .and_then(|()| attachment.store.finish_construction().map_err(store_effect));
+            .and_then(|()| self.finish_construction(&mut attachment.store));
         match derived {
             Ok(()) => Ok(attachment),
             Err(failure) => {
@@ -3440,7 +3440,10 @@ pub(crate) fn heal_from_zero(
         ProductionPolicy::new(64, 64).expect("a legal policy"),
         &progress.healing(),
     )?;
-    store.finish_construction().map_err(store_effect)
+    store
+        .finish_construction()
+        .map(|_| ())
+        .map_err(store_effect)
 }
 
 /// The roots a walk of the vault at `root` does not enter on account of

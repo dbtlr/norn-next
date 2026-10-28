@@ -260,6 +260,18 @@ pub(crate) fn apply(
     // entries still opens the transaction, because the findings are writes.
     let mut entries = changes.into_iter();
     let first = entries.next();
+    if first.is_some()
+        && store
+            .steps
+            .as_ref()
+            .is_some_and(|steps| steps.step != crate::construction::Step::Documents)
+    {
+        return Err(crate::construction::refused(
+            store,
+            "applying an increment",
+            "document writes are refused after full text begins and before construction finishes",
+        ));
+    }
     if first.is_none() && findings.is_empty() {
         return Ok(IncrementOutcome {
             generation: None,
