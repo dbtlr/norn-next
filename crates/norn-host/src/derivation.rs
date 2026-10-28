@@ -794,16 +794,24 @@ fn map_document_read(
         .filter(|d| d.code.frontmatter_scoped())
         .count() as u32;
     if depth != Depth::Base {
-        facts.links = document
-            .frontmatter_field_wikilinks()
-            .into_iter()
-            .map(map_frontmatter_link)
-            .collect();
-        facts.tags = document
-            .frontmatter_tags()
-            .into_iter()
-            .map(|tag| map_tag(tag, TagSource::Frontmatter))
-            .collect();
+        // Each vector is sized once for the frontmatter's facts and the body's
+        // behind them, so it carries no spare room: a collect from the text
+        // layer's wider link vector would keep that vector's buffer, and the
+        // plan holds its facts until its changeset flushes.
+        let links = document.frontmatter_field_wikilinks();
+        let tags = document.frontmatter_tags();
+        let (body_links, body_tags) = body
+            .as_ref()
+            .map_or((0, 0), |body| (body.links.len(), body.tags.len()));
+        facts.links = Vec::with_capacity(links.len() + body_links);
+        facts
+            .links
+            .extend(links.into_iter().map(map_frontmatter_link));
+        facts.tags = Vec::with_capacity(tags.len() + body_tags);
+        facts.tags.extend(
+            tags.into_iter()
+                .map(|tag| map_tag(tag, TagSource::Frontmatter)),
+        );
     }
     if let Some(body) = body {
         body.append_to(&mut facts);
@@ -1789,6 +1797,62 @@ fn map_value(value: &Value) -> FrontmatterValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A plan holds its facts and no spare room beside them.** A plan
+    /// waits in its changeset until the changeset flushes, so capacity a fact
+    /// vector keeps past its length is heap every pending document holds.
+    /// Frontmatter links collected from the text layer's wider vector would
+    /// keep that vector's buffer; every fact vector a plan carries is exact.
+    #[test]
+    fn a_plan_carries_its_fact_vectors_at_their_length() {
+        let mut source = String::from("---\nlinks:\n");
+        for at in 0..200 {
+            source.push_str(&format!("  - '[[a{at}]]'\n"));
+        }
+        source.push_str("tags: [x, y, z]\n---\n# Heading\n[[b]] [c](c.md) #d ^block\n");
+        let bytes = source.as_bytes();
+        let hash = norn_fs::ContentHash::of(bytes).to_string();
+        let declared = undeclaring();
+        let exact = |facts: &DocumentFacts, step: &str| {
+            assert_eq!(facts.links.capacity(), facts.links.len(), "{step} links");
+            assert_eq!(facts.tags.capacity(), facts.tags.len(), "{step} tags");
+            assert_eq!(
+                facts.headings.capacity(),
+                facts.headings.len(),
+                "{step} headings"
+            );
+            assert_eq!(facts.blocks.capacity(), facts.blocks.len(), "{step} blocks");
+        };
+        let path = Path::new("note.md");
+        let plan = plan_document(
+            path,
+            "note.md",
+            bytes,
+            hash.clone(),
+            None,
+            &declared,
+            CaseFold::Exact,
+        );
+        let Some(Change::Upsert(facts)) = &plan.change else {
+            panic!("a derived document")
+        };
+        assert_eq!(facts.links.len(), 202);
+        exact(facts, "the ordinary plan");
+        let (content, _) = plan_content_document(
+            path,
+            "note.md",
+            bytes,
+            hash,
+            None,
+            &declared,
+            CaseFold::Exact,
+        );
+        let Some(Change::Upsert(facts)) = &content.change else {
+            panic!("a derived document")
+        };
+        assert_eq!(facts.links.len(), 200);
+        exact(facts, "the content plan");
+    }
 
     /// The rich plan before the split is the oracle, including finding order
     /// and the frontmatter-first ordering that becomes store ordinals.
