@@ -13751,7 +13751,7 @@ mod tests {
         assert_eq!(spent.links_judged, link_rows(&mut attachment.store));
         assert_eq!(
             spent.full_text_rows_indexed as usize,
-            stored_paths(&mut attachment.store).len()
+            every_stored_fact(&mut attachment.store).len()
         );
         assert!(spent.links_judged > 0);
     }
