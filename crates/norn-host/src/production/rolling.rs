@@ -203,7 +203,7 @@ pub(super) fn slice(
                 match inventory.replay(record).map_err(effect)? {
                     norn_fs::WalkFact::File(file) if is_markdown(file.path().as_path()) => {
                         if let Err(quarantine) = document_path(file.path().as_path()) {
-                            pending.quarantine(file.path().as_path(), quarantine);
+                            pending.quarantine(file.path().as_path(), quarantine)?;
                         }
                     }
                     norn_fs::WalkFact::Unreadable(unreadable) => {

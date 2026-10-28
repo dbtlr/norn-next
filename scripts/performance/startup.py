@@ -51,10 +51,12 @@ def partition(ready: dict) -> dict | None:
                             ("store.upsert", "store.link_health", "store.commit"))
     once = values["store.link_health_once"]
     full_text = values.get("store.step.full_text", 0) + values.get("store.step.finish", 0)
-    result = {"full_text": full_text, "link_health_once": once, "document_plan": plan, "row_and_index_writes": rows,
+    content = values.get("host.step.content", 0) + values.get("store.step.content", 0)
+    structure = values.get("host.step.structure", 0)
+    result = {"content": content, "structure": structure, "full_text": full_text, "link_health_once": once, "document_plan": plan, "row_and_index_writes": rows,
               "link_health": health, "commit": commit,
               "other_increment": increment - rows - health - commit,
-              "other_startup": ready["startup_complete_ns"] - plan - increment - once - full_text}
+              "other_startup": ready["startup_complete_ns"] - plan - increment - once - full_text - content - structure}
     if any(value < 0 for value in result.values()):
         raise ValueError("timing scopes overlap or exceed the startup clock")
     return result
@@ -64,8 +66,12 @@ def validate_work(evidence, stage, documents, batch, store):
     """Reject timings made cheaper by skipped import work or a changed restart."""
     if evidence is None:
         return
-    if stage == "fresh" and evidence["changesets_applied"] < (documents + batch - 1) // batch:
-        raise ValueError("fresh startup committed fewer batches than its document population requires")
+    if stage == "fresh":
+        for key in ("documents_named", "content_rows_written", "structure_rows_written", "documents_read_by_build"):
+            if evidence[key] != documents:
+                raise ValueError(f"fresh startup {key} does not equal its document population")
+        if evidence["fact_rows_discarded"] or evidence["links_redecided"]:
+            raise ValueError("fresh startup discarded facts or re-decided links")
     if stage == "fresh" and evidence["links_judged"] != store["tables"]["links"]["rows"]:
         raise ValueError("fresh startup did not judge exactly every stored link")
     if stage == "restart" and any(evidence[key] for key in

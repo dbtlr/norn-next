@@ -738,10 +738,6 @@ enum Depth {
     Base,
     /// Fields, body and the frontmatter's own links and tags: what the
     /// from-zero content step writes.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "NORN-467's content step reads at this depth.")
-    )]
     Content,
     /// Everything, the body scanned in the same read.
     Rich,
@@ -1034,10 +1030,6 @@ pub(crate) fn plan_base_document(
 /// Derive content without scanning Markdown. The from-zero content step in
 /// NORN-467 will persist the origin beside its frontmatter fact counts.
 /// Metadata construction stays on `plan_base_document`, which omits those facts.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "NORN-467's content step consumes this seam.")
-)]
 pub(crate) fn plan_content_document(
     path: &Path,
     spelling: &str,
@@ -1048,7 +1040,7 @@ pub(crate) fn plan_content_document(
     case: CaseFold,
 ) -> (Plan, Option<norn_text::SourceSpan>) {
     #[cfg(feature = "induced-failure")]
-    let _timing = norn_store::profiling::span("host.document_plan");
+    let _timing = norn_store::profiling::span("host.content_plan");
     let mapped = map_document_read(
         spelling,
         bytes,
@@ -1066,10 +1058,6 @@ pub(crate) fn plan_content_document(
 /// Derive structure from the stored body and its source origin, then judge all
 /// tags in frontmatter-first order. The from-zero structure step in NORN-467
 /// will use this same seam after content lands; no bytes are reopened here.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "NORN-467's structure step consumes this seam.")
-)]
 pub(crate) fn plan_structure_document(
     facts: &mut DocumentFacts,
     origin: norn_text::SourceSpan,

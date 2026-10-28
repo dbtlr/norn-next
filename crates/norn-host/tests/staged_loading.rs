@@ -98,8 +98,14 @@ impl LoadingProbe for Probe {
             LoadingBoundary::GetPublished(_) => Point::GetPublished,
             LoadingBoundary::MetadataRecord(_) => Point::MetadataRecord,
             LoadingBoundary::MetadataComplete => Point::MetadataComplete,
+            // Each names/content/structure chunk still yields here. These
+            // checks concern the disposable sources, whose admission and
+            // contents do not depend on canonical row completeness.
             LoadingBoundary::CanonicalPage => Point::CanonicalPage,
-            LoadingBoundary::LinkHealthChunk | LoadingBoundary::FullTextBatch => return,
+            // Step completion changes no ADR 0043 disposable-source admission.
+            LoadingBoundary::StepComplete(_)
+            | LoadingBoundary::LinkHealthChunk
+            | LoadingBoundary::FullTextBatch => return,
             LoadingBoundary::CanonicalComplete => Point::CanonicalComplete,
             LoadingBoundary::QueryEstablished => Point::QueryEstablished,
             LoadingBoundary::QueryBuilt => Point::QueryBuilt,

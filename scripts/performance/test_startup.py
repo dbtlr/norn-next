@@ -92,8 +92,23 @@ class StartupAccountingTests(unittest.TestCase):
 
     def test_parent_and_child_times_are_not_added_twice(self):
         self.assertEqual(partition(self.ready()), {
-            "document_plan": 7, "row_and_index_writes": 4, "link_health": 5,
+            "content": 0, "structure": 0, "document_plan": 7, "row_and_index_writes": 4, "link_health": 5,
             "link_health_once": 3, "full_text": 7, "commit": 1, "other_increment": 2, "other_startup": 8})
+
+    def test_document_steps_count_outer_scopes_once(self):
+        ready = self.ready()
+        ready["startup_complete_ns"] += 35
+        ready["timings"]["entries"].extend([
+            {"label": "host.step.content", "calls": 1, "elapsed_ns": 10},
+            {"label": "host.content_plan", "calls": 1, "elapsed_ns": 3},
+            {"label": "store.step.content", "calls": 1, "elapsed_ns": 5},
+            {"label": "host.step.structure", "calls": 1, "elapsed_ns": 20},
+            {"label": "store.step.structure", "calls": 1, "elapsed_ns": 7},
+        ])
+        buckets = partition(ready)
+        self.assertEqual((buckets["content"], buckets["structure"]), (15, 20))
+        self.assertEqual(buckets["other_startup"], 8)
+        self.assertEqual(sum(buckets.values()), ready["startup_complete_ns"])
 
     def test_incomplete_or_overlapping_timings_cannot_be_presented_as_a_breakdown(self):
         for field in ("unknown_labels", "unfinished_spans"):
@@ -128,8 +143,8 @@ class StartupAccountingTests(unittest.TestCase):
 
     def test_work_evidence_rejects_incomplete_import_and_a_rebuilt_restart(self):
         with self.assertRaises(ValueError):
-            validate_work({"changesets_applied": 2, "links_judged": 9}, "fresh", 314, 128, {"tables": {"links": {"rows": 9}}})
-        validate_work({"changesets_applied": 3, "links_judged": 9}, "fresh", 314, 128, {"tables": {"links": {"rows": 9}}})
+            validate_work({"documents_named": 314, "content_rows_written": 313, "structure_rows_written": 314, "documents_read_by_build": 314, "fact_rows_discarded": 0, "links_redecided": 0, "links_judged": 9}, "fresh", 314, 128, {"tables": {"links": {"rows": 9}}})
+        validate_work({"documents_named": 314, "content_rows_written": 314, "structure_rows_written": 314, "documents_read_by_build": 314, "fact_rows_discarded": 0, "links_redecided": 0, "links_judged": 9}, "fresh", 314, 128, {"tables": {"links": {"rows": 9}}})
         unchanged = {"recoveries_run": 0, "rebuilds_run": 0, "documents_derived": 0, "documents_upserted": 0}
         validate_work(unchanged, "restart", 314, 128, {})
         for key in unchanged:
@@ -140,8 +155,8 @@ class StartupAccountingTests(unittest.TestCase):
         store = {"tables": {"links": {"rows": 9}}}
         for judged in (0, 8, 10):
             with self.subTest(judged=judged), self.assertRaisesRegex(ValueError, "link"):
-                validate_work({"changesets_applied": 3, "links_judged": judged}, "fresh", 314, 128, store)
-        validate_work({"changesets_applied": 3, "links_judged": 9}, "fresh", 314, 128, store)
+                validate_work({"documents_named": 314, "content_rows_written": 314, "structure_rows_written": 314, "documents_read_by_build": 314, "fact_rows_discarded": 0, "links_redecided": 0, "links_judged": judged}, "fresh", 314, 128, store)
+        validate_work({"documents_named": 314, "content_rows_written": 314, "structure_rows_written": 314, "documents_read_by_build": 314, "fact_rows_discarded": 0, "links_redecided": 0, "links_judged": 9}, "fresh", 314, 128, store)
 
     def test_revision_reports_require_shutdown_and_the_complete_validated_lifecycle(self):
         metadata = {"completed": True, "workload_version": "startup-attribution-v2", "sizes": [300],

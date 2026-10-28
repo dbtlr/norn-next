@@ -60,6 +60,60 @@ fn steps_require_an_empty_created_store_with_deferred_health() {
 fn fill(store: &mut Store) {
     use crate::common::{document, path};
     use norn_store::{Change, ContentModel, IncrementProvenance};
+    // PR C requires names/content/structure before PR A's unchanged FTS bars.
+    if store.construction_step() == Some(norn_store::Step::Names) {
+        store
+            .begin_request()
+            .apply_increment(
+                IncrementProvenance::Derived,
+                [
+                    Change::Named { path: path("a.md") },
+                    Change::Unreadable { path: path("b.md") },
+                    Change::Named { path: path("c.md") },
+                ],
+                &[],
+                &ContentModel::none(),
+            )
+            .unwrap();
+        store.finish_step(norn_store::Step::Names).unwrap();
+        let mut group = store.step_group().unwrap();
+        group
+            .begin_request()
+            .write_content(
+                &[
+                    norn_store::ContentWrite {
+                        facts: document("a.md", "a", "alpha beta beta"),
+                        origin: norn_store::Span {
+                            line: 1,
+                            column: 1,
+                            byte_offset: 0,
+                        },
+                    },
+                    norn_store::ContentWrite {
+                        facts: document("c.md", "c", "gamma alpha"),
+                        origin: norn_store::Span {
+                            line: 1,
+                            column: 1,
+                            byte_offset: 0,
+                        },
+                    },
+                ],
+                &[],
+                &ContentModel::none(),
+            )
+            .unwrap();
+        group.commit().unwrap();
+        store.finish_step(norn_store::Step::Content).unwrap();
+        let mut group = store.step_group().unwrap();
+        let rows = group.begin_request().structure_page(8).unwrap();
+        group
+            .begin_request()
+            .write_structure(&rows, &[], &ContentModel::none())
+            .unwrap();
+        group.commit().unwrap();
+        store.finish_step(norn_store::Step::Structure).unwrap();
+        return;
+    }
     store
         .begin_request()
         .apply_increment(
@@ -76,6 +130,16 @@ fn fill(store: &mut Store) {
 }
 
 fn judge(store: &mut Store) {
+    // Empty PR A fixtures still traverse PR C's three empty document steps.
+    if store.construction_step() == Some(norn_store::Step::Names) {
+        for step in [
+            norn_store::Step::Names,
+            norn_store::Step::Content,
+            norn_store::Step::Structure,
+        ] {
+            store.finish_step(step).unwrap();
+        }
+    }
     store
         .begin_request()
         .judge_link_health_once(&norn_store::ContentModel::none(), &mut || {})
@@ -392,4 +456,410 @@ fn full_text_cursor_statements_seek_document_ids() {
             "{plan:?}"
         );
     }
+}
+
+/// A provisional name is legal only in names; rich changes never enter an open build.
+#[test]
+fn named_and_rich_writes_are_refused_outside_their_step() {
+    use crate::common::{document, path};
+    use norn_store::{Change, ContentModel, IncrementProvenance, Step};
+    let scratch = Scratch::new("construction-write-admission");
+    let mut store = scratch.open();
+    let apply = |store: &mut Store, changes| {
+        store.begin_request().apply_increment(
+            IncrementProvenance::Derived,
+            changes,
+            &[],
+            &ContentModel::none(),
+        )
+    };
+    assert!(matches!(
+        apply(&mut store, vec![Change::Named { path: path("a.md") }]),
+        Err(StoreError::Lifecycle { .. })
+    ));
+    store.defer_link_health().unwrap();
+    store.begin_steps().unwrap();
+    assert!(matches!(
+        apply(
+            &mut store,
+            vec![Change::Upsert(document("a.md", "a", "body"))]
+        ),
+        Err(StoreError::Lifecycle { .. })
+    ));
+    assert!(matches!(
+        apply(
+            &mut store,
+            vec![Change::Death {
+                path: path("a.md"),
+                provenance: norn_store::Provenance::HealPrune
+            }]
+        ),
+        Err(StoreError::Lifecycle { .. })
+    ));
+    apply(&mut store, vec![Change::Named { path: path("a.md") }]).unwrap();
+    store.finish_step(Step::Names).unwrap();
+    assert!(matches!(
+        apply(&mut store, vec![Change::Named { path: path("b.md") }]),
+        Err(StoreError::Lifecycle { .. })
+    ));
+}
+
+/// Withdrawal removes provisional identity and progress, without inventing a death.
+#[test]
+fn a_withdrawal_records_no_death() {
+    use crate::common::path;
+    use norn_store::{Change, ContentModel, IncrementProvenance, Step};
+    let scratch = Scratch::new("construction-withdrawal");
+    let mut store = scratch.open();
+    store.defer_link_health().unwrap();
+    store.begin_steps().unwrap();
+    store
+        .begin_request()
+        .apply_increment(
+            IncrementProvenance::Derived,
+            [Change::Named {
+                path: path("gone.md"),
+            }],
+            &[],
+            &ContentModel::none(),
+        )
+        .unwrap();
+    store.finish_step(Step::Names).unwrap();
+    {
+        let mut group = store.step_group().unwrap();
+        group
+            .begin_request()
+            .withdraw_content(&path("gone.md"))
+            .unwrap();
+        group.commit().unwrap();
+    }
+    assert!(
+        store
+            .begin_request()
+            .stored_document(&path("gone.md"))
+            .unwrap()
+            .is_none()
+    );
+    assert!(store.begin_request().content_page(8).unwrap().is_empty());
+    assert_sql(&mut store, "NOT EXISTS(SELECT 1 FROM tombstones)");
+}
+
+/// A failed chunk cannot leave earlier chunks of its transaction committed.
+#[test]
+fn a_dropped_step_group_rolls_back_its_chunks() {
+    use crate::common::{document, path};
+    use norn_store::{Change, ContentModel, ContentWrite, IncrementProvenance, Span, Step};
+    let scratch = Scratch::new("construction-group-rollback");
+    let mut store = scratch.open();
+    store.defer_link_health().unwrap();
+    store.begin_steps().unwrap();
+    store
+        .begin_request()
+        .apply_increment(
+            IncrementProvenance::Derived,
+            [Change::Named { path: path("a.md") }],
+            &[],
+            &ContentModel::none(),
+        )
+        .unwrap();
+    store.finish_step(Step::Names).unwrap();
+    {
+        let mut group = store.step_group().unwrap();
+        group
+            .begin_request()
+            .write_content(
+                &[ContentWrite {
+                    facts: document("a.md", "hash", "body"),
+                    origin: Span {
+                        line: 1,
+                        column: 1,
+                        byte_offset: 0,
+                    },
+                }],
+                &[],
+                &ContentModel::none(),
+            )
+            .unwrap();
+    }
+    assert!(store.begin_request().content_owed(&path("a.md")).unwrap());
+    assert!(
+        store
+            .begin_request()
+            .stored_document(&path("a.md"))
+            .unwrap()
+            .unwrap()
+            .content_hash
+            .is_none()
+    );
+}
+
+/// An arbitrary single-path set can finish ahead of the vault pass; stage
+/// selection then omits it and a repeated writer records no second fact.
+#[test]
+fn a_document_run_ahead_is_not_written_twice() {
+    use crate::common::{document_with_every_fact, path};
+    use norn_store::{
+        Change, ContentModel, ContentWrite, IncrementProvenance, Span, Step, TagSource,
+    };
+    let scratch = Scratch::new("construction-ahead");
+    let mut store = scratch.open();
+    let mut facts = document_with_every_fact("a.md", "hash");
+    facts.links[0].field = Some("ref".into());
+    facts.tags[0].source = TagSource::Frontmatter;
+    let front_links = facts.links.iter().filter(|l| l.field.is_some()).count();
+    let front_tags = facts
+        .tags
+        .iter()
+        .filter(|t| t.source == TagSource::Frontmatter)
+        .count();
+    let mut content = facts.clone();
+    content.links.retain(|l| l.field.is_some());
+    content.tags.retain(|t| t.source == TagSource::Frontmatter);
+    content.headings.clear();
+    content.blocks.clear();
+    store.defer_link_health().unwrap();
+    store.begin_steps().unwrap();
+    store
+        .begin_request()
+        .apply_increment(
+            IncrementProvenance::Derived,
+            [Change::Named { path: path("a.md") }],
+            &[],
+            &ContentModel::none(),
+        )
+        .unwrap();
+    store.finish_step(Step::Names).unwrap();
+    let mut group = store.step_group().unwrap();
+    group
+        .begin_request()
+        .write_content(
+            &[ContentWrite {
+                facts: content,
+                origin: Span {
+                    line: 4,
+                    column: 1,
+                    byte_offset: facts.body_offset,
+                },
+            }],
+            &[],
+            &ContentModel::none(),
+        )
+        .unwrap();
+    let mut rows = vec![
+        group
+            .begin_request()
+            .structure_document(&path("a.md"))
+            .unwrap()
+            .unwrap(),
+    ];
+    assert_eq!(
+        (rows[0].frontmatter_links, rows[0].frontmatter_tags),
+        (front_links, front_tags)
+    );
+    rows[0].facts = facts.clone();
+    // The structure step's own finding rides with its rows: a repeated call
+    // for a document past the step files it no second time.
+    let structure_finding = [norn_store::DerivedFinding {
+        facts: crate::common::violation("a.md"),
+        replaces: None,
+        bytes_hash: None,
+    }];
+    let mut request = group.begin_request();
+    request
+        .write_structure(&rows, &structure_finding, &ContentModel::none())
+        .unwrap();
+    request
+        .write_structure(&rows, &structure_finding, &ContentModel::none())
+        .unwrap();
+    assert_eq!(request.counters().structure_rows_written(), 1);
+    request.finish();
+    group.commit().unwrap();
+    let filed: i64 = norn_db::open_read_only(store.path())
+        .adopted
+        .unwrap()
+        .connection()
+        .query_row(
+            "SELECT count(*) FROM findings WHERE path = 'a.md'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        filed, 1,
+        "a repeated structure write filed its finding again"
+    );
+    assert!(store.begin_request().content_page(8).unwrap().is_empty());
+    assert!(store.begin_request().structure_page(8).unwrap().is_empty());
+    let got = store
+        .begin_request()
+        .stored_facts(&facts.path)
+        .unwrap()
+        .unwrap();
+    let oracle_scratch = Scratch::new("construction-ahead-oracle");
+    let mut oracle = oracle_scratch.open();
+    crate::common::write_document(&mut oracle.begin_request(), &facts);
+    let expected = oracle
+        .begin_request()
+        .stored_facts(&facts.path)
+        .unwrap()
+        .unwrap();
+    assert_eq!(got.links, expected.links);
+    assert_eq!(got.tags, expected.tags);
+    assert_eq!(got.headings, expected.headings);
+    assert_eq!(got.blocks, expected.blocks);
+    assert_eq!(got.fields, expected.fields);
+}
+
+#[test]
+fn names_keep_path_ids_and_withdrawal_leaves_one_gap_on_both_orders() {
+    use crate::common::{document, path};
+    use norn_store::{Change, ContentModel, IncrementProvenance, Step, StoredPathOrder};
+    for order in [
+        StoredPathOrder::Sensitive,
+        StoredPathOrder::AsciiCaseInsensitive,
+    ] {
+        let scratch = Scratch::new("construction-name-ids");
+        let oracle_scratch = Scratch::new("construction-name-ids-oracle");
+        let mut store = scratch.open_under(order);
+        let mut oracle = oracle_scratch.open_under(order);
+        store.defer_link_health().unwrap();
+        store.begin_steps().unwrap();
+        let paths = ["a.md", "b.md", "c.md"];
+        store
+            .begin_request()
+            .apply_increment(
+                IncrementProvenance::Derived,
+                paths.map(|p| Change::Named { path: path(p) }),
+                &[],
+                &ContentModel::none(),
+            )
+            .unwrap();
+        oracle
+            .begin_request()
+            .apply_increment(
+                IncrementProvenance::Derived,
+                paths.map(|p| Change::Upsert(document(p, "hash", "body"))),
+                &[],
+                &ContentModel::none(),
+            )
+            .unwrap();
+        for target in [&mut store, &mut oracle] {
+            assert_sql(
+                target,
+                "(SELECT group_concat(path || ':' || id, ',') FROM (SELECT path, id FROM documents ORDER BY id)) = 'a.md:1,b.md:2,c.md:3'",
+            );
+        }
+        store.finish_step(Step::Names).unwrap();
+        let mut group = store.step_group().unwrap();
+        group
+            .begin_request()
+            .withdraw_content(&path("b.md"))
+            .unwrap();
+        group.commit().unwrap();
+        assert_sql(
+            &mut store,
+            "(SELECT group_concat(id, ',') FROM (SELECT id FROM documents ORDER BY id)) = '1,3'",
+        );
+    }
+}
+
+pub(crate) const PROGRESS: [ExplainedStatement<'static>; 4] = [
+    ExplainedStatement::ConstructionContentPage,
+    ExplainedStatement::ConstructionStructurePage,
+    ExplainedStatement::ConstructionFrontmatterTags,
+    ExplainedStatement::ConstructionStructureDocument,
+];
+
+/// Queue pages seek the stage index and each document; frontmatter tags seek
+/// their document/ordinal index. Neither pass scans the vault's stored facts.
+#[test]
+fn construction_pages_seek_their_progress_and_document_indexes() {
+    let scratch = Scratch::new("construction-page-plans");
+    let mut store = scratch.open();
+    store.defer_link_health().unwrap();
+    store.begin_steps().unwrap();
+    for statement in PROGRESS {
+        let plan = store.begin_request().emitted_plan(statement).unwrap();
+        assert!(
+            plan.steps
+                .iter()
+                .any(|step| step.detail.starts_with("SEARCH ")),
+            "{plan:?}"
+        );
+        assert!(
+            !plan
+                .steps
+                .iter()
+                .any(|step| step.detail.starts_with("SCAN ")
+                    || step.detail.contains("USE TEMP B-TREE")),
+            "{plan:?}"
+        );
+    }
+}
+
+/// Host chunks can share a transaction up to exactly 2,048 documents; the
+/// next chunk must commit separately, without a savepoint or partial write.
+#[test]
+fn a_step_group_never_exceeds_2048_documents() {
+    use crate::common::path;
+    use norn_store::{
+        Change, ContentModel, ContentWrite, DocumentFacts, IncrementProvenance, Span, Step,
+    };
+    let scratch = Scratch::new("construction-group-bound");
+    let mut store = scratch.open();
+    store.defer_link_health().unwrap();
+    store.begin_steps().unwrap();
+    for range in [0..1024, 1024..2050] {
+        store
+            .begin_request()
+            .apply_increment(
+                IncrementProvenance::Derived,
+                range.map(|n| Change::Named {
+                    path: path(&format!("doc-{n:04}.md")),
+                }),
+                &[],
+                &ContentModel::none(),
+            )
+            .unwrap();
+    }
+    store.finish_step(Step::Names).unwrap();
+    let rows = |paths: Vec<norn_store::DocumentPath>| {
+        paths
+            .into_iter()
+            .map(|path| ContentWrite {
+                facts: DocumentFacts::new(path, "hash", "body", 4),
+                origin: Span {
+                    line: 1,
+                    column: 1,
+                    byte_offset: 0,
+                },
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut group = store.step_group().unwrap();
+    for _ in 0..2 {
+        let chunk = rows(group.begin_request().content_page(1024).unwrap());
+        assert_eq!(chunk.len(), 1024);
+        group
+            .begin_request()
+            .write_content(&chunk, &[], &ContentModel::none())
+            .unwrap();
+    }
+    let last = rows(group.begin_request().content_page(1024).unwrap());
+    assert_eq!(last.len(), 2);
+    assert!(matches!(
+        group
+            .begin_request()
+            .write_content(&last, &[], &ContentModel::none()),
+        Err(StoreError::Bound { limit: 2048, .. })
+    ));
+    group.commit().unwrap();
+    let mut group = store.step_group().unwrap();
+    group
+        .begin_request()
+        .write_content(&last, &[], &ContentModel::none())
+        .unwrap();
+    group.commit().unwrap();
+    assert!(store.begin_request().content_page(1024).unwrap().is_empty());
+    store.finish_step(Step::Content).unwrap();
 }

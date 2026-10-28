@@ -13,13 +13,14 @@ from startup import partition
 
 
 KEYS = ("repetition", "background_documents", "changeset_size", "build_kind", "profiling", "stage")
-PHASES = {"document_plan": "Document parsing, mapping and judgment",
+PHASES = {"content": "From-zero content step", "structure": "From-zero structure step",
+          "document_plan": "Document parsing, mapping and judgment",
           "row_and_index_writes": "Document, fact and index writes",
           "link_health_once": "Complete link-health judgment",
           "full_text": "Full-text construction and finish",
           "link_health": "Link-health maintenance", "commit": "Commit",
           "other_increment": "Other increment work", "other_startup": "Remaining startup"}
-WORK = ("document_opens", "documents_derived", "changesets_applied", "links_redecided", "links_judged", "changeset_read_steps")
+WORK = ("document_opens", "documents_derived", "changesets_applied", "documents_named", "content_rows_written", "structure_rows_written", "documents_read_by_build", "fact_rows_discarded", "links_redecided", "links_judged", "changeset_read_steps")
 
 
 def validate_samples(metadata, samples):

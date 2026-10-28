@@ -2390,33 +2390,6 @@ fn heal_documents(
     Ok(account.links)
 }
 
-fn heal_documents_with_checkpoint(
-    store: &mut Store,
-    root: &Path,
-    exclusions: &[PathBuf],
-    policy: ProductionPolicy,
-    progress: &Healing<'_, ProductionAttachment>,
-    checkpoint: &mut dyn FnMut(),
-) -> Result<SkippedLinks, JobFailure> {
-    let walk = walk(root, exclusions).map_err(effect)?;
-    let sensitivity = walk.case_sensitivity();
-    let mut account = Account::default();
-    merge_walk_checkpoint(
-        store,
-        root,
-        exclusions,
-        walk,
-        sensitivity,
-        HealScope::Vault,
-        policy,
-        progress,
-        &mut account,
-        Some(checkpoint),
-    )?;
-    close_job(store, root, exclusions, policy, &mut account)?;
-    Ok(account.links)
-}
-
 /// Converge the rows a scope addresses against the files a walk of it yields.
 ///
 /// This is the one merge. The vault heal and every scoped subtree heal differ
@@ -2635,7 +2608,15 @@ where
                     let path = file.path().as_path().to_owned();
                     files.next();
                     if let Err(quarantine) = document_path(&path) {
-                        pending.quarantine(&path, quarantine);
+                        pending.quarantine(&path, quarantine)?;
+                    }
+                }
+                norn_fs::WalkFact::File(file) if pending.depth == loading::facts::Depth::Names => {
+                    let path = file.path().as_path().to_owned();
+                    files.next();
+                    match document_path(&path) {
+                        Ok(path) => pending.push(Change::Named { path }),
+                        Err(quarantine) => pending.quarantine(&path, quarantine)?,
                     }
                 }
                 norn_fs::WalkFact::File(file) => {
@@ -3161,7 +3142,7 @@ fn scoped_increment(
             Ok(document) => document,
             Err(quarantine) => {
                 if is_markdown(path) {
-                    pending.quarantine(path, quarantine);
+                    pending.quarantine(path, quarantine)?;
                     if pending.is_full() {
                         pending.flush()?;
                     }
@@ -3515,7 +3496,7 @@ fn quarantine_subtree(
         // root names no document, and reading identity here is what derives that
         // rather than restating it.
         if let Err(quarantine) = document_path(&path) {
-            pending.quarantine(&path, quarantine);
+            pending.quarantine(&path, quarantine)?;
         }
         healed += 1;
         if pending.is_full() {
@@ -3920,7 +3901,8 @@ impl FreedRoots {
                 | Change::FileBirth { .. }
                 | Change::FileDeath { .. }
                 | Change::Unreadable { .. }
-                | Change::BeneathUnlistable { .. } => {}
+                | Change::BeneathUnlistable { .. }
+                | Change::Named { .. } => {}
             }
         }
     }
@@ -4456,7 +4438,7 @@ fn rows_the_changeset_leaves(changes: &[Change]) -> BTreeMap<&DocumentPath, bool
         .filter_map(|change| match change {
             Change::BeneathUnlistable { .. } => None,
             Change::Upsert(facts) => Some((&facts.path, true)),
-            Change::Unreadable { path } => Some((path, true)),
+            Change::Unreadable { path } | Change::Named { path } => Some((path, true)),
             Change::Death { path, .. }
             | Change::Vacated { path }
             | Change::FileBirth { path }
@@ -4480,6 +4462,8 @@ fn rows_the_changeset_leaves(changes: &[Change]) -> BTreeMap<&DocumentPath, bool
 /// discard clears the finding with no second mechanism.
 struct Pending<'s> {
     metadata: bool,
+    depth: loading::facts::Depth,
+    content: Vec<norn_store::ContentWrite>,
     misses: norn_wire::WatcherMisses,
     store: &'s mut Store,
     /// The vault root every path in this scope is relative to, which is what a
@@ -4547,8 +4531,20 @@ impl<'s> Pending<'s> {
         account: &'s mut Account,
     ) -> Result<Self, JobFailure> {
         let declared = Declaration::read(store)?;
+        let depth = if store.construction_step() == Some(norn_store::Step::Names) {
+            loading::facts::Depth::Names
+        } else {
+            loading::facts::Depth::Rich
+        };
+        let bound = if depth == loading::facts::Depth::Names {
+            bound.saturating_mul(16).min(2048)
+        } else {
+            bound
+        };
         Ok(Pending {
             metadata: false,
+            depth,
+            content: Vec::new(),
             misses: norn_wire::WatcherMisses::default(),
             store,
             root,
@@ -4565,7 +4561,27 @@ impl<'s> Pending<'s> {
     }
 
     fn push(&mut self, change: Change) {
+        debug_assert!(
+            self.store.construction_step() != Some(norn_store::Step::Content)
+                || (self.content.is_empty() && self.queued.is_empty()),
+            "a change queued beside the content step's rows or findings: settle them first"
+        );
         self.changes.push(change);
+    }
+
+    /// Land what the content step has queued — its rows and every finding,
+    /// a withdrawn document's included — before a change is queued beside
+    /// them. A change in that step marks a document or a directory, and a mark
+    /// ends what stands beneath it, the findings derived from those bytes
+    /// included: it can only do so once they have landed. Outside the content
+    /// step a finding legitimately waits for the change it stands beside.
+    fn settle_content(&mut self) -> Result<(), JobFailure> {
+        if self.store.construction_step() != Some(norn_store::Step::Content)
+            || (self.content.is_empty() && self.queued.is_empty())
+        {
+            return Ok(());
+        }
+        self.flush()
     }
 
     /// Keep an unreadable document's names and discard facts no bytes support.
@@ -4587,10 +4603,11 @@ impl<'s> Pending<'s> {
         cause: &std::io::Error,
         matched: Option<&StoredDocument>,
     ) -> Result<(), JobFailure> {
+        self.settle_content()?;
         let path = match document_path(path) {
             Ok(path) => path,
             Err(quarantine) => {
-                self.quarantine(path, quarantine);
+                self.quarantine(path, quarantine)?;
                 return Ok(());
             }
         };
@@ -4612,7 +4629,10 @@ impl<'s> Pending<'s> {
                     path: row.path.clone(),
                     provenance: Provenance::HealPrune,
                 });
-            } else if row.content_hash.is_none() && self.declared.judged(row.generation) {
+            } else if row.content_hash.is_none()
+                && self.declared.judged(row.generation)
+                && !self.store.construction_began()
+            {
                 return Ok(());
             }
         }
@@ -4623,6 +4643,7 @@ impl<'s> Pending<'s> {
 
     /// Withhold a directory's range and file its account only on the first failure.
     fn unlistable(&mut self, path: &Path, cause: &std::io::Error) -> Result<(), JobFailure> {
+        self.settle_content()?;
         self.account.withheld.absorb(path);
         let subject = DocumentPath::rendered(path);
         self.account.filed.insert(&subject, Decided::ByBytes);
@@ -4654,6 +4675,7 @@ impl<'s> Pending<'s> {
         fact: &norn_fs::UnreadableFact,
         matched: Option<&StoredDocument>,
     ) -> Result<bool, JobFailure> {
+        self.settle_content()?;
         let path = fact.path().as_path();
         let matched = matched.filter(|row| {
             path_key(row.path.as_str().as_bytes(), self.store.path_order())
@@ -4799,8 +4821,16 @@ impl<'s> Pending<'s> {
     }
 
     /// File the finding that says why a path contributes no facts.
-    fn quarantine(&mut self, path: &Path, quarantine: Quarantine) {
-        self.file(plan_quarantine(path, quarantine), None);
+    fn quarantine(&mut self, path: &Path, quarantine: Quarantine) -> Result<(), JobFailure> {
+        if self.depth == loading::facts::Depth::Names {
+            self.store
+                .begin_request()
+                .defer_construction_spelling(path.as_os_str().as_encoded_bytes())
+                .map_err(store_effect)?;
+        } else {
+            self.file(plan_quarantine(path, quarantine), None);
+        }
+        Ok(())
     }
 
     /// Queue one planned finding.
@@ -4911,7 +4941,9 @@ impl<'s> Pending<'s> {
     /// Whether the changeset or the findings beside it have reached the bound
     /// one flush may hold.
     fn is_full(&self) -> bool {
-        self.changes.len() >= self.bound || self.queued.len() >= self.bound
+        self.changes.len() >= self.bound
+            || self.content.len() >= self.bound
+            || self.queued.len() >= self.bound
     }
 
     /// Apply the changeset and the findings its act derived, as one act.
@@ -4931,7 +4963,25 @@ impl<'s> Pending<'s> {
     /// change.
     fn flush(&mut self) -> Result<(), JobFailure> {
         let findings = self.recordable()?;
-        if self.changes.is_empty() && findings.is_empty() {
+        if self.changes.is_empty() && self.content.is_empty() && findings.is_empty() {
+            return Ok(());
+        }
+        // The content step's rows never share a flush with a change: every
+        // change in that step settles them first ([`Self::settle_content`]).
+        if self.store.construction_step() == Some(norn_store::Step::Content)
+            && self.changes.is_empty()
+        {
+            let mut request = self.store.begin_request();
+            request
+                .write_content(
+                    &self.content,
+                    &findings,
+                    self.declared.model.content_model(),
+                )
+                .map_err(store_effect)?;
+            let steps = request.read_steps();
+            count_increment_work(&request.finish(), steps);
+            self.content.clear();
             return Ok(());
         }
         let applied = !self.changes.is_empty();
@@ -5112,7 +5162,7 @@ impl<'s> Pending<'s> {
                             && is_markdown(unreadable.path().as_path())
                             && let Err(quarantine) = document_path(unreadable.path().as_path())
                         {
-                            self.quarantine(unreadable.path().as_path(), quarantine);
+                            self.quarantine(unreadable.path().as_path(), quarantine)?;
                         }
                         continue;
                     }
@@ -5138,7 +5188,7 @@ impl<'s> Pending<'s> {
                 // recorded, and every spelling the reading meets is filed over
                 // them. A quarantine about the document occupying that place is
                 // read from bytes this reading never opens, so it stands.
-                self.quarantine(&path, quarantine);
+                self.quarantine(&path, quarantine)?;
                 if self.is_full() {
                     self.flush()?;
                 }
@@ -13756,6 +13806,111 @@ mod tests {
         assert!(spent.links_judged > 0);
     }
 
+    #[cfg(feature = "induced-failure")]
+    struct VanishAfterNames(PathBuf);
+    #[cfg(feature = "induced-failure")]
+    impl crate::LoadingProbe for VanishAfterNames {
+        fn at(&self, boundary: crate::LoadingBoundary<'_>) {
+            if matches!(
+                boundary,
+                crate::LoadingBoundary::StepComplete(norn_store::Step::Names)
+            ) {
+                fs::remove_file(&self.0).unwrap();
+            }
+        }
+    }
+
+    #[cfg(feature = "induced-failure")]
+    #[test]
+    fn a_file_gone_before_content_is_withdrawn() {
+        let f = Fixture::new("step-vanished");
+        fs::write(f.vault().join("gone.md"), "gone").unwrap();
+        fs::write(f.vault().join("..md"), "refused spelling").unwrap();
+        let rendered = DocumentPath::rendered(Path::new("..md"));
+        fs::write(f.vault().join(rendered.as_str()), b"\xff").unwrap();
+        fs::write(f.vault().join("stay.md"), "# Stay\n").unwrap();
+        let (ops, name) = f.ops(2);
+        let ops = ops.with_loading_probe(Arc::new(VanishAfterNames(f.vault().join("gone.md"))));
+        let mut attachment = ops
+            .attach(&f.registration(), &ProgressReporter::disconnected())
+            .unwrap();
+        for path in [DocumentPath::new("gone.md").unwrap(), rendered.clone()] {
+            assert!(
+                attachment
+                    .store
+                    .begin_request()
+                    .stored_document(&path)
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                attachment
+                    .store
+                    .begin_request()
+                    .stored_tombstone(&path)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        assert_eq!(
+            attachment
+                .store
+                .begin_request()
+                .content_quarantine_hash(&rendered)
+                .unwrap(),
+            Some(norn_fs::ContentHash::of(b"\xff").to_string())
+        );
+        assert!(!sorted_kinds(&mut attachment.store, rendered.as_str()).is_empty());
+        assert_eq!(
+            derived_vault(&mut attachment.store, &f.vault()),
+            from_scratch(
+                &f,
+                "step-vanished-oracle",
+                ProductionPolicy::new(2, 2).unwrap()
+            )
+        );
+        ops.detach(&name, attachment);
+    }
+
+    /// The staged build writes facts once and preserves the ordinary derivation,
+    /// including frontmatter-first link and tag ordinals and source coordinates.
+    #[test]
+    fn a_from_zero_build_equals_an_ordinary_build() {
+        let f = Fixture::new("step-equality");
+        for (path, bytes) in [
+            ("a.md", "---\nrefs: '[[missing]]'\ntags: [front, other]\n---\n# Heading\n[[b]] #body ^block\n".as_bytes()),
+            ("b.md", b"\xef\xbb\xbf---\r\ntags: [front]\r\n---\r\n# Body\r\n[[a#Heading]] #inline\r\n"),
+            ("empty.md", b""),
+            ("front.md", b"---\ntags: [front]\n---\n"),
+            ("unclosed.md", b"---\nhello: there"),
+            ("lone.md", b"---\rkey: value\r---\r# Title\r[[missing]]"),
+            ("bad.md", b"\xff"),
+            ("asset.png", b"asset"),
+        ] { fs::write(f.vault().join(path), bytes).unwrap(); }
+        std::os::unix::fs::symlink("a.md", f.vault().join("alias.md")).unwrap();
+        let (ops, name) = f.ops(2);
+        let mut attachment = ops
+            .attach(&f.registration(), &ProgressReporter::disconnected())
+            .unwrap();
+        let spent = ops.evidence.read();
+        assert_eq!(spent.documents_named, 7);
+        assert_eq!(spent.content_rows_written, 6);
+        assert_eq!(spent.structure_rows_written, 6);
+        assert_eq!(spent.documents_read_by_build, 7);
+        assert_eq!(spent.fact_rows_discarded, 0);
+        assert_eq!(spent.links_redecided, 0);
+        assert_eq!(spent.links_judged, link_rows(&mut attachment.store));
+        assert_eq!(
+            derived_vault(&mut attachment.store, &f.vault()),
+            from_scratch(
+                &f,
+                "step-equality-oracle",
+                ProductionPolicy::new(2, 2).unwrap()
+            )
+        );
+        ops.detach(&name, attachment);
+    }
+
     #[test]
     fn a_from_zero_build_judges_each_link_once() {
         let f = Fixture::new("judgment-once");
@@ -14192,8 +14347,11 @@ mod tests {
     #[cfg(feature = "induced-failure")]
     impl crate::LoadingProbe for EditDuringBuild {
         fn at(&self, boundary: crate::LoadingBoundary<'_>) {
-            if matches!(boundary, crate::LoadingBoundary::CanonicalPage)
-                && !self.edited.swap(true, std::sync::atomic::Ordering::SeqCst)
+            // Editing after content guarantees the reconcile must re-decide the stored links.
+            if matches!(
+                boundary,
+                crate::LoadingBoundary::StepComplete(norn_store::Step::Content)
+            ) && !self.edited.swap(true, std::sync::atomic::Ordering::SeqCst)
             {
                 fs::write(&self.document, "[[new-missing]]\n").unwrap();
             }
@@ -14247,7 +14405,7 @@ mod tests {
         );
     }
 
-    /// Records, at every canonical page of a build, whether the mark stood.
+    /// Records the mark across names, content and structure chunk boundaries.
     #[cfg(feature = "induced-failure")]
     struct MarkWitness {
         database: PathBuf,

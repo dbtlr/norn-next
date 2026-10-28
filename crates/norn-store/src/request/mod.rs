@@ -31,6 +31,10 @@
 //! it was recorded to survive is a policy over generations, and nothing in this
 //! crate decides it.
 //!
+//! From-zero construction fills provisional names through separate content and
+//! structure writers inside [`crate::StepGroup`]. Ordinary increments refuse
+//! rich upserts and deaths while those steps remain open.
+//!
 //! # Reads at rest, and the read builders that are not here
 //!
 //! The `stored_*` readers answer *what is at rest for this one path*, and take
@@ -161,10 +165,10 @@ pub const FINDING_ID_CHUNK: usize = 4;
 
 /// One request's worth of work against a store.
 pub struct Request<'a> {
-    store: &'a mut Store,
-    counters: DerivationCounters,
+    pub(crate) store: &'a mut Store,
+    pub(crate) counters: DerivationCounters,
     /// The engine work this request's multi-row reads have cost.
-    read_work: ReadWork,
+    pub(crate) read_work: ReadWork,
 }
 
 /// What the multi-row reader has run on one request's behalf: the virtual-machine
@@ -176,6 +180,16 @@ pub struct Request<'a> {
 pub(crate) struct ReadWork {
     steps: Cell<u64>,
     statements: Cell<u64>,
+}
+
+impl ReadWork {
+    /// Attribute a completed cached read after its status was reset for this run.
+    pub(crate) fn record(&self, statement: &Statement<'_>) {
+        let stepped = statement.get_status(StatementStatus::VmStep);
+        self.steps
+            .set(self.steps.get().saturating_add(stepped.max(0) as u64));
+        self.statements.set(self.statements.get().saturating_add(1));
+    }
 }
 
 impl<'a> Request<'a> {
@@ -1826,10 +1840,7 @@ impl<'a> Request<'a> {
         // returned: a statement that failed part way still stepped the engine,
         // and dropping that count would let a reader that refuses on every page
         // cost nothing a bar could see.
-        let stepped = statement.get_status(StatementStatus::VmStep);
-        work.steps
-            .set(work.steps.get().saturating_add(stepped.max(0) as u64));
-        work.statements.set(work.statements.get().saturating_add(1));
+        work.record(&statement);
         match refused {
             Some(problem) => Err(problem),
             None => Ok(found),
@@ -2024,7 +2035,7 @@ pub(crate) fn check_finding_paths(finding: &FindingFacts) -> Result<(), StoreErr
 /// judgment in derivation files the findings that cite rules and judge
 /// values; every other producer's carry neither.
 pub(crate) fn write_finding(
-    transaction: &rusqlite::Transaction<'_>,
+    transaction: &Connection,
     finding: &FindingFacts,
 ) -> Result<(), StoreError> {
     #[cfg(feature = "induced-failure")]
@@ -2148,7 +2159,7 @@ pub(crate) fn check_content_finding(finding: &FindingFacts) -> Result<(), StoreE
 /// The finding is a content finding: the changeset checked it before its
 /// transaction ([`check_content_finding`]).
 pub(crate) fn record_content_quarantine(
-    transaction: &rusqlite::Transaction<'_>,
+    transaction: &Connection,
     finding: &FindingFacts,
     hash: &str,
 ) -> Result<(), StoreError> {
@@ -2166,7 +2177,7 @@ pub(crate) fn record_content_quarantine(
 /// which tells every two sets apart however their names are spelled, and is
 /// held as that spelling alone: its names are read back off it.
 fn cited_rule_set(
-    transaction: &rusqlite::Transaction<'_>,
+    transaction: &Connection,
     fingerprint: &str,
     rules: &BTreeSet<String>,
 ) -> Result<Option<i64>, StoreError> {
@@ -2198,7 +2209,7 @@ fn cited_rule_set(
 /// through a transaction a caller is composing rather than through the
 /// connection's autocommit.
 pub(crate) fn discard_about_in(
-    transaction: &rusqlite::Transaction<'_>,
+    transaction: &Connection,
     path: &DocumentPath,
     scope: DiscardScope<'_>,
     directories: &mut BTreeSet<DirectoryPrefix>,
@@ -2225,7 +2236,7 @@ pub(crate) fn note_directory(
 
 /// Delete and capture the ended marks in one statement, including nested marks.
 pub(crate) fn discard_collecting_directories(
-    transaction: &rusqlite::Transaction<'_>,
+    transaction: &Connection,
     sql: &str,
     parameters: impl Params,
     directories: &mut BTreeSet<DirectoryPrefix>,
