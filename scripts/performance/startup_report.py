@@ -13,7 +13,8 @@ from startup import partition
 
 
 KEYS = ("repetition", "background_documents", "changeset_size", "build_kind", "profiling", "stage")
-PHASES = {"document_plan": "Document parsing, mapping and judgment",
+PHASES = {"content": "From-zero content step", "structure": "From-zero structure step",
+          "document_plan": "Document parsing, mapping and judgment",
           "row_and_index_writes": "Document, fact and index writes",
           "link_health_once": "Complete link-health judgment",
           "full_text": "Full-text construction and finish",
