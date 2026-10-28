@@ -13945,6 +13945,77 @@ mod tests {
         ops.detach(&name, attachment);
     }
 
+    /// **A from-zero build that failed is never built over again.** The store
+    /// it leaves holds a partial build's rows and full text, and the
+    /// attachment keeps it parked for the recovery the failure owes. That
+    /// recovery owes rung 3 instead, which discards the store and builds from
+    /// an empty one; the failed build has already put back the connection
+    /// settings it raised.
+    #[cfg(feature = "induced-failure")]
+    #[test]
+    fn a_recovery_after_a_failed_from_zero_build_rebuilds_from_an_empty_store() {
+        let f = Fixture::new("failed-build-then-recover");
+        let schema = f.vault().join(".norn/schema.yaml");
+        fs::write(&schema, "version: 9\n").unwrap();
+        write_a_vault_of_documents(&f, 40);
+        let (ops, name) = f.ops(64);
+        let policy = ProductionPolicy::new(64, 2).unwrap();
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let database = attachment.store.path().to_path_buf();
+        let opened = norn_store::induced_failure::construction_pragmas(&attachment.store).unwrap();
+        fs::write(&schema, "version: 1\n").unwrap();
+
+        // The disk fills during the build: SQLite raises a limit below the
+        // file's size to its size, so the file may not grow at all.
+        norn_store::induced_failure::execute_out_of_band(
+            &mut attachment.store,
+            "PRAGMA max_page_count = 1",
+        )
+        .unwrap();
+        let failure = ops
+            .recover(&name, &mut attachment, &progress)
+            .expect_err("a build over a full disk");
+        assert!(
+            matches!(failure, JobFailure::Environmental(_)),
+            "{failure:?}"
+        );
+        assert!(mark_stands(&database), "a failed build cleared the mark");
+        assert_eq!(
+            norn_store::induced_failure::construction_pragmas(&attachment.store).unwrap(),
+            opened,
+            "a failed build left its construction settings raised"
+        );
+
+        norn_store::induced_failure::execute_out_of_band(
+            &mut attachment.store,
+            "PRAGMA max_page_count = 4294967294",
+        )
+        .unwrap();
+        let failure = ops
+            .recover(&name, &mut attachment, &progress)
+            .expect_err("a recovery over what a failed build left");
+        assert!(
+            matches!(failure, JobFailure::StoreDamaged(_)),
+            "{failure:?}"
+        );
+        assert_eq!(
+            from_zero_builds(&ops),
+            1,
+            "no build ran over the partial store"
+        );
+
+        let mut attachment = ops.rebuild(&name, attachment, &progress).unwrap();
+        assert_eq!(from_zero_builds(&ops), 2, "the rebuild leg");
+        assert!(!mark_stands(attachment.store.path()));
+        assert_eq!(full_text_trigger_count(attachment.store.path()), 3);
+        assert_eq!(
+            derived_vault(&mut attachment.store, f.vault().as_path()),
+            from_scratch(&f, "failed-build-then-recover-oracle", policy)
+        );
+        ops.detach(&name, attachment);
+    }
+
     #[cfg(feature = "induced-failure")]
     struct FullTextWitness {
         database: PathBuf,

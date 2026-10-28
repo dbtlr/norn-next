@@ -136,8 +136,17 @@ impl ProductionEntryOps {
         progress: &ProgressReporter<ProductionAttachment>,
         admission: EarlyReads,
     ) -> Result<(), JobFailure> {
-        self.construct_from_zero(attachment, progress, admission)?;
-        self.finish_construction(&mut attachment.store)
+        let built = self
+            .construct_from_zero(attachment, progress, admission)
+            .and_then(|()| self.finish_construction(&mut attachment.store));
+        // A failed build's store may stay parked for the recovery it owes,
+        // which discards it rather than building over it ([`Self::derive_vault`]).
+        if built.is_err()
+            && let Err(error) = attachment.store.restore_construction_settings()
+        {
+            self.record_cleanup_failure(format!("construction settings: {error}"));
+        }
+        built
     }
 
     pub(super) fn finish_construction(&self, store: &mut Store) -> Result<(), JobFailure> {
@@ -176,12 +185,23 @@ impl ProductionEntryOps {
 
     /// Derive the vault into the store the caller holds: a build from zero if
     /// the store is under construction, the ordinary heal if it is finished.
+    ///
+    /// A store whose from-zero build began and failed holds that build's
+    /// partial rows and full text, and the attachment kept it parked for this
+    /// recovery or reload. No build runs over it: it owes rung 3, which
+    /// discards it and builds from an empty store under the controls the leg
+    /// has just taken.
     pub(super) fn derive_vault(
         &self,
         attachment: &mut ProductionAttachment,
         progress: &ProgressReporter<ProductionAttachment>,
     ) -> Result<(), JobFailure> {
-        if attachment.store.under_construction() {
+        if attachment.store.construction_began() {
+            Err(JobFailure::StoreDamaged(
+                "a from-zero build that failed left a partial store, which is rebuilt from empty"
+                    .into(),
+            ))
+        } else if attachment.store.under_construction() {
             self.build_from_zero(attachment, progress, EarlyReads::Declined)
         } else {
             self.heal_under_coverage(attachment, progress)

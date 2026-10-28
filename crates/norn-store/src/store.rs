@@ -1339,12 +1339,15 @@ impl Store {
             .commit()
             .map_err(|e| error::sql("finishing construction", e))?;
         self.under_construction = false;
-        let Some(steps) = self.steps.take() else {
+        if self.steps.is_none() {
             return Ok(crate::ConstructionFinish::default());
-        };
-        self.connection()
-            .pragma_update(None, "wal_autocheckpoint", steps.saved_autocheckpoint)
-            .map_err(|e| error::sql("restoring construction autocheckpoint", e))?;
+        }
+        // The build has finished once the mark is gone, so the steps end before
+        // anything below can fail: a finished store never reads as one whose
+        // build began and failed.
+        let restored = self.restore_construction_settings();
+        self.steps = None;
+        restored?;
         let busy: bool = self
             .connection()
             .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))

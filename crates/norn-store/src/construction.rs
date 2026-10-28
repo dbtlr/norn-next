@@ -31,7 +31,9 @@ impl Store {
     /// Drops the three full-text triggers atomically, then raises WAL autocheckpoint
     /// to 10,000 pages. The opened setting and progress live only in memory: a crash
     /// leaves the construction mark, so the next open rebuilds instead of resuming.
-    /// A second call is refused; a retry must reopen the store.
+    /// A second call is refused: a build that began and failed leaves a partial
+    /// build's rows and full text, so a retry discards the store and builds from
+    /// an empty one ([`Self::construction_began`]).
     pub fn begin_steps(&mut self) -> Result<(), StoreError> {
         if !self.under_construction()
             || matches!(self.open_outcome(), OpenOutcome::Reused)
@@ -83,6 +85,27 @@ impl Store {
             .pragma_update(None, "wal_autocheckpoint", 10_000)
             .map_err(|e| error::sql("raising construction autocheckpoint", e))?;
         Ok(())
+    }
+
+    /// Whether a from-zero build began its steps on this store and has not
+    /// finished. Such a store is never built over again: its rows and full-text
+    /// index are a partial build's, so the next from-zero build over it is owed
+    /// to rung 3, which discards it and builds from an empty store.
+    pub fn construction_began(&self) -> bool {
+        self.steps.is_some()
+    }
+
+    /// Put back the connection settings a from-zero build raised, after the
+    /// build failed and the store stays open until it is discarded. The steps
+    /// stay begun ([`Self::construction_began`]). Idempotent; a store whose
+    /// steps never began is untouched.
+    pub fn restore_construction_settings(&mut self) -> Result<(), StoreError> {
+        let Some(steps) = self.steps.as_ref() else {
+            return Ok(());
+        };
+        self.connection()
+            .pragma_update(None, "wal_autocheckpoint", steps.saved_autocheckpoint)
+            .map_err(|e| error::sql("restoring construction autocheckpoint", e))
     }
 }
 
