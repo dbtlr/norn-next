@@ -997,3 +997,73 @@ fn marking_a_directory_leaves_its_readable_case_twin_untouched() {
         assert!(child.status.success(), "{}\n{}", String::from_utf8_lossy(&child.stdout), String::from_utf8_lossy(&child.stderr));
     }
 }
+
+/// A contained step-2 open can discover an unlistable ancestor after names
+/// have committed. Every descendant leaves the progress queue as broken.
+#[test]
+fn a_mark_found_when_content_opens() {
+    const CHILD: &str = "NORN_STEP_CONTENT_DIRECTORY_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = crate::child_gate::output_of_test_binary(std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "production::tests::broken_documents::a_mark_found_when_content_opens", "--nocapture"])
+            .env(CHILD, "1").env("NORN_FS_WALK_ARMED_STAGES", "list=denied")
+            .env("NORN_FS_WALK_LIST_AT", "locked")).unwrap();
+        assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        return;
+    }
+    let f = Fixture::watcherless("content-open-unlistable");
+    fs::create_dir(f.vault().join("locked")).unwrap();
+    for path in ["locked/a.md", "locked/b.md"] { fs::write(f.vault().join(path), "# Heading\n[[missing]] #tag\n").unwrap(); }
+    let mut store = Store::open(f.root.join("steps.sqlite3"), proven_order(&f), crate::DERIVATION_VERSION).unwrap();
+    let paths: Vec<_> = ["locked/a.md", "locked/b.md"].map(|p| DocumentPath::new(p).unwrap()).into();
+    store.defer_link_health().unwrap(); store.begin_steps().unwrap();
+    store.begin_request().apply_increment(IncrementProvenance::Derived, paths.iter().cloned().map(|path| Change::Named { path }), &[], &ContentModel::none()).unwrap();
+    store.finish_step(norn_store::Step::Names).unwrap();
+    let (ops, _) = f.ops(2);
+    let source = norn_fs::Vault::open(&f.vault(), &[]).unwrap();
+    let mut account = Account::default();
+    let mut group = store.step_group().unwrap();
+    let root = f.vault();
+    let mut pending = Pending::new(group.store(), 2, &root, &[], &mut account).unwrap();
+    loading::steps::content_chunk(&ops, &mut pending, &source, &paths).unwrap();
+    pending.flush().unwrap(); drop(pending); group.commit().unwrap();
+    assert!(store.begin_request().content_page(2).unwrap().is_empty());
+    assert!(store.begin_request().structure_page(2).unwrap().is_empty());
+    assert!(store.begin_request().unreadable_directory_stands(&DocumentPath::new("locked").unwrap()).unwrap());
+    for path in &paths {
+        let facts = store.begin_request().stored_facts(path).unwrap().unwrap();
+        assert!(facts.body.is_none()); assert!(facts.links.is_empty()); assert!(facts.headings.is_empty());
+        assert!(store.begin_request().stored_tombstone(path).unwrap().is_none());
+    }
+}
+
+#[test]
+fn a_broken_content_open_finishes_without_structure() {
+    const CHILD: &str = "NORN_STEP_CONTENT_FILE_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = crate::child_gate::output_of_test_binary(std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "production::tests::broken_documents::a_broken_content_open_finishes_without_structure", "--nocapture"])
+            .env(CHILD, "1").env("NORN_FS_WALK_ARMED_STAGES", "open=denied")).unwrap();
+        assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        return;
+    }
+    let f = Fixture::watcherless("content-open-broken");
+    for path in ["a.md", "b.md"] { fs::write(f.vault().join(path), "# Heading\n[[missing]] #tag\n").unwrap(); }
+    let mut store = Store::open(f.root.join("steps.sqlite3"), proven_order(&f), crate::DERIVATION_VERSION).unwrap();
+    let paths: Vec<_> = ["a.md", "b.md"].map(|p| DocumentPath::new(p).unwrap()).into();
+    store.defer_link_health().unwrap(); store.begin_steps().unwrap();
+    store.begin_request().apply_increment(IncrementProvenance::Derived, paths.iter().cloned().map(|path| Change::Named { path }), &[], &ContentModel::none()).unwrap();
+    store.finish_step(norn_store::Step::Names).unwrap();
+    let (ops, _) = f.ops(2);
+    let source = norn_fs::Vault::open(&f.vault(), &[]).unwrap();
+    let root = f.vault();
+    let mut account = Account::default();
+    let mut group = store.step_group().unwrap();
+    let mut pending = Pending::new(group.store(), 2, &root, &[], &mut account).unwrap();
+    loading::steps::content_chunk(&ops, &mut pending, &source, &paths).unwrap();
+    pending.flush().unwrap(); drop(pending); group.commit().unwrap();
+    assert_broken(&mut store, "a.md");
+    assert!(store.begin_request().content_page(2).unwrap().is_empty());
+    let rows = store.begin_request().structure_page(2).unwrap();
+    assert_eq!(rows.len(), 1); assert_eq!(rows[0].facts.path.as_str(), "b.md");
+}

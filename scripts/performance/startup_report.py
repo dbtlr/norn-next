@@ -19,7 +19,7 @@ PHASES = {"document_plan": "Document parsing, mapping and judgment",
           "full_text": "Full-text construction and finish",
           "link_health": "Link-health maintenance", "commit": "Commit",
           "other_increment": "Other increment work", "other_startup": "Remaining startup"}
-WORK = ("document_opens", "documents_derived", "changesets_applied", "links_redecided", "links_judged", "changeset_read_steps")
+WORK = ("document_opens", "documents_derived", "changesets_applied", "documents_named", "content_rows_written", "structure_rows_written", "documents_read_by_build", "fact_rows_discarded", "links_redecided", "links_judged", "changeset_read_steps")
 
 
 def validate_samples(metadata, samples):

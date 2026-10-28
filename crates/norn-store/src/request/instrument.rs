@@ -26,7 +26,10 @@ use norn_wire::FindingKind;
 
 use std::collections::BTreeMap;
 
-use crate::construction::{FTS_BATCH_SQL, FTS_LAST_SQL, FTS_REMAINING_SQL};
+use crate::construction::{
+    CONTENT_PAGE_SQL, FRONTMATTER_TAGS_SQL, FTS_BATCH_SQL, FTS_LAST_SQL, FTS_REMAINING_SQL,
+    STRUCTURE_DOCUMENT_SQL, STRUCTURE_PAGE_SQL,
+};
 use crate::ddl;
 use crate::facts::CANDIDATE_HEAD;
 use crate::health::LINK_HEALTH_CHUNK;
@@ -119,6 +122,10 @@ impl<'a> Request<'a> {
         // Explain the same comparison-key statements that judgment runs.
         let key = SuffixKey::Comparison;
         let sql = match statement {
+            ExplainedStatement::ConstructionStructureDocument => STRUCTURE_DOCUMENT_SQL.to_string(),
+            ExplainedStatement::ConstructionContentPage => CONTENT_PAGE_SQL.to_string(),
+            ExplainedStatement::ConstructionStructurePage => STRUCTURE_PAGE_SQL.to_string(),
+            ExplainedStatement::ConstructionFrontmatterTags => FRONTMATTER_TAGS_SQL.to_string(),
             ExplainedStatement::FullTextLast => FTS_LAST_SQL.to_string(),
             ExplainedStatement::FullTextBatch => FTS_BATCH_SQL.to_string(),
             ExplainedStatement::FullTextRemaining => FTS_REMAINING_SQL.to_string(),
@@ -181,6 +188,16 @@ impl<'a> Request<'a> {
         };
         let database = &self.store.database;
         Ok(match statement {
+            ExplainedStatement::ConstructionContentPage
+            | ExplainedStatement::ConstructionStructurePage => {
+                database.emitted_plan(&sql, [MAX_PAGE as i64])
+            }
+            ExplainedStatement::ConstructionStructureDocument => {
+                database.emitted_plan(&sql, ["example.md"])
+            }
+            ExplainedStatement::ConstructionFrontmatterTags => {
+                database.emitted_plan(&sql, [EXPLAINED_DOCUMENT_ROW])
+            }
             ExplainedStatement::FullTextLast | ExplainedStatement::FullTextBatch => {
                 database.emitted_plan(&sql, (EXPLAINED_DOCUMENT_ROW, MAX_PAGE as i64))
             }
@@ -498,6 +515,14 @@ impl<'a> Request<'a> {
 /// ids its chunk holds.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExplainedStatement<'a> {
+    /// The next names owing content, by TEMP stage and document id.
+    ConstructionContentPage,
+    /// Stored bodies owing structure, by TEMP stage and document id.
+    ConstructionStructurePage,
+    /// One document's frontmatter tags in ordinal order.
+    ConstructionFrontmatterTags,
+    /// One selected document's stored structure input, by path and TEMP progress.
+    ConstructionStructureDocument,
     /// The last document id in a bounded full-text batch.
     FullTextLast,
     /// Index stored bodies by document-id cursor without reading them into Rust.
@@ -701,7 +726,7 @@ pub const POINT_READS: usize = 13;
 ///
 /// It is the length of [`ExplainedStatement::all`], which is the enumeration
 /// every other census is checked against.
-pub const STATEMENTS: usize = 52;
+pub const STATEMENTS: usize = 56;
 
 impl<'a> ExplainedStatement<'a> {
     /// Every statement this seam names, in slot order, each bound to a subject
@@ -786,6 +811,10 @@ impl<'a> ExplainedStatement<'a> {
             Self::FullTextLast,
             Self::FullTextBatch,
             Self::FullTextRemaining,
+            Self::ConstructionContentPage,
+            Self::ConstructionStructurePage,
+            Self::ConstructionFrontmatterTags,
+            Self::ConstructionStructureDocument,
         ]
     }
 
@@ -850,6 +879,10 @@ impl<'a> ExplainedStatement<'a> {
             Self::FullTextLast => 49,
             Self::FullTextBatch => 50,
             Self::FullTextRemaining => 51,
+            Self::ConstructionContentPage => 52,
+            Self::ConstructionStructurePage => 53,
+            Self::ConstructionFrontmatterTags => 54,
+            Self::ConstructionStructureDocument => 55,
         };
         assert!(
             slot < STATEMENTS,
@@ -938,6 +971,10 @@ impl<'a> ExplainedStatement<'a> {
             | Self::FullTextLast
             | Self::FullTextBatch
             | Self::FullTextRemaining
+            | Self::ConstructionContentPage
+            | Self::ConstructionStructurePage
+            | Self::ConstructionFrontmatterTags
+            | Self::ConstructionStructureDocument
             | Self::LinkHealthClassFindings
             | Self::LinkHealthFoundLinks
             | Self::LinkHealthDiscard

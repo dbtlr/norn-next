@@ -39,6 +39,8 @@ pub enum Change {
     /// A regular vault file admitted by the walk and path grammar. Only its
     /// name is stored; no bytes, hash, fact rows or tombstone belong to it.
     FileBirth { path: DocumentPath },
+    /// A provisional document name, admitted only during construction step 1.
+    Named { path: DocumentPath },
     /// A document whose bytes cannot be read. Its names stand and every
     /// content-derived fact is cleared in this transaction.
     Unreadable { path: DocumentPath },
@@ -254,6 +256,7 @@ pub(crate) fn apply(
 ) -> Result<IncrementOutcome, StoreError> {
     #[cfg(feature = "induced-failure")]
     let _timing = norn_db::profiling::span("store.increment");
+    crate::construction::close_group(store)?;
     // The first entry is what decides whether the changeset half is an act at
     // all, so it is taken before anything is opened: an empty changeset writes
     // no document row and takes no generation. An act carrying findings and no
@@ -261,10 +264,12 @@ pub(crate) fn apply(
     let mut entries = changes.into_iter();
     let first = entries.next();
     if first.is_some()
-        && store
-            .steps
-            .as_ref()
-            .is_some_and(|steps| steps.step != crate::construction::Step::Documents)
+        && store.steps.as_ref().is_some_and(|steps| {
+            matches!(
+                steps.step,
+                crate::construction::Step::FullText | crate::construction::Step::FullTextComplete
+            )
+        })
     {
         return Err(crate::construction::refused(
             store,
@@ -299,6 +304,8 @@ pub(crate) fn apply(
     let path_order = store.path_order();
     // Findings and changed paths share one comparison key for both axes.
     let class_space = SuffixKey::Comparison;
+    let step = store.steps.as_ref().map(|steps| steps.step);
+    let store_path = store.path().to_path_buf();
     let transaction = store
         .database
         .immediate_transaction("opening the increment transaction")?;
@@ -315,6 +322,15 @@ pub(crate) fn apply(
         generation = Some(stamp);
         let mut statements = Statements::prepare(&transaction)?;
         for (index, change) in std::iter::once(first).chain(entries).enumerate() {
+            if (matches!(change, Change::Named { .. }) && step != Some(crate::Step::Names))
+                || (step.is_some() && matches!(change, Change::Upsert(_) | Change::Death { .. }))
+            {
+                return Err(StoreError::Lifecycle {
+                    operation: "applying an increment",
+                    path: store_path.clone(),
+                    message: "change is not admitted in this construction step".into(),
+                });
+            }
             if let Change::BeneathUnlistable { prefix } = &change {
                 beneath_unlistable(
                     &transaction,
@@ -323,6 +339,7 @@ pub(crate) fn apply(
                     stamp,
                     recorded_at,
                     &mut tally,
+                    step.is_some(),
                 )?;
                 continue;
             }
@@ -362,6 +379,14 @@ pub(crate) fn apply(
                     .execute(params![path.as_str()])
                     .map(|_| ())
                     .map_err(|error| error::sql("deleting a vault file", error)),
+                Change::Named { path } => {
+                    unreadable(&mut statements, stamp, recorded_at, path,
+                        declared.ambiguity_ignore().admitting_segments(path.as_str()), &mut tally)?;
+                    transaction.execute("INSERT INTO temp.construction_progress(document, stage) SELECT id, 1 FROM documents WHERE path = ?1", [path.as_str()])
+                        .map_err(|e| error::sql("recording a provisional name", e))?;
+                    tally.documents_named += 1;
+                    Ok(())
+                }
                 Change::Unreadable { path } => unreadable(
                     &mut statements,
                     stamp,
@@ -412,6 +437,11 @@ pub(crate) fn apply(
                     &mut tally.directories,
                 )
             });
+            if step.is_some()
+                && let Change::Unreadable { path } = &change
+            {
+                transaction.execute("DELETE FROM temp.construction_progress WHERE document = (SELECT id FROM documents WHERE path = ?1)", [path.as_str()]).map_err(|e| error::sql("ending broken progress", e))?;
+            }
             tally.findings_discarded +=
                 applied.map_err(|problem| error::in_entry(index, subject, problem))?;
             // A document joining a class and one leaving it both name it, and
@@ -481,6 +511,7 @@ pub(crate) fn apply(
 
     // Counters record what happened, so they move after the commit that made it
     // happen.
+    counters.add(Counter::DocumentsNamed, tally.documents_named);
     counters.add(Counter::DocumentsUpserted, tally.documents_upserted);
     counters.add(Counter::DocumentsDeleted, tally.documents_deleted);
     counters.add(Counter::TombstonesRecorded, tally.tombstones_recorded);
@@ -523,6 +554,7 @@ pub(crate) fn apply(
 /// the path set one key per distinct changed path.
 #[derive(Default)]
 struct Tally {
+    documents_named: u64,
     documents_upserted: u64,
     documents_deleted: u64,
     tombstones_recorded: u64,
@@ -781,15 +813,7 @@ fn upsert(
 #[derive(Clone, Copy)]
 pub(crate) enum FactPart {
     All,
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "NORN-467's content step consumes this part.")
-    )]
     Frontmatter,
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "NORN-467's structure step consumes this part.")
-    )]
     Body,
 }
 
@@ -999,7 +1023,7 @@ pub(crate) fn check_derived_findings(findings: &[DerivedFinding<'_>]) -> Result<
 /// Record derived findings after discards, retaining directory marks for the
 /// same transaction's maintenance. Construction content uses this seam too.
 pub(crate) fn write_derived_findings(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     findings: &[DerivedFinding<'_>],
     directories: &mut BTreeSet<DirectoryPrefix>,
 ) -> Result<u64, StoreError> {
@@ -1132,7 +1156,9 @@ fn record_death(
 /// turns every stored span into an offset outside it, and a byte length that
 /// disagrees with the body is a size a heal would compare against. This is the
 /// one write path for a document row, so it is where the check belongs.
-fn refuse_a_document_that_does_not_add_up(facts: &DocumentFacts) -> Result<(), StoreError> {
+pub(crate) fn refuse_a_document_that_does_not_add_up(
+    facts: &DocumentFacts,
+) -> Result<(), StoreError> {
     let accounted = facts.body_offset.saturating_add(facts.body.len() as u64);
     if accounted == facts.byte_length {
         return Ok(());
@@ -1162,7 +1188,7 @@ fn refuse_a_document_that_does_not_add_up(facts: &DocumentFacts) -> Result<(), S
 /// carrier's fold are a function of the document alone, and a document derived
 /// under no declaration, or under a stale one that types none of its keys,
 /// writes the typed column as a pin leaves it — empty — for the walk to fill.
-fn refuse_typed_values_the_pin_does_not_derive(
+pub(crate) fn refuse_typed_values_the_pin_does_not_derive(
     pinned: Option<&str>,
     facts: &DocumentFacts,
 ) -> Result<(), StoreError> {
@@ -1216,7 +1242,8 @@ fn subject(change: &Change) -> &DocumentPath {
         | Change::Vacated { path }
         | Change::FileBirth { path }
         | Change::FileDeath { path }
-        | Change::Unreadable { path } => path,
+        | Change::Unreadable { path }
+        | Change::Named { path } => path,
     }
 }
 
@@ -1306,6 +1333,7 @@ fn beneath_unlistable(
     generation: i64,
     derived_at: i64,
     tally: &mut Tally,
+    construction: bool,
 ) -> Result<(), StoreError> {
     let lower = format!("{}/", prefix.as_str());
     let upper = format!("{}0", prefix.as_str());
@@ -1338,6 +1366,10 @@ fn beneath_unlistable(
         )
         .map_err(|error| error::sql("withdrawing content beneath an unlistable directory", error))?
         as u64;
+    if construction {
+        let collation = if folded { "NOCASE" } else { "BINARY" };
+        transaction.execute(&format!("DELETE FROM temp.construction_progress WHERE document IN (SELECT id FROM documents WHERE path >= ?1 COLLATE {collation} AND path < ?2 COLLATE {collation})"), params![lower, upper]).map_err(|e| error::sql("withdrawing unlistable progress", e))?;
+    }
     // Names did not move, but anchors on the held names must be re-judged.
     let mut statement = transaction
         .prepare(WriteStatement::WithheldPaths.sql())

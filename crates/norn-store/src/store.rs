@@ -1348,6 +1348,11 @@ impl Store {
         let restored = self.restore_construction_settings();
         self.steps = None;
         restored?;
+        self.connection()
+            .execute_batch(
+                "DROP TABLE temp.construction_progress; DROP TABLE temp.construction_spellings",
+            )
+            .map_err(|e| error::sql("dropping construction progress", e))?;
         let busy: bool = self
             .connection()
             .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))

@@ -5,6 +5,7 @@ use crate::derivation::plan_base_document;
 #[derive(Clone, Copy, PartialEq)]
 pub(in crate::production) enum Depth {
     Rich,
+    Names,
     Metadata,
 }
 
@@ -37,7 +38,7 @@ pub(in crate::production) fn load_fact(
             let path = file.path().as_path().to_owned();
             let Some(spelling) = path.to_str() else {
                 if let Err(quarantine) = document_path(&path) {
-                    pending.quarantine(&path, quarantine);
+                    pending.quarantine(&path, quarantine)?;
                 }
                 return Ok(None);
             };

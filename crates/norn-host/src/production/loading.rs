@@ -1,4 +1,4 @@
-//! From-zero construction: ordinary derivation with one complete link-health judgment.
+//! From-zero names, content and structure, followed by one link-health judgment and full text.
 use super::*;
 use crate::lifecycle::loading::{Diagnostics, Operation};
 use norn_fs::walk::inventory::InventoryWalk;
@@ -11,6 +11,7 @@ use std::os::unix::ffi::OsStrExt;
 
 pub(super) mod closure;
 pub(super) mod facts;
+pub(super) mod steps;
 
 #[cfg(feature = "induced-failure")]
 #[derive(Clone, Copy, Debug)]
@@ -24,6 +25,7 @@ pub enum LoadingBoundary<'a> {
     MetadataRecord(&'a Path),
     MetadataComplete,
     CanonicalPage,
+    StepComplete(norn_store::Step),
     LinkHealthChunk,
     FullTextBatch,
     CanonicalComplete,
@@ -283,11 +285,11 @@ impl ProductionEntryOps {
             &attachment.shadows,
             &attachment.covered_root,
         );
-        attachment.skipped_links = heal_documents_with_checkpoint(
+        attachment.skipped_links = steps::documents(
+            self,
             &mut attachment.store,
             &attachment.covered_root,
             &exclusions,
-            self.policy,
             &healing,
             &mut || {
                 if let Some(construction) = loading.as_mut() {

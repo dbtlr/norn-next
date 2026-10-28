@@ -81,6 +81,9 @@
 /// reading carries all of them.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Counter {
+    DocumentsNamed,
+    ContentRowsWritten,
+    StructureRowsWritten,
     DocumentsUpserted,
     /// Document rows indexed by the from-zero full-text pass, including NULL bodies.
     FullTextRowsIndexed,
@@ -118,6 +121,9 @@ pub(crate) enum Counter {
 impl Counter {
     /// Every counter, in the order a reading reports them.
     const ALL: &'static [Counter] = &[
+        Counter::DocumentsNamed,
+        Counter::ContentRowsWritten,
+        Counter::StructureRowsWritten,
         Counter::DocumentsUpserted,
         Counter::FullTextRowsIndexed,
         Counter::DocumentsDeleted,
@@ -144,6 +150,9 @@ impl Counter {
     /// strings, so a rename is a deliberate break rather than a silent one.
     const fn name(self) -> &'static str {
         match self {
+            Counter::DocumentsNamed => "documents_named",
+            Counter::ContentRowsWritten => "content_rows_written",
+            Counter::StructureRowsWritten => "structure_rows_written",
             Counter::DocumentsUpserted => "documents_upserted",
             Counter::FullTextRowsIndexed => "full_text_rows_indexed",
             Counter::DocumentsDeleted => "documents_deleted",
@@ -229,6 +238,26 @@ impl DerivationCounters {
     /// Candidates this request's re-decision read.
     pub fn link_health_candidates_read(&self) -> u64 {
         self.value(Counter::LinkHealthCandidatesRead)
+    }
+
+    /// Fact rows deleted before replacement or withdrawal.
+    pub fn fact_rows_discarded(&self) -> u64 {
+        self.value(Counter::FactRowsDiscarded)
+    }
+
+    /// Provisional document names inserted during construction.
+    pub fn documents_named(&self) -> u64 {
+        self.value(Counter::DocumentsNamed)
+    }
+
+    /// Document rows filled by the content step.
+    pub fn content_rows_written(&self) -> u64 {
+        self.value(Counter::ContentRowsWritten)
+    }
+
+    /// Documents whose structure facts were appended.
+    pub fn structure_rows_written(&self) -> u64 {
+        self.value(Counter::StructureRowsWritten)
     }
 
     /// Document rows indexed by the from-zero full-text pass.

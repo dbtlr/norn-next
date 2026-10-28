@@ -70,6 +70,7 @@ use norn_store::{DerivationCounters, IncrementOutcome, SnapshotCounters};
 #[derive(Debug, Default)]
 pub struct JobEvidence {
     document_opens: AtomicU64,
+    documents_read_by_build: AtomicU64,
     stats: AtomicU64,
     walk_dirents: AtomicU64,
     write_dirents: AtomicU64,
@@ -85,6 +86,10 @@ pub struct JobEvidence {
     findings_written: AtomicU64,
     links_redecided: AtomicU64,
     links_judged: AtomicU64,
+    documents_named: AtomicU64,
+    content_rows_written: AtomicU64,
+    structure_rows_written: AtomicU64,
+    fact_rows_discarded: AtomicU64,
     full_text_rows_indexed: AtomicU64,
     link_health_keys_resolved: AtomicU64,
     link_health_candidates_read: AtomicU64,
@@ -129,6 +134,8 @@ pub struct EvidenceReading {
     /// job: one per read, so a file read twice counts twice
     /// ([`norn_fs::reads::ReadTally::document_opens`]).
     pub document_opens: u64,
+    /// Canonical content opens; structure reads only stored bodies.
+    pub documents_read_by_build: u64,
     /// Names stated, however the stat was spelled.
     pub stats: u64,
     /// Directory entries taken off a directory stream.
@@ -179,6 +186,14 @@ pub struct EvidenceReading {
     /// Links judged once after a from-zero build landed its facts.
     pub links_judged: u64,
     /// Document rows indexed by from-zero full-text batches, including NULL bodies.
+    /// Work performed by the from-zero document steps.
+    pub documents_named: u64,
+    /// Work performed by the from-zero document steps.
+    pub content_rows_written: u64,
+    /// Work performed by the from-zero document steps.
+    pub structure_rows_written: u64,
+    /// Work performed by the from-zero document steps.
+    pub fact_rows_discarded: u64,
     pub full_text_rows_indexed: u64,
     /// Keys the increments and complete from-zero judgments resolved.
     pub link_health_keys_resolved: u64,
@@ -294,6 +309,9 @@ impl EvidenceReading {
     /// that reads a host from its first job onwards reads the account directly.
     pub fn since(self, earlier: EvidenceReading) -> EvidenceReading {
         EvidenceReading {
+            documents_read_by_build: self
+                .documents_read_by_build
+                .saturating_sub(earlier.documents_read_by_build),
             document_opens: self.document_opens.saturating_sub(earlier.document_opens),
             stats: self.stats.saturating_sub(earlier.stats),
             walk_dirents: self.walk_dirents.saturating_sub(earlier.walk_dirents),
@@ -324,6 +342,16 @@ impl EvidenceReading {
                 .saturating_sub(earlier.findings_written),
             links_redecided: self.links_redecided.saturating_sub(earlier.links_redecided),
             links_judged: self.links_judged.saturating_sub(earlier.links_judged),
+            documents_named: self.documents_named.saturating_sub(earlier.documents_named),
+            content_rows_written: self
+                .content_rows_written
+                .saturating_sub(earlier.content_rows_written),
+            structure_rows_written: self
+                .structure_rows_written
+                .saturating_sub(earlier.structure_rows_written),
+            fact_rows_discarded: self
+                .fact_rows_discarded
+                .saturating_sub(earlier.fact_rows_discarded),
             full_text_rows_indexed: self
                 .full_text_rows_indexed
                 .saturating_sub(earlier.full_text_rows_indexed),
@@ -417,6 +445,10 @@ fn rule_work_since(later: RuleWork, earlier: RuleWork) -> RuleWork {
 }
 
 impl JobEvidence {
+    /// Count an open owed specifically to canonical construction content.
+    pub(crate) fn count_build_read(&self) {
+        self.documents_read_by_build.fetch_add(1, Ordering::Relaxed);
+    }
     /// The file each counted read of every job read while a
     /// [`norn_fs::reads::FileRecording`] stood, in the order the jobs ended.
     ///
@@ -437,6 +469,7 @@ impl JobEvidence {
     pub fn read(&self) -> EvidenceReading {
         let get = |field: &AtomicU64| field.load(Ordering::Relaxed);
         EvidenceReading {
+            documents_read_by_build: get(&self.documents_read_by_build),
             document_opens: get(&self.document_opens),
             stats: get(&self.stats),
             walk_dirents: get(&self.walk_dirents),
@@ -453,6 +486,10 @@ impl JobEvidence {
             findings_written: get(&self.findings_written),
             links_redecided: get(&self.links_redecided),
             links_judged: get(&self.links_judged),
+            documents_named: get(&self.documents_named),
+            content_rows_written: get(&self.content_rows_written),
+            structure_rows_written: get(&self.structure_rows_written),
+            fact_rows_discarded: get(&self.fact_rows_discarded),
             full_text_rows_indexed: get(&self.full_text_rows_indexed),
             link_health_keys_resolved: get(&self.link_health_keys_resolved),
             link_health_candidates_read: get(&self.link_health_candidates_read),
@@ -610,6 +647,14 @@ impl JobEvidence {
             .fetch_add(changesets.links_redecided, Ordering::Relaxed);
         self.links_judged
             .fetch_add(changesets.links_judged, Ordering::Relaxed);
+        self.documents_named
+            .fetch_add(changesets.documents_named, Ordering::Relaxed);
+        self.content_rows_written
+            .fetch_add(changesets.content_rows_written, Ordering::Relaxed);
+        self.structure_rows_written
+            .fetch_add(changesets.structure_rows_written, Ordering::Relaxed);
+        self.fact_rows_discarded
+            .fetch_add(changesets.fact_rows_discarded, Ordering::Relaxed);
         self.full_text_rows_indexed
             .fetch_add(changesets.full_text_rows_indexed, Ordering::Relaxed);
         self.link_health_keys_resolved
@@ -713,6 +758,10 @@ struct ChangesetTally {
     findings_written: u64,
     links_redecided: u64,
     links_judged: u64,
+    documents_named: u64,
+    content_rows_written: u64,
+    structure_rows_written: u64,
+    fact_rows_discarded: u64,
     full_text_rows_indexed: u64,
     link_health_keys_resolved: u64,
     link_health_candidates_read: u64,
@@ -729,6 +778,10 @@ thread_local! {
         findings_written: 0,
         links_redecided: 0,
         links_judged: 0,
+        documents_named: 0,
+        content_rows_written: 0,
+        structure_rows_written: 0,
+        fact_rows_discarded: 0,
         full_text_rows_indexed: 0,
         link_health_keys_resolved: 0,
         link_health_candidates_read: 0,
@@ -771,6 +824,10 @@ pub(crate) fn count_increment_work(counters: &DerivationCounters, read_steps: u6
         tally.findings_written += counters.findings_written();
         tally.links_redecided += counters.links_redecided();
         tally.links_judged += counters.links_judged();
+        tally.documents_named += counters.documents_named();
+        tally.content_rows_written += counters.content_rows_written();
+        tally.structure_rows_written += counters.structure_rows_written();
+        tally.fact_rows_discarded += counters.fact_rows_discarded();
         tally.full_text_rows_indexed += counters.full_text_rows_indexed();
         tally.link_health_keys_resolved += counters.link_health_keys_resolved();
         tally.link_health_candidates_read += counters.link_health_candidates_read();
