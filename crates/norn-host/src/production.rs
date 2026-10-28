@@ -4562,18 +4562,23 @@ impl<'s> Pending<'s> {
 
     fn push(&mut self, change: Change) {
         debug_assert!(
-            self.content.is_empty(),
-            "a change queued beside the content step's rows: settle the content first"
+            self.store.construction_step() != Some(norn_store::Step::Content)
+                || (self.content.is_empty() && self.queued.is_empty()),
+            "a change queued beside the content step's rows or findings: settle them first"
         );
         self.changes.push(change);
     }
 
-    /// Land the content step's queued rows and their findings before a change
-    /// is queued beside them. A change in that step marks a document or a
-    /// directory, and a mark ends what stands beneath it, the findings the
-    /// rows' bytes derived included: it can only do so once they have landed.
+    /// Land what the content step has queued — its rows and every finding,
+    /// a withdrawn document's included — before a change is queued beside
+    /// them. A change in that step marks a document or a directory, and a mark
+    /// ends what stands beneath it, the findings derived from those bytes
+    /// included: it can only do so once they have landed. Outside the content
+    /// step a finding legitimately waits for the change it stands beside.
     fn settle_content(&mut self) -> Result<(), JobFailure> {
-        if self.content.is_empty() {
+        if self.store.construction_step() != Some(norn_store::Step::Content)
+            || (self.content.is_empty() && self.queued.is_empty())
+        {
             return Ok(());
         }
         self.flush()

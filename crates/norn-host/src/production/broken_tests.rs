@@ -1129,3 +1129,67 @@ fn a_mark_filed_beside_content_beneath_it_ends_that_content_s_findings() {
         .query_map([], |row| row.get(0)).unwrap().map(Result::unwrap).collect();
     assert!(filed.is_empty(), "a names-only row kept its content's findings: {filed:?}");
 }
+
+/// **A mark filed beside a withdrawn document's finding ends it.** An
+/// undecodable document beneath a directory leaves no content row, only its
+/// queued content finding; the mark filed beside it ends what stands beneath
+/// the directory, that finding included, as in a flush of its own.
+#[test]
+fn a_mark_filed_beside_a_withdrawn_document_s_finding_ends_it() {
+    let f = Fixture::watcherless("mark-beside-withdrawn");
+    fs::create_dir(f.vault().join("dir")).unwrap();
+    fs::write(f.vault().join("dir/a.md"), b"\xff\xfe\x00bad").unwrap();
+    let mut store = Store::open(f.root.join("steps.sqlite3"), proven_order(&f), crate::DERIVATION_VERSION).unwrap();
+    let paths: Vec<_> = ["dir/a.md"].map(|p| DocumentPath::new(p).unwrap()).into();
+    store.defer_link_health().unwrap(); store.begin_steps().unwrap();
+    store.begin_request().apply_increment(IncrementProvenance::Derived, paths.iter().cloned().map(|path| Change::Named { path }), &[], &ContentModel::none()).unwrap();
+    store.finish_step(norn_store::Step::Names).unwrap();
+    let (ops, _) = f.ops(4);
+    let source = norn_fs::Vault::open(&f.vault(), &[]).unwrap();
+    let root = f.vault();
+    let mut account = Account::default();
+    let mut group = store.step_group().unwrap();
+    let mut pending = Pending::new(group.store(), 4, &root, &[], &mut account).unwrap();
+    loading::steps::content_chunk(&ops, &mut pending, &source, &paths).unwrap();
+    pending.unlistable(Path::new("dir"), &std::io::Error::from_raw_os_error(13)).unwrap();
+    pending.flush().unwrap(); drop(pending); group.commit().unwrap();
+    let filed: Vec<String> = norn_db::open_read_only(store.path()).adopted.unwrap().connection()
+        .prepare("SELECT kind FROM findings WHERE path = 'dir/a.md'").unwrap()
+        .query_map([], |row| row.get(0)).unwrap().map(Result::unwrap).collect();
+    assert!(filed.is_empty(), "a finding beneath the mark survived it: {filed:?}");
+}
+
+/// **A named document that became a directory the walk cannot list leaves the
+/// content step.** Its provisional row owns no death, so it is withdrawn and
+/// the directory is marked: a build from zero over the final tree holds no row
+/// at that path and the mark at it. The content queue empties, so the step
+/// ends rather than paging the same name again.
+#[test]
+fn a_named_document_turned_unlistable_directory_leaves_the_content_step() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::watcherless("named-turned-directory");
+    for path in ["a.md", "b.md"] { fs::write(f.vault().join(path), "# Heading\n").unwrap(); }
+    let mut store = Store::open(f.root.join("steps.sqlite3"), proven_order(&f), crate::DERIVATION_VERSION).unwrap();
+    let paths: Vec<_> = ["a.md", "b.md"].map(|p| DocumentPath::new(p).unwrap()).into();
+    store.defer_link_health().unwrap(); store.begin_steps().unwrap();
+    store.begin_request().apply_increment(IncrementProvenance::Derived, paths.iter().cloned().map(|path| Change::Named { path }), &[], &ContentModel::none()).unwrap();
+    store.finish_step(norn_store::Step::Names).unwrap();
+    let turned = f.vault().join("a.md");
+    fs::remove_file(&turned).unwrap();
+    fs::create_dir(&turned).unwrap();
+    fs::write(turned.join("inside.md"), "# Inside\n").unwrap();
+    fs::set_permissions(&turned, fs::Permissions::from_mode(0o000)).unwrap();
+    let (ops, _) = f.ops(4);
+    let source = norn_fs::Vault::open(&f.vault(), &[]).unwrap();
+    let root = f.vault();
+    let mut account = Account::default();
+    let mut group = store.step_group().unwrap();
+    let mut pending = Pending::new(group.store(), 4, &root, &[], &mut account).unwrap();
+    loading::steps::content_chunk(&ops, &mut pending, &source, &paths).unwrap();
+    pending.flush().unwrap(); drop(pending); group.commit().unwrap();
+    fs::set_permissions(&turned, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(store.begin_request().content_page(4).unwrap().is_empty(), "the content step pages a name it can never settle");
+    assert!(store.begin_request().stored_facts(&paths[0]).unwrap().is_none(), "the withdrawn name still stands");
+    assert!(store.begin_request().stored_tombstone(&paths[0]).unwrap().is_none());
+    assert!(store.begin_request().unreadable_directory_stands(&paths[0]).unwrap());
+}

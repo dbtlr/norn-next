@@ -43,6 +43,7 @@ pub(super) fn documents(
             exclusions,
             &mut account,
         )?;
+        let mut previous: Option<DocumentPath> = None;
         while count < 2048 {
             let mut request = pending.store.begin_request();
             let result = request.content_page(policy.changeset_size.min(2048 - count));
@@ -52,6 +53,16 @@ pub(super) fn documents(
             if paths.is_empty() {
                 break;
             }
+            // Every chunk takes each of its paths out of the queue. One that
+            // pages the same first path again made no progress, and the build
+            // fails rather than spin: its mark makes the next open rebuild.
+            if previous.as_ref() == paths.first() {
+                return Err(JobFailure::Environmental(format!(
+                    "the content step could not settle `{}`",
+                    paths[0].as_str()
+                )));
+            }
+            previous = paths.first().cloned();
             count += paths.len();
             content_chunk(ops, &mut pending, &source, &paths)?;
             pending.flush()?;
@@ -164,6 +175,18 @@ pub(in crate::production) fn content_chunk(
                 None
             }
             norn_fs::WalkFact::Unreadable(unreadable) => {
+                // A name step 1 enumerated that is now a directory the walk
+                // cannot list is no document: its provisional row owns no
+                // death and is withdrawn, and the directory is marked at it.
+                if unreadable.kind() == norn_fs::UnreadKind::Directory
+                    && unreadable.path().as_path() == Path::new(path.as_str())
+                {
+                    pending
+                        .store
+                        .begin_request()
+                        .withdraw_content(path)
+                        .map_err(store_effect)?;
+                }
                 pending.flush()?;
                 pending.unreadable_fact(&unreadable, None)?;
                 pending.flush()?;
