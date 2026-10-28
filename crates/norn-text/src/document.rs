@@ -23,7 +23,7 @@ use crate::line_ending::LineEnding;
 use crate::link::{BlockId, Link, parse_wikilinks_in_text};
 use crate::section::{SectionAddress, SectionError, SectionSpan, line_start};
 use crate::span::{
-    LineCursor, split_lines_inclusive, split_yaml_lines_inclusive, trailing_break,
+    LineCursor, SourceSpan, split_lines_inclusive, split_yaml_lines_inclusive, trailing_break,
     trailing_yaml_break, trim_yaml_line_break,
 };
 use crate::tag::{Tag, frontmatter_tag_name};
@@ -225,21 +225,41 @@ impl From<SectionError> for EditError {
 /// second scan of the same body to ask a second question.
 #[derive(Debug, Clone)]
 pub struct SourceScan<'a> {
-    source: &'a str,
-    body_start: usize,
+    body: &'a str,
+    origin: SourceSpan,
     scan: BodyScan<'a>,
 }
 
-impl SourceScan<'_> {
+impl<'a> SourceScan<'a> {
+    /// Scan a stored body in its original source coordinates. `origin` is
+    /// [`SourceSpan::at`] at [`Document::body_start`] in the original source.
+    /// This lets from-zero construction derive structure after storing content.
+    pub fn over_body(body: &'a str, origin: SourceSpan) -> Self {
+        Self {
+            body,
+            origin,
+            scan: BodyScan::new(body),
+        }
+    }
+
+    fn rebase(&self, mut at: SourceSpan) -> SourceSpan {
+        if at.line == 1 {
+            at.column += self.origin.column - 1;
+        }
+        at.line += self.origin.line - 1;
+        at.byte_offset += self.origin.byte_offset;
+        at
+    }
+
     /// Every heading in the body, in source coordinates.
     pub fn headings(&self) -> Vec<Heading> {
-        let mut cursor = LineCursor::new(self.source);
+        let mut cursor = LineCursor::new(self.body);
         self.scan
             .headings()
             .iter()
             .map(|heading| Heading {
-                span: cursor.span_at(heading.span.byte_offset + self.body_start),
-                body_offset: heading.body_offset + self.body_start,
+                span: self.rebase(cursor.span_at(heading.span.byte_offset)),
+                body_offset: heading.body_offset + self.origin.byte_offset,
                 ..heading.clone()
             })
             .collect()
@@ -258,14 +278,14 @@ impl SourceScan<'_> {
 
     /// Every `#tag` in the body, in document order, in source coordinates.
     pub fn tags(&self) -> Vec<Tag> {
-        let mut cursor = LineCursor::new(self.source);
+        let mut cursor = LineCursor::new(self.body);
         self.scan
             .tags()
             .into_iter()
             .map(|tag| Tag {
                 span: tag
                     .span
-                    .map(|span| cursor.span_at(span.byte_offset + self.body_start)),
+                    .map(|span| self.rebase(cursor.span_at(span.byte_offset))),
                 ..tag
             })
             .collect()
@@ -274,12 +294,12 @@ impl SourceScan<'_> {
     /// Every trailing block-id definition in the body, in document order, in
     /// source coordinates. A definition's span is its `^` marker.
     pub fn block_ids(&self) -> Vec<BlockId> {
-        let mut cursor = LineCursor::new(self.source);
+        let mut cursor = LineCursor::new(self.body);
         self.scan
             .block_ids()
             .into_iter()
             .map(|block| BlockId {
-                span: cursor.span_at(block.span.byte_offset + self.body_start),
+                span: self.rebase(cursor.span_at(block.span.byte_offset)),
                 ..block
             })
             .collect()
@@ -288,13 +308,13 @@ impl SourceScan<'_> {
     /// Rebase link spans the body scan reports, offsets into the body, onto
     /// the source.
     fn rebased(&self, links: Vec<Link>) -> Vec<Link> {
-        let mut cursor = LineCursor::new(self.source);
+        let mut cursor = LineCursor::new(self.body);
         links
             .into_iter()
             .map(|link| Link {
                 span: link
                     .span
-                    .map(|span| cursor.span_at(span.byte_offset + self.body_start)),
+                    .map(|span| self.rebase(cursor.span_at(span.byte_offset))),
                 ..link
             })
             .collect()
@@ -615,11 +635,7 @@ impl<'a> Document<'a> {
     /// so the body's traversal, and the heap it builds while it runs, is paid
     /// once rather than once per question.
     pub fn source_scan(&self) -> SourceScan<'a> {
-        SourceScan {
-            source: self.source,
-            body_start: self.body_start,
-            scan: self.scan_body(),
-        }
+        SourceScan::over_body(self.body, SourceSpan::at(self.source, self.body_start))
     }
 
     /// Every heading in the body, in source coordinates.
