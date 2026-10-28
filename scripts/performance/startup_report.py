@@ -16,6 +16,7 @@ KEYS = ("repetition", "background_documents", "changeset_size", "build_kind", "p
 PHASES = {"document_plan": "Document parsing, mapping and judgment",
           "row_and_index_writes": "Document, fact and index writes",
           "link_health_once": "Complete link-health judgment",
+          "full_text": "Full-text construction and finish",
           "link_health": "Link-health maintenance", "commit": "Commit",
           "other_increment": "Other increment work", "other_startup": "Remaining startup"}
 WORK = ("document_opens", "documents_derived", "changesets_applied", "links_redecided", "links_judged", "changeset_read_steps")

@@ -50,10 +50,11 @@ def partition(ready: dict) -> dict | None:
     rows, health, commit = (values[name] for name in
                             ("store.upsert", "store.link_health", "store.commit"))
     once = values["store.link_health_once"]
-    result = {"link_health_once": once, "document_plan": plan, "row_and_index_writes": rows,
+    full_text = values.get("store.step.full_text", 0) + values.get("store.step.finish", 0)
+    result = {"full_text": full_text, "link_health_once": once, "document_plan": plan, "row_and_index_writes": rows,
               "link_health": health, "commit": commit,
               "other_increment": increment - rows - health - commit,
-              "other_startup": ready["startup_complete_ns"] - plan - increment - once}
+              "other_startup": ready["startup_complete_ns"] - plan - increment - once - full_text}
     if any(value < 0 for value in result.values()):
         raise ValueError("timing scopes overlap or exceed the startup clock")
     return result

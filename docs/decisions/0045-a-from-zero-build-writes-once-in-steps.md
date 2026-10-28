@@ -340,12 +340,13 @@ order:
 
 1. **Names.** Every document row is written with only the names its path derives, and
    document ids are assigned in path order; every vault-file row is written final. A `.md`
-   path whose bytes prove in step 2 not to be a document is quarantined, its row removed
-   through the ordinary removal path, and it leaves a gap in the ids, which is accepted. A
+   path whose bytes prove in step 2 not to be a document is quarantined. A step-2
+   quarantine, or a file vanished before step 2, withdraws its provisional names row
+   without a death record, as an ordinary build never wrote one. The gap in ids is accepted. A
    name a filesystem fact adds during construction is inserted through the ordinary add
    path and takes the next id, as in any store, so ids follow path order only for the names
-   step 1 enumerated, and a build's ids equal an ordinary build's only where no name was
-   added during it. A
+   step 1 enumerated, and a build's ids equal an ordinary build's only where no `.md` was
+   byte-quarantined and no name was added during the build. A
    directory the walk cannot list is withheld and marked, and the build continues
    ([ADR 0046](0046-one-unreadable-path-never-breaks-the-vault.md)). The name-resolution
    indexes are created at the end of this step.
@@ -368,9 +369,9 @@ starts while a requeued path is still in an earlier one: step 4 never ends with 
 path's links unjudged, and step 5 never starts while a requeued path is still in steps 2–3.
 
 **Construction ends at step 5, and `Ready` follows in one order.** Step 5 installs the
-triggers; the facts accepted since step 5 began are then reconciled as ordinary
-changesets, under ADR 0044's per-changeset rule; a checkpoint runs; and `Ready` is
-published.
+triggers and runs the construction checkpoint; the facts accepted since step 5 began
+are then reconciled as ordinary changesets, under ADR 0044's per-changeset rule and the
+restored autocheckpoint; and `Ready` is published.
 
 Each step has one routine. The normal passes run it over the vault in batches; a requested
 document, and a path a filesystem fact requeues, run the same routine on their own. There
@@ -553,9 +554,9 @@ ordinary store's.
 - Host chunks stay bounded at 128 documents. A SQLite transaction spans up to 2,048
   documents, and commits at the next chunk boundary whenever a request is pending, so the
   request's snapshot sees its document.
-- The WAL autocheckpoint is raised during construction, and the checkpoint before `Ready`
-  runs in the order construction states. `synchronous` and the cache size keep their
-  production values.
+- The WAL autocheckpoint is raised during construction. The construction checkpoint runs
+  when step 5 ends, before the reconcile; the restored autocheckpoint covers the reconcile.
+  `synchronous` and the cache size keep their production values.
 
 ### Initializing a vault runs its first build in the foreground
 

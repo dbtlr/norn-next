@@ -208,6 +208,15 @@ fn a_write_after_full_text_began_is_refused() {
     store.verify_integrity().unwrap();
 }
 
+#[allow(clippy::disallowed_methods)] // Harness scaffolding: measuring the store's WAL sidecar.
+fn wal_bytes(store: &Store) -> u64 {
+    let mut wal = store.path().as_os_str().to_os_string();
+    wal.push("-wal");
+    std::fs::metadata(std::path::PathBuf::from(wal))
+        .unwrap()
+        .len()
+}
+
 #[test]
 fn construction_pragmas_are_restored() {
     let scratch = Scratch::new("construction-pragmas");
@@ -230,14 +239,7 @@ fn construction_pragmas_are_restored() {
         induced_failure::construction_pragmas(&store).unwrap(),
         opened
     );
-    let mut wal = store.path().as_os_str().to_os_string();
-    wal.push("-wal");
-    assert_eq!(
-        std::fs::metadata(std::path::PathBuf::from(wal))
-            .unwrap()
-            .len(),
-        0
-    );
+    assert_eq!(wal_bytes(&store), 0);
 }
 
 #[test]

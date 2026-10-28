@@ -99,7 +99,7 @@ impl LoadingProbe for Probe {
             LoadingBoundary::MetadataRecord(_) => Point::MetadataRecord,
             LoadingBoundary::MetadataComplete => Point::MetadataComplete,
             LoadingBoundary::CanonicalPage => Point::CanonicalPage,
-            LoadingBoundary::LinkHealthChunk => return,
+            LoadingBoundary::LinkHealthChunk | LoadingBoundary::FullTextBatch => return,
             LoadingBoundary::CanonicalComplete => Point::CanonicalComplete,
             LoadingBoundary::QueryEstablished => Point::QueryEstablished,
             LoadingBoundary::QueryBuilt => Point::QueryBuilt,
