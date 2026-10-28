@@ -1404,7 +1404,7 @@ fn full_regression_adopts_fault_and_audit_cases_with_their_features() {
                     .filter(|line| line.trim().starts_with("#[ignore = \"fault-lane case:"))
                     .count();
                 assert_eq!(tests, ignored, "every fault case is ignored");
-                assert_eq!(tests, if *target == "lockdown" { 20 } else { 3 });
+                assert_eq!(tests, if *target == "lockdown" { 20 } else { 4 });
             }
             std::fs::write(manifest.join(format!("tests/{target}.rs")), source).unwrap();
         }

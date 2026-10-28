@@ -1529,8 +1529,9 @@ impl ProductionEntryOps {
     /// that [`Self::build_from_zero`] runs — which is what makes the result
     /// equal to a first attach's rather than merely close to it.
     ///
-    /// The complete link-health judgment follows the walk; the verification
-    /// afterwards is the other half: a rebuilt database that
+    /// The complete link-health judgment and full-text batches follow the walk;
+    /// the verification afterwards covers the finished index before the closing
+    /// transaction installs its triggers and clears the mark. It is the other half: a rebuilt database that
     /// cannot answer for itself is not derived state anything may be published
     /// over, and reporting damage here rather than `Ready` is what keeps a
     /// second damaged store from being served as a sound one. The
@@ -13722,6 +13723,14 @@ mod tests {
         .is_some()
     }
 
+    fn full_text_trigger_count(path: &Path) -> usize {
+        let database = norn_db::open_read_only(path).adopted.unwrap();
+        database.connection().query_row(
+            "SELECT count(*) FROM sqlite_schema WHERE type = 'trigger' AND name LIKE 'documents_fts_%'",
+            [], |row| row.get(0),
+        ).unwrap()
+    }
+
     fn link_rows(store: &mut Store) -> u64 {
         every_stored_fact(store)
             .iter()
@@ -13737,8 +13746,13 @@ mod tests {
         let spent = ops.evidence.read().since(before);
         assert!(!attachment.store.link_health_deferred());
         assert!(!attachment.store.under_construction());
+        assert_eq!(full_text_trigger_count(attachment.store.path()), 3);
         assert_eq!(spent.links_redecided, 0);
         assert_eq!(spent.links_judged, link_rows(&mut attachment.store));
+        assert_eq!(
+            spent.full_text_rows_indexed as usize,
+            stored_paths(&mut attachment.store).len()
+        );
         assert!(spent.links_judged > 0);
     }
 
@@ -13928,6 +13942,136 @@ mod tests {
             derived_vault(&mut attachment.store, f.vault().as_path()),
             from_scratch(&f, "undeclarable-then-recover-oracle", policy)
         );
+        ops.detach(&name, attachment);
+    }
+
+    #[cfg(feature = "induced-failure")]
+    struct FullTextWitness {
+        database: PathBuf,
+        rows: std::sync::Mutex<Vec<usize>>,
+        canonical: std::sync::atomic::AtomicBool,
+    }
+
+    #[cfg(feature = "induced-failure")]
+    impl crate::LoadingProbe for FullTextWitness {
+        fn at(&self, boundary: crate::LoadingBoundary<'_>) {
+            if matches!(
+                boundary,
+                crate::LoadingBoundary::FullTextBatch | crate::LoadingBoundary::CanonicalComplete
+            ) {
+                assert!(mark_stands(&self.database));
+                assert_eq!(full_text_trigger_count(&self.database), 0);
+                let database = norn_db::open_read_only(&self.database).adopted.unwrap();
+                let (documents, indexed): (usize, usize) = database.connection().query_row(
+                    "SELECT (SELECT count(*) FROM documents), (SELECT count(*) FROM documents_fts_docsize)",
+                    [], |row| Ok((row.get(0)?, row.get(1)?)),
+                ).unwrap();
+                if matches!(boundary, crate::LoadingBoundary::FullTextBatch) {
+                    self.rows.lock().unwrap().push(indexed);
+                } else {
+                    assert_eq!(indexed, documents);
+                    self.canonical
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "induced-failure")]
+    #[test]
+    fn full_text_batches_commit_without_triggers_and_keep_the_mark() {
+        let f = Fixture::new("full-text-batches");
+        write_a_vault_of_documents(&f, 12);
+        let (ops, name) = f.ops(4);
+        let witness = Arc::new(FullTextWitness {
+            database: dirs_store(&f, &name),
+            rows: Default::default(),
+            canonical: Default::default(),
+        });
+        let ops = ops.with_loading_probe(witness.clone());
+        let mut attachment = ops
+            .attach(&f.registration(), &ProgressReporter::disconnected())
+            .unwrap();
+        let rows = witness.rows.lock().unwrap();
+        assert!(rows.len() >= 3, "{rows:?}");
+        let mut previous = 0;
+        for &count in rows.iter() {
+            assert!(
+                count > previous && count - previous <= ops.policy.changeset_size,
+                "{rows:?}"
+            );
+            previous = count;
+        }
+        assert!(witness.canonical.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(!mark_stands(attachment.store.path()));
+        assert_eq!(full_text_trigger_count(attachment.store.path()), 3);
+        attachment.store.verify_integrity().unwrap();
+        assert_eq!(
+            derived_vault(&mut attachment.store, f.vault().as_path()),
+            from_scratch(&f, "full-text-oracle", ProductionPolicy::new(4, 4).unwrap())
+        );
+        ops.detach(&name, attachment);
+    }
+
+    #[cfg(feature = "induced-failure")]
+    #[test]
+    fn rung_three_verifies_after_full_text_and_before_the_clear() {
+        let f = Fixture::new("rung-three-full-text-order");
+        write_a_vault_of_documents(&f, 120);
+        let (ops, name) = f.ops(16);
+        let progress = ProgressReporter::disconnected();
+        let attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let database = attachment.store.path().to_path_buf();
+        ops.detach(&name, attachment);
+        corrupt_the_document_pages(&f, &database);
+        let witness = Arc::new(FullTextWitness {
+            database,
+            rows: Default::default(),
+            canonical: Default::default(),
+        });
+        let ops = ops.with_loading_probe(witness.clone());
+        let attachment = ops.attach(&f.registration(), &progress).unwrap();
+        assert!(witness.canonical.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(!witness.rows.lock().unwrap().is_empty());
+        assert!(!mark_stands(attachment.store.path()));
+        attachment.store.verify_integrity().unwrap();
+        ops.detach(&name, attachment);
+    }
+
+    #[cfg(feature = "induced-failure")]
+    #[test]
+    fn a_busy_construction_checkpoint_is_counted() {
+        let f = Fixture::new("construction-busy-evidence");
+        write_a_vault_of_documents(&f, 12);
+        let (ops, name) = f.ops(4);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        attachment.store = attachment
+            .store
+            .discard_and_reopen(proven_order(&f))
+            .unwrap();
+        ProductionEntryOps::pin_candidate(&mut attachment.store, &attachment.controls).unwrap();
+        ops.construct_from_zero(&mut attachment, &progress, EarlyReads::Declined)
+            .unwrap();
+        let reader = Arc::new(attachment.store.open_reader().reader.unwrap());
+        let snapshot = reader.try_take().unwrap().establish().unwrap();
+        norn_store::induced_failure::execute_out_of_band(
+            &mut attachment.store,
+            "PRAGMA busy_timeout = 0",
+        )
+        .unwrap();
+        let before = ops.evidence.read();
+        ops.finish_construction(&mut attachment.store).unwrap();
+        assert_eq!(
+            ops.evidence
+                .read()
+                .since(before)
+                .construction_checkpoint_busy,
+            1
+        );
+        assert!(!attachment.store.under_construction());
+        assert_eq!(full_text_trigger_count(attachment.store.path()), 3);
+        drop(snapshot);
         ops.detach(&name, attachment);
     }
 
@@ -14156,6 +14300,7 @@ mod tests {
             "{failure:?}"
         );
         assert!(mark_stands(&database), "the damaged rebuild lost its mark");
+        assert_eq!(full_text_trigger_count(&database), 0);
 
         let (ops, name) = f.ops(16);
         let attachment = ops.attach(&f.registration(), &progress).unwrap();

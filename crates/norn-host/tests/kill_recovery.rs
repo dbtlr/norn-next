@@ -363,6 +363,115 @@ fn next_attach_rebuilds_from_zero_after_process_death_mid_judgment() {
     );
 }
 
+struct DieAtTheFirstFullTextBatch;
+
+impl LoadingProbe for DieAtTheFirstFullTextBatch {
+    fn at(&self, boundary: LoadingBoundary<'_>) {
+        if matches!(boundary, LoadingBoundary::FullTextBatch) {
+            std::process::abort();
+        }
+    }
+}
+
+#[test]
+#[ignore = "fault-lane case: induced recovery runs in full regression"]
+fn next_attach_rebuilds_from_zero_after_process_death_mid_full_text() {
+    const CHILD: &str = "NORN_HOST_KILLED_FULL_TEXT_CHILD";
+    if let Some(root) = std::env::var_os(CHILD) {
+        let root = Path::new(&root);
+        let _lease = Lease::hold(
+            isolation::REAL_WATCHER,
+            isolation::acquisition_budget(attach::state_budget(WAIT_LIMIT)),
+        );
+        let name = VaultName::new("notes").unwrap();
+        attach_and_wait(
+            production_host(
+                root,
+                &root.join("vault"),
+                &name,
+                ProductionPolicy::new(2, 2).unwrap(),
+                |ops| ops.with_loading_probe(Arc::new(DieAtTheFirstFullTextBatch)),
+            ),
+            &name,
+        );
+        panic!("full text finished instead of aborting");
+    }
+    let body = "[[absent]]\n".repeat(100);
+    let oracle = {
+        let fixture = Fixture::new();
+        for index in 0..BUILD_DOCUMENTS {
+            fixture.write(&format!("doc-{index}.md"), &body);
+        }
+        attach_and_wait(fixture.host(), &fixture.name);
+        let mut store = Store::open(
+            &fixture.database,
+            proven_order(&fixture.vault),
+            norn_host::DERIVATION_VERSION,
+        )
+        .unwrap();
+        norn_testkit::equivalence::StoreProjection::read(&mut store).unwrap()
+    };
+    assert_eq!(oracle.population().findings, BUILD_DOCUMENTS * 100);
+    let mut fixture = Fixture::unleased(Scratch::new("norn-host-kill-mid-full-text"));
+    for index in 0..BUILD_DOCUMENTS {
+        fixture.write(&format!("doc-{index}.md"), &body);
+    }
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "next_attach_rebuilds_from_zero_after_process_death_mid_full_text",
+            "--nocapture",
+            "--include-ignored",
+        ])
+        .env(CHILD, fixture.root.root())
+        .output()
+        .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(
+            output.status.signal(),
+            Some(6),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let (marked, rows, epoch) = read_the_store_raw(&fixture.database);
+    assert!(marked);
+    assert_eq!(rows, BUILD_DOCUMENTS);
+    {
+        let opened = norn_db::open_read_only(&fixture.database);
+        let database = opened.adopted.unwrap();
+        let (triggers, indexed): (usize, usize) = database.connection().query_row(
+            "SELECT (SELECT count(*) FROM sqlite_schema WHERE type = 'trigger' AND name LIKE 'documents_fts_%'),
+                    (SELECT count(*) FROM documents_fts_docsize)",
+            [], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        assert_eq!(triggers, 0);
+        assert!(
+            indexed > 0 && indexed < BUILD_DOCUMENTS,
+            "{indexed} indexed documents"
+        );
+    }
+    fixture.lease();
+    attach_and_wait(fixture.host(), &fixture.name);
+    let mut store = Store::open(
+        &fixture.database,
+        proven_order(&fixture.vault),
+        norn_host::DERIVATION_VERSION,
+    )
+    .unwrap();
+    assert_eq!(*store.open_outcome(), norn_store::OpenOutcome::Reused);
+    assert_ne!(store.epoch(), epoch);
+    assert!(!store.under_construction());
+    assert!(!store.link_health_deferred());
+    store.verify_integrity().unwrap();
+    assert_eq!(
+        norn_testkit::equivalence::StoreProjection::read(&mut store).unwrap(),
+        oracle
+    );
+}
+
 /// Whether the mark stands, how many document rows the store holds, and its
 /// epoch — read through a read-only handle.
 fn read_the_store_raw(database: &Path) -> (bool, usize, String) {

@@ -1060,6 +1060,9 @@ fn barred_by(statement: ExplainedStatement<'_>) -> &'static str {
         ExplainedStatement::FindingRules(_) => {
             "a_finding_rules_chunk_seeks_each_finding_and_its_rule_set_by_row_id"
         }
+        ExplainedStatement::FullTextLast
+        | ExplainedStatement::FullTextBatch
+        | ExplainedStatement::FullTextRemaining => "full_text_cursor_statements_seek_document_ids",
         ExplainedStatement::LinkHealthEveryLink | ExplainedStatement::LinkHealthJudgedDiscard => {
             "the_complete_judgment_seeks_each_page_and_its_findings_without_sorting"
         }
@@ -1838,6 +1841,9 @@ fn point_read_bar(statement: ExplainedStatement<'_>) -> Option<PointReadBar> {
         | ExplainedStatement::LinkHealthWrittenLinks
         | ExplainedStatement::LinkHealthEveryLink
         | ExplainedStatement::LinkHealthJudgedDiscard
+        | ExplainedStatement::FullTextLast
+        | ExplainedStatement::FullTextBatch
+        | ExplainedStatement::FullTextRemaining
         | ExplainedStatement::LinkHealthClassFindings
         | ExplainedStatement::LinkHealthFoundLinks
         | ExplainedStatement::LinkHealthDiscard

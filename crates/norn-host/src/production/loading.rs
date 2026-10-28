@@ -25,6 +25,7 @@ pub enum LoadingBoundary<'a> {
     MetadataComplete,
     CanonicalPage,
     LinkHealthChunk,
+    FullTextBatch,
     CanonicalComplete,
     QueryEstablished,
     QueryBuilt,
@@ -114,14 +115,14 @@ impl ProductionEntryOps {
     /// pins a readable declaration over a store an undeclarable attach left
     /// empty. The ordinary heal maintains only a finished store.
     ///
-    /// **The mark clears only after the derivation and link-health judgment**, after the
+    /// **The mark clears after derivation, link-health judgment and full text**, after the
     /// watcher coverage window has closed cleanly, so a failure of any kind —
     /// damage, the environment, lost maintainership, a watcher failure, a full
     /// disk — leaves it for the next open to rebuild over. Rung 3 alone clears
     /// it later still, after its integrity verification
-    /// ([`Self::construct_from_zero`]). This is its own
-    /// transaction until the five steps give the build a final transaction to
-    /// carry it.
+    /// ([`Self::construct_from_zero`]). The closing transaction installs the
+    /// full-text triggers, checks the schema digest and clears the mark. The
+    /// construction checkpoint follows, before the ordinary reconcile.
     ///
     /// `admission` is who may publish early reads from the store being built.
     /// Only the attach after a create does, as [`Construction`] always has;
@@ -139,7 +140,7 @@ impl ProductionEntryOps {
         self.finish_construction(&mut attachment.store)
     }
 
-    fn finish_construction(&self, store: &mut Store) -> Result<(), JobFailure> {
+    pub(super) fn finish_construction(&self, store: &mut Store) -> Result<(), JobFailure> {
         let finished = store.finish_construction().map_err(store_effect)?;
         if finished.checkpoint_busy {
             self.evidence.count_construction_checkpoint_busy();
@@ -148,12 +149,13 @@ impl ProductionEntryOps {
     }
 
     /// Count a from-zero build and derive the vault into the store under
-    /// construction, leaving the under-construction mark standing.
+    /// construction, leaving the under-construction mark standing and FTS triggers absent.
     ///
     /// The one construction path: [`Self::build_from_zero`] clears the mark
     /// after it, and a caller that owes the result a verification first
     /// (rung 3) clears it only once that passes, so a store that fails the
-    /// verification is rebuilt again by the next open rather than adopted.
+    /// verification is rebuilt again by the next open rather than adopted. Stored
+    /// bodies are fully indexed before returning, so that verification covers full text.
     pub(super) fn construct_from_zero(
         &self,
         attachment: &mut ProductionAttachment,
@@ -165,6 +167,7 @@ impl ProductionEntryOps {
             "a from-zero build ran over a finished store"
         );
         attachment.store.defer_link_health().map_err(store_effect)?;
+        attachment.store.begin_steps().map_err(store_effect)?;
         self.evidence.count_from_zero_build();
         Self::under_coverage(attachment, |attachment| {
             self.derive_into_empty(attachment, progress, admission)
@@ -286,6 +289,21 @@ impl ProductionEntryOps {
         let steps = request.read_steps();
         crate::evidence::count_increment_work(&request.finish(), steps);
         result.map_err(store_effect)?;
+        loop {
+            let mut request = attachment.store.begin_request();
+            let result = request.full_text_batch(self.policy.changeset_size);
+            let steps = request.read_steps();
+            crate::evidence::count_increment_work(&request.finish(), steps);
+            let complete = result.map_err(store_effect)?;
+            if let Some(construction) = loading.as_mut() {
+                construction.checkpoint();
+            }
+            #[cfg(feature = "induced-failure")]
+            self.loading_boundary(LoadingBoundary::FullTextBatch);
+            if complete {
+                break;
+            }
+        }
         #[cfg(feature = "induced-failure")]
         self.loading_boundary(LoadingBoundary::CanonicalComplete);
         // Publications live in the entry, independently of this construction owner.

@@ -362,3 +362,31 @@ fn steps_refuse_documents_vault_files_or_tombstones() {
         assert!(store.under_construction());
     }
 }
+
+#[test]
+fn full_text_cursor_statements_seek_document_ids() {
+    use norn_store::ExplainedStatement;
+    let scratch = Scratch::new("construction-cursor-plans");
+    let mut store = scratch.open();
+    for statement in [
+        ExplainedStatement::FullTextLast,
+        ExplainedStatement::FullTextBatch,
+        ExplainedStatement::FullTextRemaining,
+    ] {
+        let plan = store.begin_request().emitted_plan(statement).unwrap();
+        assert!(
+            plan.steps.iter().any(|step| step
+                .detail
+                .contains("SEARCH documents USING INTEGER PRIMARY KEY (rowid>?)")),
+            "{plan:?}"
+        );
+        assert!(
+            !plan
+                .steps
+                .iter()
+                .any(|step| step.detail.contains("SCAN documents")
+                    || step.detail.contains("USE TEMP B-TREE")),
+            "{plan:?}"
+        );
+    }
+}

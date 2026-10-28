@@ -26,6 +26,7 @@ use norn_wire::FindingKind;
 
 use std::collections::BTreeMap;
 
+use crate::construction::{FTS_BATCH_SQL, FTS_LAST_SQL, FTS_REMAINING_SQL};
 use crate::ddl;
 use crate::facts::CANDIDATE_HEAD;
 use crate::health::LINK_HEALTH_CHUNK;
@@ -118,6 +119,9 @@ impl<'a> Request<'a> {
         // Explain the same comparison-key statements that judgment runs.
         let key = SuffixKey::Comparison;
         let sql = match statement {
+            ExplainedStatement::FullTextLast => FTS_LAST_SQL.to_string(),
+            ExplainedStatement::FullTextBatch => FTS_BATCH_SQL.to_string(),
+            ExplainedStatement::FullTextRemaining => FTS_REMAINING_SQL.to_string(),
             ExplainedStatement::SuffixCandidates(resolution) => suffix_candidates_sql(resolution),
             ExplainedStatement::FindingsInClass(probe) => {
                 findings_in_class_sql(probe.range_count())
@@ -177,6 +181,12 @@ impl<'a> Request<'a> {
         };
         let database = &self.store.database;
         Ok(match statement {
+            ExplainedStatement::FullTextLast | ExplainedStatement::FullTextBatch => {
+                database.emitted_plan(&sql, (EXPLAINED_DOCUMENT_ROW, MAX_PAGE as i64))
+            }
+            ExplainedStatement::FullTextRemaining => {
+                database.emitted_plan(&sql, [EXPLAINED_DOCUMENT_ROW])
+            }
             ExplainedStatement::SuffixCandidates(resolution) => {
                 database.emitted_plan(&sql, params_from_iter(resolution.parameters()))
             }
@@ -488,6 +498,12 @@ impl<'a> Request<'a> {
 /// ids its chunk holds.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExplainedStatement<'a> {
+    /// The last document id in a bounded full-text batch.
+    FullTextLast,
+    /// Index stored bodies by document-id cursor without reading them into Rust.
+    FullTextBatch,
+    /// Whether any document id remains beyond the committed full-text cursor.
+    FullTextRemaining,
     /// [`Request::suffix_candidates`], over the normalized comparison key.
     SuffixCandidates(&'a TargetClass),
     /// [`Request::findings_in_class`].
@@ -685,7 +701,7 @@ pub const POINT_READS: usize = 13;
 ///
 /// It is the length of [`ExplainedStatement::all`], which is the enumeration
 /// every other census is checked against.
-pub const STATEMENTS: usize = 49;
+pub const STATEMENTS: usize = 52;
 
 impl<'a> ExplainedStatement<'a> {
     /// Every statement this seam names, in slot order, each bound to a subject
@@ -767,6 +783,9 @@ impl<'a> ExplainedStatement<'a> {
             Self::ContentQuarantineHashPage,
             Self::LinkHealthEveryLink,
             Self::LinkHealthJudgedDiscard,
+            Self::FullTextLast,
+            Self::FullTextBatch,
+            Self::FullTextRemaining,
         ]
     }
 
@@ -828,6 +847,9 @@ impl<'a> ExplainedStatement<'a> {
             Self::ContentQuarantineHashPage => 46,
             Self::LinkHealthEveryLink => 47,
             Self::LinkHealthJudgedDiscard => 48,
+            Self::FullTextLast => 49,
+            Self::FullTextBatch => 50,
+            Self::FullTextRemaining => 51,
         };
         assert!(
             slot < STATEMENTS,
@@ -913,6 +935,9 @@ impl<'a> ExplainedStatement<'a> {
             | Self::LinkHealthWrittenLinks
             | Self::LinkHealthEveryLink
             | Self::LinkHealthJudgedDiscard
+            | Self::FullTextLast
+            | Self::FullTextBatch
+            | Self::FullTextRemaining
             | Self::LinkHealthClassFindings
             | Self::LinkHealthFoundLinks
             | Self::LinkHealthDiscard
