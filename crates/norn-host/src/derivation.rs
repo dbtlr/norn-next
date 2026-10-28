@@ -784,7 +784,11 @@ fn map_document_read(
     // The body is read once, and before the facts take their own copy of it:
     // the scan builds a tree of several bodies and frees it as it returns, so
     // a copy made first would stand beside that tree.
-    let body = (depth == Depth::Rich).then(|| scan_body(document.body(), body_origin));
+    let scan = (depth == Depth::Rich).then(|| {
+        #[cfg(feature = "induced-failure")]
+        let _timing = norn_store::profiling::span("host.body_scan");
+        norn_text::SourceScan::over_body(document.body(), body_origin)
+    });
     let mut facts = DocumentFacts::new(document_path, hash, document.body(), bytes.len() as u64)
         .with_frontmatter(document.frontmatter().map(map_value), model);
     facts.body_offset = document.body_start() as u64;
@@ -794,27 +798,25 @@ fn map_document_read(
         .filter(|d| d.code.frontmatter_scoped())
         .count() as u32;
     if depth != Depth::Base {
-        // Each vector is sized once for the frontmatter's facts and the body's
-        // behind them, so it carries no spare room: a collect from the text
-        // layer's wider link vector would keep that vector's buffer, and the
-        // plan holds its facts until its changeset flushes.
-        let links = document.frontmatter_field_wikilinks();
-        let tags = document.frontmatter_tags();
-        let (body_links, body_tags) = body
-            .as_ref()
-            .map_or((0, 0), |body| (body.links.len(), body.tags.len()));
-        facts.links = Vec::with_capacity(links.len() + body_links);
-        facts
-            .links
-            .extend(links.into_iter().map(map_frontmatter_link));
-        facts.tags = Vec::with_capacity(tags.len() + body_tags);
-        facts.tags.extend(
-            tags.into_iter()
-                .map(|tag| map_tag(tag, TagSource::Frontmatter)),
+        // The frontmatter's links and tags stand before the body's, the file's
+        // order, so a fact's ordinal is where the file writes it. One category
+        // is read at a time and its scan output freed before the next.
+        facts.links = joined(
+            document.frontmatter_field_wikilinks(),
+            map_frontmatter_link,
+            scan.as_ref().map(|scan| scan.links()).unwrap_or_default(),
+            map_link,
         );
-    }
-    if let Some(body) = body {
-        body.append_to(&mut facts);
+        if let Some(scan) = &scan {
+            facts.headings = headings_of(scan);
+            facts.blocks = blocks_of(scan);
+        }
+        facts.tags = joined(
+            document.frontmatter_tags(),
+            |tag| map_tag(tag, TagSource::Frontmatter),
+            scan.as_ref().map(|scan| scan.tags()).unwrap_or_default(),
+            |tag| map_tag(tag, TagSource::Body),
+        );
     }
     Ok(Derived {
         facts,
@@ -823,55 +825,40 @@ fn map_document_read(
     })
 }
 
-/// The facts one scan of a body derives, in source coordinates. Links and
-/// tags stay as the scan read them until they are appended: mapping them into
-/// vectors of their own first would hold two vectors of facts beside each
-/// other while the frontmatter's grew to take them.
-struct BodyFacts {
-    links: Vec<norn_text::Link>,
-    headings: Vec<HeadingFact>,
-    blocks: Vec<BlockFact>,
-    tags: Vec<norn_text::Tag>,
+/// The frontmatter's facts then the body's, in one vector sized once for
+/// both: a plan holds its facts until its changeset flushes, so no vector it
+/// carries keeps spare room, as a collect reusing the text layer's wider link
+/// buffer would.
+fn joined<F, B, T>(
+    frontmatter: Vec<F>,
+    from_frontmatter: impl FnMut(F) -> T,
+    body: Vec<B>,
+    from_body: impl FnMut(B) -> T,
+) -> Vec<T> {
+    let mut facts = Vec::with_capacity(frontmatter.len() + body.len());
+    facts.extend(frontmatter.into_iter().map(from_frontmatter));
+    facts.extend(body.into_iter().map(from_body));
+    facts
 }
 
-/// Scan `body`, which starts at `origin` in its source. Ordinary derivation
-/// scans the body it has just decoded; the from-zero structure step scans the
-/// body its content step stored. Both map the scan here and through
-/// [`BodyFacts::append_to`].
-fn scan_body(body: &str, origin: norn_text::SourceSpan) -> BodyFacts {
-    #[cfg(feature = "induced-failure")]
-    let _timing = norn_store::profiling::span("host.body_scan");
-    let scan = norn_text::SourceScan::over_body(body, origin);
-    BodyFacts {
-        links: scan.links(),
-        headings: scan.headings().into_iter().map(map_heading).collect(),
-        blocks: scan
-            .block_ids()
-            .into_iter()
-            .map(|block| BlockFact {
-                block_id: block.id,
-                span: Some(span(block.span)),
-            })
-            .collect(),
-        tags: scan.tags(),
-    }
+/// Append the body's facts behind the frontmatter's a content step left.
+fn appended<B, T>(facts: &mut Vec<T>, body: Vec<B>, from_body: impl FnMut(B) -> T) {
+    facts.reserve_exact(body.len());
+    facts.extend(body.into_iter().map(from_body));
 }
 
-impl BodyFacts {
-    /// Append behind the frontmatter's facts: the file's order, so a link's or
-    /// tag's ordinal is where the file writes it.
-    fn append_to(self, facts: &mut DocumentFacts) {
-        facts.links.reserve_exact(self.links.len());
-        facts.links.extend(self.links.into_iter().map(map_link));
-        facts.headings = self.headings;
-        facts.blocks = self.blocks;
-        facts.tags.reserve_exact(self.tags.len());
-        facts.tags.extend(
-            self.tags
-                .into_iter()
-                .map(|tag| map_tag(tag, TagSource::Body)),
-        );
-    }
+fn headings_of(scan: &norn_text::SourceScan<'_>) -> Vec<HeadingFact> {
+    scan.headings().into_iter().map(map_heading).collect()
+}
+
+fn blocks_of(scan: &norn_text::SourceScan<'_>) -> Vec<BlockFact> {
+    scan.block_ids()
+        .into_iter()
+        .map(|block| BlockFact {
+            block_id: block.id,
+            span: Some(span(block.span)),
+        })
+        .collect()
 }
 
 fn map_heading(heading: norn_text::Heading) -> HeadingFact {
@@ -1088,7 +1075,25 @@ pub(crate) fn plan_structure_document(
     origin: norn_text::SourceSpan,
     declared: &Declared,
 ) -> Vec<PlannedFinding> {
-    scan_body(&facts.body, origin).append_to(facts);
+    let DocumentFacts {
+        body,
+        links,
+        headings,
+        blocks,
+        tags,
+        ..
+    } = &mut *facts;
+    let scan = {
+        #[cfg(feature = "induced-failure")]
+        let _timing = norn_store::profiling::span("host.body_scan");
+        norn_text::SourceScan::over_body(body, origin)
+    };
+    // The same categories in the same order as the ordinary plan reads them.
+    appended(links, scan.links(), map_link);
+    *headings = headings_of(&scan);
+    *blocks = blocks_of(&scan);
+    appended(tags, scan.tags(), |tag| map_tag(tag, TagSource::Body));
+    drop(scan);
     plan_tag_facet(&facts.path, facts, declared.schema())
 }
 
