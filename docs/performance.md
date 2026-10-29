@@ -290,3 +290,99 @@ checks without executing a benchmark or requiring the legacy binary.
 Its functional trial can use one scale, one warmup, two samples, and one
 repetition before collecting a full baseline. Measurement records require an
 independent validity review and a separate reproduction.
+
+## Record a timing run
+
+The record mode measures one engine and writes one flat record of metric rows,
+so a scheduled job can keep a timing history of current main and notice a
+regression before a release. It measures only the current engine, or only the
+legacy engine, and no comparison runs inside it.
+
+Build the profiling worker, which carries the public first-open mode and the
+startup work counters, then record:
+
+```sh
+python3 scripts/performance/provenance.py \
+  --startup-profile \
+  --target-directory "$PERF_HOME/build" \
+  --receipt "$PERF_HOME/record-build.json"
+python3 scripts/performance/record.py \
+  --current-build "$PERF_HOME/record-build.json" \
+  --fixtures "$PERF_HOME/record-fixtures" \
+  --output "$PERF_HOME/record-001"
+```
+
+The first run generates each missing fixture size in `--fixtures` with the same
+generator and probes as the baseline, moving it into place only once complete. Later runs check the frozen digest and reuse
+the bytes unchanged. The defaults are 2,000 and 10,000 background documents
+(2,014 and 10,014 with probes) and three fresh processes per size. Each warm
+operation runs five warmups and 400 measured calls. Writes also exclude their
+first 200 calls, which carry the one-time page-split cost after a from-zero build.
+`--processes`, `--samples`, `--warmups` and `--write-payoff` change these numbers.
+The timing recorder stays off; the feature build is a measurement subject, not a
+shipping-binary claim.
+
+Each current process attaches a fresh copy of the fixture and issues the public
+first-open Get and Find as attachment begins. The parent releases each first read
+when its answer arrives and validates both against the authored fixture after
+Ready, so validation never delays the second read. The worker's clocks start when
+it adopts the vault:
+
+| Metric | Meaning |
+| --- | --- |
+| `first_get`, `first_find` | Worker clock when the first whole Get and the first metadata Find return a served answer. A refused first read is `unavailable` and has no value. |
+| `ready` | Worker clock when the caller first observes Ready. |
+| `warm.<operation>.median`, `warm.<operation>.p95` | Round-trip latency of the twelve baseline workloads, each answer verified as in the baseline. |
+| `work.<counter>` | Startup work: documents derived, document opens, changesets applied, links judged, findings written and discarded. |
+| `work.bytes_written` | Bytes the worker passed to write calls through startup, less its own measurement output. |
+
+Clocks take the median across processes. A warm operation reports the median of
+its per-process medians and the median of its per-process p95 values. A counter
+must be equal in every process; a disagreement is recorded as `unstable` with each
+value in the note. Watcher polls and checkpoint retries are not recorded, because
+they follow timing rather than work.
+
+`--engine legacy --legacy "$LEGACY_NORN"` records the installed legacy daemon over
+fixtures a current run already generated: `ready` is its hello-to-ready time,
+`first_query` is spawn to the first validated common-text search, and the warm
+operations match. Legacy reports no first reads and no counters.
+
+`record.json` holds the run identity (commit, executable hash, compiler, start
+time and load), the parameters and the rows. A failed run keeps its failure and
+no rows. Worker logs remain under `work/`; vaults and stores are removed after
+each process.
+
+### Keep a timing table
+
+`timeline.py` keeps a tab-separated table with one row per metric and run:
+
+```sh
+python3 scripts/performance/timeline.py append "$TABLE" "$PERF_HOME/record-001/record.json"
+python3 scripts/performance/timeline.py skip "$TABLE" --commit "$COMMIT" --reason "another build is running"
+python3 scripts/performance/timeline.py compare "$TABLE"
+```
+
+The columns are `run_at`, `commit`, `build_sha256`, `compiler`, `documents`,
+`metric`, `value`, `unit`, `status`, `load_start` and `note`. Only a completed
+record is appended. A skipped run is one `run` row with status `skipped` and its
+reason, so a gap stays visible. Keep one table per engine.
+
+`compare` reports on the latest run. A skipped latest run is reported alone; the
+measured run before it was reported on its own night. Otherwise it reports:
+
+- any metric that is `unavailable` or `unstable`;
+- a work change: any counter that differs from its last measurement in an earlier
+  run, so an unstable night in between does not hide a change. Between
+  two commits, or two executables of one dirty commit, it is a change in work; for
+  the same commit and executable it is reported as nondeterministic;
+- a sustained clock shift: the latest three measured values are each at least 1.2
+  times, and at least the floor above, the median of up to seven measured runs
+  before them. The floor is 100 ms for `first_get`, `first_find`, `ready` and
+  `first_query` and 0.5 ms for warm operations. At least three reference runs are
+  required.
+
+`--ratio`, `--cold-floor-ms`, `--warm-floor-ms`, `--sustain` and `--window` change
+the thresholds. A shift stays reported until it enters the reference window, and
+only while the latest run measures that clock. Skipped runs are ignored by both
+comparisons. Counters assume the frozen fixtures never change: a regenerated
+fixture moves every counter and reads as a work change.

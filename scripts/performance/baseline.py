@@ -147,6 +147,32 @@ def verify_mutation(worker, engine, command, root, response, state, before_bytes
     return read_ns, diagnostics
 
 
+def probe_state(manifest):
+    """The known content of every probe document, which verified writes keep current."""
+    return {name: {"path": name, "body": body, "fields": {"status": "draft", "perf_bucket": "probe"}}
+            for name, body in manifest["probe_bodies"].items()}
+
+
+def verified_call(worker, engine, root, manifest, state, name, base_command, iteration, *, wal=False):
+    """Time one request and check it against its known answer outside the clock.
+
+    A read checks its complete answer; a write checks its readback and the bytes on disk.
+    """
+    command = base_command or mutation(name, iteration)
+    before_path = "bench/subject.md" if command["op"] == "set" else command.get("from")
+    before_bytes = (root / "vault" / before_path).read_bytes() if before_path is not None else None
+    wal_before = wal_position(root) if wal else None
+    response, elapsed = worker.call(command)
+    wal_after = wal_position(root) if wal else None
+    if base_command is not None:
+        validate_read(engine, command, response, manifest)
+        readback = diagnostics = None
+    else:
+        readback, diagnostics = verify_mutation(worker, engine, command, root, response, state, before_bytes)
+    return {"command": command, "response": response, "elapsed_ns": elapsed, "readback_ns": readback,
+            "readback_diagnostics": diagnostics, "wal_before": wal_before, "wal_after": wal_after}
+
+
 def run_worker(args, engine, size, repetition, fixture, manifest, samples):
     short = "c" if engine == "current" else "l"
     root = args.output / "work" / f"{size}-{repetition}-{short}"
@@ -157,8 +183,7 @@ def run_worker(args, engine, size, repetition, fixture, manifest, samples):
     cls, binary = (Current, args.current) if engine == "current" else (Legacy, args.legacy)
     context = {"engine": engine, "background_documents": size, "repetition": repetition,
                "fixture_sha256": manifest["tree_sha256"], "document_count": manifest["document_count"]}
-    state = {name: {"path": name, "body": body, "fields": {"status": "draft", "perf_bucket": "probe"}}
-             for name, body in manifest["probe_bodies"].items()}
+    state = probe_state(manifest)
     began = time.perf_counter_ns()
     loading = getattr(args, "loading", None)
     if loading and engine != "current":
@@ -185,18 +210,11 @@ def run_worker(args, engine, size, repetition, fixture, manifest, samples):
             before = resources(worker.process.pid)
             writes = []
             for iteration in range(args.warmups + args.samples):
-                command = base_command or mutation(name, iteration)
-                before_path = "bench/subject.md" if command["op"] == "set" else command.get("from")
-                before_bytes = (root / "vault" / before_path).read_bytes() if before_path is not None else None
-                wal_before = wal_position(root) if base_command is None and engine == "current" else None
-                response, elapsed = worker.call(command)
-                wal_after = wal_position(root) if base_command is None and engine == "current" else None
-                if base_command is not None:
-                    validate_read(engine, command, response, manifest)
-                    readback = None
-                    readback_diagnostics = None
-                else:
-                    readback, readback_diagnostics = verify_mutation(worker, engine, command, root, response, state, before_bytes)
+                call = verified_call(worker, engine, root, manifest, state, name, base_command, iteration,
+                                     wal=base_command is None and engine == "current")
+                command, response, elapsed = call["command"], call["response"], call["elapsed_ns"]
+                wal_before, wal_after = call["wal_before"], call["wal_after"]
+                readback, readback_diagnostics = call["readback_ns"], call["readback_diagnostics"]
                 if base_command is None:
                     writes.append({"iteration": iteration, "round_trip_ns": elapsed,
                                    "wal_pages_per_write": wal_pages_written(wal_before, wal_after) if engine == "current" else None})
@@ -246,15 +264,20 @@ def prepare(args, size):
         shutil.copytree(source / "vault", root / "vault")
         write_json(root / "manifest.json", manifest)
         return root, manifest
+    return root, generate_fixture(args.current, root, size)
+
+
+def generate_fixture(binary, root, size):
+    """Generate the realistic background at seed 7 and plant the known-answer probes."""
     token = issue_root(root)
     env = environment(root, token)
     env["NORN_PERFORMANCE_DOCUMENTS"] = str(size)
     with (root / "generation.log").open("w") as log:
-        subprocess.run([str(args.current), "generate"],
+        subprocess.run([str(binary), "generate"],
                        env=env, cwd=root, stdout=log, stderr=subprocess.STDOUT, check=True, timeout=300)
     manifest = prepare_probes(root / "vault")
     write_json(root / "manifest.json", manifest)
-    return root, manifest
+    return manifest
 
 
 def main():
