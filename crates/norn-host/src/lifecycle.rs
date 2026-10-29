@@ -6016,12 +6016,10 @@ impl<O: EntryOps> Host<O> {
                 break (turn, reader, selected);
             }
             // Capacity waits and cold opens run outside the gate, only within
-            // the original deadline. A serving entry may lack shared capacity.
+            // the original deadline. A serving entry may lack shared capacity,
+            // and an early read's capability already stands here: either way
+            // the bound ran out on a resource, which keeps its own refusal.
             if Instant::now() >= deadline {
-                if selected.is_some() {
-                    self.shared.reads.count_settle_expiry();
-                    return Err(ReadRefusal::StillIndexing(state.published_demand()));
-                }
                 return Err(ReadRefusal::ReaderUnavailable(ReaderUnavailable::new(
                     "reader capacity was unavailable past this read's bound",
                 )));

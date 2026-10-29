@@ -224,6 +224,17 @@ impl Fixture {
         self.host_over(self.ops(probe), bound)
     }
     fn host_over(&self, ops: ProductionEntryOps, bound: Duration) -> Host<ProductionEntryOps> {
+        self.host_ticking(ops, bound, Duration::from_millis(25))
+    }
+    /// A host whose dispatcher ticks every `tick`. A read bounded to zero
+    /// takes the entry gate with one try, so a case making one keeps the
+    /// dispatcher off the gate by ticking it rarely.
+    fn host_ticking(
+        &self,
+        ops: ProductionEntryOps,
+        bound: Duration,
+        tick: Duration,
+    ) -> Host<ProductionEntryOps> {
         // FSEvents can deliver the fixture's writes after the host attaches.
         norn_fs::watch::settle_prior_changes(self.scratch.root(), BUDGET.work()).unwrap();
         Host::new(
@@ -235,7 +246,7 @@ impl Fixture {
             LifecyclePolicy {
                 idle_after: Duration::from_secs(7200),
                 worker_slots: 1,
-                watch_poll_interval: Duration::from_millis(25),
+                watch_poll_interval: tick,
                 read_settle_bound: bound,
             },
         )
@@ -1513,6 +1524,40 @@ fn early_capacity_waits_keep_the_deadline_and_reselect_after_promotion_or_withdr
             );
         });
     }
+}
+
+/// Contract item 17: an early read whose bound runs out before it holds a
+/// connection refuses as reader capacity unavailable, as a canonical read
+/// does: the capacity and open wait is a resource wait, not a wait for the
+/// build's capability.
+#[test]
+fn an_early_read_past_its_bound_before_a_connection_refuses_for_capacity() {
+    let fixture = Fixture::new("early-capacity-expired");
+    // Every capability stands here, so the read below is admitted and what
+    // it lacks is a connection, which a bound of zero leaves no time to open.
+    let probe = Probe::new([LoadingBoundary::Published(Step::FullTextComplete)]);
+    let host = fixture.host_ticking(
+        fixture.ops(probe.clone()),
+        Duration::ZERO,
+        Duration::from_secs(3600),
+    );
+    std::thread::scope(|_| {
+        let _release = Release(&probe);
+        let _demand = host.demand(&name()).unwrap();
+        probe.wait(LoadingBoundary::Published(Step::FullTextComplete));
+        let refused = host.get(&get("first")).unwrap_err();
+        assert_eq!(
+            refused.code(),
+            &ReasonCode::HostReaderUnavailable,
+            "{refused:?}"
+        );
+        assert!(
+            format!("{refused:?}").contains("reader capacity was unavailable"),
+            "{refused:?}"
+        );
+        probe.release();
+    });
+    ready(&host);
 }
 
 /// Contract item 20: damage only an early read meets closes the build's
