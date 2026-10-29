@@ -4911,8 +4911,13 @@ impl<'s> Pending<'s> {
                 .map_err(store_effect)?;
             return Ok(());
         }
+        // A place can hold more spellings than one flush may, and a flush keeps
+        // what this scope has replaced, so the rest of them append.
         for spelling in spellings {
             self.quarantine(&spelling.path, spelling.quarantine)?;
+            if self.is_full() {
+                self.flush()?;
+            }
         }
         Ok(())
     }
@@ -12496,6 +12501,44 @@ mod tests {
             spellings_filed_at(&mut attachment.store, "bad\u{fffd}name.md"),
             both,
             "a report about one spelling took the other's finding"
+        );
+        assert_the_vault_heal_agrees(&ops, &name, &mut attachment, &progress);
+        ops.detach(&name, attachment);
+    }
+
+    /// **A place with more spellings than one flush holds keeps every one of
+    /// them.** The reading flushes at the bound while it files the place, and
+    /// the flush keeps what the scope already replaced there, so the spellings
+    /// after it append rather than replacing the ones before.
+    #[cfg(unix)]
+    #[test]
+    fn a_place_with_more_spellings_than_a_flush_holds_keeps_them_all() {
+        let f = Fixture::new("watched-collision-past-the-bound");
+        for spelling in ["bad\u{1}name.md", "bad\u{2}name.md", "bad\u{3}name.md"] {
+            if !write_or_report(&f.vault().join(spelling), b"body") {
+                return;
+            }
+        }
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let all = spellings_filed_at(&mut attachment.store, "bad\u{fffd}name.md");
+        assert_eq!(all.len(), 3, "the attach did not file every spelling");
+
+        fs::write(f.vault().join("bad\u{1}name.md"), "edited").unwrap();
+        watcher_leg(
+            &ops,
+            &name,
+            &mut attachment,
+            &progress,
+            f.vault().as_path(),
+            &["bad\u{1}name.md"],
+        );
+
+        assert_eq!(
+            spellings_filed_at(&mut attachment.store, "bad\u{fffd}name.md"),
+            all,
+            "a flush inside the reading lost or doubled a spelling"
         );
         assert_the_vault_heal_agrees(&ops, &name, &mut attachment, &progress);
         ops.detach(&name, attachment);
