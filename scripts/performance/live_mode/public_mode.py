@@ -151,8 +151,3 @@ def validate_history(stages,ready,parent_ready):
             or (observations and observed_ready!=observations[0])
             or (not observations and observed_ready<previous_worker)):
         raise ValueError('observed Ready differs from actual caller observations')
-
-
-def validate_slice(root,prefix,responses,stages,ready,history,manifest,audit,native_stage):
-    from revalidation import validate_slice as shared_slice
-    return shared_slice(root,prefix,responses,stages,ready,history,manifest,audit,native_stage)

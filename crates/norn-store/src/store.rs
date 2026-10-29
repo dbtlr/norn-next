@@ -96,15 +96,6 @@ use crate::hash;
 use crate::read::{Ran, ReadFilter, ReadStatement, StatementFailure, Stepped};
 use crate::request::Request;
 
-mod intake;
-pub use intake::{GetBuilder, IntakeBuilder};
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum GrantPolicy {
-    CompleteRequest,
-    SourceOnly,
-}
-
 /// The read-only snapshot handle wire reads run on.
 ///
 /// Host requests use [`Store::reader_pool`], a zero-I/O handle whose independent
@@ -146,8 +137,6 @@ enum GrantPolicy {
 /// }
 /// ```
 pub struct SnapshotReader {
-    grant_policy: GrantPolicy,
-    intake_file: Option<Arc<norn_db::TemporaryFile>>,
     budget: Option<Arc<crate::ReadBudget>>,
     pool: Option<crate::read_budget::Pool>,
     source: Option<std::path::PathBuf>,
@@ -193,9 +182,6 @@ impl SnapshotReader {
         need: crate::ReadNeed,
         deadline: Instant,
     ) -> Option<ConnectionTurn> {
-        if self.grant_policy == GrantPolicy::SourceOnly && need != crate::ReadNeed::Source {
-            return None;
-        }
         if let (Some(budget), Some(pool)) = (&self.budget, &self.pool) {
             let grant = budget.try_grant(pool, need)?;
             return Some(self.ready_turn(grant, deadline));
@@ -230,13 +216,6 @@ impl SnapshotReader {
         need: crate::ReadNeed,
         deadline: Instant,
     ) -> Result<Option<ConnectionTurn>, StoreError> {
-        if self.grant_policy == GrantPolicy::SourceOnly && need != crate::ReadNeed::Source {
-            return Err(StoreError::Sql {
-                operation: "acquiring a loading source",
-                condition: None,
-                message: "loading sources admit source-only reads".into(),
-            });
-        }
         let (Some(budget), Some(pool)) = (&self.budget, &self.pool) else {
             return Ok(self.wait_for_the_connection_until(deadline));
         };
@@ -245,26 +224,12 @@ impl SnapshotReader {
         };
         if grant.source.item.is_none() {
             let result = (|| {
-                let open_ordinary = || {
-                    norn_db::open_read_only_until(
-                        self.source.as_ref().expect("pooled source"),
-                        deadline,
-                    )
-                    .adopted
-                    .map_err(StoreError::from)
-                };
-                let database = if let Some(file) = &self.intake_file {
-                    file.open_snapshot().map_err(|error| match error {
-                        norn_db::TemporaryReadError::Failed(error) => StoreError::from(error),
-                        norn_db::TemporaryReadError::Lost { path } => StoreError::Lifecycle {
-                            operation: "opening sealed loading source",
-                            path,
-                            message: "the disposable source is missing or replaced".into(),
-                        },
-                    })?
-                } else {
-                    open_ordinary()?
-                };
+                let database = norn_db::open_read_only_until(
+                    self.source.as_ref().expect("pooled source"),
+                    deadline,
+                )
+                .adopted
+                .map_err(StoreError::from)?;
                 if database.epoch() != self.epoch {
                     return Err(StoreError::Sql {
                         operation: "opening a snapshot reader",
@@ -299,17 +264,6 @@ impl SnapshotReader {
     pub fn retire(&self) {
         if let Some(pool) = &self.pool {
             pool.retire();
-        }
-    }
-    /// Close disposable idle resources outside the entry gate.
-    pub fn retire_intake(&self) {
-        assert!(
-            self.intake_file.is_some(),
-            "only sealed intake uses this retirement"
-        );
-        self.retire();
-        if let Some(budget) = &self.budget {
-            budget.drain();
         }
     }
     pub fn last_open_failure(&self) -> Option<StoreError> {
@@ -445,10 +399,6 @@ impl SnapshotReader {
 
 impl Drop for SnapshotReader {
     fn drop(&mut self) {
-        if self.intake_file.is_some() {
-            self.retire_intake();
-            return;
-        }
         self.retire();
     }
 }
@@ -1070,8 +1020,6 @@ impl StoreMode {
 /// One vault's derived state.
 #[derive(Debug)]
 pub struct Store {
-    intake_unsealed: bool,
-    pub(crate) metadata_intake: bool,
     count_results: Arc<crate::count::CountResults>,
     pub(crate) database: Database,
     mode: StoreMode,
@@ -1088,21 +1036,9 @@ pub struct Store {
 }
 
 impl Store {
-    /// This canonical store's fairness identity, independent of physical loading files.
+    /// This canonical store's fairness identity.
     pub fn read_group(&self) -> crate::ReadGroup {
         crate::ReadGroup(self.database.path().to_path_buf())
-    }
-
-    /// Store-owned disposable namespace beside the canonical database.
-    pub fn loading_directory(path: &Path) -> PathBuf {
-        let mut name = path.as_os_str().to_os_string();
-        name.push(".loading");
-        PathBuf::from(name)
-    }
-
-    /// Sweep recognized loading orphans under the caller's existing maintainer lock.
-    pub fn sweep_loading(path: &Path) -> Result<usize, StoreError> {
-        norn_db::sweep_temporary_directory(&Self::loading_directory(path)).map_err(StoreError::from)
     }
 
     /// Mint a zero-I/O handle. Layer 6 callers share one host-owned budget;
@@ -1116,9 +1052,7 @@ impl Store {
         budget: &Arc<crate::ReadBudget>,
         group: &crate::ReadGroup,
     ) -> SnapshotReader {
-        let reader = SnapshotReader {
-            intake_file: None,
-            grant_policy: GrantPolicy::CompleteRequest,
+        SnapshotReader {
             budget: Some(Arc::clone(budget)),
             pool: Some(budget.pool(group.0.clone(), crate::read_budget::Kind::Source)),
             source: Some(self.database.path().to_path_buf()),
@@ -1127,11 +1061,7 @@ impl Store {
             order: self.order,
             connection: Mutex::new(None),
             returned: Condvar::new(),
-        };
-        if self.intake_unsealed {
-            reader.retire();
         }
-        reader
     }
     /// Open, or create, the durable store at `path` for a vault root proven to
     /// have `order`'s case behaviour, whose rows `derivation` writes.
@@ -1189,12 +1119,10 @@ impl Store {
             },
         )?;
         let database = Database::adopt(connection, path)?;
-        refuse_loading_source(database.connection(), database.path())?;
+
         crate::resolve::register_functions(database.connection())?;
         let under_construction = outcome != OpenOutcome::Reused;
         Ok(Store {
-            intake_unsealed: false,
-            metadata_intake: false,
             count_results: Arc::new(crate::count::CountResults::for_store(
                 crate::CountRetentionPolicy::default(),
                 path,
@@ -1493,16 +1421,6 @@ impl Store {
     /// the mint answers for those statements, and a mint that refused held
     /// that lock for the ones it ran before it refused.
     pub fn open_reader(&self) -> ReaderMint {
-        if self.intake_unsealed {
-            return ReaderMint {
-                reader: Err(StoreError::Sql {
-                    operation: "opening experimental metadata before sealing",
-                    condition: None,
-                    message: "seal metadata indexes before minting readers".into(),
-                }),
-                statements: 0,
-            };
-        }
         let path = self.database.path().to_path_buf();
         let opened = norn_db::open_read_only(&path);
         let reader = opened
@@ -1518,8 +1436,6 @@ impl Store {
                 Ok(database)
             })
             .map(|database| SnapshotReader {
-                intake_file: None,
-                grant_policy: GrantPolicy::CompleteRequest,
                 budget: None,
                 pool: None,
                 source: None,
@@ -2204,8 +2120,6 @@ impl norn_db::Client for StoreClient {
     /// inputs are both read, and a store where both moved is rebuilt once for a
     /// reason that names both.
     fn adopt(&self, connection: &Connection, path: &Path) -> Result<Adoption, StoreError> {
-        // A loading source must be refused before either mode adoption or rebuilding.
-        refuse_loading_source(connection, path)?;
         self.adopt_mode(connection, path)?;
         let details: Vec<String> = [
             construction_unfinished(connection)?,
@@ -2343,17 +2257,6 @@ fn construction_unfinished(connection: &Connection) -> Result<Option<String>, St
                 .to_string()
         }),
     )
-}
-
-fn refuse_loading_source(connection: &Connection, path: &Path) -> Result<(), StoreError> {
-    if meta::get_meta::<i64>(connection, ddl::meta::LOADING_SOURCE)?.is_some() {
-        return Err(StoreError::Lifecycle {
-            operation: "opening a sealed loading source",
-            path: path.to_path_buf(),
-            message: "loading projections require their owned reader and cannot be adopted".into(),
-        });
-    }
-    Ok(())
 }
 
 #[cfg(test)]

@@ -131,7 +131,7 @@ impl InventoryWalk {
                 listed,
                 &self.vault.normalizer,
                 &self.vault.exclusions,
-                // Replay re-observes catalogue names. Page arms belong to the
+                // Replay re-observes inventoried names. Page arms belong to the
                 // canonical walk and must remain unspent until it lists them.
                 &WalkFaults::default(),
             )?;

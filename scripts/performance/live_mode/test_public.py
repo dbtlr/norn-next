@@ -119,10 +119,6 @@ class PublicReplay(unittest.TestCase):
         wrong=copy.deepcopy(ready);wrong['operator_prefix_receipt']['construction_eligibility_gets']=[]
         with self.assertRaises(ValueError):validate_ready(rows,wrong,dict(document_count=314))
 
-    def test_replay_requires_public_mode_and_exact_counts_before_slicing(self):
-        from public_mode import validate_slice
-        with self.assertRaises(ValueError):
-            validate_slice(None,dict(mode='candidate-live-revalidated'),[],[],{},[],{},{},lambda x:x)
 
 class EnvironmentReplay(unittest.TestCase):
     def test_closed_producer_environment_pin_survives_a_new_replay_context(self):

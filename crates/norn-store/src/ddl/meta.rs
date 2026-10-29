@@ -89,6 +89,3 @@ pub(crate) const DERIVATION_VERSION: &str = "derivation_version";
 /// carries none is a finished one, so a build that was interrupted is never
 /// resumed over what it left.
 pub(crate) const UNDER_CONSTRUCTION: &str = "under_construction";
-
-/// An owned first-index projection cannot be adopted as an ordinary store.
-pub(crate) const LOADING_SOURCE: &str = "loading_source";

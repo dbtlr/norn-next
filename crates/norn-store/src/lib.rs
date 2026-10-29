@@ -148,7 +148,6 @@ mod held_links;
 mod increment;
 mod json;
 mod link;
-pub mod loading;
 mod moved;
 mod path;
 mod read;

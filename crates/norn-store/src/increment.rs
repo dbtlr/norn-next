@@ -252,7 +252,6 @@ pub(crate) fn apply(
     changes: impl IntoIterator<Item = Change>,
     findings: &[DerivedFinding<'_>],
     declared: &ContentModel,
-    metadata: bool,
 ) -> Result<IncrementOutcome, StoreError> {
     #[cfg(feature = "induced-failure")]
     let _timing = norn_db::profiling::span("store.increment");
@@ -410,7 +409,6 @@ pub(crate) fn apply(
                                 facts,
                                 admitting,
                                 &mut tally,
-                                metadata,
                             )
                         },
                     )
@@ -478,7 +476,7 @@ pub(crate) fn apply(
     // path and the path discard every finding keyed by a path this changeset
     // changed, and the re-decision discards the findings under each class it
     // changed before it files one in that class.
-    let run_health = !metadata && !store.link_health_deferred;
+    let run_health = !store.link_health_deferred;
     let redecided = if run_health && (generation.is_some() || !tally.directories.is_empty()) {
         #[cfg(feature = "induced-failure")]
         let _timing = norn_db::profiling::span("store.link_health");
@@ -726,15 +724,11 @@ fn upsert(
     facts: &DocumentFacts,
     admitting: usize,
     tally: &mut Tally,
-    metadata: bool,
 ) -> Result<(), StoreError> {
     #[cfg(feature = "induced-failure")]
     let _timing = norn_db::profiling::span("store.upsert");
     refuse_a_document_that_does_not_add_up(facts)?;
     let body = facts.body.as_str();
-    // Validate the real bytes above, then omit only the disposable payload.
-    // Byte length and source hash keep their ordinary authority.
-    let body = if metadata { "" } else { body };
     let projection = facts.frontmatter().map(json::canonical_json).transpose()?;
     let projection_hash = projection.as_deref().map(hash::sub_fingerprint);
 
@@ -1472,16 +1466,8 @@ mod tests {
                 .immediate_transaction("test upsert")
                 .expect("transaction");
             let mut statements = Statements::prepare(&transaction).expect("statements");
-            upsert(
-                &mut statements,
-                1,
-                1,
-                &facts,
-                1,
-                &mut Tally::default(),
-                false,
-            )
-            .expect("ordinary upsert");
+            upsert(&mut statements, 1, 1, &facts, 1, &mut Tally::default())
+                .expect("ordinary upsert");
             let document: i64 = transaction
                 .query_row("SELECT id FROM documents", [], |row| row.get(0))
                 .expect("document id");

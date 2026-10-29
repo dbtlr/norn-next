@@ -402,7 +402,6 @@ impl<'a> Request<'a> {
             changes,
             findings,
             declared,
-            false,
         )
     }
 
@@ -441,31 +440,6 @@ impl<'a> Request<'a> {
         let (rows, complete) = crate::construction::full_text_batch(self.store, limit)?;
         self.counters.add(Counter::FullTextRowsIndexed, rows);
         Ok(complete)
-    }
-
-    /// Only disposable metadata readers may observe rows with omitted bodies.
-    pub fn apply_intake_increment(
-        &mut self,
-        changes: impl IntoIterator<Item = Change>,
-        findings: &[DerivedFinding<'_>],
-        declared: &ContentModel,
-    ) -> Result<IncrementOutcome, StoreError> {
-        if !self.store.metadata_intake {
-            return Err(StoreError::Lifecycle {
-                operation: "writing loading metadata",
-                path: self.store.path().to_path_buf(),
-                message: "payload omission requires an owned metadata intake".into(),
-            });
-        }
-        increment::apply(
-            self.store,
-            &mut self.counters,
-            &self.read_work,
-            changes,
-            findings,
-            declared,
-            true,
-        )
     }
 
     /// Record one finding, with the head of its candidates.

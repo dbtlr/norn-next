@@ -13,7 +13,6 @@
 //! `dead_code` allow to hide what no case reaches.
 
 mod broken;
-mod catalogue;
 mod common;
 
 mod construction;

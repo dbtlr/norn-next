@@ -734,7 +734,6 @@ impl ProductionEntryOps {
                 {
                     Acquisition::Acquired(_guard) => {
                         Store::sweep_count_residue(&source).map_err(|error| error.to_string())?;
-                        Store::sweep_loading(&source).map_err(|error| error.to_string())?;
                     }
                     Acquisition::Contended { .. } => {}
                 }
@@ -1356,9 +1355,6 @@ impl ProductionEntryOps {
             };
         if !admit(&derived.join(STORE_FILE))? {
             return Ok(None);
-        }
-        if let Err(error) = Store::sweep_loading(&derived.join(STORE_FILE)) {
-            self.record_cleanup_failure(error.to_string());
         }
         // The lock and the shadow home are two mechanisms of one maintainership,
         // so both are keyed by the coordinates the derived directory is keyed
@@ -21981,8 +21977,6 @@ mod tests {
         fn an_unregistered_vault_discards_its_derived_state_and_keeps_its_lock_file() {
             let f = Fixture::new("unregister-discards");
             fs::write(f.vault().join("a.md"), "# A\n").unwrap();
-            // The loading directory below exists only if the first attach
-            // began early reads, which a late FSEvents delivery would withdraw.
             norn_fs::watch::settle_prior_changes(f.root.root(), lifecycle_budget().work()).unwrap();
             let (host, dirs) = empty_host(&f);
             register(&host, &f.vault()).expect("the vault is registered");
@@ -22002,7 +21996,6 @@ mod tests {
                 .map(|entry| entry.unwrap().file_name().into_string().unwrap())
                 .collect::<Vec<_>>();
             left.sort();
-            // A from-zero build writes no disposable store beside the canonical one.
             assert_eq!(
                 left,
                 ["maintainer.lock"],
@@ -22645,8 +22638,6 @@ mod tests {
             let f = Fixture::new("set-root-move");
             fs::write(f.vault().join("only-at-a.md"), "# A\n").unwrap();
             let moved = another_root(&f, &[("only-at-b.md", "# B\n")]);
-            // The loading directory below exists only if the first attach
-            // began early reads, which a late FSEvents delivery would withdraw.
             norn_fs::watch::settle_prior_changes(f.root.root(), lifecycle_budget().work()).unwrap();
             let (host, dirs) = empty_host(&f);
             register(&host, &f.vault()).expect("the vault is registered");
@@ -22666,7 +22657,6 @@ mod tests {
                 .map(|entry| entry.unwrap().file_name().into_string().unwrap())
                 .collect::<Vec<_>>();
             left.sort();
-            // A from-zero build writes no disposable store beside the canonical one.
             assert_eq!(
                 left,
                 ["maintainer.lock"],
