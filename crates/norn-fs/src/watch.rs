@@ -684,7 +684,6 @@ impl RootAnchor {
 
 impl Subscription {
     /// Mint only before any relevant fact has been accepted on this coverage.
-    /// The lab captures this before enumerating its complete names catalogue.
     #[cfg(any(test, feature = "induced-failure"))]
     pub fn unchanged_observation(&self) -> Option<Observation> {
         let observation = Observation {
