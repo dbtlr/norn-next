@@ -1749,6 +1749,94 @@ fn an_empty_store_recovery_publishes() {
     ready(&host);
 }
 
+/// Contract items 20 and 26: a recovery whose from-zero build an early read
+/// found damaged publishes that damage in place of what it would otherwise
+/// publish, and hands on to the rebuild it owes before any other work runs
+/// over the damaged store.
+#[test]
+fn an_empty_store_recovery_over_damage_an_early_read_met_rebuilds() {
+    let fixture = Fixture::with_schema("early-damaged-recovery", "version: 1\nfields: [oops\n");
+    // The recovery's closing transaction has run, so the damage below is met
+    // by the early read alone; the next build to capture authority is the
+    // rebuild's, held there so what ran before it can be read.
+    let probe = Probe::new([
+        LoadingBoundary::Published(Step::FullTextComplete),
+        LoadingBoundary::AuthorityCaptured,
+    ]);
+    let ops = fixture.ops(probe.clone());
+    let account = ops.account();
+    let host = fixture.host_over(ops, norn_host::READ_SETTLE_BOUND);
+    std::thread::scope(|_| {
+        let _release = Release(&probe);
+        let _demand = host.demand(&name()).unwrap();
+        wait_until(
+            "the undeclarable attach withholds trust",
+            BUDGET,
+            || match host.state(&name()) {
+                Err(error) if error.code() == &ReasonCode::HostEntryUntrusted => Observed::Met(()),
+                other => Observed::pending(format!("{other:?}")),
+            },
+        )
+        .unwrap();
+        std::fs::write(
+            fixture.root.join(".norn/schema.yaml"),
+            "version: 1\nfields:\n  rank: { type: number }\n",
+        )
+        .unwrap();
+        // The recovery watches anew, and FSEvents can deliver this write
+        // after it attaches: an accepted fact that withdraws its build's
+        // authority before the damage is met.
+        norn_fs::watch::settle_prior_changes(fixture.scratch.root(), BUDGET.work()).unwrap();
+        wait_until("the recovery's build closes", BUDGET, || {
+            let _ = host.demand(&name());
+            if probe
+                .seen()
+                .contains(&LoadingBoundary::Published(Step::FullTextComplete))
+            {
+                Observed::Met(())
+            } else {
+                Observed::pending("no recovery build yet")
+            }
+        })
+        .unwrap();
+        probe.wait(LoadingBoundary::Published(Step::FullTextComplete));
+        damage_every_table(&fixture.store_path());
+        let refused = host.find(&ranked("2")).unwrap_err();
+        assert_eq!(
+            refused.code(),
+            &ReasonCode::HostEntryNotReady,
+            "{refused:?}"
+        );
+        probe.release();
+        probe.wait(LoadingBoundary::AuthorityCaptured);
+        // The rebuild has captured its authority and built nothing yet, and
+        // the entry already answers with the damage the early read met.
+        let damaged = host.state(&name()).unwrap_err();
+        assert_eq!(
+            damaged.code(),
+            &ReasonCode::HostEntryUntrusted,
+            "{damaged:?}"
+        );
+        assert_eq!(account.read().rebuilds_run, 1);
+        probe.release();
+    });
+    // The first `Ready` is the rebuild's: the recovery published none over
+    // the store the read found damaged.
+    ready(&host);
+    assert_eq!(account.read().rebuilds_run, 1);
+    assert!(host.get(&get("first")).is_ok());
+    assert_eq!(
+        host.find(&ranked("2"))
+            .unwrap()
+            .answer
+            .report
+            .page
+            .rows
+            .len(),
+        1
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Get pull-ahead and commit-on-pending.
 // ---------------------------------------------------------------------------

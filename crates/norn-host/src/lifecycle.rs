@@ -7469,6 +7469,14 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                         // a read's once a change arrives, asks for.
                         state.withhold_trust_until_the_vault_changes(reason, took_in_a_fact);
                         next = schedule_due_detach(&mut state, &name);
+                    } else if state.damage_met_under_a_claim.is_some() {
+                        // A recovery over an empty store is a from-zero build,
+                        // and an early read found the store it built damaged:
+                        // the damage is published in place of what the
+                        // recovery left, and the claim goes on to the rebuild
+                        // it owes, which the facts standing in `pending` and a
+                        // teardown the entry is due follow.
+                        next = hand_on_carried_damage(&mut state, &name);
                     } else if state.detach_due {
                         // A teardown the entry is due can be withdrawn by a
                         // demand before it runs, so what this recovery left is
@@ -18232,6 +18240,78 @@ mod tests {
         wait_for_one_rebuild_to_ready(&host, &name, &ops);
         assert_eq!(ops.recovers.load(Ordering::SeqCst), 0);
         drop(lease);
+    }
+
+    /// **Damage a read meets under a recovery's claim is published where the
+    /// recovery ends, and the recovery hands on to the rebuild it owes.** A
+    /// recovery keeps the store it ran over, so the verdict names the store
+    /// the entry goes on holding: the facts the recovery leaves owe a
+    /// reconcile, and that reconcile follows the rebuild rather than running
+    /// over a store a read found damaged.
+    #[test]
+    fn damage_a_read_meets_under_a_recovery_reaches_the_rebuild() {
+        let ops = Arc::new(FakeOps::default());
+        let name = VaultName::new("notes").unwrap();
+        let host = Arc::new(host_without_ambient_polling(
+            Arc::clone(&ops),
+            Roots::Absent(&[&name]),
+            1,
+        ));
+        let lease = host.demand(&name).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        let hold = host
+            .begin_read(&name)
+            .expect("a ready entry answers a read");
+        *ops.terminal_poll.lock().unwrap() = Some(WatchError::Backend("lost".into()));
+        poll_watchers(&host.shared);
+        wait_for_state(&host, &name, backend_lost());
+        ops.block_recover.store(true, Ordering::SeqCst);
+        let recovery = host.demand(&name).unwrap();
+        wait_for_flag("recover_started", &ops.recover_started);
+        let detail = "the store is damaged";
+        let refusal = host.withdraw_for_read_damage(&hold, detail.to_string());
+        assert!(
+            matches!(refusal, ReadRefusal::NotServing(_)),
+            "a read under the recovery's claim was refused with {refusal:?}"
+        );
+        drop(hold);
+
+        let reconciles = ops.reconciles.load(Ordering::SeqCst);
+        ops.block_reconcile.store(true, Ordering::SeqCst);
+        ops.block_rebuild.store(true, Ordering::SeqCst);
+        ops.recover_release.store(true, Ordering::SeqCst);
+        wait_until(
+            "the work the recovery hands on to",
+            lifecycle_wait_budget(),
+            || {
+                if ops.rebuild_started.load(Ordering::SeqCst)
+                    || ops.reconcile_started.load(Ordering::SeqCst)
+                {
+                    Observed::Met(())
+                } else {
+                    Observed::pending("the recovery has handed on to nothing")
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+        assert_eq!(
+            ops.reconciles.load(Ordering::SeqCst),
+            reconciles,
+            "a reconcile ran over a store a read found damaged before its rebuild"
+        );
+        assert_eq!(
+            host.state(&name),
+            answered(TrustState::untrusted(
+                UntrustedReason::store_damaged_rebuilding(detail)
+            )),
+            "the recovery published another state than the damage the read met"
+        );
+        ops.block_reconcile.store(false, Ordering::SeqCst);
+        ops.reconcile_release.store(true, Ordering::SeqCst);
+        ops.rebuild_release.store(true, Ordering::SeqCst);
+        wait_for_one_rebuild_to_ready(&host, &name, &ops);
+        drop((lease, recovery));
     }
 
     /// **Damage a read meets under a reload's claim is published in place of
