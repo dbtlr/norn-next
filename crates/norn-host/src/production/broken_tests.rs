@@ -460,32 +460,6 @@ fn a_rolling_heal_quarantines_an_unopenable_refused_spelling_once() {
 }
 
 #[test]
-fn a_broken_file_does_not_withhold_its_loading_name() {
-    let f = Fixture::watcherless("loading-broken-name");
-    let root = f.vault();
-    fs::write(root.join("a.md"), "body\n").unwrap();
-    let _denied = norn_fs::deny_document_opens(&root.join("a.md"));
-    let source = norn_fs::Vault::open(&root, &[]).unwrap();
-    let fact = source.fact(Path::new("a.md")).unwrap();
-    let mut store = Store::open(
-        f.root.join("broken.sqlite3"),
-        proven_order(&f),
-        crate::DERIVATION_VERSION,
-    )
-    .unwrap();
-    let mut account = Account::default();
-    let mut pending = Pending::new(&mut store, 8, &root, &[], &mut account).unwrap();
-    assert!(
-        loading::facts::load_fact(&mut pending, fact, loading::facts::Depth::Metadata, false)
-            .unwrap()
-            .is_none()
-    );
-    pending.flush().unwrap();
-    assert!(pending.account.withheld.roots.is_empty() && !pending.account.withheld.rendered);
-    assert_broken(pending.store, "a.md");
-}
-
-#[test]
 fn a_rolling_revisit_marks_a_document_broken_that_turned_unreadable_since_healing() {
     let f = Fixture::new("rolling-revisit-recovered");
     let path = f.vault().join("a.md");

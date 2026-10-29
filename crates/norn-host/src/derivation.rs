@@ -740,8 +740,6 @@ pub(crate) fn map_document(
 /// How much of a document one read derives.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Depth {
-    /// Fields and body only, for metadata construction.
-    Base,
     /// Fields, body and the frontmatter's own links and tags: what the
     /// from-zero content step writes.
     Content,
@@ -799,27 +797,25 @@ fn map_document_read(
         .iter()
         .filter(|d| d.code.frontmatter_scoped())
         .count() as u32;
-    if depth != Depth::Base {
-        // The frontmatter's links and tags stand before the body's, the file's
-        // order, so a fact's ordinal is where the file writes it. One category
-        // is read at a time and its scan output freed before the next.
-        facts.links = joined(
-            document.frontmatter_field_wikilinks(),
-            map_frontmatter_link,
-            scan.as_ref().map(|scan| scan.links()).unwrap_or_default(),
-            map_link,
-        );
-        if let Some(scan) = &scan {
-            facts.headings = headings_of(scan);
-            facts.blocks = blocks_of(scan);
-        }
-        facts.tags = joined(
-            document.frontmatter_tags(),
-            |tag| map_tag(tag, TagSource::Frontmatter),
-            scan.as_ref().map(|scan| scan.tags()).unwrap_or_default(),
-            |tag| map_tag(tag, TagSource::Body),
-        );
+    // The frontmatter's links and tags stand before the body's, the file's
+    // order, so a fact's ordinal is where the file writes it. One category
+    // is read at a time and its scan output freed before the next.
+    facts.links = joined(
+        document.frontmatter_field_wikilinks(),
+        map_frontmatter_link,
+        scan.as_ref().map(|scan| scan.links()).unwrap_or_default(),
+        map_link,
+    );
+    if let Some(scan) = &scan {
+        facts.headings = headings_of(scan);
+        facts.blocks = blocks_of(scan);
     }
+    facts.tags = joined(
+        document.frontmatter_tags(),
+        |tag| map_tag(tag, TagSource::Frontmatter),
+        scan.as_ref().map(|scan| scan.tags()).unwrap_or_default(),
+        |tag| map_tag(tag, TagSource::Body),
+    );
     Ok(Derived {
         facts,
         unread_frontmatter,
@@ -1012,30 +1008,8 @@ pub(crate) fn plan_document(
     plan
 }
 
-/// Read fields and body without deriving rich Markdown facts for metadata construction.
-pub(crate) fn plan_base_document(
-    path: &Path,
-    spelling: &str,
-    bytes: &[u8],
-    hash: String,
-    stored: Option<&DocumentPath>,
-    declared: &Declared,
-    case: CaseFold,
-) -> Plan {
-    #[cfg(feature = "induced-failure")]
-    let _timing = norn_store::profiling::span("host.document_plan");
-    plan_mapped_document(
-        path,
-        map_document_read(spelling, bytes, hash, declared.content_model(), Depth::Base),
-        stored,
-        declared,
-        case,
-    )
-}
-
 /// Derive content without scanning Markdown. The from-zero content step in
 /// NORN-467 will persist the origin beside its frontmatter fact counts.
-/// Metadata construction stays on `plan_base_document`, which omits those facts.
 pub(crate) fn plan_content_document(
     path: &Path,
     spelling: &str,

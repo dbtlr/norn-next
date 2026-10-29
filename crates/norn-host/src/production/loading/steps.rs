@@ -1,4 +1,4 @@
-//! The canonical names, content and structure passes; disposable early sources stay separate.
+//! The canonical names, content and structure passes, each published as it ends.
 use super::*;
 use crate::derivation::{plan_content_document, plan_structure_document};
 use norn_store::{ContentWrite, Span, Step};
@@ -12,8 +12,12 @@ pub(super) fn documents(
     root: &Path,
     exclusions: &[PathBuf],
     progress: &Healing<'_, ProductionAttachment>,
-    checkpoint: &mut dyn FnMut(),
+    publisher: &Publisher<'_>,
 ) -> Result<SkippedLinks, JobFailure> {
+    let mut checkpoint = || {
+        #[cfg(feature = "induced-failure")]
+        ops.loading_boundary(LoadingBoundary::CanonicalPage);
+    };
     let policy = ops.policy;
     let walk = walk(root, exclusions).map_err(effect)?;
     let sensitivity = walk.case_sensitivity();
@@ -28,10 +32,10 @@ pub(super) fn documents(
         policy,
         progress,
         &mut account,
-        Some(checkpoint),
+        Some(&mut checkpoint),
     )?;
     store.finish_step(Step::Names).map_err(store_effect)?;
-    boundary(ops, Step::Names);
+    boundary(ops, publisher, Step::Names);
     let source = norn_fs::Vault::open(root, exclusions).map_err(effect)?;
     loop {
         let mut group = store.step_group().map_err(store_effect)?;
@@ -109,7 +113,7 @@ pub(super) fn documents(
     drop(pending);
     close_job(store, root, exclusions, policy, &mut account)?;
     store.finish_step(Step::Content).map_err(store_effect)?;
-    boundary(ops, Step::Content);
+    boundary(ops, publisher, Step::Content);
     let declared = Declaration::read(store)?;
     loop {
         let mut group = store.step_group().map_err(store_effect)?;
@@ -133,7 +137,7 @@ pub(super) fn documents(
         }
     }
     store.finish_step(Step::Structure).map_err(store_effect)?;
-    boundary(ops, Step::Structure);
+    boundary(ops, publisher, Step::Structure);
     Ok(account.links)
 }
 
@@ -297,9 +301,10 @@ fn structure_chunk(
 }
 
 /// Publish a completed step only after its last group commits.
-fn boundary(ops: &ProductionEntryOps, step: Step) {
+fn boundary(ops: &ProductionEntryOps, publisher: &Publisher<'_>, step: Step) {
+    publisher.publish(step);
     #[cfg(feature = "induced-failure")]
     ops.loading_boundary(LoadingBoundary::StepComplete(step));
     #[cfg(not(feature = "induced-failure"))]
-    let _ = (ops, step);
+    let _ = ops;
 }

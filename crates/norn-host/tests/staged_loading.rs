@@ -1,5 +1,11 @@
 //! Real public requests at initial construction boundaries, without private readers.
-#![cfg(all(unix, feature = "induced-failure"))]
+//!
+//! These cases assert ADR 0043's retired disposable sources. They are
+//! compiled out while `early_reads` re-asserts its behavior over the canonical store; NORN-468
+//! C-3 deletes this file.
+// Compiled out, not ignored: CI runs a suite's ignored cases wholesale, and
+// these assert retired machinery. The target stays until C-3 deletes it.
+#![cfg(any())]
 #![allow(clippy::disallowed_methods)] // Every path is inside this test's owned fixture.
 
 use norn_config::{ConfigDirs, registry::VaultRoot};
@@ -26,6 +32,8 @@ type GetAnswer = Result<
     norn_host::Answered<norn_wire::GetReport, norn_store::GetWork>,
     norn_wire::ErrorEnvelope,
 >;
+// Retired source points stay named until C-3 deletes these cases.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Point {
     AuthorityCaptured,
@@ -88,35 +96,20 @@ impl Probe {
     }
 }
 impl LoadingProbe for Probe {
-    fn at(&self, boundary: LoadingBoundary<'_>) {
+    fn at(&self, boundary: LoadingBoundary) {
         let point = match boundary {
             LoadingBoundary::AuthorityCaptured => Point::AuthorityCaptured,
-            LoadingBoundary::BeforeCatalogue => Point::BeforeCatalogue,
-            LoadingBoundary::CatalogueRecord(_) => Point::CatalogueRecord,
-            LoadingBoundary::CatalogueComplete => Point::CatalogueComplete,
-            LoadingBoundary::GetLoaded(_) => Point::GetLoaded,
-            LoadingBoundary::GetPublished(_) => Point::GetPublished,
-            LoadingBoundary::MetadataRecord(_) => Point::MetadataRecord,
-            LoadingBoundary::MetadataComplete => Point::MetadataComplete,
-            // Each names/content/structure chunk still yields here. These
-            // checks concern the disposable sources, whose admission and
-            // contents do not depend on canonical row completeness.
+            // ADR 0043's catalogue, metadata and Get sources are retired; their
+            // points are never reached. Each names/content/structure chunk
+            // still yields here.
             LoadingBoundary::CanonicalPage => Point::CanonicalPage,
-            // Step completion changes no ADR 0043 disposable-source admission.
             LoadingBoundary::StepComplete(_)
+            | LoadingBoundary::Published(_)
             | LoadingBoundary::LinkHealthChunk
             | LoadingBoundary::FullTextBatch => return,
             LoadingBoundary::CanonicalComplete => Point::CanonicalComplete,
             LoadingBoundary::QueryEstablished => Point::QueryEstablished,
             LoadingBoundary::QueryBuilt => Point::QueryBuilt,
-            LoadingBoundary::SourceCreated { role, paths } => {
-                self.state
-                    .lock()
-                    .unwrap()
-                    .files
-                    .push((role.into(), paths.into()));
-                return;
-            }
         };
         let mut state = self.state.lock().unwrap();
         if state.stop || state.next.front() != Some(&point) {
@@ -821,7 +814,7 @@ struct SplitProbe {
     reads: Arc<Probe>,
 }
 impl LoadingProbe for SplitProbe {
-    fn at(&self, boundary: LoadingBoundary<'_>) {
+    fn at(&self, boundary: LoadingBoundary) {
         match boundary {
             LoadingBoundary::QueryEstablished | LoadingBoundary::QueryBuilt => {
                 self.reads.at(boundary)
@@ -1227,15 +1220,10 @@ struct BrokenConstructor {
     broke: std::sync::atomic::AtomicBool,
 }
 impl LoadingProbe for BrokenConstructor {
-    fn at(&self, boundary: LoadingBoundary<'_>) {
+    fn at(&self, boundary: LoadingBoundary) {
+        // The disposable source this broke is retired.
+        let _ = &self.broke;
         self.inner.at(boundary);
-        if let LoadingBoundary::SourceCreated { role, paths } = boundary
-            && role == "Get first"
-            && !self.broke.swap(true, std::sync::atomic::Ordering::SeqCst)
-        {
-            std::fs::remove_file(&paths[0]).unwrap();
-            std::fs::create_dir(&paths[0]).unwrap();
-        }
     }
 }
 
@@ -1367,7 +1355,7 @@ struct CapacityProbe {
     readers: Arc<Readers>,
 }
 impl LoadingProbe for CapacityProbe {
-    fn at(&self, boundary: LoadingBoundary<'_>) {
+    fn at(&self, boundary: LoadingBoundary) {
         match boundary {
             LoadingBoundary::QueryEstablished => self.readers.established(),
             LoadingBoundary::QueryBuilt => {}

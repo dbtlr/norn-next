@@ -7,7 +7,6 @@ mod places;
 #[cfg(test)]
 mod reader_tests;
 mod rolling;
-use loading::EarlyReads;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -188,6 +187,35 @@ impl fmt::Display for ProductionPolicyError {
 
 impl std::error::Error for ProductionPolicyError {}
 
+/// Cleanup failures share a bounded history across the host lifetime.
+#[derive(Default)]
+pub(crate) struct FailureHistory {
+    recent: std::collections::VecDeque<String>,
+    dropped: u64,
+}
+
+impl FailureHistory {
+    pub(crate) fn record(&mut self, detail: String) {
+        if self.recent.len() == 8 {
+            self.recent.pop_front();
+            self.dropped = self.dropped.saturating_add(1);
+        }
+        self.recent.push_back(detail);
+    }
+
+    pub(crate) fn summary(&self) -> Option<String> {
+        if self.recent.is_empty() {
+            return None;
+        }
+        let recent = self.recent.iter().cloned().collect::<Vec<_>>().join("; ");
+        Some(if self.dropped == 0 {
+            recent
+        } else {
+            format!("{} older failures dropped; {recent}", self.dropped)
+        })
+    }
+}
+
 /// The production implementation of the lifecycle effect seam.
 ///
 /// It keeps no account of the serving set. Every registration it acts on
@@ -196,8 +224,7 @@ impl std::error::Error for ProductionPolicyError {}
 /// and recoveries that follow read. Nothing here can name a vault the host does
 /// not serve, or place a served vault at a root the host does not.
 pub struct ProductionEntryOps {
-    cleanup_error: Arc<Mutex<crate::lifecycle::loading::FailureHistory>>,
-    loading_cleanup: Mutex<Vec<loading::CleanupRecord>>,
+    cleanup_error: Arc<Mutex<FailureHistory>>,
     #[cfg(feature = "induced-failure")]
     loading_probe: Option<Arc<dyn loading::LoadingProbe>>,
     readers: Arc<norn_store::ReadBudget>,
@@ -626,6 +653,10 @@ impl ReadSource for norn_store::SnapshotReader {
             })
             .map_err(|error| reader_unavailable(&error))
     }
+
+    fn relations_loading(snapshot: Self::Snapshot) -> Self::Snapshot {
+        snapshot.relations_loading()
+    }
 }
 
 /// Render a store refusal as the reason a read is refused with, told through
@@ -655,10 +686,7 @@ fn reader_unavailable(error: &StoreError) -> ReaderUnavailable {
 impl ProductionEntryOps {
     pub fn new(dirs: ConfigDirs, policy: ProductionPolicy) -> Self {
         let ops = Self {
-            cleanup_error: Arc::new(Mutex::new(
-                crate::lifecycle::loading::FailureHistory::default(),
-            )),
-            loading_cleanup: Mutex::new(Vec::new()),
+            cleanup_error: Arc::new(Mutex::new(FailureHistory::default())),
             #[cfg(feature = "induced-failure")]
             loading_probe: None,
             readers: norn_store::ReadBudget::new(policy.read_budget),
@@ -674,10 +702,9 @@ impl ProductionEntryOps {
         ops
     }
 
-    /// The eight most recent cleanup or disposable-source failures, with a dropped count.
+    /// The eight most recent cleanup failures, with a dropped count.
     /// Cleanup failure does not take source reads out of service; fresh counts retain their fallback.
     pub fn last_reader_cleanup_error(&self) -> Option<String> {
-        self.collect_loading_cleanup();
         self.cleanup_error
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1590,8 +1617,8 @@ impl ProductionEntryOps {
         Self::pin_candidate(&mut attachment.store, &attachment.controls)?;
         attachment.read_pinned_model()?;
         let derived = self
-            .construct_from_zero(&mut attachment, progress, EarlyReads::Declined)
-            .and_then(|()| {
+            .construct_from_zero(&mut attachment, progress)
+            .and_then(|publisher| {
                 attachment
                     .store
                     .verify_integrity()
@@ -1602,8 +1629,9 @@ impl ProductionEntryOps {
                         )),
                         other => other,
                     })
-            })
-            .and_then(|()| self.finish_construction(&mut attachment.store));
+                    .inspect_err(|_| publisher.close())?;
+                self.finish_published(&mut attachment.store, &publisher)
+            });
         match derived {
             Ok(()) => Ok(attachment),
             Err(failure) => {
@@ -1809,10 +1837,6 @@ impl EntryOps for ProductionEntryOps {
         });
     }
 
-    fn first_index_reads(&self) -> bool {
-        true
-    }
-
     #[allow(clippy::disallowed_methods)] // Observes only the derived store, never vault inputs.
     fn first_index_candidate(&self, registration: &Registration) -> bool {
         // A missing name is only a candidate. Existing, linked, foreign or unreadable
@@ -1825,7 +1849,6 @@ impl EntryOps for ProductionEntryOps {
 
     fn trim_readers(&self, now: Instant) {
         self.readers.trim(now);
-        self.collect_loading_cleanup();
     }
     type Attachment = ProductionAttachment;
 
@@ -1850,19 +1873,15 @@ impl EntryOps for ProductionEntryOps {
         let (attachment, healed) = {
             let mut attachment = attachment;
             let healed = if attachment.store.under_construction() {
-                self.build_from_zero(&mut attachment, progress, EarlyReads::FirstAttach)
+                self.build_from_zero(&mut attachment, progress)
             } else {
-                progress.decline_loading();
                 self.heal_under_coverage(&mut attachment, progress)
             };
             (attachment, healed)
         };
         let mut attached = match healed {
             Ok(()) => Ok(attachment),
-            Err(JobFailure::StoreDamaged(_)) => {
-                progress.decline_loading();
-                self.rung_three(attachment, progress)
-            }
+            Err(JobFailure::StoreDamaged(_)) => self.rung_three(attachment, progress),
             Err(failure) => Err(failure),
         }?;
         self.dispatch_config(&mut attached);
@@ -2612,7 +2631,7 @@ where
                         pending.quarantine(&path, quarantine)?;
                     }
                 }
-                norn_fs::WalkFact::File(file) if pending.depth == loading::facts::Depth::Names => {
+                norn_fs::WalkFact::File(file) if pending.names => {
                     let path = file.path().as_path().to_owned();
                     files.next();
                     match document_path(&path) {
@@ -4565,8 +4584,9 @@ fn rows_the_changeset_leaves(changes: &[Change]) -> BTreeMap<&DocumentPath, bool
 /// it concluded second. A document that reads again is a plain upsert whose own
 /// discard clears the finding with no second mechanism.
 struct Pending<'s> {
-    metadata: bool,
-    depth: loading::facts::Depth,
+    /// Whether this scope writes step 1 of a from-zero build: names only,
+    /// with refused spellings deferred to the end of step 2.
+    names: bool,
     content: Vec<norn_store::ContentWrite>,
     misses: norn_wire::WatcherMisses,
     store: &'s mut Store,
@@ -4635,19 +4655,14 @@ impl<'s> Pending<'s> {
         account: &'s mut Account,
     ) -> Result<Self, JobFailure> {
         let declared = Declaration::read(store)?;
-        let depth = if store.construction_step() == Some(norn_store::Step::Names) {
-            loading::facts::Depth::Names
-        } else {
-            loading::facts::Depth::Rich
-        };
-        let bound = if depth == loading::facts::Depth::Names {
+        let names = store.construction_step() == Some(norn_store::Step::Names);
+        let bound = if names {
             bound.saturating_mul(16).min(2048)
         } else {
             bound
         };
         Ok(Pending {
-            metadata: false,
-            depth,
+            names,
             content: Vec::new(),
             misses: norn_wire::WatcherMisses::default(),
             store,
@@ -4926,7 +4941,7 @@ impl<'s> Pending<'s> {
 
     /// File the finding that says why a path contributes no facts.
     fn quarantine(&mut self, path: &Path, quarantine: Quarantine) -> Result<(), JobFailure> {
-        if self.depth == loading::facts::Depth::Names {
+        if self.names {
             self.store
                 .begin_request()
                 .defer_construction_spelling(path.as_os_str().as_encoded_bytes())
@@ -5136,21 +5151,14 @@ impl<'s> Pending<'s> {
             self.account.freed.absorb(&self.changes);
         }
         let mut request = self.store.begin_request();
-        let outcome = if self.metadata {
-            request.apply_intake_increment(
-                self.changes.drain(..),
-                &findings,
-                self.declared.model.content_model(),
-            )
-        } else {
-            request.apply_increment(
+        let outcome = request
+            .apply_increment(
                 self.provenance,
                 self.changes.drain(..),
                 &findings,
                 self.declared.model.content_model(),
             )
-        }
-        .map_err(store_effect)?;
+            .map_err(store_effect)?;
         self.account.misses.changed += self.misses.changed;
         self.account.misses.created += self.misses.created;
         self.account.misses.deleted += self.misses.deleted;
@@ -14718,7 +14726,7 @@ mod tests {
     struct VanishAfterNames(PathBuf);
     #[cfg(feature = "induced-failure")]
     impl crate::LoadingProbe for VanishAfterNames {
-        fn at(&self, boundary: crate::LoadingBoundary<'_>) {
+        fn at(&self, boundary: crate::LoadingBoundary) {
             if matches!(
                 boundary,
                 crate::LoadingBoundary::StepComplete(norn_store::Step::Names)
@@ -15088,7 +15096,7 @@ mod tests {
 
     #[cfg(feature = "induced-failure")]
     impl crate::LoadingProbe for FullTextWitness {
-        fn at(&self, boundary: crate::LoadingBoundary<'_>) {
+        fn at(&self, boundary: crate::LoadingBoundary) {
             if matches!(
                 boundary,
                 crate::LoadingBoundary::FullTextBatch | crate::LoadingBoundary::CanonicalComplete
@@ -15185,8 +15193,7 @@ mod tests {
             .discard_and_reopen(proven_order(&f))
             .unwrap();
         ProductionEntryOps::pin_candidate(&mut attachment.store, &attachment.controls).unwrap();
-        ops.construct_from_zero(&mut attachment, &progress, EarlyReads::Declined)
-            .unwrap();
+        ops.construct_from_zero(&mut attachment, &progress).unwrap();
         let reader = Arc::new(attachment.store.open_reader().reader.unwrap());
         let snapshot = reader.try_take().unwrap().establish().unwrap();
         norn_store::induced_failure::execute_out_of_band(
@@ -15217,7 +15224,7 @@ mod tests {
 
     #[cfg(feature = "induced-failure")]
     impl crate::LoadingProbe for JudgmentMarkWitness {
-        fn at(&self, boundary: crate::LoadingBoundary<'_>) {
+        fn at(&self, boundary: crate::LoadingBoundary) {
             if matches!(boundary, crate::LoadingBoundary::LinkHealthChunk) {
                 self.stood.lock().unwrap().push(mark_stands(&self.database));
             }
@@ -15254,7 +15261,7 @@ mod tests {
 
     #[cfg(feature = "induced-failure")]
     impl crate::LoadingProbe for EditDuringBuild {
-        fn at(&self, boundary: crate::LoadingBoundary<'_>) {
+        fn at(&self, boundary: crate::LoadingBoundary) {
             // Editing after content guarantees the reconcile must re-decide the stored links.
             if matches!(
                 boundary,
@@ -15322,7 +15329,7 @@ mod tests {
 
     #[cfg(feature = "induced-failure")]
     impl crate::LoadingProbe for MarkWitness {
-        fn at(&self, boundary: crate::LoadingBoundary<'_>) {
+        fn at(&self, boundary: crate::LoadingBoundary) {
             if matches!(boundary, crate::LoadingBoundary::CanonicalPage) {
                 self.stood.lock().unwrap().push(mark_stands(&self.database));
             }
@@ -15395,7 +15402,7 @@ mod tests {
 
     #[cfg(feature = "induced-failure")]
     impl crate::LoadingProbe for OrphanAtBuildEnd {
-        fn at(&self, boundary: crate::LoadingBoundary<'_>) {
+        fn at(&self, boundary: crate::LoadingBoundary) {
             if matches!(boundary, crate::LoadingBoundary::CanonicalComplete) {
                 norn_db::rusqlite::Connection::open(&self.database)
                     .expect("opening the store out of band")
@@ -21942,14 +21949,10 @@ mod tests {
                 .map(|entry| entry.unwrap().file_name().into_string().unwrap())
                 .collect::<Vec<_>>();
             left.sort();
-            let loading = Store::loading_directory(&dirs.derived_dir(&notes()).join(STORE_FILE));
-            assert!(
-                fs::read_dir(loading).unwrap().next().is_none(),
-                "discard retained loading state"
-            );
+            // A from-zero build writes no disposable store beside the canonical one.
             assert_eq!(
                 left,
-                ["maintainer.lock", "store.sqlite3.loading"],
+                ["maintainer.lock"],
                 "the derived directory kept state, or lost its lock file"
             );
             assert!(
@@ -22610,14 +22613,10 @@ mod tests {
                 .map(|entry| entry.unwrap().file_name().into_string().unwrap())
                 .collect::<Vec<_>>();
             left.sort();
-            let loading = Store::loading_directory(&dirs.derived_dir(&notes()).join(STORE_FILE));
-            assert!(
-                fs::read_dir(loading).unwrap().next().is_none(),
-                "discard retained loading state"
-            );
+            // A from-zero build writes no disposable store beside the canonical one.
             assert_eq!(
                 left,
-                ["maintainer.lock", "store.sqlite3.loading"],
+                ["maintainer.lock"],
                 "the old root's derived state outlived the move"
             );
             let (after, epoch_after) = attached_and_found(&host);

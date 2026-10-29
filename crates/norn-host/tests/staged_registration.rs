@@ -58,7 +58,6 @@ impl EntryOps for PreHeld {
     }
 
     delegate! {
-        fn first_index_reads(&self) -> bool;
         fn first_index_candidate(&self, registration: &Registration) -> bool;
         fn trim_readers(&self, now: Instant);
         fn reconcile(&self, name: &VaultName, attachment: &mut Self::Attachment, work: ReconcileWork, progress: &ProgressReporter<Self::Attachment>) -> Result<(), JobFailure>;
@@ -192,8 +191,11 @@ struct CanonicalPause {
     gate: Arc<(Mutex<bool>, Condvar)>,
 }
 impl norn_host::LoadingProbe for CanonicalPause {
-    fn at(&self, boundary: norn_host::LoadingBoundary<'_>) {
-        if matches!(boundary, norn_host::LoadingBoundary::MetadataComplete) {
+    fn at(&self, boundary: norn_host::LoadingBoundary) {
+        if matches!(
+            boundary,
+            norn_host::LoadingBoundary::Published(norn_store::Step::Structure)
+        ) {
             self.reached
                 .store(true, std::sync::atomic::Ordering::Release);
             let held = self.gate.0.lock().unwrap();
@@ -286,11 +288,11 @@ fn a_fresh_first_public_caller_triggers_attachment_and_waits_for_its_own_capabil
         .unwrap();
         assert!(!canonical.reached.load(std::sync::atomic::Ordering::Acquire));
         release(&preattach);
-        wait_until("metadata complete before canonical work", BUDGET, || {
+        wait_until("structure published before relations", BUDGET, || {
             if canonical.reached.load(std::sync::atomic::Ordering::Acquire) {
                 Observed::Met(())
             } else {
-                Observed::pending("metadata not complete")
+                Observed::pending("structure not published")
             }
         })
         .unwrap();
@@ -395,11 +397,11 @@ fn dynamic_registration_and_replacement_reobserve_storage_before_any_read() {
                 })
                 .unwrap();
                 release(&gate);
-                wait_until("fresh replacement metadata", BUDGET, || {
+                wait_until("fresh replacement structure", BUDGET, || {
                     if canonical.reached.load(std::sync::atomic::Ordering::Acquire) {
                         Observed::Met(())
                     } else {
-                        Observed::pending("metadata not complete")
+                        Observed::pending("structure not published")
                     }
                 })
                 .unwrap();

@@ -80,7 +80,8 @@ impl HoldReading {
     ///
     /// A hold is taken only under a published demand that answers a read —
     /// `Ready`, the healing of an entry that has derived every fact the
-    /// read met, or claim-owned first-index warming — so the demand answers with its state, and the trust an
+    /// read met, or the warming of a from-zero build whose published step
+    /// admits the read — so the demand answers with its state, and the trust an
     /// answer carries is what the entry published at the instant its
     /// snapshot was established; one that did not would be refused with its
     /// own envelope, through the mapping every demand renders through. A
@@ -184,9 +185,6 @@ where
         #[cfg(feature = "induced-failure")]
         hold.query_boundary(self, false);
         let result = build(&hold);
-        if let Err(refusal) = &result {
-            hold.record_page_failure(refusal);
-        }
         #[cfg(feature = "induced-failure")]
         hold.query_boundary(self, true);
         // Storage/resource failures keep their actual type. Other refusals require
@@ -216,7 +214,9 @@ where
             },
         };
         if depends_on_source && !hold.current() {
-            return Err(ReadRefusal::FirstIndex(hold.reading().published().clone()).answer(name));
+            return Err(
+                ReadRefusal::StillIndexing(hold.reading().published().clone()).answer(name),
+            );
         }
         let built = result.map_err(|refusal| match page_refusal(refusal) {
             PageRefused::Answered(envelope) => envelope,

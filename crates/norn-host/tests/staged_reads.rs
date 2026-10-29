@@ -1,4 +1,4 @@
-//! Public first-index admission (ADR 0043), with Ready publication held back.
+//! Public early admission during a first attach, with Ready publication held back.
 //!
 //! This boundary follows canonical construction: it proves public admission,
 //! not service before canonical work. A construction-stage seam must prove that
@@ -152,11 +152,43 @@ fn public_get_answers_the_requested_slug_during_first_attach_before_ready() {
         ));
         assert!(early.answer.reading.generation > 0);
         assert!(!early.answer.reading.epoch.is_empty());
-        assert_ne!(early.answer.reading.epoch, canonical.answer.reading.epoch);
-        assert_eq!(early.answer.report, expected_report());
-        assert_eq!(early.answer.report, canonical.answer.report);
+        // Early reads answer from the canonical store under construction.
+        assert_eq!(early.answer.reading.epoch, canonical.answer.reading.epoch);
+        // Admitted once structure is published, before link health is judged:
+        // the early answer equals Ready's except its relation parts read loading.
+        assert_eq!(
+            serde_json::to_value(&early.answer.report).unwrap(),
+            relations_loading(serde_json::to_value(expected_report()).unwrap())
+        );
     });
     drop(host);
+}
+
+/// A Ready answer as a build that has not judged relations renders it: every
+/// link's targets and health, and every findings column, read as loading.
+fn relations_loading(mut value: serde_json::Value) -> serde_json::Value {
+    match &mut value {
+        serde_json::Value::Object(object) => {
+            if object.contains_key("health") && object.contains_key("targets") {
+                object.insert("targets".into(), serde_json::Value::Null);
+                object.insert("health".into(), "loading".into());
+            }
+            for (key, child) in object.iter_mut() {
+                if key == "findings" && child.get("state").is_some() {
+                    *child = serde_json::json!({"state": "unknown", "reason": "loading"});
+                } else {
+                    *child = relations_loading(child.take());
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                *item = relations_loading(item.take());
+            }
+        }
+        _ => {}
+    }
+    value
 }
 
 // Authored from the fixture bytes, including source positions after the
@@ -312,7 +344,6 @@ impl EntryOps for HeldAttach {
     }
 
     delegate! {
-        fn first_index_reads(&self) -> bool;
         fn first_index_candidate(&self, registration: &Registration) -> bool;
         fn trim_readers(&self, now: Instant);
         fn reconcile(&self, name: &VaultName, attachment: &mut Self::Attachment, work: ReconcileWork, progress: &ProgressReporter<Self::Attachment>) -> Result<(), JobFailure>;
