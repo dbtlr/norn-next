@@ -81,11 +81,15 @@ python3 scripts/performance/report.py "$PERF_HOME/run-002"
 ```
 
 Add `--loading operator-prefix-public` to take the public first Get and first
-Find on the current worker's caller thread while it attaches. The legacy daemon
-starts as usual. The worker writes both answers to `loading-checkpoints.json` in
-each run's work directory. The runner checks each served answer against the
-fixture: an early Get may read link resolution, link health and findings as
-still loading, and every other part must match exactly. Each answer's
+Find on the current worker's caller thread while it attaches. This mode needs a
+worker built with the `induced-failure` feature: build it with
+`provenance.py --startup-profile`, and pass that build's receipt as
+`--current-build`. A worker built without the feature refuses the mode. The
+legacy daemon starts as usual. The worker writes both answers to
+`loading-checkpoints.json` in each run's work directory. The runner checks each
+served answer against the fixture: an early Get may read link resolution, link
+health and findings as still loading, and every other part must match exactly.
+Each answer's
 `first_answers` sample records `query_host_ns`, its disposition and where it
 was read from. `early_step` names the build step that admitted an early answer,
 and `canonical` marks a canonical read. The sample also records the pull-ahead
