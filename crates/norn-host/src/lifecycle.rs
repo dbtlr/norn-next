@@ -6085,7 +6085,9 @@ impl<O: EntryOps> Host<O> {
                     drop(outside);
                     return Err(verdict.refusal);
                 }
-                Err(error) if selected.is_some() => {
+                // A construction closed or replaced while the cold open ran
+                // is answered by the current stance on the next round.
+                Err(error) if selected.is_some() && still_the_entrys => {
                     return Err(ReadRefusal::ReaderUnavailable(error));
                 }
                 Err(error) if still_the_entrys && state.answers_a_read(met_at) => {
@@ -20240,6 +20242,88 @@ mod tests {
                 "a waiter cannot close the last old handle under the gate"
             );
         });
+    }
+
+    /// **An early read whose construction closed while its cold open ran
+    /// answers the entry's current stance, not the open's failure.** The open
+    /// ran outside the gate against a pool the closure retired, so its failure
+    /// says nothing about the entry: the next round finds no construction and
+    /// refuses with what the entry publishes.
+    #[cfg(unix)]
+    #[test]
+    fn an_early_cold_open_failing_after_its_construction_closed_answers_the_current_stance() {
+        let _watcher_lease = norn_testkit::isolation::Lease::hold(
+            norn_testkit::isolation::REAL_WATCHER,
+            norn_testkit::isolation::acquisition_budget(lifecycle_wait_budget()),
+        );
+        let scratch = temp_base("early-cold-open-after-closure");
+        let root = scratch.join("vault");
+        std::fs::create_dir_all(root.join(".norn")).unwrap();
+        std::fs::write(root.join(".norn/schema.yaml"), "version: 1\n").unwrap();
+        norn_fs::watch::settle_prior_changes(scratch.root(), lifecycle_wait_budget().work())
+            .unwrap();
+        let (subscription, _own) =
+            norn_fs::watch::watch(&root, &root.join(".norn/schema.yaml")).unwrap();
+        subscription
+            .synchronize(lifecycle_wait_budget().work())
+            .unwrap();
+
+        let ops = Arc::new(FakeOps::default());
+        ops.block_attach.store(true, Ordering::SeqCst);
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
+        let _lease = host.demand(&name).unwrap();
+        wait_for_flag("attach_started", &ops.attach_started);
+        let entry = host.shared.entries.get(&name).unwrap().clone();
+        let progress = reporter(&entry, entry.gate.lock().unwrap().claim.epoch());
+        // The pool's one connection is out, so the read's acquisition is a
+        // cold open outside the gate.
+        let pool = FakeReader {
+            ledger: Arc::clone(&ops.readers),
+            free: Mutex::new(false),
+            returned: Condvar::new(),
+        };
+        let token = progress
+            .begin_construction(Some(loading::Begun {
+                pool,
+                model: Arc::new(ContentModel::none()),
+                authority: subscription.capture_build_authority().unwrap(),
+                store_epoch: "fake-epoch".into(),
+            }))
+            .expect("the attach's claim begins its construction");
+        assert!(progress.publish_step(token, "fake-epoch", norn_store::Step::FullTextComplete));
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        *ops.readers.acquisition_blocked.lock().unwrap() = Some((true, entered_tx, release_rx));
+        let params = norn_wire::GetParams::new(
+            norn_wire::VaultAddress::name(name.clone()),
+            norn_wire::ResolutionTarget::new("subject").unwrap(),
+        );
+        thread::scope(|scope| {
+            let reading = scope.spawn(|| {
+                host.begin_query_read(
+                    &name,
+                    norn_store::ReadNeed::Source,
+                    loading::Request::Get(&params),
+                )
+                .map(drop)
+            });
+            entered_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the early read left the gate for its cold open");
+            entry.gate.lock().unwrap().close_construction();
+            release_tx.send(()).unwrap();
+            let refusal = reading
+                .join()
+                .unwrap()
+                .expect_err("no construction stands to answer the read");
+            assert!(
+                matches!(refusal, ReadRefusal::NotServing(_)),
+                "the read was refused with a closed construction's open failure: {refusal:?}"
+            );
+        });
+        ops.attach_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &name, TrustState::Ready);
     }
 
     /// An attach that installs no coverage mints no reader. The mint is a limb
