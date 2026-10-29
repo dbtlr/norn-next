@@ -113,6 +113,9 @@ def clock_shifts(measured: list[list[dict]], thresholds: Thresholds) -> list[str
         for row in run:
             if row["unit"] == "ms" and row["status"] == "measured":
                 series.setdefault((row["documents"], row["metric"]), []).append(float(row["value"]))
+    # Only a clock the latest run measured can still be shifting.
+    current = {(row["documents"], row["metric"]) for row in measured[-1] if row["status"] == "measured"} if measured else set()
+    series = {key: values for key, values in series.items() if key in current}
     lines = []
     for (documents, metric), values in sorted(series.items(), key=lambda item: (int(item[0][0]), item[0][1])):
         recent = values[-thresholds.sustain:]

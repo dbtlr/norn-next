@@ -162,6 +162,12 @@ class ClockShiftTests(unittest.TestCase):
         self.history(table, [5000] * 4 + [1000] * 7 + [1300] * 3)
         self.assertIn("1000.000 ms ->", table.report()[0])
 
+    def test_a_shift_is_not_repeated_once_the_latest_run_stops_measuring_it(self):
+        table = Table(self)
+        self.history(table, [1000, 1000, 1000, 1500, 1500, 1500])
+        table.add(status="unavailable")
+        self.assertEqual(table.report(), ["unavailable at 2014 documents: ready"])
+
     def test_a_short_history_reports_no_shift(self):
         table = Table(self)
         self.history(table, [1000, 1000, 1300, 1300, 1300])

@@ -382,5 +382,7 @@ measured run before it was reported on its own night. Otherwise it reports:
   required.
 
 `--ratio`, `--cold-floor-ms`, `--warm-floor-ms`, `--sustain` and `--window` change
-the thresholds. A shift stays reported until it enters the reference window.
-Skipped runs are ignored by both comparisons.
+the thresholds. A shift stays reported until it enters the reference window, and
+only while the latest run measures that clock. Skipped runs are ignored by both
+comparisons. Counters assume the frozen fixtures never change: a regenerated
+fixture moves every counter and reads as a work change.
