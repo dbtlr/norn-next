@@ -40,7 +40,7 @@ use faults::{Boundary, HealWindow, WatchFaults};
 /// is ordered: observing a sentinel written after the fixture puts its earlier
 /// writes behind the next stream's current-event-ID reading. The sentinel is
 /// outside the vault so its creation and cleanup cannot invalidate that
-/// attachment's first-index proof. Linux needs no such barrier.
+/// attachment's build authority. Linux needs no such barrier.
 ///
 /// Available only with `induced-failure`. A failed stream, an expired delivery
 /// wait or failed sentinel I/O returns an error rather than assuming settlement.

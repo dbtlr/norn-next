@@ -877,8 +877,8 @@ title: abcdefgh
 ";
 
 /// What one judgment of [`PARAMETER_PROBE`] under `rules` paid: a vault
-/// attached empty so first-index metadata and canonical construction finish
-/// before the probe is written. Only its watcher derivation is counted.
+/// attached empty so its from-zero construction finishes before the probe is
+/// written. Only its watcher derivation is counted.
 fn judged_under(label: &str, rules: &str) -> CounterSnapshot {
     let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), label).expect("a sandbox");
     let root = sandbox.work_dir().join("judged");
@@ -979,7 +979,7 @@ fn follows_the_parameter(
 /// **The logical rule counters follow each declared parameter, and only
 /// proportionally.** One document is judged under schemas differing in one
 /// parameter at a time, each written under a live attachment after the empty
-/// vault's first-index construction finishes:
+/// vault's from-zero construction finishes:
 ///
 /// - **rule count R**: R rules none of which selects the document evaluate R
 ///   rules and R selector terms, and read each term's ten bytes;
