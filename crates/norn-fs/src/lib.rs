@@ -144,8 +144,8 @@ pub use walk::{
     UnreadableFact, Vault, Walk, WalkError, WalkFact, walk, walk_subtree,
 };
 pub use watch::{
-    Batch, FirstIndexObservation, OWN_WRITE_TTL, OwnWrites, RescanScope, Subscription,
-    SubscriptionState, WatchError, watch, watch_polling,
+    Batch, BuildAuthority, OWN_WRITE_TTL, OwnWrites, RescanScope, Subscription, SubscriptionState,
+    WatchError, watch, watch_polling,
 };
 pub use write::{
     Act, AfterState, Confirmed, Content, Durability, Landed, Publication, Published,

@@ -25,10 +25,10 @@ use crate::path::{CaseSensitivity, NormalizedPath, PathError, PathNormalizer};
 use crate::write::{Act, AfterState};
 use crate::{Identity, PostState, path_identity};
 
+mod build_authority;
 mod faults;
-mod first_index;
-pub use first_index::FirstIndexObservation;
-use first_index::FirstIndexProof;
+pub use build_authority::BuildAuthority;
+use build_authority::BuildProof;
 
 use faults::{Boundary, HealWindow, WatchFaults};
 
@@ -739,7 +739,7 @@ impl Subscription {
             wait_for_synchronization(&self.control, self.faults.synchronization_wait(deadline));
         if let Err(error) = &outcome {
             let mut state = self.state.lock().expect("watch state poisoned");
-            state.first_index.invalidate();
+            state.build_authority.invalidate();
             state.terminal.get_or_insert_with(|| error.clone());
             drop(state);
             // The coalescer is parked with nothing pending, so the recorded
@@ -955,7 +955,7 @@ fn record_terminal(
             _ => detected,
         };
         state.terminal = Some(error.clone());
-        state.first_index.invalidate();
+        state.build_authority.invalidate();
         #[cfg(any(test, feature = "induced-failure"))]
         {
             state.observation_revision = None;
@@ -1015,7 +1015,7 @@ impl Subscription {
         self.state
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .first_index
+            .build_authority
             .close_admission();
         self.watcher.take();
         // Disconnect the delivery slot before joining the worker. A terminal
@@ -1752,7 +1752,7 @@ struct State {
     schema: SchemaLocation,
     ledger: Arc<Mutex<Ledger>>,
     pending: Option<Pending>,
-    first_index: Arc<FirstIndexProof>,
+    build_authority: Arc<BuildProof>,
     // Accepted observations outlive every pending/heal/delivery transfer. None
     // is terminal or an unrepresentable revision, and can never become zero.
     #[cfg(any(test, feature = "induced-failure"))]
@@ -1804,7 +1804,7 @@ impl State {
             schema,
             ledger,
             pending: None,
-            first_index: Arc::new(FirstIndexProof::new()),
+            build_authority: Arc::new(BuildProof::new()),
             #[cfg(any(test, feature = "induced-failure"))]
             observation_revision: Some(0),
             terminal: None,
@@ -1817,7 +1817,7 @@ impl State {
         }
     }
     fn batch(&mut self) -> &mut Batch {
-        self.first_index.invalidate();
+        self.build_authority.invalidate();
         #[cfg(any(test, feature = "induced-failure"))]
         {
             self.observation_revision = self.observation_revision.and_then(|n| n.checked_add(1));
@@ -1916,7 +1916,7 @@ fn ingest(shared: &Arc<Mutex<State>>, result: notify::Result<Event>) -> Option<W
                         covered: state.root.clone(),
                         identity: state.root_identity,
                     };
-                    let proof = Arc::clone(&state.first_index);
+                    let proof = Arc::clone(&state.build_authority);
                     // Root identity performs I/O. The anchor is immutable, so
                     // release bookkeeping until that check has finished.
                     drop(state);
@@ -1934,7 +1934,7 @@ fn ingest(shared: &Arc<Mutex<State>>, result: notify::Result<Event>) -> Option<W
         }
     }
     if state.terminal.is_some() {
-        state.first_index.invalidate();
+        state.build_authority.invalidate();
         #[cfg(any(test, feature = "induced-failure"))]
         {
             state.observation_revision = None;
@@ -2247,7 +2247,7 @@ impl Drop for CoalescerExit<'_> {
         locked.closing = false;
         locked.coalescer_died |= thread::panicking();
         if locked.coalescer_died {
-            locked.first_index.invalidate();
+            locked.build_authority.invalidate();
         }
         self.handoff.notify_all();
     }
