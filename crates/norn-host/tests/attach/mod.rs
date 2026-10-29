@@ -325,6 +325,16 @@ impl Vault {
         self.serve_with_policy([self.name.clone()], None, policy, |ops| ops)
     }
 
+    /// A host serving this vault under `policy`, its production ops composed
+    /// by `compose` before the host takes them.
+    pub fn host_composed(
+        &self,
+        policy: ProductionPolicy,
+        compose: impl FnOnce(ProductionEntryOps) -> ProductionEntryOps,
+    ) -> ServingHost {
+        self.serve_with_policy([self.name.clone()], None, policy, compose)
+    }
+
     /// A host serving this vault's root under each of `names`, holding the
     /// real-watcher lease for as long as it serves. More than one name over the
     /// one root is a registry in conflict, which the host parks.
