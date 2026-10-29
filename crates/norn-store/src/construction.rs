@@ -19,6 +19,8 @@ pub(crate) struct Steps {
     pub(crate) group_open: bool,
     group_guard: bool,
     group_documents: usize,
+    /// Construction transactions committed, every closing path counted.
+    group_commits: u64,
 }
 
 /// Construction completeness boundaries, held in memory rather than persisted.
@@ -107,6 +109,7 @@ impl Store {
             group_open: false,
             group_guard: false,
             group_documents: 0,
+            group_commits: 0,
         });
         self.connection()
             .pragma_update(None, "wal_autocheckpoint", 10_000)
@@ -355,6 +358,35 @@ impl Store {
         }
         Ok(StepGroup { store: self })
     }
+
+    /// Commit the open group's chunks now and keep its guard, so the next
+    /// write opens a fresh transaction under it. A pulled-ahead request's
+    /// reader takes its snapshot after this commit, so it sees its document.
+    /// Outside a group this is refused, like every construction write.
+    pub fn commit_step_group(&mut self) -> Result<(), StoreError> {
+        if !self.steps.as_ref().is_some_and(|s| s.group_guard) {
+            return Err(refused(
+                self,
+                "committing a construction group",
+                "a group guard is required",
+            ));
+        }
+        close_group(self)
+    }
+
+    /// How many more documents the open group admits before its
+    /// 2,048-document bound; zero outside construction.
+    pub fn construction_group_room(&self) -> usize {
+        self.steps
+            .as_ref()
+            .map_or(0, |s| 2048usize.saturating_sub(s.group_documents))
+    }
+
+    /// Construction transactions committed so far, including those a rare
+    /// ordinary increment closed; zero outside construction.
+    pub fn construction_group_commits(&self) -> u64 {
+        self.steps.as_ref().map_or(0, |s| s.group_commits)
+    }
 }
 
 /// Commit before a rare ordinary increment, leaving the guard responsible for
@@ -368,6 +400,7 @@ pub(crate) fn close_group(store: &mut Store) -> Result<(), StoreError> {
         let steps = store.steps.as_mut().expect("steps");
         steps.group_open = false;
         steps.group_documents = 0;
+        steps.group_commits += 1;
         #[cfg(feature = "induced-failure")]
         crate::faults::note_the_changeset_committed();
     }
@@ -810,6 +843,82 @@ impl crate::Request<'_> {
     }
 }
 
+/// One document or file a target's class holds during construction, and the
+/// construction step it still owes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TargetCandidate {
+    pub path: crate::DocumentPath,
+    /// [`Step::Content`] for a provisional name, [`Step::Structure`] for a
+    /// document whose structure is owed, `None` for one that owes neither: a
+    /// structured or broken document, or a vault file.
+    pub owes: Option<Step>,
+}
+
+impl crate::Request<'_> {
+    /// The documents and files `target`'s class holds under `ignore`, each
+    /// with the step it still owes, resolved as a Get resolves it — exact-path
+    /// precedence included — or `None` where the class holds more than
+    /// `limit`. A provisional exact candidate can hide suffix candidates, so a
+    /// caller re-reads after the content step settles any candidate. A target
+    /// no class compiles for names nothing, as a Get finds.
+    ///
+    /// The NORN-468 pull-ahead caller drains Get requests through this after
+    /// step 1 has ended, when the class indexes exist.
+    pub fn target_candidates(
+        &mut self,
+        target: &str,
+        ignore: &crate::AmbiguityIgnore,
+        limit: usize,
+    ) -> Result<Option<Vec<TargetCandidate>>, StoreError> {
+        check_limit(limit)?;
+        let Ok(class) = crate::resolve::TargetClass::compile(target, ignore) else {
+            return Ok(Some(Vec::new()));
+        };
+        let (sql, parameters) = crate::find::compose_class_head(&class, limit + 1);
+        let rows = Self::read_all_on(
+            self.store.connection(),
+            &self.read_work,
+            &sql,
+            norn_db::rusqlite::params_from_iter(parameters),
+            |row| Ok(Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))),
+            "reading a target's construction candidates",
+        )?;
+        if rows.len() > limit {
+            return Ok(None);
+        }
+        rows.into_iter()
+            .map(|(id, path)| {
+                let owes = if id < 0 {
+                    None
+                } else {
+                    match progress_stage(self.store.connection(), id)? {
+                        Some(1) => Some(Step::Content),
+                        Some(2) => Some(Step::Structure),
+                        _ => None,
+                    }
+                };
+                Ok(TargetCandidate {
+                    path: crate::DocumentPath::new(&path)?,
+                    owes,
+                })
+            })
+            .collect::<Result<_, StoreError>>()
+            .map(Some)
+    }
+}
+
+/// A document's construction stage: 1 owes content, 2 owes structure, 3 is
+/// structured; absent for a broken document, whose progress ended.
+fn progress_stage(connection: &Connection, id: i64) -> Result<Option<i64>, StoreError> {
+    use norn_db::rusqlite::OptionalExtension;
+    connection
+        .query_row(PROGRESS_STAGE_SQL, [id], |r| r.get(0))
+        .optional()
+        .map_err(|e| error::sql("reading a candidate's construction stage", e))
+}
+
+const PROGRESS_STAGE_SQL: &str = "SELECT stage FROM temp.construction_progress WHERE document = ?1";
+
 impl crate::Request<'_> {
     /// Whether a provisional name still owes content (a preceding directory
     /// failure in the same chunk may have removed its queue entry).
@@ -917,6 +1026,7 @@ mod plan_tests {
                 ORDINALS_SQL,
                 STRUCTURE_PROGRESS_SQL,
                 EXHAUSTED_SQL,
+                PROGRESS_STAGE_SQL,
             ] {
                 let count = store.connection().prepare(sql).unwrap().parameter_count();
                 let parameters = vec![norn_db::rusqlite::types::Value::Integer(1); count];

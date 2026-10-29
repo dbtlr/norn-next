@@ -166,7 +166,9 @@ mod store;
 mod validate;
 mod write_path;
 
-pub use construction::{ConstructionFinish, ContentWrite, Step, StepGroup, StructureInput};
+pub use construction::{
+    ConstructionFinish, ContentWrite, Step, StepGroup, StructureInput, TargetCandidate,
+};
 pub use count::{
     COUNT_RESULT_STATEMENTS, COUNT_STATEMENTS, CountPlan, CountResultStatement,
     CountRetentionPolicy, CountStatement, CountWork, Counted, GroupMember,
