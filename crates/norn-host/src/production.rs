@@ -3034,6 +3034,11 @@ fn scoped_increment(
                     && is_markdown(unreadable.path().as_path())
                     && document_path(unreadable.path().as_path()).is_err() =>
             {
+                // A name whose kind is unknown may be a folder, which hides
+                // what is under it from every scope this job registers.
+                if unreadable.kind() == norn_fs::UnreadKind::Unknown {
+                    pending.withhold_entry(unreadable.path().as_path());
+                }
                 pending.read_place(&vault, &DocumentPath::rendered(unreadable.path().as_path()))?;
                 continue;
             }
