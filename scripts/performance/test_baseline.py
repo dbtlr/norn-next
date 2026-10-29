@@ -45,7 +45,8 @@ class LoadingProtocolTests(unittest.TestCase):
 
         class Worker:
             def __init__(self, stages):
-                self.stages = [{"startup_stage": stage, "probe": probe} for stage, probe in stages]
+                self.stages = [{"startup_stage": stage, "probe": probe, "disposition": "unavailable",
+                                "query_host_ns": 1} for stage, probe in stages]
             def call(self, _command):
                 raise Accepted()
             def close(self):
@@ -66,6 +67,47 @@ class LoadingProtocolTests(unittest.TestCase):
                 with patch("baseline.Current", return_value=Worker([("public-get", "whole_slug")])):
                     with self.assertRaisesRegex(ValueError, "requested loading mode"):
                         run_worker(args, "current", 0, 1, fixture, manifest, io.StringIO())
+
+
+class FirstAnswerTests(unittest.TestCase):
+    def stages(self):
+        from test_whole_get import example
+        response, manifest = example()
+        response["answer"]["reading"]["trust"] = {"state": "warming", "phase": "healing"}
+        response["answer"]["report"]["document"]["findings"] = {"state": "unknown", "reason": "loading"}
+        manifest["active_paths"] = ["a.md", "b.md"]
+        get = {"startup_stage": "public-get", "probe": "whole_slug", "disposition": "served",
+               "answer": response["answer"], "query_host_ns": 420, "early_answer": True,
+               "read_from": "construction", "early_step": "names", "state_after_call": {"state": "warming"},
+               "pull_ahead": {"pull_ahead_documents": 1}}
+        find = {"startup_stage": "public-find", "probe": "active_page", "disposition": "unavailable",
+                "answer": None, "query_host_ns": 3600, "early_answer": False, "read_from": "canonical",
+                "early_step": None, "state_after_call": {"state": "warming"}, "pull_ahead": {}}
+        return [get, find], manifest
+
+    def test_first_answers_are_validated_and_reported_with_where_they_were_read(self):
+        from baseline import first_answers
+        stages, manifest = self.stages()
+        answers = first_answers(stages, manifest)
+        self.assertEqual([(a["startup_stage"], a["query_host_ns"], a["early_step"]) for a in answers],
+                         [("public-get", 420, "names"), ("public-find", 3600, None)])
+        self.assertEqual(answers[0]["read_from"], "construction")
+        self.assertNotIn("answer", answers[0])
+
+    def test_a_wrong_or_refused_first_answer_is_rejected(self):
+        from baseline import first_answers
+        stages, manifest = self.stages()
+        stages[0]["answer"]["report"]["document"]["headings"]["items"] = []
+        with self.assertRaises(ValueError):
+            first_answers(stages, manifest)
+        stages, manifest = self.stages()
+        stages[1]["disposition"] = "error"
+        with self.assertRaises(ValueError):
+            first_answers(stages, manifest)
+        stages, manifest = self.stages()
+        stages[0]["answer"]["reading"]["trust"] = {"state": "ready"}
+        with self.assertRaises(ValueError):
+            first_answers(stages, manifest)
 
 
 class AnswerTests(unittest.TestCase):

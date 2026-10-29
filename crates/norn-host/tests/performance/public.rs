@@ -1,10 +1,14 @@
 //! Two real caller-thread requests while ordinary attachment continues independently.
+//!
+//! Each answer is labelled with where it was read: the step of the from-zero
+//! build that admitted it early, or none for a canonical read. The pull-ahead
+//! evidence the build had spent by then is recorded beside it.
 
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Instant;
 
-use norn_host::{Host, ProductionEntryOps};
+use norn_host::EarlyReadsServed;
 use norn_wire::{
     FindParams, GetParams, Predicate, ResolutionTarget, TrustState, VaultAddress, VaultName,
 };
@@ -13,7 +17,7 @@ use serde_json::{Value, json};
 /// ACKs rendezvous with this caller only; attachment owns no observer or pause.
 /// Ready here means a caller observation, never the instant of publication.
 pub fn prefix(
-    host: &Host<ProductionEntryOps>,
+    host: &super::attach::ServingHost,
     name: &VaultName,
     root: &Path,
     began: Instant,
@@ -27,6 +31,7 @@ pub fn prefix(
     .into_iter()
     .enumerate()
     {
+        let served = host.read_evidence().early_reads_served;
         let started = began.elapsed().as_nanos();
         let finished;
         let (answer, error, counters, work) = if index == 0 {
@@ -60,6 +65,15 @@ pub fn prefix(
         };
         let state = host.state(name).expect("registered vault state");
         let observed = began.elapsed().as_nanos();
+        // The caller issues nothing else meanwhile, so the step whose count
+        // moved is the one that admitted this answer.
+        let early_step = admitted_at(host.read_evidence().early_reads_served.since(served));
+        let (reads, jobs) = (host.read_evidence(), host.evidence());
+        let pull_ahead = json!({"pull_ahead_requests": reads.pull_ahead_requests,
+            "requests_past_bound": reads.requests_past_bound,
+            "pull_ahead_documents": jobs.pull_ahead_documents,
+            "construction_commits_for_requests": jobs.construction_commits_for_requests,
+            "construction_publications": jobs.construction_publications});
         if state == TrustState::Ready {
             observed_ready.get_or_insert(observed);
         }
@@ -83,7 +97,9 @@ pub fn prefix(
             "disposition":disposition,"answer":answer,"error":error,
             "counters":counters,"builder_work":work,
             "query_started_ns":started,"query_finished_ns":finished,"query_host_ns":finished-started,
-            "state_after_call":state,"state_observed_ns":observed,"early_answer":early}),
+            "state_after_call":state,"state_observed_ns":observed,"early_answer":early,
+            "read_from":(if early_step.is_some() {"construction"} else {"canonical"}),
+            "early_step":early_step,"pull_ahead":pull_ahead}),
         );
         assert_ne!(
             disposition, "error",
@@ -98,6 +114,24 @@ pub fn prefix(
         .expect("bounded caller-only parent acknowledgement");
     }
     observed_ready
+}
+
+/// The one step whose count moved over `served`, a single answer's window.
+fn admitted_at(served: EarlyReadsServed) -> Option<&'static str> {
+    let steps = [
+        ("names", served.names),
+        ("content", served.content),
+        ("structure", served.structure),
+        ("relations", served.relations),
+        ("full_text_complete", served.full_text_complete),
+    ];
+    assert!(
+        served.total() <= 1,
+        "one answer was served once: {served:?}"
+    );
+    steps
+        .into_iter()
+        .find_map(|(step, count)| (count == 1).then_some(step))
 }
 
 fn operator_ack(

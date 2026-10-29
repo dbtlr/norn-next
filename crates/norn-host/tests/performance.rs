@@ -202,7 +202,11 @@ fn performance_worker() {
             "link_health_keys_resolved": e.link_health_keys_resolved,
             "link_health_candidates_read": e.link_health_candidates_read,
             "changeset_read_steps": e.changeset_read_steps, "recoveries_run": e.recoveries_run,
-            "rebuilds_run": e.rebuilds_run, "construction_checkpoint_busy": e.construction_checkpoint_busy, "watcher_polls": e.watcher_polls}),
+            "rebuilds_run": e.rebuilds_run, "construction_checkpoint_busy": e.construction_checkpoint_busy, "watcher_polls": e.watcher_polls,
+            "content_step_commits": e.content_step_commits, "structure_step_commits": e.structure_step_commits,
+            "pull_ahead_documents": e.pull_ahead_documents,
+            "construction_commits_for_requests": e.construction_commits_for_requests,
+            "construction_publications": e.construction_publications}),
         )
     };
     #[cfg(not(feature = "induced-failure"))]

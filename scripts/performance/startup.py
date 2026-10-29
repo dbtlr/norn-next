@@ -73,6 +73,10 @@ def validate_work(evidence, stage, documents, batch, store):
                 raise ValueError(f"fresh startup {key} does not equal its document population")
         if evidence["fact_rows_discarded"] or evidence["links_redecided"]:
             raise ValueError("fresh startup discarded facts or re-decided links")
+        # Each document is opened once; the one other open reads the vault's
+        # declaration (.norn/schema.yaml), which every fixture writes.
+        if evidence["document_opens"] != documents + 1:
+            raise ValueError("fresh startup opened a document more than once, or not at all")
     if stage == "fresh" and evidence["links_judged"] != store["tables"]["links"]["rows"]:
         raise ValueError("fresh startup did not judge exactly every stored link")
     if stage == "restart" and any(evidence[key] for key in

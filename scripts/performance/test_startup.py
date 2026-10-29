@@ -152,20 +152,32 @@ class StartupAccountingTests(unittest.TestCase):
 
     def test_work_evidence_rejects_incomplete_import_and_a_rebuilt_restart(self):
         with self.assertRaises(ValueError):
-            validate_work({"documents_named": 314, "content_rows_written": 313, "structure_rows_written": 314, "documents_read_by_build": 314, "fact_rows_discarded": 0, "links_redecided": 0, "links_judged": 9}, "fresh", 314, 128, {"tables": {"links": {"rows": 9}}})
-        validate_work({"documents_named": 314, "content_rows_written": 314, "structure_rows_written": 314, "documents_read_by_build": 314, "fact_rows_discarded": 0, "links_redecided": 0, "links_judged": 9}, "fresh", 314, 128, {"tables": {"links": {"rows": 9}}})
+            validate_work({"documents_named": 314, "content_rows_written": 313, "structure_rows_written": 314, "documents_read_by_build": 314, "document_opens": 315, "fact_rows_discarded": 0, "links_redecided": 0, "links_judged": 9}, "fresh", 314, 128, {"tables": {"links": {"rows": 9}}})
+        validate_work({"documents_named": 314, "content_rows_written": 314, "structure_rows_written": 314, "documents_read_by_build": 314, "document_opens": 315, "fact_rows_discarded": 0, "links_redecided": 0, "links_judged": 9}, "fresh", 314, 128, {"tables": {"links": {"rows": 9}}})
         unchanged = {"recoveries_run": 0, "rebuilds_run": 0, "documents_derived": 0, "documents_upserted": 0}
         validate_work(unchanged, "restart", 314, 128, {})
         for key in unchanged:
             with self.assertRaises(ValueError):
                 validate_work({**unchanged, key: 1}, "restart", 314, 128, {})
 
+    def test_fresh_work_opens_each_document_once_beside_the_declaration(self):
+        store = {"tables": {"links": {"rows": 9}}}
+        fresh = {"documents_named": 314, "content_rows_written": 314, "structure_rows_written": 314,
+                 "documents_read_by_build": 314, "document_opens": 315, "fact_rows_discarded": 0,
+                 "links_redecided": 0, "links_judged": 9}
+        validate_work(fresh, "fresh", 314, 128, store)
+        for opens in (314, 316, 2 * 314 + 1):
+            with self.subTest(opens=opens), self.assertRaisesRegex(ValueError, "opened"):
+                validate_work({**fresh, "document_opens": opens}, "fresh", 314, 128, store)
+        validate_work({"recoveries_run": 0, "rebuilds_run": 0, "documents_derived": 0,
+                       "documents_upserted": 0, "document_opens": 1}, "restart", 314, 128, {})
+
     def test_fresh_work_judges_exactly_every_stored_link(self):
         store = {"tables": {"links": {"rows": 9}}}
         for judged in (0, 8, 10):
             with self.subTest(judged=judged), self.assertRaisesRegex(ValueError, "link"):
-                validate_work({"documents_named": 314, "content_rows_written": 314, "structure_rows_written": 314, "documents_read_by_build": 314, "fact_rows_discarded": 0, "links_redecided": 0, "links_judged": judged}, "fresh", 314, 128, store)
-        validate_work({"documents_named": 314, "content_rows_written": 314, "structure_rows_written": 314, "documents_read_by_build": 314, "fact_rows_discarded": 0, "links_redecided": 0, "links_judged": 9}, "fresh", 314, 128, store)
+                validate_work({"documents_named": 314, "content_rows_written": 314, "structure_rows_written": 314, "documents_read_by_build": 314, "document_opens": 315, "fact_rows_discarded": 0, "links_redecided": 0, "links_judged": judged}, "fresh", 314, 128, store)
+        validate_work({"documents_named": 314, "content_rows_written": 314, "structure_rows_written": 314, "documents_read_by_build": 314, "document_opens": 315, "fact_rows_discarded": 0, "links_redecided": 0, "links_judged": 9}, "fresh", 314, 128, store)
 
     def test_revision_reports_require_shutdown_and_the_complete_validated_lifecycle(self):
         metadata = {"completed": True, "workload_version": "startup-attribution-v2", "sizes": [300],
