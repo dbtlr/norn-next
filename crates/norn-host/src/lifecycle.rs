@@ -2778,6 +2778,7 @@ fn hand_on_carried_damage<A: SnapshotSource>(
 /// nothing, so nothing is withdrawn when it is dropped.
 fn unheld_lease<O: EntryOps>(name: &VaultName, outcome: Demand) -> DemandLease<O> {
     DemandLease {
+        loading_interest: None,
         outcome,
         name: name.clone(),
         held: None,
@@ -4368,6 +4369,10 @@ pub enum ReadRefusal {
 /// One client operation's lifecycle guard and immediate trust answer.
 /// Dropping it ends the demand lease and starts a fresh idle interval.
 pub struct DemandLease<O: EntryOps> {
+    /// This read's interest in its target in a build's pull-ahead queue. The
+    /// queue holds it weakly, so the slot expires with the demand that owns
+    /// the read.
+    loading_interest: Option<Arc<()>>,
     outcome: Demand,
     /// The vault this lease was demanded under. It is the lease's own whether
     /// or not an entry stands behind it, so a refusal answered here names the
@@ -4461,6 +4466,7 @@ impl<O: EntryOps> DemandLease<O> {
     /// Give this lease back under a hold of its entry's gate the caller
     /// already has. The lease's own drop runs over nothing from here.
     fn give_back_under(mut self, state: &mut EntryState<O::Attachment>) {
+        self.loading_interest.take();
         if self.held.take().is_some() {
             give_back_demand(state, self.recovery_demand, Instant::now());
         }
@@ -4491,6 +4497,7 @@ impl<O: EntryOps> Drop for DemandLease<O> {
     /// hold runs the give-back.
     fn drop(&mut self) {
         let dropped_at = Instant::now();
+        self.loading_interest.take();
         let Some(shared) = self.held.take() else {
             return;
         };
@@ -5603,6 +5610,7 @@ impl<O: EntryOps> Host<O> {
         if let Some(park) = state.parked() {
             drop(state);
             return Ok(DemandLease {
+                loading_interest: None,
                 outcome: park,
                 name: name.clone(),
                 held: Some(Arc::clone(&self.shared)),
@@ -5618,6 +5626,7 @@ impl<O: EntryOps> Host<O> {
             drop(state);
             dispatch_pending(&self.shared, &entry)?;
             return Ok(DemandLease {
+                loading_interest: None,
                 outcome: answer,
                 name: name.clone(),
                 held: Some(Arc::clone(&self.shared)),
@@ -5627,6 +5636,7 @@ impl<O: EntryOps> Host<O> {
         let answer = state.published_demand();
         drop(state);
         Ok(DemandLease {
+            loading_interest: None,
             outcome: answer,
             name: name.clone(),
             held: Some(Arc::clone(&self.shared)),
@@ -5816,6 +5826,7 @@ impl<O: EntryOps> Host<O> {
         // it owns, in the hold a refusal answers from, and an
         // [`AcquisitionOutsideTheGate`] lets the lease's own drop give it back.
         let lease = DemandLease {
+            loading_interest: None,
             outcome: state.published_demand(),
             name: name.clone(),
             held: Some(Arc::clone(&self.shared)),
@@ -5874,13 +5885,43 @@ impl<O: EntryOps> Host<O> {
         // is taking in: recorded under the first hold that finds the entry
         // settling, before any wait, and never moved after.
         let mut met_at = None;
+        // Whether this read was counted past its build's pull-ahead bound.
+        let mut past_bound = false;
         let (turn, reader, early) = loop {
             // A construction is read only where the canonical stance refuses:
             // a serving or settling entry answers from its own reader.
             let (selected, early_wait) = match stance {
                 ReadStance::Refuse => match state.early(request) {
                     loading::Early::Admitted(admitted) => (Some(admitted), false),
-                    loading::Early::Waits => (None, true),
+                    loading::Early::Waits => {
+                        // A waiting Get's interest joins its build's queue
+                        // for pull-ahead; past the bound it waits for its
+                        // vault-wide step.
+                        let joined = state.join_requests(request);
+                        let interest = match joined {
+                            Some(loading::Joined::New(interest)) => {
+                                self.shared.reads.count_pull_ahead_request();
+                                Some(interest)
+                            }
+                            Some(loading::Joined::Shared(interest)) => Some(interest),
+                            Some(loading::Joined::PastBound) => {
+                                if !past_bound {
+                                    past_bound = true;
+                                    self.shared.reads.count_request_past_bound();
+                                }
+                                None
+                            }
+                            None => None,
+                        };
+                        if interest.is_some() {
+                            state
+                                .lease
+                                .as_mut()
+                                .expect("read acquisition owns its lease")
+                                .loading_interest = interest;
+                        }
+                        (None, true)
+                    }
                     loading::Early::Refused => (None, false),
                 },
                 ReadStance::Settle | ReadStance::Serve => (None, false),

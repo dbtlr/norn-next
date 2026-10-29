@@ -197,6 +197,12 @@ impl Fixture {
             _watcher: watcher,
         }
     }
+    /// Write `bytes` at `relative` under the vault, making its directories.
+    fn add(&self, relative: &str, bytes: impl AsRef<[u8]>) {
+        let path = self.root.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    }
     fn derived(&self) -> PathBuf {
         self.dirs.derived_dir(&name())
     }
@@ -1184,4 +1190,796 @@ fn an_empty_store_recovery_publishes() {
         probe.release();
     });
     ready(&host);
+}
+
+// ---------------------------------------------------------------------------
+// Get pull-ahead and commit-on-pending.
+// ---------------------------------------------------------------------------
+
+/// Whether `early` is `ready` with relation parts read as loading: a link's
+/// targets null beside `health: loading`, and a findings column or page
+/// `unknown(loading)`. A page cursor names its snapshot, so either both pages
+/// continue or neither does. Every other part is equal.
+fn modulo_loading(early: &serde_json::Value, ready: &serde_json::Value) -> bool {
+    use serde_json::Value;
+    let loading = serde_json::json!({"state": "unknown", "reason": "loading"});
+    match (early, ready) {
+        (Value::Object(early_object), Value::Object(ready_object)) => {
+            let link = early_object.get("health") == Some(&Value::from("loading"))
+                && early_object.get("targets") == Some(&Value::Null)
+                && ready_object.contains_key("targets");
+            early_object.len() == ready_object.len()
+                && early_object.iter().all(|(key, value)| {
+                    let Some(standing) = ready_object.get(key) else {
+                        return false;
+                    };
+                    (link && (key == "health" || key == "targets"))
+                        || (*value == loading && standing.get("state").is_some())
+                        // A cursor names its snapshot's generation.
+                        || (key == "next" && value.is_string() && standing.is_string())
+                        || modulo_loading(value, standing)
+                })
+        }
+        (Value::Array(early_items), Value::Array(ready_items)) => {
+            early_items.len() == ready_items.len()
+                && early_items
+                    .iter()
+                    .zip(ready_items)
+                    .all(|(early, ready)| modulo_loading(early, ready))
+        }
+        _ => early == ready,
+    }
+}
+
+/// An early answer, or its refusal, against the same request's Ready answer:
+/// equal modulo loading parts, or the not-ready refusal.
+macro_rules! assert_exact {
+    ($what:expr, $early:expr, $ready:expr $(,)?) => {{
+        let what = $what;
+        match ($early, $ready) {
+            (Ok(early), Ok(ready)) => {
+                assert!(warming(&early.answer.reading.trust), "{what}");
+                let (early, ready) = (json!(&early.answer.report), json!(&ready.answer.report));
+                assert!(
+                    modulo_loading(&early, &ready),
+                    "{what}: early {early:#} against ready {ready:#}"
+                );
+            }
+            (Err(early), _) if early.code() == &ReasonCode::HostEntryNotReady => {
+                assert_still_indexing(early)
+            }
+            (Err(early), Err(ready)) => assert_eq!(json!(early), json!(ready), "{what}"),
+            (early, ready) => panic!(
+                "{what}: early {:?} against ready {:?}",
+                early.as_ref().err(),
+                ready.as_ref().err()
+            ),
+        }
+    }};
+}
+
+/// The first page cursor an answer carries, for its continuation.
+fn next_cursor(value: &serde_json::Value) -> Option<norn_wire::Cursor> {
+    match value {
+        serde_json::Value::Object(object) => object
+            .get("next")
+            .filter(|next| !next.is_null())
+            .map(|next| serde_json::from_value(next.clone()).unwrap())
+            .or_else(|| object.values().find_map(next_cursor)),
+        serde_json::Value::Array(items) => items.iter().find_map(next_cursor),
+        _ => None,
+    }
+}
+
+/// Contract item 7: a Get issued mid-content is pulled ahead at the next chunk
+/// boundary and answers before the content step ends, equal to the same Get
+/// at Ready except its loading parts; its continuation reads the same.
+#[test]
+fn a_requested_document_answers_before_content_ends() {
+    let fixture = Fixture::new("early-pull-ahead");
+    let probe = Probe::new([
+        LoadingBoundary::StepComplete(Step::Names),
+        LoadingBoundary::CanonicalPage,
+        LoadingBoundary::RequestsDrained,
+    ]);
+    let ops = fixture.ops(probe.clone());
+    let account = ops.account();
+    let host = fixture.host_over(ops, norn_host::READ_SETTLE_BOUND);
+    let tags = get("first")
+        .with_collection(norn_wire::CollectionSelector::Tags)
+        .with_limit(1);
+    let (early, page, continued) = std::thread::scope(|scope| {
+        let _release = Release(&probe);
+        let _demand = host.demand(&name()).unwrap();
+        probe.wait(LoadingBoundary::StepComplete(Step::Names));
+        probe.release();
+        // The first content chunk is written; `first.md` is still a name.
+        probe.wait(LoadingBoundary::CanonicalPage);
+        let answer = spawn_get(scope, &host, get("first"));
+        let page = spawn_get(scope, &host, tags.clone());
+        waits(&host, 2);
+        probe.release();
+        probe.wait(LoadingBoundary::RequestsDrained);
+        // Both shapes shared one slot and answer while the build is held.
+        let early = answer.recv_timeout(BUDGET.work()).unwrap().unwrap();
+        let page = page.recv_timeout(BUDGET.work()).unwrap().unwrap();
+        assert!(
+            !probe
+                .seen()
+                .contains(&LoadingBoundary::Published(Step::Content)),
+            "answered after the content step"
+        );
+        assert!(probe.seen().contains(&LoadingBoundary::TargetReady));
+        probe.release();
+        // A ready target lives only while an interest holds it: the
+        // continuation queues again and is answered at a later drain.
+        let cursor = next_cursor(&json!(&page.answer.report));
+        let continued = cursor.map(|cursor| host.get(&tags.clone().with_after(cursor)));
+        (early, page, continued)
+    });
+    ready(&host);
+    assert!(warming(&early.answer.reading.trust));
+    let ready_get = host.get(&get("first")).unwrap();
+    assert_eq!(
+        json!(&early.answer.report),
+        relations_loading(json!(&ready_get.answer.report))
+    );
+    let ready_page = host.get(&tags).unwrap();
+    assert_exact!(
+        "a tags page",
+        &Ok::<_, norn_wire::ErrorEnvelope>(page),
+        &Ok::<_, norn_wire::ErrorEnvelope>(ready_page)
+    );
+    // The continuation reads the same rows, reporting at most that its
+    // snapshot's generation moved since the early page.
+    let continued = continued.expect("a tags page of one continues").unwrap();
+    let continued = json!(&continued.answer.report);
+    let cursor = next_cursor(&json!(&host.get(&tags).unwrap().answer.report)).unwrap();
+    let ready_continued = json!(
+        &host
+            .get(&tags.clone().with_after(cursor))
+            .unwrap()
+            .answer
+            .report
+    );
+    assert_eq!(
+        continued["page"]["page"]["value"]["rows"],
+        ready_continued["page"]["page"]["value"]["rows"]
+    );
+    assert!(
+        continued["page"]["page"]["value"]["moved"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|moved| moved == "generation"),
+        "{continued:#}"
+    );
+    // Its content and structure ran ahead once, each document read once.
+    let evidence = account.read();
+    assert_eq!(evidence.pull_ahead_documents, 2, "{evidence:?}");
+    assert!(evidence.construction_commits_for_requests >= 1);
+    assert_eq!(evidence.content_rows_written, DOCUMENTS);
+    assert_eq!(evidence.documents_read_by_build, DOCUMENTS);
+    // The continuation queues again unless Structure published first.
+    assert!((1..=2).contains(&host.read_evidence().pull_ahead_requests));
+}
+
+/// Contract item 9: a by-name target ambiguous among provisional names answers
+/// ambiguous only once every candidate passed step 2; a byte-quarantined
+/// candidate leaves a unique answer; a class over one chunk waits for
+/// vault-wide Structure.
+#[test]
+fn a_provisional_ambiguity_waits_for_its_candidates() {
+    let fixture = Fixture::new("early-provisional-ambiguity");
+    fixture.add("b/dup.md", "# B\n");
+    fixture.add("c/dup.md", "# C\n");
+    fixture.add("c/solo.md", "# Solo\n");
+    fixture.add("d/solo.md", b"\xff\xfe not a document");
+    for folder in ["x", "y", "z"] {
+        fixture.add(&format!("{folder}/many.md"), "# Many\n");
+    }
+    let probe = Probe::new([
+        LoadingBoundary::StepComplete(Step::Names),
+        LoadingBoundary::StepComplete(Step::Content),
+    ]);
+    let host = fixture.host(probe.clone());
+    let (dup, solo, many) = std::thread::scope(|scope| {
+        let _release = Release(&probe);
+        let _demand = host.demand(&name()).unwrap();
+        probe.wait(LoadingBoundary::StepComplete(Step::Names));
+        let dup = spawn_get(scope, &host, get("dup"));
+        let solo = spawn_get(scope, &host, get("solo"));
+        let many = spawn_get(scope, &host, get("many"));
+        waits(&host, 3);
+        probe.release();
+        // Held before Structure publishes: only pulled-ahead targets answer.
+        probe.wait(LoadingBoundary::StepComplete(Step::Content));
+        let dup = dup.recv_timeout(BUDGET.work()).unwrap();
+        let solo = solo.recv_timeout(BUDGET.work()).unwrap();
+        assert!(
+            many.try_recv().is_err(),
+            "a class over one chunk was answered before vault-wide Structure"
+        );
+        probe.release();
+        (dup, solo, many.recv_timeout(BUDGET.work()).unwrap())
+    });
+    ready(&host);
+    let ambiguous = dup.as_ref().unwrap_err();
+    assert_eq!(
+        ambiguous.code(),
+        &ReasonCode::VaultAmbiguousTarget,
+        "{ambiguous:?}"
+    );
+    assert_eq!(json!(ambiguous), json!(host.get(&get("dup")).unwrap_err()));
+    assert_exact!("a unique answer", &solo, &host.get(&get("solo")));
+    match &solo.as_ref().unwrap().answer.report {
+        norn_wire::GetReport::Record { document, .. } => {
+            assert_eq!(document.path.as_str(), "c/solo.md")
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_exact!("a class over one chunk", &many, &host.get(&get("many")));
+    assert_eq!(
+        many.unwrap_err().code(),
+        &ReasonCode::VaultAmbiguousTarget,
+        "three candidates"
+    );
+}
+
+/// C3 amendment: exact-path precedence hides `folder/alpha.md` behind a
+/// provisional `alpha.md`. Once step 2 quarantines `alpha.md`, `alpha` names
+/// `folder/alpha.md` alone, and it is never answered before that document
+/// passed step 2.
+#[test]
+fn an_exact_candidate_quarantined_exposes_its_suffix_candidate() {
+    let fixture = Fixture::new("early-exact-quarantined");
+    fixture.add("alpha.md", b"\xff\xfe not a document");
+    fixture.add("folder/alpha.md", "---\nrank: 7\n---\n# Alpha\n[[doc01]]\n");
+    let probe = Probe::new([
+        LoadingBoundary::StepComplete(Step::Names),
+        LoadingBoundary::RequestsDrained,
+        LoadingBoundary::StepComplete(Step::Content),
+    ]);
+    let ops = fixture.ops(probe.clone());
+    let account = ops.account();
+    let host = fixture.host_over(ops, norn_host::READ_SETTLE_BOUND);
+    let early = std::thread::scope(|scope| {
+        let _release = Release(&probe);
+        let _demand = host.demand(&name()).unwrap();
+        probe.wait(LoadingBoundary::StepComplete(Step::Names));
+        let answer = spawn_get(scope, &host, get("alpha"));
+        waits(&host, 1);
+        probe.release();
+        // The first drain spends its chunk on `alpha.md` and then on the
+        // candidate it exposed; the target is not ready until a later drain
+        // runs that candidate's structure.
+        probe.wait(LoadingBoundary::RequestsDrained);
+        assert!(answer.try_recv().is_err(), "answered before its structure");
+        assert!(account.read().pull_ahead_documents >= 2);
+        probe.release();
+        probe.wait(LoadingBoundary::StepComplete(Step::Content));
+        let early = answer.recv_timeout(BUDGET.work()).unwrap();
+        probe.release();
+        early
+    });
+    ready(&host);
+    let ready_get = host.get(&get("alpha"));
+    assert_exact!("the exposed suffix candidate", &early, &ready_get);
+    match &early.unwrap().answer.report {
+        norn_wire::GetReport::Record { document, .. } => {
+            assert_eq!(document.path.as_str(), "folder/alpha.md")
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// Contract item 10: at most 256 distinct live targets are queued; duplicates
+/// share a slot; an expired interest frees its slot; the 257th distinct
+/// target gets no pull-ahead and still answers after vault-wide Structure.
+#[test]
+fn pending_requests_are_bounded_and_duplicates_share_a_slot() {
+    const BOUND: usize = 256;
+    let fixture = Fixture::new("early-bounded-queue");
+    let probe = Probe::new([
+        LoadingBoundary::StepComplete(Step::Names),
+        LoadingBoundary::RequestsDrained,
+    ]);
+    let host = fixture.host_bound(probe.clone(), Duration::from_secs(6));
+    let joined = |count: u64| {
+        wait_until("interests joined", BUDGET, || {
+            let seen = host.read_evidence().pull_ahead_requests;
+            if seen == count {
+                Observed::Met(())
+            } else {
+                Observed::pending(format!("{seen} != {count}"))
+            }
+        })
+        .unwrap();
+    };
+    std::thread::scope(|scope| {
+        let _release = Release(&probe);
+        let _demand = host.demand(&name()).unwrap();
+        probe.wait(LoadingBoundary::StepComplete(Step::Names));
+        // Interests that expire release their slots, ready or not.
+        let gone: Vec<_> = (0..BOUND)
+            .map(|n| spawn_get(scope, &host, get(&format!("gone-{n:03}"))))
+            .collect();
+        joined(BOUND as u64);
+        for answer in gone {
+            assert_still_indexing(&answer.recv_timeout(BUDGET.work()).unwrap().unwrap_err());
+        }
+        let waited = host.read_evidence().settle_waits;
+        let mut kept: Vec<_> = (0..BOUND)
+            .map(|n| spawn_get(scope, &host, get(&format!("kept-{n:03}"))))
+            .collect();
+        // Duplicates share their target's slot.
+        kept.extend((0..2).map(|_| spawn_get(scope, &host, get("kept-000"))));
+        joined(2 * BOUND as u64);
+        waits(&host, waited + BOUND as u64 + 2);
+        let extra = spawn_get(scope, &host, get("extra"));
+        wait_until("a request past the bound", BUDGET, || {
+            match host.read_evidence().requests_past_bound {
+                1 => Observed::Met(()),
+                seen => Observed::pending(format!("{seen}")),
+            }
+        })
+        .unwrap();
+        probe.release();
+        // The first drain readies every queued target; none needs a document.
+        probe.wait(LoadingBoundary::RequestsDrained);
+        for answer in kept {
+            let refused = answer.recv_timeout(BUDGET.work()).unwrap().unwrap_err();
+            assert_eq!(
+                refused.code(),
+                &ReasonCode::VaultUnknownTarget,
+                "{refused:?}"
+            );
+        }
+        assert!(
+            extra.try_recv().is_err(),
+            "the 257th target was pulled ahead"
+        );
+        probe.release();
+        let refused = extra.recv_timeout(BUDGET.work()).unwrap().unwrap_err();
+        assert_eq!(
+            refused.code(),
+            &ReasonCode::VaultUnknownTarget,
+            "{refused:?}"
+        );
+    });
+    // Once the answered reads release their slots, the 257th may join.
+    let reads = host.read_evidence();
+    assert!(
+        (2 * BOUND as u64..=2 * BOUND as u64 + 1).contains(&reads.pull_ahead_requests),
+        "{reads:?}"
+    );
+    assert_eq!(reads.requests_past_bound, 1);
+    ready(&host);
+}
+
+/// Contract item 10: under a continuous stream of distinct requests the build
+/// still reaches Ready, each drain pulls ahead at most one chunk, and the pass
+/// advances a chunk between drains; no document is read or written twice.
+#[test]
+fn a_request_stream_cannot_starve_construction() {
+    const BULK: u64 = 40;
+    let fixture = Fixture::new("early-request-stream");
+    for n in 0..BULK {
+        fixture.add(
+            &format!("bulk/n{n:02}.md"),
+            format!(
+                "---\nrank: {}\n---\n# Bulk {n}\n[[doc0{}]]\n",
+                100 + n,
+                n % 10
+            ),
+        );
+    }
+    let probe = Probe::new([]);
+    let ops = fixture.ops(probe.clone());
+    let account = ops.account();
+    let host = fixture.host_over(ops, norn_host::READ_SETTLE_BOUND);
+    let documents = DOCUMENTS + BULK;
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        let _demand = host.demand(&name()).unwrap();
+        for lane in 0..4u64 {
+            let (host, stop) = (&host, &stop);
+            scope.spawn(move || {
+                let mut n = BULK - 1 - lane;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let _ = host.get(&get(&format!("n{n:02}")));
+                    n = (n + BULK - 4) % BULK;
+                }
+            });
+        }
+        // The lanes stop however this scope ends, so a failure cannot hang it.
+        struct Stop<'a>(&'a std::sync::atomic::AtomicBool);
+        impl Drop for Stop<'_> {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        let _stop = Stop(&stop);
+        ready(&host);
+    });
+    let evidence = account.read();
+    let seen = probe.seen();
+    let drains = seen
+        .iter()
+        .filter(|point| **point == LoadingBoundary::RequestsDrained)
+        .count() as u64;
+    let pages = seen
+        .iter()
+        .filter(|point| **point == LoadingBoundary::CanonicalPage)
+        .count() as u64;
+    assert!(drains > 0, "{seen:?}");
+    assert!(evidence.pull_ahead_documents <= 2 * drains, "{evidence:?}");
+    // Drains run as each step's first group opens and after a chunk.
+    assert!(drains <= pages + 2, "{drains} drains over {pages} chunks");
+    assert_eq!(evidence.content_rows_written, documents);
+    assert_eq!(evidence.structure_rows_written, documents);
+    assert_eq!(evidence.documents_read_by_build, documents);
+}
+
+/// Contract item 11: with a request pending at a chunk boundary the group
+/// commits before the target publishes, so the reader's snapshot holds its
+/// document; with none pending a step commits as the pass alone does, at most
+/// one transaction per 2,048 documents and the closing one.
+#[test]
+fn a_pending_request_commits_at_the_next_chunk_boundary() {
+    let per_step = DOCUMENTS.div_ceil(2048) + 1;
+    // No request: the pass's own commits. Each fixture holds the watcher
+    // lease, so this one ends before the next begins.
+    {
+        let quiet = Fixture::new("early-commits-quiet");
+        let probe = Probe::new([]);
+        let ops = quiet.ops(probe.clone());
+        let account = ops.account();
+        let host = quiet.host_over(ops, norn_host::READ_SETTLE_BOUND);
+        let _demand = host.demand(&name()).unwrap();
+        ready(&host);
+        let evidence = account.read();
+        assert_eq!(evidence.construction_commits_for_requests, 0);
+        assert_eq!(evidence.pull_ahead_documents, 0);
+        assert!(evidence.content_step_commits <= per_step, "{evidence:?}");
+        assert!(evidence.structure_step_commits <= per_step, "{evidence:?}");
+        assert!(!probe.seen().contains(&LoadingBoundary::RequestsDrained));
+    }
+    // A pending request: one early commit, before the target publishes.
+    let fixture = Fixture::new("early-commits-pending");
+    let probe = Probe::new([
+        LoadingBoundary::StepComplete(Step::Names),
+        LoadingBoundary::CanonicalPage,
+        LoadingBoundary::TargetReady,
+    ]);
+    let ops = fixture.ops(probe.clone());
+    let account = ops.account();
+    let host = fixture.host_over(ops, norn_host::READ_SETTLE_BOUND);
+    let early = std::thread::scope(|scope| {
+        let _release = Release(&probe);
+        let _demand = host.demand(&name()).unwrap();
+        probe.wait(LoadingBoundary::StepComplete(Step::Names));
+        probe.release();
+        probe.wait(LoadingBoundary::CanonicalPage);
+        let answer = spawn_get(scope, &host, get("first"));
+        waits(&host, 1);
+        let before = account.read();
+        probe.release();
+        // Held after publication: the commit has already run.
+        probe.wait(LoadingBoundary::TargetReady);
+        let held = account.read();
+        assert_eq!(
+            held.construction_commits_for_requests - before.construction_commits_for_requests,
+            1
+        );
+        assert_eq!(
+            held.content_step_commits, before.content_step_commits,
+            "step commits are counted when the step ends"
+        );
+        let early = answer.recv_timeout(BUDGET.work()).unwrap().unwrap();
+        probe.release();
+        early
+    });
+    ready(&host);
+    // The reader's snapshot held the document's content and structure.
+    assert_eq!(
+        json!(&early.answer.report),
+        relations_loading(json!(&host.get(&get("first")).unwrap().answer.report))
+    );
+    let evidence = account.read();
+    assert_eq!(evidence.construction_commits_for_requests, 1);
+    assert!(
+        evidence.content_step_commits <= per_step + evidence.construction_commits_for_requests,
+        "{evidence:?}"
+    );
+    assert!(evidence.structure_step_commits <= per_step, "{evidence:?}");
+}
+
+/// The requests an exactness sweep issues at each held boundary: every Get
+/// shape over documents with links, tags, a broken document, an unlistable
+/// directory and an ambiguous slug, and the Finds whose steps publish.
+fn sweep_gets() -> Vec<(&'static str, GetParams)> {
+    use norn_wire::CollectionSelector;
+    vec![
+        ("record", get("first")),
+        (
+            "projected",
+            get("doc03").with_columns([Column::path(), Column::fields(), Column::body()]),
+        ),
+        (
+            "declared field",
+            get("doc04").with_columns([Column::field("rank")]),
+        ),
+        ("section", get("first#First")),
+        ("block", get("first#^block")),
+        (
+            "links page",
+            get("first").with_collection(CollectionSelector::Links),
+        ),
+        (
+            "findings page",
+            get("first").with_collection(CollectionSelector::Findings),
+        ),
+        (
+            "tags page",
+            get("first")
+                .with_collection(CollectionSelector::Tags)
+                .with_limit(1),
+        ),
+        ("broken", get("broken")),
+        ("broken section", get("broken#Anything")),
+        ("ambiguous", get("dup")),
+        ("unknown", get("absent")),
+        ("unlistable", get("locked/inner")),
+        ("linked", get("doc05")),
+    ]
+}
+
+fn sweep_finds() -> Vec<(&'static str, FindParams)> {
+    vec![
+        ("field", ranked("3")),
+        ("path", find().with_predicates([Predicate::path("b/*")])),
+        ("tag", find().with_predicates([Predicate::tag("group1")])),
+        (
+            "links",
+            find().with_columns([Column::path(), Column::links(), Column::findings()]),
+        ),
+    ]
+}
+
+/// Contract item 21: at every published step and at a mid-chunk pull-ahead,
+/// every request a build admits equals its Ready answer modulo loading parts.
+#[test]
+fn every_admitted_answer_equals_ready() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new("early-exactness-sweep");
+    fixture.add("b/dup.md", "# B dup\n[[doc02]] #group1\n");
+    fixture.add("c/dup.md", "# C dup\n");
+    fixture.add("broken.md", "# Broken\n");
+    fixture.add("locked/inner.md", "# Inner\n");
+    std::fs::set_permissions(
+        fixture.root.join("broken.md"),
+        std::fs::Permissions::from_mode(0o000),
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        fixture.root.join("locked"),
+        std::fs::Permissions::from_mode(0o000),
+    )
+    .unwrap();
+    let points = [
+        LoadingBoundary::StepComplete(Step::Names),
+        LoadingBoundary::CanonicalPage,
+        LoadingBoundary::RequestsDrained,
+        LoadingBoundary::StepComplete(Step::Content),
+        LoadingBoundary::StepComplete(Step::Structure),
+        LoadingBoundary::Published(Step::Relations),
+    ];
+    let probe = Probe::new(points);
+    // Chunks of eight leave each drain room for every queued target.
+    let host = fixture.host_over(
+        ProductionEntryOps::new(fixture.dirs.clone(), ProductionPolicy::new(2, 8).unwrap())
+            .with_loading_probe(probe.clone()),
+        Duration::from_secs(30),
+    );
+    let (gets, finds, pulled) = std::thread::scope(|scope| {
+        let _release = Release(&probe);
+        let _demand = host.demand(&name()).unwrap();
+        let mut gets = Vec::new();
+        let mut finds = Vec::new();
+        let mut pulled = None;
+        for point in points {
+            probe.wait(point);
+            if point == LoadingBoundary::CanonicalPage {
+                // A Get waiting here is pulled ahead at a later drain.
+                let joined = host.read_evidence().pull_ahead_requests;
+                pulled = Some(spawn_get(scope, &host, get("doc09")));
+                wait_until("the mid-content Get joins", BUDGET, || {
+                    match host.read_evidence().pull_ahead_requests {
+                        seen if seen > joined => Observed::Met(()),
+                        seen => Observed::pending(format!("{seen}")),
+                    }
+                })
+                .unwrap();
+                probe.release();
+                continue;
+            }
+            for (what, params) in sweep_gets() {
+                gets.push((point, what, params.clone(), spawn_get(scope, &host, params)));
+            }
+            for (what, params) in sweep_finds() {
+                finds.push((
+                    point,
+                    what,
+                    params.clone(),
+                    spawn_find(scope, &host, params),
+                ));
+            }
+            if point == LoadingBoundary::StepComplete(Step::Content) {
+                let answer = pulled
+                    .as_ref()
+                    .unwrap()
+                    .recv_timeout(BUDGET.work())
+                    .unwrap();
+                pulled = Some({
+                    let (send, receive) = mpsc::sync_channel(1);
+                    send.send(answer).unwrap();
+                    receive
+                });
+            }
+            // Admitted answers arrive while the build is held here.
+            std::thread::sleep(Duration::from_millis(200));
+            probe.release();
+        }
+        let gets: Vec<_> = gets
+            .into_iter()
+            .map(|(point, what, params, answer)| {
+                (
+                    point,
+                    what,
+                    params,
+                    answer.recv_timeout(BUDGET.work()).unwrap(),
+                )
+            })
+            .collect();
+        let finds: Vec<_> = finds
+            .into_iter()
+            .map(|(point, what, params, answer)| {
+                (
+                    point,
+                    what,
+                    params,
+                    answer.recv_timeout(BUDGET.work()).unwrap(),
+                )
+            })
+            .collect();
+        (gets, finds, pulled.unwrap().recv().unwrap())
+    });
+    ready(&host);
+    assert_exact!("pulled ahead mid-chunk", &pulled, &host.get(&get("doc09")));
+    let mut admitted = 0;
+    for (point, what, params, answer) in &gets {
+        assert_exact!(&format!("{what} at {point:?}"), answer, &host.get(params));
+        admitted += usize::from(
+            answer
+                .as_ref()
+                .is_ok_and(|a| warming(&a.answer.reading.trust)),
+        );
+    }
+    for (point, what, params, answer) in &finds {
+        assert_exact!(&format!("{what} at {point:?}"), answer, &host.find(params));
+        admitted += usize::from(
+            answer
+                .as_ref()
+                .is_ok_and(|a| warming(&a.answer.reading.trust)),
+        );
+    }
+    assert!(admitted > 0);
+    std::fs::set_permissions(
+        fixture.root.join("locked"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+}
+
+/// The store a host attaching `fixture`'s tree with no early reader derives.
+fn reference_store(fixture: &Fixture, label: &str) -> PathBuf {
+    let dirs = ConfigDirs::new(
+        fixture.scratch.join(format!("{label}-config")),
+        fixture.scratch.join(format!("{label}-data")),
+    )
+    .unwrap();
+    let path = dirs.derived_dir(&name()).join("store.sqlite3");
+    let reference = Host::new(
+        RegistryRead::from_entries([Registration::new(
+            name(),
+            VaultRoot::new(&fixture.root).unwrap(),
+        )]),
+        ProductionEntryOps::new(dirs, ProductionPolicy::new(2, 2).unwrap()),
+        LifecyclePolicy {
+            idle_after: Duration::from_secs(7200),
+            worker_slots: 1,
+            watch_poll_interval: Duration::from_millis(25),
+            read_settle_bound: norn_host::READ_SETTLE_BOUND,
+        },
+    )
+    .unwrap();
+    let demand = reference.demand(&name()).unwrap();
+    ready(&reference);
+    drop(demand);
+    drop(reference);
+    path
+}
+
+/// Every document's path beside its row id: the identities step 1 assigned.
+fn path_ids(path: &Path) -> Vec<(String, i64)> {
+    let database = norn_db::open_read_only(path).adopted.unwrap();
+    let mut statement = database
+        .connection()
+        .prepare("SELECT path, id FROM documents ORDER BY path")
+        .unwrap();
+    statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+fn semantic(path: &Path) -> serde_json::Value {
+    norn_store::startup_audit::audit(path, |_, _, _| Ok(())).unwrap()["semantic_sha256"].clone()
+}
+
+/// Contract item 22: a build that pulled many requests ahead derives the
+/// store an ordinary build derives — projection, semantic digest and the
+/// path-to-id map — and still reads and writes each document once.
+#[test]
+fn a_pulled_ahead_build_equals_an_ordinary_build() {
+    let fixture = Fixture::new("early-pulled-ahead-equals");
+    fixture.add("b/dup.md", "# B dup\n[[doc02]]\n");
+    fixture.add("c/dup.md", "# C dup\n");
+    fixture.add("alpha.md", b"\xff\xfe not a document");
+    fixture.add("folder/alpha.md", "# Alpha\n[[first]] #group1\n");
+    let documents = DOCUMENTS + 3;
+    let probe = Probe::new([LoadingBoundary::StepComplete(Step::Names)]);
+    let ops = fixture.ops(probe.clone());
+    let account = ops.account();
+    let host = fixture.host_over(ops, norn_host::READ_SETTLE_BOUND);
+    let targets: Vec<String> = (0..12)
+        .rev()
+        .map(|n| format!("doc{n:02}"))
+        .chain(["first", "dup", "alpha", "folder/alpha"].map(String::from))
+        .collect();
+    std::thread::scope(|scope| {
+        let _release = Release(&probe);
+        let _demand = host.demand(&name()).unwrap();
+        probe.wait(LoadingBoundary::StepComplete(Step::Names));
+        let answers: Vec<_> = targets
+            .iter()
+            .map(|target| spawn_get(scope, &host, get(target)))
+            .collect();
+        waits(&host, targets.len() as u64);
+        probe.release();
+        for answer in answers {
+            let _ = answer.recv_timeout(BUDGET.work()).unwrap();
+        }
+    });
+    ready(&host);
+    let evidence = account.read();
+    assert!(evidence.pull_ahead_documents > 0, "{evidence:?}");
+    assert_eq!(evidence.content_rows_written, documents, "{evidence:?}");
+    assert_eq!(evidence.structure_rows_written, documents, "{evidence:?}");
+    assert_eq!(
+        evidence.documents_read_by_build,
+        documents + 1,
+        "{evidence:?}"
+    );
+    assert_eq!(evidence.document_opens, documents + 2, "{evidence:?}");
+    drop(host);
+    let reference = reference_store(&fixture, "reference");
+    project(&fixture.store_path(), &fixture.root).assert_equivalent(
+        &project(&reference, &fixture.root),
+        "a pulled-ahead build derives the ordinary build's store",
+    );
+    assert_eq!(semantic(&fixture.store_path()), semantic(&reference));
+    assert_eq!(path_ids(&fixture.store_path()), path_ids(&reference));
 }

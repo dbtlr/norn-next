@@ -98,6 +98,10 @@ pub struct JobEvidence {
     rebuilds_run: AtomicU64,
     from_zero_builds: AtomicU64,
     construction_checkpoint_busy: AtomicU64,
+    content_step_commits: AtomicU64,
+    structure_step_commits: AtomicU64,
+    pull_ahead_documents: AtomicU64,
+    construction_commits_for_requests: AtomicU64,
     watcher_polls: AtomicU64,
     watcher_rescans_reported: AtomicU64,
     mint_statements_under_the_gate: AtomicU64,
@@ -218,6 +222,18 @@ pub struct EvidenceReading {
     pub from_zero_builds: u64,
     /// Construction checkpoints a reader prevented from truncating the WAL.
     pub construction_checkpoint_busy: u64,
+    /// Transactions from-zero content steps committed, early commits for
+    /// requests and those a rare increment closed included.
+    pub content_step_commits: u64,
+    /// Transactions from-zero structure steps committed, early commits for
+    /// requests included.
+    pub structure_step_commits: u64,
+    /// Documents from-zero builds ran through step 2 or step 3 ahead of their
+    /// queue for a requested Get; each is a document the pass then skips.
+    pub pull_ahead_documents: u64,
+    /// Early commits a from-zero build took at a chunk boundary so a pending
+    /// request's reader sees its document.
+    pub construction_commits_for_requests: u64,
     /// Watcher polls taken over an attachment, however each one answered.
     ///
     /// One per poll of an entry's attachment — a pass of the dispatcher's
@@ -373,6 +389,18 @@ impl EvidenceReading {
             construction_checkpoint_busy: self
                 .construction_checkpoint_busy
                 .saturating_sub(earlier.construction_checkpoint_busy),
+            content_step_commits: self
+                .content_step_commits
+                .saturating_sub(earlier.content_step_commits),
+            structure_step_commits: self
+                .structure_step_commits
+                .saturating_sub(earlier.structure_step_commits),
+            pull_ahead_documents: self
+                .pull_ahead_documents
+                .saturating_sub(earlier.pull_ahead_documents),
+            construction_commits_for_requests: self
+                .construction_commits_for_requests
+                .saturating_sub(earlier.construction_commits_for_requests),
             watcher_polls: self.watcher_polls.saturating_sub(earlier.watcher_polls),
             watcher_rescans_reported: self
                 .watcher_rescans_reported
@@ -499,6 +527,10 @@ impl JobEvidence {
             rebuilds_run: get(&self.rebuilds_run),
             from_zero_builds: get(&self.from_zero_builds),
             construction_checkpoint_busy: get(&self.construction_checkpoint_busy),
+            content_step_commits: get(&self.content_step_commits),
+            structure_step_commits: get(&self.structure_step_commits),
+            pull_ahead_documents: get(&self.pull_ahead_documents),
+            construction_commits_for_requests: get(&self.construction_commits_for_requests),
             watcher_polls: get(&self.watcher_polls),
             watcher_rescans_reported: get(&self.watcher_rescans_reported),
             mint_statements_under_the_gate: get(&self.mint_statements_under_the_gate),
@@ -527,6 +559,26 @@ impl JobEvidence {
 
     pub(crate) fn count_construction_checkpoint_busy(&self) {
         self.construction_checkpoint_busy
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Count the transactions a from-zero step committed.
+    pub(crate) fn count_step_commits(&self, step: norn_store::Step, commits: u64) {
+        let counter = match step {
+            norn_store::Step::Content => &self.content_step_commits,
+            norn_store::Step::Structure => &self.structure_step_commits,
+            _ => return,
+        };
+        counter.fetch_add(commits, Ordering::Relaxed);
+    }
+
+    pub(crate) fn count_pull_ahead_documents(&self, documents: u64) {
+        self.pull_ahead_documents
+            .fetch_add(documents, Ordering::Relaxed);
+    }
+
+    pub(crate) fn count_construction_commit_for_requests(&self) {
+        self.construction_commits_for_requests
             .fetch_add(1, Ordering::Relaxed);
     }
 
@@ -1211,6 +1263,8 @@ pub(crate) struct ReadEvidence {
     settle_waits: AtomicU64,
     settle_rounds: AtomicU64,
     settle_expiries: AtomicU64,
+    pull_ahead_requests: AtomicU64,
+    requests_past_bound: AtomicU64,
     preview_link_judgments: LinkJudgmentAccount,
     repair_batches: RepairBatchAccount,
     similar_stems: SimilarStemsAccount,
@@ -1336,6 +1390,12 @@ pub struct ReadReading {
     /// when their settle bound ran out: each is a
     /// [`ReadRefusal::Unsettled`](crate::ReadRefusal::Unsettled).
     pub settle_expiries: u64,
+    /// Distinct targets waiting Gets queued for a from-zero build to pull
+    /// ahead: a read sharing a live slot adds none.
+    pub pull_ahead_requests: u64,
+    /// Waiting Gets that found their build's pull-ahead queue full, each
+    /// counted once; they wait for vault-wide Structure instead.
+    pub requests_past_bound: u64,
     /// What the previews this host answered spent judging their plans' links
     /// on the store's resolution door, over every judgment each ran.
     pub preview_link_judgments: LinkJudgmentCost,
@@ -1398,6 +1458,10 @@ pub struct ReadsSince {
     pub settle_rounds: u64,
     /// Acquisitions this window refused past their settle bound.
     pub settle_expiries: u64,
+    /// Distinct targets this window's waiting Gets queued for pull-ahead.
+    pub pull_ahead_requests: u64,
+    /// Waiting Gets this window that found the pull-ahead queue full.
+    pub requests_past_bound: u64,
     /// What this window's previews spent judging their plans' links.
     pub preview_link_judgments: LinkJudgmentCost,
     /// What this window's batch reads reported of themselves.
@@ -1440,6 +1504,12 @@ impl ReadReading {
             settle_waits: self.settle_waits.saturating_sub(earlier.settle_waits),
             settle_rounds: self.settle_rounds.saturating_sub(earlier.settle_rounds),
             settle_expiries: self.settle_expiries.saturating_sub(earlier.settle_expiries),
+            pull_ahead_requests: self
+                .pull_ahead_requests
+                .saturating_sub(earlier.pull_ahead_requests),
+            requests_past_bound: self
+                .requests_past_bound
+                .saturating_sub(earlier.requests_past_bound),
             preview_link_judgments: self
                 .preview_link_judgments
                 .since(earlier.preview_link_judgments),
@@ -1477,6 +1547,8 @@ impl ReadEvidence {
             settle_waits: get(&self.settle_waits),
             settle_rounds: get(&self.settle_rounds),
             settle_expiries: get(&self.settle_expiries),
+            pull_ahead_requests: get(&self.pull_ahead_requests),
+            requests_past_bound: get(&self.requests_past_bound),
             preview_link_judgments: self.preview_link_judgments.read(),
             repair_batches: self.repair_batches.read(),
             similar_stems: self.similar_stems.read(),
@@ -1646,6 +1718,14 @@ impl ReadEvidence {
     /// **Called where the wait begins**, after the acquisition gave the entry
     /// gate back, so a reading taken while the read waits names it whatever
     /// answer it goes on to get.
+    pub(crate) fn count_pull_ahead_request(&self) {
+        self.pull_ahead_requests.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn count_request_past_bound(&self) {
+        self.requests_past_bound.fetch_add(1, Ordering::Relaxed);
+    }
+
     pub(crate) fn count_settle_wait(&self) {
         self.settle_waits.fetch_add(1, Ordering::Relaxed);
     }

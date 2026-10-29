@@ -11,7 +11,7 @@ use super::*;
 use norn_fs::watch::BuildAuthority;
 use norn_store::Step;
 use norn_store::early::Boundary;
-use norn_wire::{FindParams, GetParams};
+use norn_wire::{Column, FindParams, GetParams};
 
 #[derive(Clone, Copy)]
 pub(crate) enum Request<'a> {
@@ -30,6 +30,24 @@ impl Request<'_> {
             Self::Find(params) => norn_store::early::find(params),
         };
         (boundary != Boundary::Ready).then_some(boundary)
+    }
+}
+
+impl<'a> Request<'a> {
+    /// The target a build may publish ready for this request ahead of
+    /// vault-wide Structure: a Get admitted at Structure that names no
+    /// undeclared field, whose absence only the complete key universe
+    /// settles. Every other request waits for its vault-wide step.
+    fn pulled_ahead_target(self, model: &ContentModel) -> Option<&'a str> {
+        let Self::Get(params) = self else {
+            return None;
+        };
+        let undeclared = params
+            .columns
+            .iter()
+            .any(|column| matches!(column, Column::Field { key, .. } if !model.is_declared(key)));
+        (norn_store::early::get(params) == Boundary::Structure && !undeclared)
+            .then(|| params.target.address())
     }
 }
 
@@ -101,16 +119,93 @@ pub(super) struct Building<R: ReadSource> {
     authority: BuildAuthority,
     /// The last step this build ended and published; `None` before step 1 ends.
     published: Option<Step>,
-    /// NORN-468 C-2 (Get pull-ahead) is the consuming layer.
-    #[allow(dead_code)]
     requests: Requests,
 }
 
-/// The requests a build pulls ahead of its queue and the targets it has
-/// published ready. NORN-468 C-2 (pull-ahead) fills this; until then every Get
-/// is admitted at vault-wide Structure and no build drains requests.
+/// The most distinct live targets a build holds, pending and ready together,
+/// whatever the vault's size. A request past it waits for vault-wide Structure.
+pub(super) const MAX_PENDING: usize = 256;
+
+/// The Get targets a build pulls ahead of its queue and the ones it has
+/// published ready, keyed by target address. Each slot lives only while a
+/// waiting read's lease holds its interest: an expired interest releases its
+/// slot, ready or not, so no vault-sized map of ready targets accrues.
 #[derive(Default)]
-pub(super) struct Requests;
+pub(super) struct Requests {
+    slots: Vec<Slot>,
+}
+
+struct Slot {
+    target: String,
+    interest: Weak<()>,
+    ready: bool,
+}
+
+/// What a read's interest in a target found in its build's queue.
+pub(super) enum Joined {
+    /// A new slot: the first live interest in this target.
+    New(Arc<()>),
+    /// The slot a live interest in the same target already holds.
+    Shared(Arc<()>),
+    /// The queue holds [`MAX_PENDING`] live targets.
+    PastBound,
+}
+
+impl Requests {
+    fn release_expired(&mut self) {
+        self.slots.retain(|slot| slot.interest.strong_count() > 0);
+    }
+
+    fn ready(&self, target: &str) -> bool {
+        self.slots
+            .iter()
+            .any(|slot| slot.ready && slot.target == target && slot.interest.strong_count() > 0)
+    }
+
+    fn join(&mut self, target: &str) -> Joined {
+        self.release_expired();
+        if let Some(interest) = self
+            .slots
+            .iter()
+            .find(|slot| slot.target == target)
+            .and_then(|slot| slot.interest.upgrade())
+        {
+            return Joined::Shared(interest);
+        }
+        if self.slots.len() >= MAX_PENDING {
+            return Joined::PastBound;
+        }
+        let interest = Arc::new(());
+        self.slots.push(Slot {
+            target: target.to_owned(),
+            interest: Arc::downgrade(&interest),
+            ready: false,
+        });
+        Joined::New(interest)
+    }
+
+    fn pending(&mut self) -> Vec<String> {
+        self.release_expired();
+        self.slots
+            .iter()
+            .filter(|slot| !slot.ready)
+            .map(|slot| slot.target.clone())
+            .collect()
+    }
+
+    /// Mark each of `targets` a live interest still holds ready; whether any moved.
+    fn publish(&mut self, targets: &[String]) -> bool {
+        self.release_expired();
+        let mut moved = false;
+        for slot in &mut self.slots {
+            if !slot.ready && targets.contains(&slot.target) {
+                slot.ready = true;
+                moved = true;
+            }
+        }
+        moved
+    }
+}
 
 /// What a request meets in its entry's construction.
 pub(super) enum Early<R: ReadSource> {
@@ -130,6 +225,9 @@ pub(crate) struct Admitted<R> {
     authority: BuildAuthority,
     token: BuildToken,
     published: Step,
+    /// The target the build published ready for this request ahead of its
+    /// vault-wide step, where that is what admitted it.
+    target: Option<String>,
     /// The build had not judged relations when this request was admitted.
     pub(super) relations_loading: bool,
 }
@@ -142,6 +240,7 @@ impl<R> Clone for Admitted<R> {
             authority: self.authority.clone(),
             token: self.token,
             published: self.published,
+            target: self.target.clone(),
             relations_loading: self.relations_loading,
         }
     }
@@ -157,6 +256,10 @@ impl<R> Admitted<R> {
         request
             .boundary()
             .is_some_and(|boundary| reaches(Some(self.published), boundary))
+            || self
+                .target
+                .as_deref()
+                .is_some_and(|target| request.pulled_ahead_target(&self.model) == Some(target))
     }
 }
 
@@ -192,7 +295,7 @@ impl<A: SnapshotSource> ProgressReporter<A> {
             model: begun.model,
             authority: begun.authority,
             published: None,
-            requests: Requests,
+            requests: Requests::default(),
         }));
         Some(token)
     }
@@ -217,6 +320,50 @@ impl<A: SnapshotSource> ProgressReporter<A> {
                 return false;
             }
             building.published = Some(step);
+            state.construction_revision += 1;
+            true
+        })
+        .unwrap_or(false)
+    }
+
+    /// The targets live reads wait on that `token`'s build has not yet
+    /// published ready, for its next drain. Zero I/O under the gate.
+    pub(crate) fn pending_targets(&self, token: BuildToken) -> Vec<String> {
+        self.with_claimed_state(|state| match state.construction.as_mut() {
+            Some(Construction::Building(building)) if building.token == token => {
+                building.requests.pending()
+            }
+            _ => Vec::new(),
+        })
+        .unwrap_or_default()
+    }
+
+    /// Publish that `token`'s build committed every candidate of each of
+    /// `targets` past step 2 and its resolved document past step 3, over the
+    /// store `store_epoch` names. The guards are [`Self::publish_step`]'s; a
+    /// target no live interest holds any longer publishes nothing.
+    pub(crate) fn publish_targets(
+        &self,
+        token: BuildToken,
+        store_epoch: &str,
+        targets: &[String],
+    ) -> bool {
+        self.with_claimed_state(|state| {
+            if !state.may_publish_construction() {
+                return false;
+            }
+            let Some(Construction::Building(building)) = state.construction.as_mut() else {
+                return false;
+            };
+            if building.claim != self.epoch
+                || building.token != token
+                || building.store_epoch != store_epoch
+                || building.published.is_none()
+                || !building.authority.admits()
+                || !building.requests.publish(targets)
+            {
+                return false;
+            }
             state.construction_revision += 1;
             true
         })
@@ -298,9 +445,9 @@ impl<A: SnapshotSource> EntryState<A> {
 
     /// What `request` meets in this entry's construction under this hold.
     ///
-    /// C-2 adds per-target Get admission here: a Get whose target the build
-    /// has published ready is admitted before vault-wide Structure, and an
-    /// interest in a target not yet ready joins [`Building::requests`].
+    /// Once step 1 has ended, a Get whose target the build has published
+    /// ready is admitted before vault-wide Structure; one whose target is not
+    /// yet ready waits, and [`Self::join_requests`] queues its interest.
     pub(super) fn early(&self, request: Request<'_>) -> Early<A::Reader> {
         let Some(boundary) = request.boundary() else {
             return Early::Refused;
@@ -317,22 +464,40 @@ impl<A: SnapshotSource> EntryState<A> {
             Some(Construction::Building(building))
                 if self.claim.stands_at(building.claim) && building.authority.admits() =>
             {
-                match building.published {
-                    Some(published) if reaches(Some(published), boundary) => {
-                        Early::Admitted(Admitted {
-                            pool: Arc::clone(&building.pool),
-                            model: Arc::clone(&building.model),
-                            authority: building.authority.clone(),
-                            token: building.token,
-                            published,
-                            relations_loading: !reaches(Some(published), Boundary::Relations),
-                        })
+                let Some(published) = building.published else {
+                    return Early::Waits;
+                };
+                let target = if reaches(Some(published), boundary) {
+                    None
+                } else {
+                    match request.pulled_ahead_target(&building.model) {
+                        Some(target) if building.requests.ready(target) => Some(target.to_owned()),
+                        _ => return Early::Waits,
                     }
-                    _ => Early::Waits,
-                }
+                };
+                Early::Admitted(Admitted {
+                    pool: Arc::clone(&building.pool),
+                    model: Arc::clone(&building.model),
+                    authority: building.authority.clone(),
+                    token: building.token,
+                    published,
+                    target,
+                    relations_loading: !reaches(Some(published), Boundary::Relations),
+                })
             }
             _ => Early::Refused,
         }
+    }
+
+    /// Queue a waiting Get's interest in its target with this entry's build,
+    /// for the build to pull ahead at its next drain; `None` for a request no
+    /// drain serves, or with no build begun.
+    pub(super) fn join_requests(&mut self, request: Request<'_>) -> Option<Joined> {
+        let Some(Construction::Building(building)) = self.construction.as_mut() else {
+            return None;
+        };
+        let target = request.pulled_ahead_target(&building.model)?;
+        Some(building.requests.join(target))
     }
 
     /// Whether `admitted` still stands for `request` under this hold: the same
@@ -348,6 +513,10 @@ impl<A: SnapshotSource> EntryState<A> {
                 if building.token == admitted.token
                     && self.claim.stands_at(building.claim)
                     && building.authority.admits()
+                    && admitted
+                        .target
+                        .as_deref()
+                        .is_none_or(|target| building.requests.ready(target))
         ) && admitted.serves(request)
     }
 

@@ -15,6 +15,11 @@ pub enum LoadingBoundary {
     StepComplete(norn_store::Step),
     /// The build published the end of this step to its early reads.
     Published(norn_store::Step),
+    /// The build published requested Get targets ready, after the commit
+    /// holding their documents.
+    TargetReady,
+    /// The build drained the requests pending at a chunk boundary.
+    RequestsDrained,
     LinkHealthChunk,
     FullTextBatch,
     CanonicalComplete,
@@ -49,6 +54,26 @@ impl Publisher<'_> {
         }
         #[cfg(not(feature = "induced-failure"))]
         let _ = self.ops;
+    }
+
+    /// The targets live reads wait on that this build has not yet published
+    /// ready, for its next drain.
+    pub(super) fn pending_targets(&self) -> Vec<String> {
+        self.begun
+            .as_ref()
+            .map(|(token, _)| self.progress.pending_targets(*token))
+            .unwrap_or_default()
+    }
+
+    /// Publish `targets` ready: the group writing their documents has committed.
+    pub(super) fn publish_targets(&self, targets: &[String]) {
+        let Some((token, epoch)) = &self.begun else {
+            return;
+        };
+        if !targets.is_empty() && self.progress.publish_targets(*token, epoch, targets) {
+            #[cfg(feature = "induced-failure")]
+            self.ops.loading_boundary(LoadingBoundary::TargetReady);
+        }
     }
 
     /// Close this build's construction: it failed, and nothing it wrote is admitted again.
