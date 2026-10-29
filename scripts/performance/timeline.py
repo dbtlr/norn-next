@@ -31,7 +31,10 @@ class Thresholds:
 
 
 def write_rows(table: Path, rows: list[dict]) -> None:
+    """Append one run's rows; runs are grouped by run_at, so each must be new to the table."""
     new = not table.exists()
+    if not new and {row["run_at"] for row in rows} & {row["run_at"] for row in read(table)}:
+        raise ValueError("this run is already in the table")
     with table.open("a", newline="") as file:
         writer = csv.DictWriter(file, fieldnames=COLUMNS, delimiter="\t", lineterminator="\n")
         if new:

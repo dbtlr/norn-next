@@ -61,6 +61,16 @@ class AppendTests(unittest.TestCase):
             append(table.path, source)
         self.assertFalse(table.path.exists())
 
+    def test_a_run_already_in_the_table_is_refused_rather_than_merged(self):
+        # Runs are grouped by run_at, so a repeated append would double one run's values.
+        table = Table(self)
+        table.add()
+        with self.assertRaises(ValueError):
+            append(table.path, table.root / "record-1.json")
+        with self.assertRaises(ValueError):
+            skip(table.path, run_at="2026-10-01T04:30:00Z", commit="aaaa", load=1.0, reason="busy")
+        self.assertEqual(len(read(table.path)), 3)
+
     def test_a_skipped_run_is_one_row_with_its_reason(self):
         table = Table(self)
         skip(table.path, run_at="2026-10-02T04:30:00Z", commit="aaaa", load=9.5, reason="cargo is running")
