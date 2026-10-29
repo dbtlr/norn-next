@@ -9,9 +9,9 @@ from pathlib import Path
 from timeline import COLUMNS, Thresholds, append, compare, read, skip
 
 
-def record(run_at, commit="aaaa", ready=1000.0, warm=1.0, derived=2014, status="measured"):
+def record(run_at, commit="aaaa", ready=1000.0, warm=1.0, derived=2014, status="measured", build="b" * 64):
     return {"record_version": 1, "completed": True, "run_at": run_at, "commit": commit,
-            "build_sha256": "b" * 64, "compiler": "1.97.1", "load_start": 0.5,
+            "build_sha256": build, "compiler": "1.97.1", "load_start": 0.5,
             "rows": [
                 {"documents": 2014, "metric": "ready", "value": ready, "unit": "ms", "status": status, "note": ""},
                 {"documents": 2014, "metric": "warm.get_small.median", "value": warm, "unit": "ms",
@@ -86,6 +86,15 @@ class WorkChangeTests(unittest.TestCase):
         report = table.report()
         self.assertEqual(len(report), 1)
         self.assertIn("nondeterministic work at aaaa", report[0])
+
+    def test_a_counter_change_between_two_builds_of_one_commit_is_a_work_change(self):
+        # A dirty checkout keeps its commit while its executable changes.
+        table = Table(self)
+        table.add(commit="aaaa-dirty", derived=2014, build="1" * 64)
+        table.add(commit="aaaa-dirty", derived=4028, build="2" * 64)
+        report = table.report()
+        self.assertEqual(len(report), 1)
+        self.assertIn("work change at aaaa-dirty between builds 111111111111..222222222222", report[0])
 
     def test_skipped_runs_do_not_hide_the_previous_commit(self):
         table = Table(self)

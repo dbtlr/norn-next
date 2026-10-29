@@ -371,8 +371,8 @@ reason, so a gap stays visible. Keep one table per engine.
 
 - a skipped run, and any metric that is `unavailable` or `unstable`;
 - a work change: any counter that differs from the measured run before it. Between
-  two commits it is a change in work; at the same commit it is reported as
-  nondeterministic;
+  two commits, or two executables of one dirty commit, it is a change in work; for
+  the same commit and executable it is reported as nondeterministic;
 - a sustained clock shift: the latest three measured values are each at least 1.2
   times, and at least the floor above, the median of up to seven measured runs
   before them. The floor is 100 ms for `first_get`, `first_find`, `ready` and

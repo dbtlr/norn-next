@@ -89,8 +89,14 @@ def work_changes(measured: list[list[dict]]) -> list[str]:
         if not changed:
             continue
         commits = before[0]["commit"], latest[0]["commit"]
-        heading = (f"nondeterministic work at {commits[1]}" if commits[0] == commits[1]
-                   else f"work change {commits[0]}..{commits[1]}")
+        builds = before[0]["build_sha256"][:12], latest[0]["build_sha256"][:12]
+        if commits[0] != commits[1]:
+            heading = f"work change {commits[0]}..{commits[1]}"
+        elif builds[0] != builds[1]:
+            # A dirty checkout keeps its commit while its executable changes.
+            heading = f"work change at {commits[1]} between builds {builds[0]}..{builds[1]}"
+        else:
+            heading = f"nondeterministic work at {commits[1]}"
         lines.append(f"{heading} at {documents} documents: " + "; ".join(changed))
     return lines
 
