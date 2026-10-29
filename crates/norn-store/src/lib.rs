@@ -132,6 +132,7 @@ mod construction;
 mod count;
 mod counters;
 mod describe;
+pub mod early;
 mod error;
 mod facts;
 #[cfg(feature = "induced-failure")]
