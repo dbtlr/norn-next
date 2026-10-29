@@ -15,13 +15,17 @@ use super::*;
 use norn_fs::watch::BuildAuthority;
 use norn_store::Step;
 use norn_store::early::Boundary;
-use norn_wire::{Column, FindParams, GetParams};
+use norn_wire::{Column, FindParams, GetParams, SearchParams, ValidateParams};
 
+/// What a read asks of its entry: the shape early admission classifies, or
+/// a canonical read only `Ready` serves.
 #[derive(Clone, Copy)]
 pub(crate) enum Request<'a> {
     Canonical,
     Get(&'a GetParams),
     Find(&'a FindParams),
+    Validate(&'a ValidateParams),
+    Search(&'a SearchParams),
 }
 
 impl Request<'_> {
@@ -32,6 +36,8 @@ impl Request<'_> {
             Self::Canonical => return None,
             Self::Get(params) => norn_store::early::get(params),
             Self::Find(params) => norn_store::early::find(params),
+            Self::Validate(params) => norn_store::early::validate(params),
+            Self::Search(params) => norn_store::early::search(params),
         };
         (boundary != Boundary::Ready).then_some(boundary)
     }
@@ -595,6 +601,41 @@ where
                 .is_none_or(|early| early.serves(Request::Find(params)))
         );
         self.hold.snapshot().find(params, self.hold.content_model())
+    }
+
+    pub(crate) fn validate(
+        &self,
+        params: &ValidateParams,
+    ) -> Result<norn_store::Validated, norn_store::PageRefusal> {
+        assert!(
+            self.early
+                .as_ref()
+                .is_none_or(|early| early.serves(Request::Validate(params)))
+        );
+        self.hold
+            .snapshot()
+            .validate(params, self.hold.content_model())
+    }
+
+    /// Run a search's builder for `params` alone on this hold's snapshot and
+    /// pinned model, told whether the hold is early. An early hold reads only
+    /// the store: semantic engines start after `Ready`, so its builder
+    /// samples no vector rung.
+    pub(crate) fn search<T>(
+        &self,
+        params: &SearchParams,
+        build: impl FnOnce(&norn_store::Snapshot, &ContentModel, bool) -> T,
+    ) -> T {
+        assert!(
+            self.early
+                .as_ref()
+                .is_none_or(|early| early.serves(Request::Search(params)))
+        );
+        build(
+            self.hold.snapshot(),
+            self.hold.content_model(),
+            self.early.is_some(),
+        )
     }
 
     /// Whether no accepted fact or coverage loss known now withdrew the

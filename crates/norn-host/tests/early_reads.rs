@@ -16,8 +16,8 @@ use norn_testkit::{
 };
 use norn_wire::{
     ApplyMode, AuthoredValue, Column, CountParams, DescribeParams, DocumentPath, FieldChange,
-    FindParams, FindingKind, GetParams, Predicate, ReasonCode, ResolutionTarget, SetParams,
-    TrustState, VaultAddress, VaultName, WriteTarget,
+    FindParams, FindingKind, GetParams, Predicate, ReasonCode, ResolutionTarget, SearchParams,
+    SetParams, TrustState, ValidateParams, VaultAddress, VaultName, WriteTarget,
 };
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -669,7 +669,7 @@ fn structure_shapes_open_when_structure_ends() {
     }
 }
 
-/// Contract item 14, its HasFinding and link-health parts (validate is C-3's).
+/// Contract item 14, its HasFinding and link-health parts.
 #[test]
 fn relations_gate_has_finding_and_link_health() {
     let fixture = Fixture::new("early-relations");
@@ -722,6 +722,118 @@ fn relations_gate_has_finding_and_link_health() {
     );
     assert_eq!(judged.1.answer.report, ready_get);
     assert_eq!(judged.2.answer.report, ready_links);
+}
+
+/// Contract item 14, its validate part: a validate waits for relations and
+/// refuses at its deadline before they publish, and once they do it is
+/// admitted, its rows and its tally equal to Ready's.
+#[test]
+fn relations_gate_validate() {
+    let fixture = Fixture::new("early-relations-validate");
+    let probe = Probe::new([
+        LoadingBoundary::StepComplete(Step::Structure),
+        LoadingBoundary::Published(Step::Relations),
+    ]);
+    let host = fixture.host_bound(probe.clone(), Duration::from_millis(300));
+    let shapes = [
+        ValidateParams::new(address()),
+        ValidateParams::new(address()).with_kinds([FindingKind::Broken]),
+        ValidateParams::new(address()).with_predicates([Predicate::path("first.md")]),
+        ValidateParams::new(address()).summarized(),
+    ];
+    let early = std::thread::scope(|_| {
+        let _release = Release(&probe);
+        let _demand = host.demand(&name()).unwrap();
+        probe.wait(LoadingBoundary::StepComplete(Step::Structure));
+        let began = Instant::now();
+        assert_still_indexing(&host.validate(&shapes[0]).unwrap_err());
+        assert!(
+            began.elapsed() >= Duration::from_millis(300),
+            "a validate waits for relations before it refuses"
+        );
+        probe.release();
+        probe.wait(LoadingBoundary::Published(Step::Relations));
+        let early = shapes
+            .iter()
+            .map(|shape| host.validate(shape).unwrap())
+            .collect::<Vec<_>>();
+        probe.release();
+        early
+    });
+    ready(&host);
+    assert!(
+        json!(&early[1].answer.report)
+            .to_string()
+            .contains("first.md"),
+        "the fixture holds broken links"
+    );
+    for (shape, early) in shapes.iter().zip(early) {
+        assert!(warming(&early.answer.reading.trust));
+        let ready = host.validate(shape).unwrap();
+        assert_eq!(json!(&early.answer.report), json!(&ready.answer.report));
+        assert_eq!(early.answer.unsatisfied, ready.answer.unsatisfied);
+        assert_eq!(early.answer.advisories, ready.answer.advisories);
+    }
+}
+
+/// Contract item 15: a search, and a Find matching text, wait while full text
+/// is being written and refuse at their deadline; once the closing
+/// transaction commits they are admitted, equal to Ready. A host composing no
+/// semantic engine answers the lexical rung alone, early as at Ready.
+#[test]
+fn search_opens_after_the_closing_transaction() {
+    let fixture = Fixture::new("early-search");
+    let probe = Probe::new([
+        LoadingBoundary::FullTextBatch,
+        LoadingBoundary::Published(Step::FullTextComplete),
+    ]);
+    let host = fixture.host_bound(probe.clone(), Duration::from_millis(300));
+    let search = SearchParams::new(address(), "Title");
+    let filtered = SearchParams::new(address(), "Body")
+        .with_predicates([Predicate::tag("group1")])
+        .with_columns([Column::path(), Column::fields()]);
+    let matching = find().with_predicates([Predicate::matches("Title")]);
+    let (searched, filtered_early, matched) = std::thread::scope(|_| {
+        let _release = Release(&probe);
+        let _demand = host.demand(&name()).unwrap();
+        probe.wait(LoadingBoundary::FullTextBatch);
+        assert!(
+            host.validate(&ValidateParams::new(address())).is_ok(),
+            "relations stand while full text is written"
+        );
+        let began = Instant::now();
+        assert_still_indexing(&host.search(&search).unwrap_err());
+        assert!(
+            began.elapsed() >= Duration::from_millis(300),
+            "a search waits for full text before it refuses"
+        );
+        assert_still_indexing(&host.find(&matching).unwrap_err());
+        probe.release();
+        probe.wait(LoadingBoundary::Published(Step::FullTextComplete));
+        let answers = (
+            host.search(&search).unwrap(),
+            host.search(&filtered).unwrap(),
+            host.find(&matching).unwrap(),
+        );
+        probe.release();
+        answers
+    });
+    ready(&host);
+    for early in [&searched.answer.reading, &filtered_early.answer.reading] {
+        assert!(warming(&early.trust), "{early:?}");
+    }
+    assert!(warming(&matched.answer.reading.trust));
+    assert!(!searched.answer.report.page.rows.is_empty());
+    for (early, params) in [(&searched, &search), (&filtered_early, &filtered)] {
+        let ready = host.search(params).unwrap();
+        assert_eq!(json!(&early.answer.report), json!(&ready.answer.report));
+        assert_eq!(early.answer.unsatisfied, ready.answer.unsatisfied);
+        assert_eq!(early.answer.advisories, ready.answer.advisories);
+    }
+    assert_eq!(
+        host.find(&matching).unwrap().answer.report,
+        matched.answer.report
+    );
 }
 
 /// Contract item 16.
