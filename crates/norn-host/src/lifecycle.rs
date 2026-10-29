@@ -5854,8 +5854,9 @@ impl<O: EntryOps> Host<O> {
             "a read scheduled work over an entry that then {stance:?}s"
         );
         // A read with an early capability over an entry under construction
-        // may wait for the build that capability is published by.
-        let early_capable = request.boundary().is_some() && state.constructing();
+        // may wait for the build that capability is published by. The
+        // construction is read first, so a read at `Ready` classifies nothing.
+        let early_capable = state.constructing() && request.boundary().is_some();
         if stance == ReadStance::Refuse && scheduled {
             // The dispatch is the demand's, and its one failure is the
             // worker pool being gone — which is the host coming down, and is
