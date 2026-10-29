@@ -7167,6 +7167,11 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     let mut state = entry.gate.lock().expect("entry gate poisoned");
                     if state.claim.stands_at(epoch) {
                         state.claim.release();
+                        // The attach gave its store back, so damage an early
+                        // read met on that store's build goes with it, and no
+                        // read can judge that build's pool from here on.
+                        state.damage_met_under_a_claim = None;
+                        state.close_construction();
                         park_identity_refusal(&mut state, refusal.to_string());
                     }
                     return None;
@@ -7226,6 +7231,11 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
             // verdict goes with it; a successful one installs that store, so it
             // stands against the store installed below.
             let damage_this_build_met = state.damage_met_under_a_claim.take();
+            if result.is_err() {
+                // A failed attach gave its store back: no read still running
+                // on its build's pool may leave a verdict behind it.
+                state.close_construction();
+            }
             match result {
                 Ok((attachment, observed, handoff_saturated)) => {
                     let took_in_a_fact = !observed.is_empty() || handoff_saturated;
@@ -18348,6 +18358,45 @@ mod tests {
             "an attach rebuilt for damage a read met on a store an earlier attach gave back"
         );
         drop((lease, again));
+    }
+
+    /// **An attach whose root the registry refuses once it returns gives back
+    /// the store a read found damaged, and the verdict goes with it.** The
+    /// attach after the root answers again publishes `Ready` over the store it
+    /// opens, running no rebuild for damage met on one it gave back.
+    #[cfg(unix)]
+    #[test]
+    fn a_registry_refused_attach_drops_the_damage_a_read_met_under_it() {
+        let scratch = temp_base("refused-attach-drops-damage");
+        let root = scratch.root().join("root");
+        let ops = Arc::new(FakeOps::default());
+        let name = VaultName::new("notes").unwrap();
+        let host = host_over_roots(Arc::clone(&ops), &[(&name, &root)], 1);
+
+        ops.block_attach.store(true, Ordering::SeqCst);
+        let lease = host.demand(&name).unwrap();
+        wait_for_flag("attach_started", &ops.attach_started);
+        {
+            let entry = host.shared.entries.get(&name).unwrap();
+            let mut state = entry.gate.lock().expect("entry gate poisoned");
+            // As an early read's damage judgment leaves it under a held claim.
+            state.damage_met_under_a_claim = Some("the store is damaged".into());
+        }
+        refuse_root_identity(&root);
+        ops.block_attach.store(false, Ordering::SeqCst);
+        ops.attach_release.store(true, Ordering::SeqCst);
+        wait_for_environmental_refusal(&host, &name);
+
+        std::fs::remove_file(&root).unwrap();
+        std::fs::create_dir(&root).unwrap();
+        let again = host.demand(&name).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        assert_eq!(
+            ops.rebuilds.load(Ordering::SeqCst),
+            0,
+            "an attach rebuilt for damage a read met on a store a refused attach gave back"
+        );
+        drop((lease, again, host));
     }
 
     /// **Damage a read meets under a reload's claim is published in place of
