@@ -2961,6 +2961,8 @@ fn a_broken_document_keeps_its_findings_while_loading() {
     let vault = broken_vault("broken-loading-get", false);
     for params in [
         getting("broken"),
+        getting("broken").with_columns([Column::findings()]),
+        getting("broken").with_columns([Column::path(), Column::findings()]),
         getting("broken").with_collection(CollectionSelector::Findings),
     ] {
         let loading = vault
