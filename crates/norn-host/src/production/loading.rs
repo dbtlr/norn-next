@@ -2,7 +2,7 @@
 use super::*;
 use crate::lifecycle::loading::{Diagnostics, Operation};
 use norn_fs::walk::inventory::InventoryWalk;
-use norn_fs::watch::FirstIndexObservation;
+use norn_fs::watch::BuildAuthority;
 use norn_store::loading::{
     Catalogue, GetBuilder, IntakeBuilder, TemporaryCleanupReceipt, TemporaryCleanupStatus,
 };
@@ -338,7 +338,7 @@ impl ProductionEntryOps {
 struct Construction<'a> {
     ops: &'a ProductionEntryOps,
     progress: &'a ProgressReporter<ProductionAttachment>,
-    authority: FirstIndexObservation,
+    authority: BuildAuthority,
     source: norn_fs::Vault,
     catalogue: Catalogue,
     root: PathBuf,
@@ -367,7 +367,7 @@ impl<'a> Construction<'a> {
         let Some(authority) = attachment
             .subscription
             .as_ref()
-            .and_then(Subscription::first_index_observation)
+            .and_then(Subscription::capture_build_authority)
         else {
             progress.decline_loading();
             return Ok(None);

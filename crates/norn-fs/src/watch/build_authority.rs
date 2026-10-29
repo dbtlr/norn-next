@@ -1,14 +1,14 @@
-//! First-index authority retains only bounded proof, never watcher resources.
+//! Build authority retains only bounded proof, never watcher resources.
 use super::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-pub(super) struct FirstIndexProof {
+pub(super) struct BuildProof {
     invalid: AtomicBool,
     accepting: AtomicBool,
     waker: Mutex<Option<std::task::Waker>>,
 }
 
-impl FirstIndexProof {
+impl BuildProof {
     pub(super) fn new() -> Self {
         Self {
             invalid: AtomicBool::new(false),
@@ -42,28 +42,32 @@ impl FirstIndexProof {
     }
 }
 
-/// An unchanged-coverage proof captured before first-index enumeration.
+/// The build's watcher authority, captured before enumeration.
+///
+/// Every from-zero build captures its own authority. Host early admission consumes
+/// it in NORN-468 PR C. Any accepted fact or coverage loss withdraws it in full;
+/// NORN-469 narrows fact withdrawal to the affected paths.
 ///
 /// Root checks perform filesystem work and must run outside all locks. Admission
 /// and held checks read bounded bookkeeping only: entry gates may call them.
 /// Watcher callbacks may wake the stance signal but never acquire an entry gate. This handle
 /// owns no subscription, watcher, coalescer, delivery slot or batch maps.
 #[derive(Clone)]
-pub struct FirstIndexObservation {
-    proof: Arc<FirstIndexProof>,
+pub struct BuildAuthority {
+    proof: Arc<BuildProof>,
     control: Arc<(Mutex<SubscriptionState>, Condvar)>,
     state: Weak<Mutex<State>>,
     root: RootAnchor,
 }
 
-impl FirstIndexObservation {
+impl BuildAuthority {
     /// Record any known source contradiction permanently, for all derived sources.
     pub fn invalidate(&self) {
         self.proof.invalidate();
     }
 
     /// Check the registered root outside entry gates and watcher locks.
-    /// Restoration never revives this coverage's first-index authority.
+    /// Restoration never revives this build's authority.
     pub fn check_root(&self) -> bool {
         if let Err(error) = self.root.check() {
             self.invalidate();
@@ -111,7 +115,7 @@ impl FirstIndexObservation {
         true
     }
 
-    /// Register the one stance-signal wake for this coverage. Re-registration
+    /// Register the one stance-signal wake for this build. Re-registration
     /// replaces it; storage never grows with requests. An already withdrawn or
     /// administratively closed authority wakes immediately, including when it
     /// races registration. No bridge thread or polling is needed.
@@ -146,16 +150,23 @@ impl FirstIndexObservation {
 }
 
 impl Subscription {
-    /// Capture only under unchanged synchronized coverage, before enumeration.
-    /// Known facts remain disqualifying after delivery, drain and root restoration.
-    pub fn first_index_observation(&self) -> Option<FirstIndexObservation> {
+    /// Capture fresh authority under live synchronized coverage, before enumeration.
+    /// Replaces and withdraws the previous build's authority, waking its waiter.
+    /// Prior facts do not prevent capture; terminal coverage loss does.
+    pub fn capture_build_authority(&self) -> Option<BuildAuthority> {
         self.check_root_anchor().ok()?;
-        let state = self.state.lock().ok()?;
-        if state.terminal.is_some() || state.unsubscribed || state.coalescer_died {
+        let mut state = self.state.lock().ok()?;
+        if state.terminal.is_some()
+            || state.terminal_taken
+            || state.unsubscribed
+            || state.coalescer_died
+        {
             return None;
         }
-        let observation = FirstIndexObservation {
-            proof: Arc::clone(&state.first_index),
+        state.build_authority.invalidate();
+        state.build_authority = Arc::new(BuildProof::new());
+        let observation = BuildAuthority {
+            proof: Arc::clone(&state.build_authority),
             control: Arc::clone(&self.control),
             state: Arc::downgrade(&self.state),
             root: self.root_anchor.clone(),

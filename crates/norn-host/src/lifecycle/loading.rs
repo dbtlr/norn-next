@@ -1,6 +1,6 @@
 //! Request-specific admission during the first attach. No unrestricted early hold escapes.
 use super::*;
-use norn_fs::watch::FirstIndexObservation;
+use norn_fs::watch::BuildAuthority;
 use norn_wire::{FindParams, GetParams};
 use std::sync::Weak;
 
@@ -73,7 +73,7 @@ pub(crate) struct Diagnostics {
 pub(super) struct Source<R: ReadSource> {
     pub(super) reader: Arc<R>,
     pub(super) model: Arc<ContentModel>,
-    pub(super) authority: FirstIndexObservation,
+    pub(super) authority: BuildAuthority,
     pub(super) operation: Operation,
     pub(super) claim: u64,
     damaged: AtomicBool,
@@ -86,7 +86,7 @@ impl<R: ReadSource> Source<R> {
     fn new(
         reader: R,
         model: Arc<ContentModel>,
-        authority: FirstIndexObservation,
+        authority: BuildAuthority,
         operation: Operation,
         claim: u64,
         diagnostics: Diagnostics,
@@ -160,7 +160,7 @@ struct Interest {
 /// Bounded by spent preparations plus live queue reservations. Spent work never renews.
 pub(super) struct Loading<R: ReadSource> {
     pub(super) claim: u64,
-    authority: Option<FirstIndexObservation>,
+    authority: Option<BuildAuthority>,
     queue: Vec<Interest>,
     spent: Vec<String>,
     building: Option<String>,
@@ -242,7 +242,7 @@ impl<R: ReadSource> Loading<R> {
 
 impl<A: SnapshotSource> ProgressReporter<A> {
     /// Bind fresh coverage to this initial attach before enumeration starts.
-    pub(crate) fn begin_loading(&self, authority: FirstIndexObservation) -> bool {
+    pub(crate) fn begin_loading(&self, authority: BuildAuthority) -> bool {
         let Some(entry) = self.entry.upgrade() else {
             return false;
         };
@@ -279,7 +279,7 @@ impl<A: SnapshotSource> ProgressReporter<A> {
                         && loading
                             .authority
                             .as_ref()
-                            .is_some_and(FirstIndexObservation::admits)
+                            .is_some_and(BuildAuthority::admits)
                 })
                 .and_then(Loading::next)
         })
@@ -316,7 +316,7 @@ impl<A: SnapshotSource> ProgressReporter<A> {
         &self,
         reader: A::Reader,
         model: Arc<ContentModel>,
-        authority: FirstIndexObservation,
+        authority: BuildAuthority,
         operation: Operation,
         diagnostics: Diagnostics,
     ) {
@@ -411,7 +411,7 @@ impl<A: SnapshotSource> EntryState<A> {
                     && loading
                         .authority
                         .as_ref()
-                        .is_none_or(FirstIndexObservation::admits)
+                        .is_none_or(BuildAuthority::admits)
                     && match request {
                         Request::Get(params) => {
                             self.loading_failure(request).is_some()
