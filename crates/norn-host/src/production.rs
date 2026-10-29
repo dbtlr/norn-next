@@ -9159,6 +9159,10 @@ mod tests {
                 },
             )
             .unwrap();
+            // FSEvents can deliver the fixture's own writes after the watch's
+            // history marker; every reconcile owes the engine a slice, so a
+            // late delivery would run one ahead of the edit a case arms it for.
+            norn_fs::watch::settle_prior_changes(f.root.root(), lifecycle_budget().work()).unwrap();
             let lease = host.demand(&name).unwrap();
             wait_state(&host, &name, norn_wire::TrustState::Ready);
             (host, name, lease)
