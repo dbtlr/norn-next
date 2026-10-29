@@ -1725,6 +1725,10 @@ fn an_empty_store_recovery_publishes() {
             "version: 1\nfields:\n  rank: { type: number }\n",
         )
         .unwrap();
+        // The recovery watches anew, and FSEvents can deliver this write
+        // after it attaches: an accepted fact that withdraws its build's
+        // authority before structure publishes.
+        norn_fs::watch::settle_prior_changes(fixture.scratch.root(), BUDGET.work()).unwrap();
         wait_until("the recovery's build reaches structure", BUDGET, || {
             let _ = host.demand(&name());
             if probe
