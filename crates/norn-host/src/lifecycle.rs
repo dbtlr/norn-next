@@ -7221,6 +7221,11 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                 return result.ok().map(|(attachment, _, _)| attachment);
             }
             state.claim.release();
+            // Damage an early read met under this claim was met on this
+            // attach's own build. A failed attach gave that store back, so the
+            // verdict goes with it; a successful one installs that store, so it
+            // stands against the store installed below.
+            let damage_this_build_met = state.damage_met_under_a_claim.take();
             match result {
                 Ok((attachment, observed, handoff_saturated)) => {
                     let took_in_a_fact = !observed.is_empty() || handoff_saturated;
@@ -7230,10 +7235,6 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     state.last_reload_error = None;
                     let withheld = shared.ops.withheld_trust(&attachment);
                     state.install_coverage(&*shared.ops, attachment);
-                    // Damage an early read met under this claim was met on
-                    // this attach's own build, so it names the store just
-                    // installed rather than one that went back before it.
-                    let damage_this_build_met = state.damage_met_under_a_claim.take();
                     // The coverage is this attach's, and what any earlier
                     // requirement was raised against went back with the release
                     // that preceded it. Both clear here so nothing the entry
@@ -18310,6 +18311,43 @@ mod tests {
         ops.rebuild_release.store(true, Ordering::SeqCst);
         wait_for_one_rebuild_to_ready(&host, &name, &ops);
         drop((lease, recovery));
+    }
+
+    /// **A failed attach gives back the store a read found damaged, and the
+    /// verdict goes with it.** The attach that follows opens the store again
+    /// and publishes `Ready` over it, running no rebuild for damage met on a
+    /// store the entry no longer held.
+    #[test]
+    fn a_failed_attach_drops_the_damage_a_read_met_under_it() {
+        let ops = Arc::new(FakeOps::default());
+        let name = VaultName::new("notes").unwrap();
+        let host = Arc::new(host_without_ambient_polling(
+            Arc::clone(&ops),
+            Roots::Absent(&[&name]),
+            1,
+        ));
+        ops.block_attach.store(true, Ordering::SeqCst);
+        ops.terminal_attach.store(true, Ordering::SeqCst);
+        let lease = host.demand(&name).unwrap();
+        wait_for_flag("attach_started", &ops.attach_started);
+        {
+            let entry = host.shared.entries.get(&name).unwrap();
+            let mut state = entry.gate.lock().expect("entry gate poisoned");
+            // As an early read's damage judgment leaves it under a held claim.
+            state.damage_met_under_a_claim = Some("the store is damaged".into());
+        }
+        ops.block_attach.store(false, Ordering::SeqCst);
+        ops.attach_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &name, backend_lost());
+
+        let again = host.demand(&name).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        assert_eq!(
+            ops.rebuilds.load(Ordering::SeqCst),
+            0,
+            "an attach rebuilt for damage a read met on a store an earlier attach gave back"
+        );
+        drop((lease, again));
     }
 
     /// **Damage a read meets under a reload's claim is published in place of
