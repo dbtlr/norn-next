@@ -77,7 +77,7 @@ pub fn find(params: &FindParams) -> Boundary {
         .fold(Boundary::Content, std::cmp::max)
 }
 
-/// Vault-wide Get admission. PR C may admit a target earlier once all its
+/// Vault-wide Get admission. The host admits a target earlier once all its
 /// candidates have content and the resolved document has committed structure.
 /// An undeclared Field projection still requires vault-wide Structure.
 pub fn get(params: &GetParams) -> Boundary {

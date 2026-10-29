@@ -7,6 +7,10 @@
 //! its original deadline; every other request refuses at once. Publication never
 //! publishes `Ready`, and `Ready` closes the construction in the hold that
 //! publishes it.
+//!
+//! A waiting Get also queues its target ([`Requests`]); the build pulls the
+//! target's candidates and document ahead at its next chunk boundary and
+//! publishes the target ready, admitting that Get before vault-wide Structure.
 use super::*;
 use norn_fs::watch::BuildAuthority;
 use norn_store::Step;
