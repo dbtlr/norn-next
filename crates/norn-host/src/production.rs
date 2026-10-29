@@ -3196,6 +3196,27 @@ fn scoped_increment(
         let document_path = match identity {
             Ok(document) => document,
             Err(_) => {
+                // **A regular file holds nothing beneath it**, and a name whose
+                // only refusal is its stem still addresses the stored paths
+                // under it — `..md` is where `..md/note.md` lives — so a folder
+                // of that name that became this file leaves rows and findings
+                // there, which are taken as the missing arm takes them.
+                if let Some(beneath) = &prefix {
+                    pending.flush()?;
+                    prune_subtree_ordered(
+                        pending.store,
+                        root,
+                        exclusions,
+                        SubtreeScope::Prefix(beneath),
+                        policy,
+                        progress,
+                        stored_path_order(sensitivity),
+                        pending.account,
+                    )?;
+                    pending
+                        .account
+                        .walked(HealScope::Prefix(beneath), stored_path_order(sensitivity));
+                }
                 // A refused folder that became this file leaves the places
                 // beneath it, which the reading takes with the file's own.
                 places::read_places_of_a_refused_spelling(
@@ -12901,6 +12922,93 @@ mod tests {
         assert_eq!(
             spellings_filed_at(&mut attachment.store, "x\u{fffd}.md").len(),
             1
+        );
+        assert_a_build_from_zero_agrees(&f, &mut attachment);
+        ops.detach(&name, attachment);
+    }
+
+    /// **A folder named like a dot-stem file that becomes that file leaves
+    /// nothing beneath it.** `..md` names no document and still addresses the
+    /// stored paths under it, so the rows and findings there go as they go
+    /// for a folder that left, and the file's own spelling is filed.
+    #[cfg(unix)]
+    #[test]
+    fn a_dot_stem_folder_that_becomes_a_file_ends_the_rows_and_findings_beneath_it() {
+        let f = Fixture::new("watched-dot-stem-folder-becomes-file");
+        fs::create_dir(f.vault().join("..md")).unwrap();
+        fs::write(f.vault().join("..md/a.md"), "body").unwrap();
+        if !write_or_report(&f.vault().join("..md/x\u{1}.md"), b"body") {
+            return;
+        }
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        assert_eq!(stored_paths(&mut attachment.store), ["..md/a.md"]);
+        assert_eq!(
+            spellings_filed_at(&mut attachment.store, "..md/x\u{fffd}.md").len(),
+            1
+        );
+
+        fs::remove_dir_all(f.vault().join("..md")).unwrap();
+        fs::write(f.vault().join("..md"), "refused stem").unwrap();
+        watcher_leg(
+            &ops,
+            &name,
+            &mut attachment,
+            &progress,
+            f.vault().as_path(),
+            &["..md"],
+        );
+
+        assert!(
+            stored_paths(&mut attachment.store).is_empty(),
+            "the folder's row outlived it"
+        );
+        assert!(
+            spellings_filed_at(&mut attachment.store, "..md/x\u{fffd}.md").is_empty(),
+            "a finding beneath the folder outlived it"
+        );
+        assert_eq!(
+            spellings_filed_at(&mut attachment.store, "\u{fffd}..md").len(),
+            1
+        );
+        assert_a_build_from_zero_agrees(&f, &mut attachment);
+        ops.detach(&name, attachment);
+    }
+
+    /// **A batch naming two colliding spellings reads their place once.** The
+    /// first reading files every spelling of the place, so a second would file
+    /// each of them again beside the first.
+    #[cfg(unix)]
+    #[test]
+    fn a_batch_naming_two_colliding_spellings_reads_their_place_once() {
+        let f = Fixture::new("watched-collision-both-reported");
+        let created = write_or_report(&f.vault().join("bad\u{1}name.md"), b"body")
+            && write_or_report(&f.vault().join("bad\u{2}name.md"), b"body");
+        if !created {
+            return;
+        }
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let both = spellings_filed_at(&mut attachment.store, "bad\u{fffd}name.md");
+        assert_eq!(both.len(), 2, "the attach did not file both spellings");
+
+        fs::write(f.vault().join("bad\u{1}name.md"), "edited").unwrap();
+        fs::write(f.vault().join("bad\u{2}name.md"), "edited").unwrap();
+        watcher_leg(
+            &ops,
+            &name,
+            &mut attachment,
+            &progress,
+            f.vault().as_path(),
+            &["bad\u{1}name.md", "bad\u{2}name.md"],
+        );
+
+        assert_eq!(
+            spellings_filed_at(&mut attachment.store, "bad\u{fffd}name.md"),
+            both,
+            "the place was read once per spelling rather than once per job"
         );
         assert_a_build_from_zero_agrees(&f, &mut attachment);
         ops.detach(&name, attachment);
