@@ -6310,6 +6310,55 @@ mod tests {
         assert_eq!(error.stage(), crate::ReloadStage::Parse);
     }
 
+    /// A count-residue sweep an attach fails is recorded after the cause an
+    /// earlier startup sweep recorded, never in its place.
+    #[test]
+    fn a_later_attach_sweep_preserves_an_earlier_cleanup_cause() {
+        let f = Fixture::new("attach-sweep-keeps-causes");
+        let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
+        let earlier = dirs.derived_dir(&VaultName::new("earlier").unwrap());
+        fs::create_dir_all(earlier.join("store.count-results")).unwrap();
+        fs::create_dir(earlier.join(MAINTAINER_LOCK_FILE)).unwrap();
+        let ops = ProductionEntryOps::new(dirs.clone(), ProductionPolicy::new(2, 2).unwrap());
+        let prior = ops
+            .last_reader_cleanup_error()
+            .expect("the startup sweep's lock failure");
+        assert!(prior.contains("earlier"), "{prior}");
+        let registration = f.registration();
+        let name = registration.name.clone();
+        let residue = dirs
+            .derived_dir(&name)
+            .join(STORE_FILE)
+            .with_extension("count-results");
+        fs::create_dir_all(residue.parent().unwrap()).unwrap();
+        fs::write(&residue, "a file cannot be swept as a residue namespace").unwrap();
+        let host = crate::Host::new(
+            crate::RegistryRead::from_entries([registration]),
+            ops,
+            crate::LifecyclePolicy {
+                idle_after: Duration::from_secs(60),
+                worker_slots: 1,
+                watch_poll_interval: Duration::from_millis(25),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
+            },
+        )
+        .unwrap();
+        let _lease = host.demand(&name).unwrap();
+        wait_state(&host, &name, norn_wire::TrustState::Ready);
+        let diagnostic = host
+            .ops()
+            .last_reader_cleanup_error()
+            .expect("both cleanup failures retained");
+        assert!(
+            diagnostic.starts_with(&prior),
+            "earlier cause erased: {diagnostic}"
+        );
+        assert!(
+            diagnostic.contains(&residue.display().to_string()),
+            "later failure absent: {diagnostic}"
+        );
+    }
+
     #[test]
     fn invalid_vault_config_is_retained_when_attach_cannot_start() {
         let f = Fixture::new("invalid-vault-config-status");

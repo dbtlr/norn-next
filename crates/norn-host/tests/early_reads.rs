@@ -258,6 +258,10 @@ fn find() -> FindParams {
 fn ranked(rank: &str) -> FindParams {
     find().with_predicates([Predicate::equal_to("rank", rank)])
 }
+/// A Find whose part names a key the schema does not declare.
+fn unknown_key() -> FindParams {
+    find().with_predicates([Predicate::equal_to("unknown", "x")])
+}
 fn target(text: &str) -> ResolutionTarget {
     ResolutionTarget::new(text).unwrap()
 }
@@ -574,7 +578,7 @@ fn field_find_opens_when_content_ends_and_its_cursor_continues_across_ready() {
             norn_wire::Direction::Ascending,
         ))
         .with_limit(2);
-    let (early, first_page, tagged) = std::thread::scope(|scope| {
+    let (early, first_page, tagged, unknown) = std::thread::scope(|scope| {
         let _release = Release(&probe);
         let _demand = host.demand(&name()).unwrap();
         probe.wait(LoadingBoundary::StepComplete(Step::Names));
@@ -589,6 +593,20 @@ fn field_find_opens_when_content_ends_and_its_cursor_continues_across_ready() {
         // Publication woke the waiter, which answers while the build is held.
         let early = waiting.recv_timeout(BUDGET.work()).unwrap().unwrap();
         let first_page = host.find(&paged).unwrap();
+        // Cursor judgment is the ordinary one: a cursor under another order
+        // is refused, and a part naming an undeclared key is unsatisfied as
+        // at Ready.
+        let reordered = find()
+            .with_after(first_page.answer.report.page.next.clone().unwrap())
+            .with_sort(norn_wire::Sort::new(
+                norn_wire::SortKey::field("rank"),
+                norn_wire::Direction::Descending,
+            ));
+        assert_eq!(
+            host.find(&reordered).unwrap_err().code(),
+            &ReasonCode::VaultCursorOrderChanged
+        );
+        let unknown = host.find(&unknown_key()).unwrap();
         let before = host.read_evidence().settle_waits;
         let tagged = spawn_find(
             scope,
@@ -599,12 +617,21 @@ fn field_find_opens_when_content_ends_and_its_cursor_continues_across_ready() {
         assert!(tagged.try_recv().is_err(), "a tag Find waits for structure");
         probe.release();
         let tagged = tagged.recv_timeout(BUDGET.work()).unwrap().unwrap();
-        (early, first_page, tagged)
+        (early, first_page, tagged, unknown)
     });
     assert!(warming(&early.answer.reading.trust));
     assert_eq!(early.answer.report.page.rows.len(), 1);
     assert_eq!(early.answer.report.page.rows[0].path.as_str(), "doc07.md");
     ready(&host);
+    let ready_unknown = host.find(&unknown_key()).unwrap();
+    assert!(!unknown.answer.unsatisfied.is_empty());
+    assert_eq!(
+        (unknown.answer.unsatisfied, unknown.answer.report),
+        (
+            ready_unknown.answer.unsatisfied,
+            ready_unknown.answer.report
+        )
+    );
     assert_eq!(
         host.find(&ranked("7")).unwrap().answer.report,
         early.answer.report
@@ -1069,12 +1096,13 @@ fn established_holds_survive_promotion() {
 }
 
 /// Contract item 18: a contradiction known at exposure refuses an early answer,
-/// a source-dependent refusal included.
+/// a source-dependent refusal included: an ambiguity the rows derived, and a
+/// bound read under the declaration the withdrawn build pinned.
 #[test]
 fn a_known_contradiction_fails_the_final_check_for_success_and_data_derived_refusals() {
-    for ambiguous in [false, true] {
+    for case in ["success", "ambiguous", "unreadable bound"] {
         let fixture = Fixture::new("early-final-check");
-        if ambiguous {
+        if case == "ambiguous" {
             std::fs::create_dir(fixture.root.join("one")).unwrap();
             std::fs::create_dir(fixture.root.join("two")).unwrap();
             std::fs::rename(
@@ -1095,7 +1123,16 @@ fn a_known_contradiction_fails_the_final_check_for_success_and_data_derived_refu
             let _release_reads = Release(&reads);
             let _demand = host.demand(&name()).unwrap();
             construction.wait(LoadingBoundary::StepComplete(Step::Structure));
-            let result = spawn_get(scope, &host, get("first"));
+            let (sent, result) = mpsc::sync_channel(1);
+            let host_ref = &host;
+            scope.spawn(move || {
+                let error = if case == "unreadable bound" {
+                    host_ref.find(&ranked("not-a-number")).map(|_| ())
+                } else {
+                    host_ref.get(&get("first")).map(|_| ())
+                };
+                let _ = sent.send(error);
+            });
             reads.wait(LoadingBoundary::QueryBuilt);
             std::fs::rename(&fixture.root, fixture.scratch.join("moved-root")).unwrap();
             assert!(
@@ -1106,6 +1143,248 @@ fn a_known_contradiction_fails_the_final_check_for_success_and_data_derived_refu
             let error = result.recv_timeout(BUDGET.work()).unwrap().unwrap_err();
             assert_still_indexing(&error);
             construction.release();
+        });
+    }
+}
+
+/// Contract item 18: an established early Get finds its root gone only at
+/// final exposure, where no other request or build step checked it. Moving an
+/// unwatched ancestor leaves the covered directory and its files untouched.
+#[test]
+fn an_established_get_discovers_root_loss_only_at_final_exposure() {
+    let mut fixture = Fixture::new("early-final-root-check");
+    let ancestor = fixture.scratch.join("ancestor");
+    std::fs::create_dir(&ancestor).unwrap();
+    let registered = ancestor.join("vault");
+    std::fs::rename(&fixture.root, &registered).unwrap();
+    fixture.root = registered;
+    let construction = Probe::new([LoadingBoundary::StepComplete(Step::Structure)]);
+    let reads = Probe::new([LoadingBoundary::QueryBuilt]);
+    let host = fixture.host(Arc::new(SplitProbe {
+        construction: construction.clone(),
+        reads: reads.clone(),
+    }));
+    std::thread::scope(|scope| {
+        let _release_construction = Release(&construction);
+        let _release_reads = Release(&reads);
+        let _demand = host.demand(&name()).unwrap();
+        construction.wait(LoadingBoundary::StepComplete(Step::Structure));
+        let result = spawn_get(scope, &host, get("first"));
+        reads.wait(LoadingBoundary::QueryBuilt);
+        std::fs::rename(&ancestor, fixture.scratch.join("moved-ancestor")).unwrap();
+        reads.release();
+        assert_still_indexing(&result.recv_timeout(BUDGET.work()).unwrap().unwrap_err());
+        construction.release();
+    });
+}
+
+/// Contract item 19: a build whose registered root is lost after its watcher
+/// authority was captured begins no construction, so a first read waiting on
+/// the provisional attach is refused at once, never left to expire.
+#[test]
+fn a_root_lost_before_the_build_begins_refuses_its_waiter() {
+    let fixture = Fixture::new("early-declined-binding");
+    let registered = fixture.scratch.join("registered");
+    std::os::unix::fs::symlink(&fixture.root, &registered).unwrap();
+    let probe = Probe::new([
+        LoadingBoundary::AuthorityCaptured,
+        LoadingBoundary::CanonicalPage,
+    ]);
+    norn_fs::watch::settle_prior_changes(fixture.scratch.root(), BUDGET.work()).unwrap();
+    let host = Host::new(
+        RegistryRead::from_entries([Registration::new(
+            name(),
+            VaultRoot::new(&registered).unwrap(),
+        )]),
+        fixture.ops(probe.clone()),
+        LifecyclePolicy {
+            idle_after: Duration::from_secs(7200),
+            worker_slots: 1,
+            watch_poll_interval: Duration::from_millis(25),
+            read_settle_bound: norn_host::READ_SETTLE_BOUND,
+        },
+    )
+    .unwrap();
+    std::thread::scope(|scope| {
+        let _release = Release(&probe);
+        let result = spawn_get(scope, &host, get("first"));
+        probe.wait(LoadingBoundary::AuthorityCaptured);
+        waits(&host, 1);
+        // Coverage keeps its physical root; only the registered spelling is lost.
+        std::fs::remove_file(&registered).unwrap();
+        probe.release();
+        probe.wait(LoadingBoundary::CanonicalPage);
+        let error = result.recv_timeout(BUDGET.work()).unwrap().unwrap_err();
+        assert_eq!(error.code(), &ReasonCode::HostEntryNotReady);
+        assert_eq!(host.read_evidence().settle_expiries, 0);
+        probe.release();
+    });
+}
+
+/// Holds every early read at its establishment while armed, counting them,
+/// so reads can be made to occupy the reader budget.
+#[derive(Default)]
+struct Readers {
+    state: Mutex<(bool, usize)>,
+    moved: Condvar,
+}
+impl Readers {
+    fn arm(&self) {
+        *self.state.lock().unwrap() = (true, 0);
+    }
+    fn release(&self) {
+        self.state.lock().unwrap_or_else(|p| p.into_inner()).0 = false;
+        self.moved.notify_all();
+    }
+    fn wait(&self, count: usize) {
+        wait_until("early reads established", BUDGET, || {
+            let now = self.state.lock().unwrap().1;
+            if now >= count {
+                Observed::Met(())
+            } else {
+                Observed::pending(format!("{now} < {count}"))
+            }
+        })
+        .unwrap();
+    }
+    fn established(&self) {
+        let mut state = self.state.lock().unwrap();
+        if !state.0 {
+            return;
+        }
+        state.1 += 1;
+        self.moved.notify_all();
+        let (_released, timeout) = self
+            .moved
+            .wait_timeout_while(state, Duration::from_secs(60), |state| state.0)
+            .unwrap();
+        assert!(!timeout.timed_out(), "the read barrier was never released");
+    }
+}
+struct ReleaseReaders<'a>(&'a Readers);
+impl Drop for ReleaseReaders<'_> {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
+struct CapacityProbe {
+    construction: Arc<Probe>,
+    readers: Arc<Readers>,
+}
+impl LoadingProbe for CapacityProbe {
+    fn at(&self, boundary: LoadingBoundary) {
+        match boundary {
+            LoadingBoundary::QueryEstablished => self.readers.established(),
+            LoadingBoundary::QueryBuilt => {}
+            _ => self.construction.at(boundary),
+        }
+    }
+}
+
+/// Contract item 17: an early read waiting for reader capacity keeps its one
+/// deadline, refusing as capacity unavailable when it runs out; after Ready it
+/// is served canonically; and a withdrawal wakes it to refuse at once, before
+/// the reads holding the capacity give it back.
+#[test]
+fn early_capacity_waits_keep_the_deadline_and_reselect_after_promotion_or_withdrawal() {
+    for transition in ["deadline", "promotion", "withdrawal"] {
+        let fixture = Fixture::new("early-capacity");
+        let construction = Probe::new([LoadingBoundary::StepComplete(Step::Structure)]);
+        let readers = Arc::new(Readers::default());
+        let mut policy = ProductionPolicy::new(2, 2).unwrap();
+        policy.read_budget = norn_store::ReadBudgetPolicy::new(2, Duration::ZERO).unwrap();
+        // The closing checkpoint waits out the held reads' snapshots before
+        // Ready, so a promotion is given the room to outlast that wait.
+        let bound = match transition {
+            "deadline" => Duration::from_millis(500),
+            "promotion" => Duration::from_secs(30),
+            _ => norn_host::READ_SETTLE_BOUND,
+        };
+        let host = fixture.host_over(
+            ProductionEntryOps::new(fixture.dirs.clone(), policy).with_loading_probe(Arc::new(
+                CapacityProbe {
+                    construction: construction.clone(),
+                    readers: readers.clone(),
+                },
+            )),
+            bound,
+        );
+        std::thread::scope(|scope| {
+            let _release_construction = Release(&construction);
+            let _release_reads = ReleaseReaders(&readers);
+            let _demand = host.demand(&name()).unwrap();
+            construction.wait(LoadingBoundary::StepComplete(Step::Structure));
+            let initial = host.get(&get("first")).unwrap();
+            readers.arm();
+            let held_one = spawn_get(scope, &host, get("first"));
+            let held_two = spawn_get(scope, &host, get("first"));
+            readers.wait(2);
+            assert_eq!(host.read_budget_census().live_connections, 2);
+            let waiting = spawn_get(scope, &host, get("first"));
+            wait_until("a third early read waits for capacity", BUDGET, || {
+                if host.read_budget_census().waiting_reads == 1 {
+                    Observed::Met(())
+                } else {
+                    Observed::pending("the third read has not queued")
+                }
+            })
+            .unwrap();
+            match transition {
+                "deadline" => {
+                    assert_eq!(
+                        waiting
+                            .recv_timeout(BUDGET.work())
+                            .unwrap()
+                            .unwrap_err()
+                            .code(),
+                        &ReasonCode::HostReaderUnavailable
+                    );
+                    assert_eq!(host.read_budget_census().live_connections, 2);
+                    readers.release();
+                    held_one.recv_timeout(BUDGET.work()).unwrap().unwrap();
+                    held_two.recv_timeout(BUDGET.work()).unwrap().unwrap();
+                    construction.release();
+                    ready(&host);
+                }
+                "promotion" => {
+                    construction.release();
+                    ready(&host);
+                    assert_eq!(host.read_budget_census().live_connections, 2);
+                    readers.release();
+                    held_one.recv_timeout(BUDGET.work()).unwrap().unwrap();
+                    held_two.recv_timeout(BUDGET.work()).unwrap().unwrap();
+                    let promoted = waiting.recv_timeout(BUDGET.work()).unwrap().unwrap();
+                    assert_eq!(promoted.answer.reading.trust, TrustState::Ready);
+                    assert_eq!(promoted.answer.reading.epoch, initial.answer.reading.epoch);
+                    assert_eq!(
+                        json!(&initial.answer.report),
+                        relations_loading(json!(&promoted.answer.report))
+                    );
+                }
+                "withdrawal" => {
+                    std::fs::rename(&fixture.root, fixture.scratch.join("moved-root")).unwrap();
+                    assert!(host.find(&find()).is_err());
+                    assert_eq!(
+                        waiting
+                            .recv_timeout(BUDGET.work())
+                            .unwrap()
+                            .unwrap_err()
+                            .code(),
+                        &ReasonCode::HostEntryNotReady,
+                        "a withdrawal wakes a capacity wait before held reads release"
+                    );
+                    readers.release();
+                    assert!(held_one.recv_timeout(BUDGET.work()).unwrap().is_err());
+                    assert!(held_two.recv_timeout(BUDGET.work()).unwrap().is_err());
+                    construction.release();
+                }
+                _ => unreachable!(),
+            }
+            assert!(host.read_budget_census().peak_connections <= 2);
+            assert_eq!(
+                host.read_evidence().gate_retakes_within_establishing_holds,
+                0
+            );
         });
     }
 }

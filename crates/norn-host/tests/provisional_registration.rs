@@ -1,4 +1,7 @@
-//! Registration-time first-index candidacy and ordinary reused-store reads.
+//! Registration-time candidacy for the provisional first-read wait: a vault
+//! with no store at registration lets its first read wait for its from-zero
+//! build, while a reused, foreign or inaccessible store, and a registration
+//! made or replaced over one, refuses its reads at once.
 #![cfg(all(unix, feature = "induced-failure"))]
 #![allow(clippy::disallowed_methods)]
 use norn_config::ConfigDirs;
@@ -119,9 +122,9 @@ fn host(
     .unwrap()
 }
 
-/// A canonical-only (non-fresh) first attach of this host: does an eligible Get
-/// refuse at once (as a canonical first-open request), or wait for provisional
-/// first-index admission and then expire with the first-index message?
+/// A first attach of this host over a store an earlier host finished: an
+/// eligible Get, Find and count refuse at once, as canonical requests do, and
+/// never wait for an early capability.
 #[test]
 fn probe_reused_store_first_attach_provisional_wait() {
     let scratch = Scratch::under(Path::new(env!("CARGO_TARGET_TMPDIR")), "review-reused").unwrap();
@@ -166,7 +169,10 @@ fn probe_reused_store_first_attach_provisional_wait() {
     assert!(host.get(&params).is_ok());
     for error in [get.unwrap_err(), find.unwrap_err(), count.unwrap_err()] {
         assert_eq!(error.code(), &norn_wire::ReasonCode::HostEntryNotReady);
-        assert!(!error.message().contains("first time"), "{error:?}");
+        assert!(
+            !error.message().contains("still being indexed"),
+            "{error:?}"
+        );
     }
     assert_eq!(
         waits, 0,
@@ -247,7 +253,10 @@ fn assert_ordinary_refusals(host: &Host<PreHeld>) {
         .unwrap_err();
     for error in [get, find, count] {
         assert_eq!(error.code(), &norn_wire::ReasonCode::HostEntryNotReady);
-        assert!(!error.message().contains("first time"), "{error:?}");
+        assert!(
+            !error.message().contains("still being indexed"),
+            "{error:?}"
+        );
     }
     assert_eq!(host.read_evidence().settle_waits, 0);
     assert_eq!(host.read_evidence().settle_expiries, 0);

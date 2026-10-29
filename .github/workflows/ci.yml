@@ -196,12 +196,10 @@ jobs:
       - name: Host library contracts
         run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-host --features induced-failure --lib
       # test-suite.sh judges one libtest target's summary, so each target is its own step.
-      - name: Staged host loading
-        run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-host --features induced-failure --test staged_loading
-      - name: Staged host reads
-        run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-host --features induced-failure --test staged_reads
-      - name: Staged host registration
-        run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-host --features induced-failure --test staged_registration
+      - name: Early host reads
+        run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-host --features induced-failure --test early_reads
+      - name: Provisional host registration
+        run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-host --features induced-failure --test provisional_registration
       - name: Obsidian parity
         run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-host --features induced-failure --test obsidian_parity
       # --exact alone succeeds on a typo. test-suite.sh rejects zero matches.
