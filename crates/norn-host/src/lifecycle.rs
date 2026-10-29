@@ -7251,6 +7251,10 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                         // declaration again, and the facts this attach observed
                         // wait in `pending` for the heal that recovery runs.
                         state.withhold_trust_until_the_vault_changes(reason, took_in_a_fact);
+                        // Damage an early read met still names the store just
+                        // installed, so it stands for the claim's end to
+                        // publish, the rebuild it owes dominating the recovery.
+                        state.damage_met_under_a_claim = damage_this_build_met;
                     } else if damage_this_build_met.is_some() {
                         // The store this attach installs is the one an early
                         // read found damaged: the damage is published in place
