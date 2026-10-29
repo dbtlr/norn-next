@@ -6181,6 +6181,11 @@ impl<O: EntryOps> Host<O> {
             .reads
             .count_establishment_under_the_gate(hold, mint_statements);
         self.shared.reads.count_read();
+        if let Some(admitted) = &early {
+            self.shared
+                .reads
+                .count_early_read_served(admitted.published());
+        }
         Ok(loading::QueryHold::new(
             ReadHold {
                 entry,

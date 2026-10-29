@@ -49,11 +49,10 @@ impl Publisher<'_> {
             return;
         };
         if self.progress.publish_step(*token, epoch, step) {
+            self.ops.evidence.count_construction_publication();
             #[cfg(feature = "induced-failure")]
             self.ops.loading_boundary(LoadingBoundary::Published(step));
         }
-        #[cfg(not(feature = "induced-failure"))]
-        let _ = self.ops;
     }
 
     /// The targets live reads wait on that this build has not yet published
@@ -71,6 +70,7 @@ impl Publisher<'_> {
             return;
         };
         if !targets.is_empty() && self.progress.publish_targets(*token, epoch, targets) {
+            self.ops.evidence.count_construction_publication();
             #[cfg(feature = "induced-failure")]
             self.ops.loading_boundary(LoadingBoundary::TargetReady);
         }

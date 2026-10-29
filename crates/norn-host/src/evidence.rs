@@ -102,6 +102,7 @@ pub struct JobEvidence {
     structure_step_commits: AtomicU64,
     pull_ahead_documents: AtomicU64,
     construction_commits_for_requests: AtomicU64,
+    construction_publications: AtomicU64,
     watcher_polls: AtomicU64,
     watcher_rescans_reported: AtomicU64,
     mint_statements_under_the_gate: AtomicU64,
@@ -234,6 +235,10 @@ pub struct EvidenceReading {
     /// Early commits a from-zero build took at a chunk boundary so a pending
     /// request's reader sees its document.
     pub construction_commits_for_requests: u64,
+    /// Publications from-zero builds made to their early reads that took
+    /// effect: each step's end, and each set of requested Get targets
+    /// published ready. A publication a guard refused adds none.
+    pub construction_publications: u64,
     /// Watcher polls taken over an attachment, however each one answered.
     ///
     /// One per poll of an entry's attachment — a pass of the dispatcher's
@@ -401,6 +406,9 @@ impl EvidenceReading {
             construction_commits_for_requests: self
                 .construction_commits_for_requests
                 .saturating_sub(earlier.construction_commits_for_requests),
+            construction_publications: self
+                .construction_publications
+                .saturating_sub(earlier.construction_publications),
             watcher_polls: self.watcher_polls.saturating_sub(earlier.watcher_polls),
             watcher_rescans_reported: self
                 .watcher_rescans_reported
@@ -531,6 +539,7 @@ impl JobEvidence {
             structure_step_commits: get(&self.structure_step_commits),
             pull_ahead_documents: get(&self.pull_ahead_documents),
             construction_commits_for_requests: get(&self.construction_commits_for_requests),
+            construction_publications: get(&self.construction_publications),
             watcher_polls: get(&self.watcher_polls),
             watcher_rescans_reported: get(&self.watcher_rescans_reported),
             mint_statements_under_the_gate: get(&self.mint_statements_under_the_gate),
@@ -579,6 +588,11 @@ impl JobEvidence {
 
     pub(crate) fn count_construction_commit_for_requests(&self) {
         self.construction_commits_for_requests
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn count_construction_publication(&self) {
+        self.construction_publications
             .fetch_add(1, Ordering::Relaxed);
     }
 
@@ -1265,6 +1279,7 @@ pub(crate) struct ReadEvidence {
     settle_expiries: AtomicU64,
     pull_ahead_requests: AtomicU64,
     requests_past_bound: AtomicU64,
+    early_reads_served: EarlyReadsAccount,
     preview_link_judgments: LinkJudgmentAccount,
     repair_batches: RepairBatchAccount,
     similar_stems: SimilarStemsAccount,
@@ -1273,6 +1288,80 @@ pub(crate) struct ReadEvidence {
     planning_holds: PlanningHoldAccount,
     clock_reads: AtomicU64,
     rewrite_selection_steps: AtomicU64,
+}
+
+/// Reads served under construction, by the last step their build had
+/// published when each was admitted. Full text publishes only once its
+/// closing transaction commits, so no read is admitted at its batches.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct EarlyReadsServed {
+    /// Admitted once names ended: Gets whose targets were pulled ahead.
+    pub names: u64,
+    /// Admitted once content ended.
+    pub content: u64,
+    /// Admitted once structure ended.
+    pub structure: u64,
+    /// Admitted once relations were judged.
+    pub relations: u64,
+    /// Admitted once the closing transaction committed full text.
+    pub full_text_complete: u64,
+}
+
+impl EarlyReadsServed {
+    /// What was served since `earlier`.
+    #[must_use]
+    pub fn since(self, earlier: Self) -> Self {
+        Self {
+            names: self.names.saturating_sub(earlier.names),
+            content: self.content.saturating_sub(earlier.content),
+            structure: self.structure.saturating_sub(earlier.structure),
+            relations: self.relations.saturating_sub(earlier.relations),
+            full_text_complete: self
+                .full_text_complete
+                .saturating_sub(earlier.full_text_complete),
+        }
+    }
+
+    /// Every early read served, whatever step admitted it.
+    #[must_use]
+    pub fn total(self) -> u64 {
+        self.names + self.content + self.structure + self.relations + self.full_text_complete
+    }
+}
+
+#[derive(Debug, Default)]
+struct EarlyReadsAccount {
+    names: AtomicU64,
+    content: AtomicU64,
+    structure: AtomicU64,
+    relations: AtomicU64,
+    full_text_complete: AtomicU64,
+}
+
+impl EarlyReadsAccount {
+    fn count(&self, step: norn_store::Step) {
+        let counter = match step {
+            norn_store::Step::Names => &self.names,
+            norn_store::Step::Content => &self.content,
+            norn_store::Step::Structure => &self.structure,
+            norn_store::Step::Relations => &self.relations,
+            norn_store::Step::FullText | norn_store::Step::FullTextComplete => {
+                &self.full_text_complete
+            }
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn read(&self) -> EarlyReadsServed {
+        let get = |counter: &AtomicU64| counter.load(Ordering::Relaxed);
+        EarlyReadsServed {
+            names: get(&self.names),
+            content: get(&self.content),
+            structure: get(&self.structure),
+            relations: get(&self.relations),
+            full_text_complete: get(&self.full_text_complete),
+        }
+    }
 }
 
 /// What one acquisition read off SQLite's count of its thread and off its
@@ -1396,6 +1485,9 @@ pub struct ReadReading {
     /// Waiting Gets that found their build's pull-ahead queue full, each
     /// counted once; they wait for vault-wide Structure instead.
     pub requests_past_bound: u64,
+    /// Reads served on a from-zero build's store under construction, by the
+    /// last step their build had published when each was admitted.
+    pub early_reads_served: EarlyReadsServed,
     /// What the previews this host answered spent judging their plans' links
     /// on the store's resolution door, over every judgment each ran.
     pub preview_link_judgments: LinkJudgmentCost,
@@ -1462,6 +1554,8 @@ pub struct ReadsSince {
     pub pull_ahead_requests: u64,
     /// Waiting Gets this window that found the pull-ahead queue full.
     pub requests_past_bound: u64,
+    /// Reads this window served under construction, by published step.
+    pub early_reads_served: EarlyReadsServed,
     /// What this window's previews spent judging their plans' links.
     pub preview_link_judgments: LinkJudgmentCost,
     /// What this window's batch reads reported of themselves.
@@ -1510,6 +1604,7 @@ impl ReadReading {
             requests_past_bound: self
                 .requests_past_bound
                 .saturating_sub(earlier.requests_past_bound),
+            early_reads_served: self.early_reads_served.since(earlier.early_reads_served),
             preview_link_judgments: self
                 .preview_link_judgments
                 .since(earlier.preview_link_judgments),
@@ -1549,6 +1644,7 @@ impl ReadEvidence {
             settle_expiries: get(&self.settle_expiries),
             pull_ahead_requests: get(&self.pull_ahead_requests),
             requests_past_bound: get(&self.requests_past_bound),
+            early_reads_served: self.early_reads_served.read(),
             preview_link_judgments: self.preview_link_judgments.read(),
             repair_batches: self.repair_batches.read(),
             similar_stems: self.similar_stems.read(),
@@ -1712,12 +1808,6 @@ impl ReadEvidence {
             .fetch_max(rounds, Ordering::Relaxed);
     }
 
-    /// Record that one acquisition began a settle wait: a wait for its entry
-    /// to publish `Ready` or to derive the facts the read met.
-    ///
-    /// **Called where the wait begins**, after the acquisition gave the entry
-    /// gate back, so a reading taken while the read waits names it whatever
-    /// answer it goes on to get.
     pub(crate) fn count_pull_ahead_request(&self) {
         self.pull_ahead_requests.fetch_add(1, Ordering::Relaxed);
     }
@@ -1726,6 +1816,19 @@ impl ReadEvidence {
         self.requests_past_bound.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Record one read served on a store under construction, admitted when
+    /// its build had last published `step`.
+    pub(crate) fn count_early_read_served(&self, step: norn_store::Step) {
+        self.early_reads_served.count(step);
+    }
+
+    /// Record that one acquisition began a settle wait: a wait for its entry
+    /// to publish `Ready`, to derive the facts the read met, or to publish
+    /// the construction step that admits it.
+    ///
+    /// **Called where the wait begins**, after the acquisition gave the entry
+    /// gate back, so a reading taken while the read waits names it whatever
+    /// answer it goes on to get.
     pub(crate) fn count_settle_wait(&self) {
         self.settle_waits.fetch_add(1, Ordering::Relaxed);
     }

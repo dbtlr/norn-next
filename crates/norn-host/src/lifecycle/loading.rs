@@ -257,6 +257,11 @@ impl<R> Clone for Admitted<R> {
 }
 
 impl<R> Admitted<R> {
+    /// The last step the build had published when it admitted this request.
+    pub(super) fn published(&self) -> Step {
+        self.published
+    }
+
     /// Check the build's root outside every lock; a loss withdraws the build.
     pub(super) fn authority_root_current(&self) -> bool {
         self.authority.check_root()

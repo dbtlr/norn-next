@@ -500,6 +500,15 @@ fn the_first_read_on_a_new_vault_waits_and_a_get_at_structure_equals_ready() {
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(documents.len() as u64, DOCUMENTS, "{files:?}");
     assert_eq!(distinct.len() as u64, DOCUMENTS, "{files:?}");
+    // The one other open is the declaration's.
+    let others = files
+        .iter()
+        .filter(|file| !documents.contains(file))
+        .collect::<Vec<_>>();
+    assert!(
+        others.len() == 1 && others[0].path.ends_with(".norn/schema.yaml"),
+        "{files:?}"
+    );
     assert_eq!(account.read().document_opens, DOCUMENTS + 1, "{files:?}");
     assert_eq!(account.read().from_zero_builds, 1);
     assert!(
@@ -734,7 +743,9 @@ fn relations_gate_validate() {
         LoadingBoundary::StepComplete(Step::Structure),
         LoadingBoundary::Published(Step::Relations),
     ]);
-    let host = fixture.host_bound(probe.clone(), Duration::from_millis(300));
+    let ops = fixture.ops(probe.clone());
+    let account = ops.account();
+    let host = fixture.host_over(ops, Duration::from_millis(300));
     let shapes = [
         ValidateParams::new(address()),
         ValidateParams::new(address()).with_kinds([FindingKind::Broken]),
@@ -761,6 +772,16 @@ fn relations_gate_validate() {
         early
     });
     ready(&host);
+    // Each validate was served at relations; the one refused at structure
+    // was never served. The build published its five steps and no target.
+    assert_eq!(
+        host.read_evidence().early_reads_served,
+        norn_host::EarlyReadsServed {
+            relations: shapes.len() as u64,
+            ..Default::default()
+        }
+    );
+    assert_eq!(account.read().construction_publications, 5);
     assert!(
         json!(&early[1].answer.report)
             .to_string()
@@ -1422,6 +1443,14 @@ fn a_requested_document_answers_before_content_ends() {
             "answered after the content step"
         );
         assert!(probe.seen().contains(&LoadingBoundary::TargetReady));
+        // Both were admitted under the names step, their target pulled ahead.
+        assert_eq!(
+            host.read_evidence().early_reads_served,
+            norn_host::EarlyReadsServed {
+                names: 2,
+                ..Default::default()
+            }
+        );
         probe.release();
         // A ready target lives only while an interest holds it: the
         // continuation queues again and is answered at a later drain.
@@ -1469,6 +1498,8 @@ fn a_requested_document_answers_before_content_ends() {
     // Its content and structure ran ahead once, each document read once.
     let evidence = account.read();
     assert_eq!(evidence.pull_ahead_documents, 2, "{evidence:?}");
+    // Five steps, and at least the one target set published ready.
+    assert!(evidence.construction_publications >= 6, "{evidence:?}");
     assert!(evidence.construction_commits_for_requests >= 1);
     assert_eq!(evidence.content_rows_written, DOCUMENTS);
     assert_eq!(evidence.documents_read_by_build, DOCUMENTS);
