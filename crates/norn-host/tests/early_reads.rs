@@ -1389,19 +1389,22 @@ fn early_capacity_waits_keep_the_deadline_and_reselect_after_promotion_or_withdr
     }
 }
 
-/// Contract item 20: damage an early read meets closes the build's
-/// capabilities at once, and the store is rebuilt through the claim path.
+/// Contract item 20: damage only an early read meets closes the build's
+/// capabilities at once, and the attach that installs that store publishes the
+/// damage in place of `Ready` and rebuilds it through the claim path.
 #[test]
 fn early_damage_takes_the_rebuild_path() {
     let fixture = Fixture::new("early-damage");
-    let probe = Probe::new([LoadingBoundary::StepComplete(Step::Content)]);
+    // The closing transaction has run: the build writes and reads no more of
+    // the store, so the damage below is met by the early read alone.
+    let probe = Probe::new([LoadingBoundary::Published(Step::FullTextComplete)]);
     let ops = fixture.ops(probe.clone());
     let account = ops.account();
     let host = fixture.host_over(ops, norn_host::READ_SETTLE_BOUND);
     std::thread::scope(|_| {
         let _release = Release(&probe);
         let _demand = host.demand(&name()).unwrap();
-        probe.wait(LoadingBoundary::StepComplete(Step::Content));
+        probe.wait(LoadingBoundary::Published(Step::FullTextComplete));
         damage_every_table(&fixture.store_path());
         let refused = host.find(&ranked("2")).unwrap_err();
         assert_eq!(
@@ -1417,9 +1420,21 @@ fn early_damage_takes_the_rebuild_path() {
         );
         probe.release();
     });
+    // The first `Ready` is the rebuild's: the attach published none over the
+    // store the read found damaged.
     ready(&host);
+    assert_eq!(account.read().from_zero_builds, 2);
     assert!(host.get(&get("first")).is_ok());
-    assert!(account.read().from_zero_builds >= 2);
+    assert_eq!(
+        host.find(&ranked("2"))
+            .unwrap()
+            .answer
+            .report
+            .page
+            .rows
+            .len(),
+        1
+    );
 }
 
 /// Contract item 8: an inline rung 3 after a failed first build withdraws the

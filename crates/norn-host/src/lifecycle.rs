@@ -7216,6 +7216,10 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     state.last_reload_error = None;
                     let withheld = shared.ops.withheld_trust(&attachment);
                     state.install_coverage(&*shared.ops, attachment);
+                    // Damage an early read met under this claim was met on
+                    // this attach's own build, so it names the store just
+                    // installed rather than one that went back before it.
+                    let damage_this_build_met = state.damage_met_under_a_claim.take();
                     // The coverage is this attach's, and what any earlier
                     // requirement was raised against went back with the release
                     // that preceded it. Both clear here so nothing the entry
@@ -7231,6 +7235,17 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                         // declaration again, and the facts this attach observed
                         // wait in `pending` for the heal that recovery runs.
                         state.withhold_trust_until_the_vault_changes(reason, took_in_a_fact);
+                    } else if damage_this_build_met.is_some() {
+                        // The store this attach installs is the one an early
+                        // read found damaged: the damage is published in place
+                        // of `Ready`, and the claim goes on to the rebuild it
+                        // owes, which the facts standing in `pending` follow.
+                        state.damage_met_under_a_claim = damage_this_build_met;
+                        let rebuild = hand_on_carried_damage(&mut state, &name)
+                            .expect("the damage is carried");
+                        drop(state);
+                        drop(attach_claims);
+                        dispatch_handoff(shared, entry, epoch, rebuild);
                     } else if state.pending.is_empty() && !handoff_saturated {
                         state.trust = TrustState::Ready;
                     } else {
@@ -8630,6 +8645,11 @@ fn run_reload_job<O: EntryOps>(
         Ok(judgment) => {
             record_active_declaration(&mut state, &*shared.ops, &name, &attachment);
             state.last_reload_error = None;
+            // A reload keeps the store it ran over, so damage a read met under
+            // its claim — an early read on a build it ran over an empty store,
+            // or a read on the standing handle — names the store it goes on
+            // holding.
+            let damage_a_read_met = state.damage_met_under_a_claim.take();
             state.clear_rung_requirements();
             match judgment.outcome {
                 ReloadOutcome::ConfigOnly => {
@@ -8644,6 +8664,20 @@ fn run_reload_job<O: EntryOps>(
                 ReloadOutcome::SchemaChanged => {
                     state.remint_coverage(&*shared.ops, epoch, attachment);
                 }
+            }
+            if let Some(detail) = damage_a_read_met {
+                // The damage is published in place of `Ready` and the claim
+                // goes on to the rebuild it owes, as for damage the reload
+                // met itself; the caller is answered with it.
+                state.damage_met_under_a_claim = Some(detail.clone());
+                let rebuild =
+                    hand_on_carried_damage(&mut state, &name).expect("the damage is carried");
+                drop(state);
+                let _ = reply.send(Err(ReloadRefusal::Runtime(JobFailure::StoreDamaged(
+                    detail,
+                ))));
+                dispatch_handoff(shared, entry, epoch, rebuild);
+                return None;
             }
             state.trust = TrustState::Ready;
             Ok(judgment)
@@ -18177,6 +18211,63 @@ mod tests {
         ops.rebuild_release.store(true, Ordering::SeqCst);
         wait_for_one_rebuild_to_ready(&host, &name, &ops);
         assert_eq!(ops.recovers.load(Ordering::SeqCst), 0);
+        drop(lease);
+    }
+
+    /// **Damage a read meets under a reload's claim is published in place of
+    /// `Ready`, and the reload hands on to the rebuild it owes.** A reload
+    /// keeps the store it ran over, so the verdict the read carried to the
+    /// reload's end names the store the entry goes on holding: clearing it
+    /// with the rung requirements would publish `Ready` over a store a read
+    /// found damaged, with nothing scheduled to rebuild it.
+    #[test]
+    fn damage_a_read_meets_under_a_reload_reaches_the_rebuild() {
+        let ops = Arc::new(FakeOps::default());
+        ops.reload_supported.store(true, Ordering::SeqCst);
+        let name = VaultName::new("notes").unwrap();
+        let host = Arc::new(host_without_ambient_polling(
+            Arc::clone(&ops),
+            Roots::Absent(&[&name]),
+            1,
+        ));
+        let lease = host.demand(&name).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        let hold = host
+            .begin_read(&name)
+            .expect("a ready entry answers a read");
+        ops.block_reload.store(true, Ordering::SeqCst);
+        let asking = Arc::clone(&host);
+        let asked = name.clone();
+        let answer = thread::spawn(move || asking.reload(&asked));
+        wait_for_flag("reload_started", &ops.reload_started);
+        let detail = "the store is damaged";
+        let refusal = host.withdraw_for_read_damage(&hold, detail.to_string());
+        assert!(
+            matches!(refusal, ReadRefusal::ReaderUnavailable(_)),
+            "a read under the reload's claim was refused with {refusal:?}"
+        );
+        drop(hold);
+
+        ops.block_rebuild.store(true, Ordering::SeqCst);
+        ops.reload_release.store(true, Ordering::SeqCst);
+        assert_eq!(
+            answer.join().unwrap(),
+            Err(ReloadRefusal::Runtime(JobFailure::StoreDamaged(
+                detail.into()
+            ))),
+            "the reload answered over a store a read found damaged"
+        );
+        wait_for_flag("rebuild_started", &ops.rebuild_started);
+        assert_eq!(
+            host.state(&name),
+            answered(TrustState::untrusted(
+                UntrustedReason::store_damaged_rebuilding(detail)
+            )),
+            "the reload published another state than the damage the read met"
+        );
+        ops.rebuild_release.store(true, Ordering::SeqCst);
+        wait_for_one_rebuild_to_ready(&host, &name, &ops);
         drop(lease);
     }
 
