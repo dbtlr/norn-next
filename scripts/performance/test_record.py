@@ -4,8 +4,9 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from record import acknowledge, measured, summarize
+from record import acknowledge, fixture, measured, summarize
 
 
 def process(documents=2014, first_get=400_000_000, first_find=900_000_000, ready=3_000_000_000,
@@ -98,6 +99,21 @@ class AcknowledgementTests(unittest.TestCase):
             self.assertEqual(json.loads((acks / "1.json").read_text()), {"sequence": 1, "probe": "whole_slug"})
             self.assertEqual(json.loads((acks / "2.json").read_text()), {"sequence": 2, "probe": "active_page"})
             self.assertEqual(sorted(path.name for path in acks.iterdir()), ["1.json", "2.json"])
+
+
+
+class FixtureTests(unittest.TestCase):
+    def test_a_failed_generation_leaves_no_fixture_for_the_next_run_to_trust(self):
+        def interrupted(binary, root, size):
+            root.mkdir(parents=True)
+            (root / "vault").mkdir()
+            raise TimeoutError("generation timed out")
+
+        with tempfile.TemporaryDirectory() as directory:
+            fixtures = Path(directory)
+            with patch("record.generate_fixture", side_effect=interrupted), self.assertRaises(TimeoutError):
+                fixture(Path("worker"), fixtures, 2000)
+            self.assertEqual(list(fixtures.iterdir()), [])
 
 
 if __name__ == "__main__":

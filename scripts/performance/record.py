@@ -174,7 +174,14 @@ def fixture(binary, fixtures, size):
     """Read a frozen fixture, generating it once when it does not exist yet."""
     source = fixtures / str(size)
     if not source.exists():
-        generate_fixture(binary, source, size)
+        # Generate beside it and move it in whole, so an interrupted generation leaves nothing to trust.
+        partial = fixtures / f".{size}.partial"
+        shutil.rmtree(partial, ignore_errors=True)
+        try:
+            generate_fixture(binary, partial, size)
+            partial.replace(source)
+        finally:
+            shutil.rmtree(partial, ignore_errors=True)
     manifest = json.loads((source / "manifest.json").read_text())
     if manifest["workload_version"] != "runtime-baseline-v1" or manifest["background_count"] != size:
         raise ValueError("the frozen fixture belongs to another workload or scale")

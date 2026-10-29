@@ -9,7 +9,8 @@ from pathlib import Path
 from timeline import COLUMNS, Thresholds, append, compare, read, skip
 
 
-def record(run_at, commit="aaaa", ready=1000.0, warm=1.0, derived=2014, status="measured", build="b" * 64):
+def record(run_at, commit="aaaa", ready=1000.0, warm=1.0, derived=2014, status="measured", build="b" * 64,
+           work_status="measured"):
     return {"record_version": 1, "completed": True, "run_at": run_at, "commit": commit,
             "build_sha256": build, "compiler": "1.97.1", "load_start": 0.5,
             "rows": [
@@ -17,7 +18,7 @@ def record(run_at, commit="aaaa", ready=1000.0, warm=1.0, derived=2014, status="
                 {"documents": 2014, "metric": "warm.get_small.median", "value": warm, "unit": "ms",
                  "status": "measured", "note": ""},
                 {"documents": 2014, "metric": "work.documents_derived", "value": derived, "unit": "count",
-                 "status": "measured", "note": ""},
+                 "status": work_status, "note": ""},
             ]}
 
 
@@ -96,6 +97,15 @@ class WorkChangeTests(unittest.TestCase):
         self.assertEqual(len(report), 1)
         self.assertIn("work change at aaaa-dirty between builds 111111111111..222222222222", report[0])
 
+    def test_an_unstable_night_does_not_hide_the_next_change(self):
+        table = Table(self)
+        table.add(commit="aaaa", derived=2014)
+        table.add(commit="bbbb", derived=3000, work_status="unstable")
+        table.add(commit="cccc", derived=4028)
+        report = table.report()
+        self.assertEqual(len(report), 1)
+        self.assertIn("work change aaaa..cccc at 2014 documents: work.documents_derived 2014 -> 4028", report[0])
+
     def test_skipped_runs_do_not_hide_the_previous_commit(self):
         table = Table(self)
         table.add(commit="aaaa", derived=2014)
@@ -165,7 +175,8 @@ class LatestRunTests(unittest.TestCase):
         report = table.report()
         self.assertIn("unavailable at 2014 documents: ready", report[0])
         skip(table.path, run_at="2026-10-09T04:30:00Z", commit="aaaa", load=9.0, reason="cargo is running")
-        self.assertEqual(table.report()[0], "latest run 2026-10-09T04:30:00Z skipped: cargo is running")
+        # A skipped night reports only itself; the run before it was reported on its own night.
+        self.assertEqual(table.report(), ["latest run 2026-10-09T04:30:00Z skipped: cargo is running"])
 
 
 if __name__ == "__main__":

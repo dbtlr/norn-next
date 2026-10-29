@@ -313,7 +313,7 @@ python3 scripts/performance/record.py \
 ```
 
 The first run generates each missing fixture size in `--fixtures` with the same
-generator and probes as the baseline. Later runs check the frozen digest and reuse
+generator and probes as the baseline, moving it into place only once complete. Later runs check the frozen digest and reuse
 the bytes unchanged. The defaults are 2,000 and 10,000 background documents
 (2,014 and 10,014 with probes) and three fresh processes per size. Each warm
 operation runs five warmups and 400 measured calls. Writes also exclude their
@@ -367,10 +367,12 @@ The columns are `run_at`, `commit`, `build_sha256`, `compiler`, `documents`,
 record is appended. A skipped run is one `run` row with status `skipped` and its
 reason, so a gap stays visible. Keep one table per engine.
 
-`compare` reports, for the latest run:
+`compare` reports on the latest run. A skipped latest run is reported alone; the
+measured run before it was reported on its own night. Otherwise it reports:
 
-- a skipped run, and any metric that is `unavailable` or `unstable`;
-- a work change: any counter that differs from the measured run before it. Between
+- any metric that is `unavailable` or `unstable`;
+- a work change: any counter that differs from its last measurement in an earlier
+  run, so an unstable night in between does not hide a change. Between
   two commits, or two executables of one dirty commit, it is a change in work; for
   the same commit and executable it is reported as nondeterministic;
 - a sustained clock shift: the latest three measured values are each at least 1.2

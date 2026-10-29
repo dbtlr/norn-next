@@ -74,31 +74,37 @@ def skipped(run: list[dict]) -> bool:
     return any(row["status"] == "skipped" for row in run)
 
 
+def change_heading(before: dict, latest: dict) -> str:
+    commits = before["commit"], latest["commit"]
+    builds = before["build_sha256"][:12], latest["build_sha256"][:12]
+    if commits[0] != commits[1]:
+        return f"work change {commits[0]}..{commits[1]}"
+    if builds[0] != builds[1]:
+        # A dirty checkout keeps its commit while its executable changes.
+        return f"work change at {commits[1]} between builds {builds[0]}..{builds[1]}"
+    return f"nondeterministic work at {commits[1]}"
+
+
 def work_changes(measured: list[list[dict]]) -> list[str]:
-    """Compare the latest run's counters with the measured run before it."""
-    if len(measured) < 2:
+    """Compare each of the latest run's counters with its last earlier measurement.
+
+    An unstable or missing night in between does not hide a change.
+    """
+    if not measured:
         return []
-    before, latest = measured[-2], measured[-1]
-    old = {(row["documents"], row["metric"]): row["value"] for row in before
-           if row["metric"].startswith("work.") and row["status"] == "measured"}
-    lines = []
-    for documents in sorted({row["documents"] for row in latest}, key=int):
-        changed = [f"{row['metric']} {old[documents, row['metric']]} -> {row['value']}" for row in latest
-                   if row["documents"] == documents and row["metric"].startswith("work.")
-                   and row["status"] == "measured" and old.get((documents, row["metric"]), row["value"]) != row["value"]]
-        if not changed:
+    latest = measured[-1]
+    groups: dict[tuple[str, str], list[str]] = {}
+    for row in latest:
+        if not row["metric"].startswith("work.") or row["status"] != "measured":
             continue
-        commits = before[0]["commit"], latest[0]["commit"]
-        builds = before[0]["build_sha256"][:12], latest[0]["build_sha256"][:12]
-        if commits[0] != commits[1]:
-            heading = f"work change {commits[0]}..{commits[1]}"
-        elif builds[0] != builds[1]:
-            # A dirty checkout keeps its commit while its executable changes.
-            heading = f"work change at {commits[1]} between builds {builds[0]}..{builds[1]}"
-        else:
-            heading = f"nondeterministic work at {commits[1]}"
-        lines.append(f"{heading} at {documents} documents: " + "; ".join(changed))
-    return lines
+        before = next((old for run in reversed(measured[:-1]) for old in run
+                       if (old["documents"], old["metric"], old["status"])
+                       == (row["documents"], row["metric"], "measured")), None)
+        if before is not None and before["value"] != row["value"]:
+            key = (row["documents"], change_heading(before, row))
+            groups.setdefault(key, []).append(f"{row['metric']} {before['value']} -> {row['value']}")
+    return [f"{heading} at {documents} documents: " + "; ".join(changed)
+            for (documents, heading), changed in sorted(groups.items(), key=lambda item: (int(item[0][0]), item[0][1]))]
 
 
 def clock_shifts(measured: list[list[dict]], thresholds: Thresholds) -> list[str]:
@@ -123,15 +129,14 @@ def clock_shifts(measured: list[list[dict]], thresholds: Thresholds) -> list[str
 
 
 def compare(rows: list[dict], thresholds: Thresholds) -> list[str]:
-    """Report the latest skip, unmeasured metrics, work changes and sustained clock shifts."""
+    """Report the latest run: its skip, or its unmeasured metrics, work changes and sustained clock shifts."""
     every = runs(rows)
     measured = [run for run in every if not skipped(run)]
-    lines = []
     if every and skipped(every[-1]):
-        lines.append(f"latest run {every[-1][0]['run_at']} skipped: {every[-1][0]['note']}")
-    if measured:
-        lines += [f"{row['status']} at {row['documents']} documents: {row['metric']} {row['note']}".rstrip()
-                  for row in measured[-1] if row["status"] not in ("measured", "skipped")]
+        # The measured run before it was reported on its own night.
+        return [f"latest run {every[-1][0]['run_at']} skipped: {every[-1][0]['note']}"]
+    lines = [f"{row['status']} at {row['documents']} documents: {row['metric']} {row['note']}".rstrip()
+             for row in (measured[-1] if measured else []) if row["status"] != "measured"]
     return lines + work_changes(measured) + clock_shifts(measured, thresholds)
 
 
