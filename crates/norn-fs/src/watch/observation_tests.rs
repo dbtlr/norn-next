@@ -435,6 +435,14 @@ fn capture_refuses_terminal_or_rootless_coverage() {
 }
 
 #[test]
+fn capture_refuses_a_failure_taken_before_control_publishes_it() {
+    let (_lease, _scratch, watch) = fixture();
+    ingest(&watch.state, Err(notify::Error::generic("backend failure")));
+    assert!(watch.state.lock().unwrap().take_terminal().is_some());
+    assert!(watch.capture_build_authority().is_none());
+}
+
+#[test]
 fn capture_refuses_a_dead_coalescer() {
     let (_lease, _scratch, watch) = fixture();
     watch.state.lock().unwrap().coalescer_died = true;

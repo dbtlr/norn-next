@@ -809,7 +809,7 @@ impl Subscription {
             // The coalescer waits on a batch held for the window, and goes on
             // once the window has taken it.
             self.handoff.notify_all();
-            let terminal = state.terminal.take().or_else(|| {
+            let terminal = state.take_terminal().or_else(|| {
                 state
                     .coalescer_died
                     .then(|| WatchError::Backend("watcher stopped".into()))
@@ -1780,9 +1780,20 @@ struct State {
     /// over, and no terminal error follows it into the delivery slot, so the
     /// subscription carries no fact past this one.
     coalescer_died: bool,
+    /// A terminal cause was taken for delivery. Control publishes it only
+    /// after the lock is released, and the subscription never recovers, so a
+    /// capture in that gap must refuse as it does once control is terminal.
+    terminal_taken: bool,
 }
 
 impl State {
+    /// Take the terminal cause for delivery, remembering that one was taken.
+    fn take_terminal(&mut self) -> Option<WatchError> {
+        let terminal = self.terminal.take();
+        self.terminal_taken |= terminal.is_some();
+        terminal
+    }
+
     fn new(
         root: PathBuf,
         registered_root: PathBuf,
@@ -1814,6 +1825,7 @@ impl State {
             settled_in_slot: 0,
             unsubscribed: false,
             coalescer_died: false,
+            terminal_taken: false,
         }
     }
     fn batch(&mut self) -> &mut Batch {
@@ -2194,7 +2206,7 @@ fn run_coalescer(
             let mut locked = state.lock().expect("watch state poisoned");
             if locked.healing {
                 Ok(None)
-            } else if let Some(error) = locked.terminal.take() {
+            } else if let Some(error) = locked.take_terminal() {
                 Err(error)
             } else {
                 let root = locked.root.clone();

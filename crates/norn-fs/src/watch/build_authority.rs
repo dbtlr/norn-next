@@ -156,7 +156,11 @@ impl Subscription {
     pub fn capture_build_authority(&self) -> Option<BuildAuthority> {
         self.check_root_anchor().ok()?;
         let mut state = self.state.lock().ok()?;
-        if state.terminal.is_some() || state.unsubscribed || state.coalescer_died {
+        if state.terminal.is_some()
+            || state.terminal_taken
+            || state.unsubscribed
+            || state.coalescer_died
+        {
             return None;
         }
         state.build_authority.invalidate();
