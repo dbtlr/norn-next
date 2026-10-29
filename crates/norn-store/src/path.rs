@@ -730,6 +730,18 @@ pub(crate) fn prefix_successor(prefix: &str) -> Option<String> {
     None
 }
 
+/// The segment a folder named `name` occupies in every place
+/// [`DocumentPath::rendered`] names beneath it.
+///
+/// Rendering is per segment and only the leaf's stem is read as a stem, so
+/// this is the whole of what a folder contributes to a rendering. A caller
+/// looking for the spellings that render onto a place lists a folder and keeps
+/// the names whose rendering is the place's segment there; the corpus in
+/// `tests/paths.rs` holds this to `rendered` for every refusal it states.
+pub fn rendered_folder_name(name: &std::ffi::OsStr) -> String {
+    rendered_segment(&name.to_string_lossy())
+}
+
 /// One segment as a document-path segment: every character the grammar refuses
 /// replaced, and a segment the grammar refuses whole marked ahead of.
 ///

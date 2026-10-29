@@ -229,7 +229,7 @@ pub use read::{
 pub use norn_db::{ColumnRead, EmittedPlan, OpenOutcome, PlanStep, RebuildReason};
 pub use path::{
     ClassKey, DirectoryPrefix, DocumentPath, PathKey, RENDERED_MARKER, SuffixKey, SuffixProbe,
-    comparison_key, suffix_probe,
+    comparison_key, rendered_folder_name, suffix_probe,
 };
 pub use request::{
     DiscardScope, ExplainedStatement, FINDING_ID_CHUNK, FeedCursor, FindingCursor, InventoryEntry,
