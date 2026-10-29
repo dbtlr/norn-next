@@ -699,12 +699,14 @@ never the rest and concludes nothing there. **A scoped leg told about a refused 
 its place instead**: a report names one spelling and the place is named by all of them, so the
 leg lists the folders along the place's path — the deepest one spelled as written, and one per
 candidate at each marked segment — and files every spelling it finds there, the first replacing
-what stood; where it finds none, the place's spelling findings end. That covers a refused spelling
-that is edited, that leaves, or whose root stands refused, and a refused folder that leaves or
-stands refused, whose spelling addresses no range of stored paths: the places beneath it are found
-from the findings under its rendering and each is read the same way. A reading costs the folders
-along one path, each listed once per job, and never a subtree; a folder it cannot list concludes
-nothing, and the place keeps what it holds. A walk rooted below an unrendered ancestor that a real
+what stood; where it finds none, the place's spelling findings end. A report does not say what the
+path was before, so every refused spelling it names has both its own place read and, where its
+spelling addresses no range of stored paths, the places beneath its rendering, found from the
+findings standing there. That covers a refused spelling that is edited, leaves, becomes a folder or
+stands refused, and a refused folder that leaves, loses a file, becomes a file or stands refused.
+A reading costs the folders along one path, each listed once per job and looked up by the segment
+its names render to, and never a subtree; a folder it cannot list or search concludes nothing, and
+the place keeps what it holds until the folder reads again. A walk rooted below an unrendered ancestor that a real
 folder's own marker-carrying name puts above it still concludes nothing at the places there, and the
 next heal converges them. The collision is where the sides tell apart most
 clearly — the document whose bytes were refused can leave while a refused spelling still renders
