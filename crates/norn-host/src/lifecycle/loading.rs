@@ -167,9 +167,16 @@ impl Requests {
     }
 
     fn ready(&self, target: &str) -> bool {
+        self.ready_interest(target).is_some()
+    }
+
+    /// A further hold on `target`'s ready slot, while a live interest holds it.
+    /// It adds no slot, so the bound never turns it away.
+    fn ready_interest(&self, target: &str) -> Option<Arc<()>> {
         self.slots
             .iter()
-            .any(|slot| slot.ready && slot.target == target && slot.interest.strong_count() > 0)
+            .filter(|slot| slot.ready && slot.target == target)
+            .find_map(|slot| slot.interest.upgrade())
     }
 
     fn join(&mut self, target: &str) -> Joined {
@@ -238,6 +245,10 @@ pub(crate) struct Admitted<R> {
     /// The target the build published ready for this request ahead of its
     /// vault-wide step, where that is what admitted it.
     target: Option<String>,
+    /// This request's own hold on that target's slot, taken under the hold
+    /// that admitted it, for the read's lease to keep: the read that queued
+    /// the target may end first.
+    interest: Option<Arc<()>>,
     /// The build had not judged relations when this request was admitted.
     pub(super) relations_loading: bool,
 }
@@ -251,6 +262,7 @@ impl<R> Clone for Admitted<R> {
             token: self.token,
             published: self.published,
             target: self.target.clone(),
+            interest: self.interest.clone(),
             relations_loading: self.relations_loading,
         }
     }
@@ -260,6 +272,12 @@ impl<R> Admitted<R> {
     /// The last step the build had published when it admitted this request.
     pub(super) fn published(&self) -> Step {
         self.published
+    }
+
+    /// Take this admission's hold on its pulled-ahead target, for the read's
+    /// lease to keep through its answer.
+    pub(super) fn take_interest(&mut self) -> Option<Arc<()>> {
+        self.interest.take()
     }
 
     /// Check the build's root outside every lock; a loss withdraws the build.
@@ -482,13 +500,16 @@ impl<A: SnapshotSource> EntryState<A> {
                 let Some(published) = building.published else {
                     return Early::Waits;
                 };
-                let target = if reaches(Some(published), boundary) {
-                    None
+                let (target, interest) = if reaches(Some(published), boundary) {
+                    (None, None)
                 } else {
-                    match request.pulled_ahead_target(&building.model) {
-                        Some(target) if building.requests.ready(target) => Some(target.to_owned()),
-                        _ => return Early::Waits,
-                    }
+                    let Some(target) = request.pulled_ahead_target(&building.model) else {
+                        return Early::Waits;
+                    };
+                    let Some(interest) = building.requests.ready_interest(target) else {
+                        return Early::Waits;
+                    };
+                    (Some(target.to_owned()), Some(interest))
                 };
                 Early::Admitted(Admitted {
                     pool: Arc::clone(&building.pool),
@@ -497,6 +518,7 @@ impl<A: SnapshotSource> EntryState<A> {
                     token: building.token,
                     published,
                     target,
+                    interest,
                     relations_loading: !reaches(Some(published), Boundary::Relations),
                 })
             }

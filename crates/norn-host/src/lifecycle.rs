@@ -4369,7 +4369,8 @@ pub enum ReadRefusal {
 /// One client operation's lifecycle guard and immediate trust answer.
 /// Dropping it ends the demand lease and starts a fresh idle interval.
 pub struct DemandLease<O: EntryOps> {
-    /// This read's interest in its target in a build's pull-ahead queue. The
+    /// This read's interest in its target in a build's pull-ahead queue,
+    /// joined while it waits or taken where the ready target admits it. The
     /// queue holds it weakly, so the slot expires with the demand that owns
     /// the read.
     loading_interest: Option<Arc<()>>,
@@ -5893,7 +5894,19 @@ impl<O: EntryOps> Host<O> {
             // a serving or settling entry answers from its own reader.
             let (selected, early_wait) = match stance {
                 ReadStance::Refuse => match state.early(request) {
-                    loading::Early::Admitted(admitted) => (Some(admitted), false),
+                    loading::Early::Admitted(mut admitted) => {
+                        // A Get admitted through its pulled-ahead target keeps
+                        // that target's slot under its own lease, so the read
+                        // that queued it may end before this one answers.
+                        if let Some(interest) = admitted.take_interest() {
+                            state
+                                .lease
+                                .as_mut()
+                                .expect("read acquisition owns its lease")
+                                .loading_interest = Some(interest);
+                        }
+                        (Some(admitted), false)
+                    }
                     loading::Early::Waits => {
                         // A waiting Get's interest joins its build's queue
                         // for pull-ahead; past the bound it waits for its
@@ -20323,6 +20336,100 @@ mod tests {
                 "the read was refused with a closed construction's open failure: {refusal:?}"
             );
         });
+        ops.attach_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &name, TrustState::Ready);
+    }
+
+    /// **A Get admitted through its pulled-ahead target holds that target
+    /// itself.** The read that queued the target lets its interest go while
+    /// this read waits outside the gate for the pool's connection; the target
+    /// still stands for this read, which answers its document, and the slot
+    /// goes with this read's own lease.
+    #[cfg(unix)]
+    #[test]
+    fn an_early_get_admitted_through_its_target_outlives_the_read_that_queued_it() {
+        let _watcher_lease = norn_testkit::isolation::Lease::hold(
+            norn_testkit::isolation::REAL_WATCHER,
+            norn_testkit::isolation::acquisition_budget(lifecycle_wait_budget()),
+        );
+        let scratch = temp_base("early-target-outlives-its-queuer");
+        let root = scratch.join("vault");
+        std::fs::create_dir_all(root.join(".norn")).unwrap();
+        std::fs::write(root.join(".norn/schema.yaml"), "version: 1\n").unwrap();
+        norn_fs::watch::settle_prior_changes(scratch.root(), lifecycle_wait_budget().work())
+            .unwrap();
+        let (subscription, _own) =
+            norn_fs::watch::watch(&root, &root.join(".norn/schema.yaml")).unwrap();
+        subscription
+            .synchronize(lifecycle_wait_budget().work())
+            .unwrap();
+
+        let ops = Arc::new(FakeOps::default());
+        ops.block_attach.store(true, Ordering::SeqCst);
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
+        let _lease = host.demand(&name).unwrap();
+        wait_for_flag("attach_started", &ops.attach_started);
+        let entry = host.shared.entries.get(&name).unwrap().clone();
+        let progress = reporter(&entry, entry.gate.lock().unwrap().claim.epoch());
+        let token = progress
+            .begin_construction(Some(loading::Begun {
+                pool: FakeReader {
+                    ledger: Arc::clone(&ops.readers),
+                    free: Mutex::new(true),
+                    returned: Condvar::new(),
+                },
+                model: Arc::new(ContentModel::none()),
+                authority: subscription.capture_build_authority().unwrap(),
+                store_epoch: "fake-epoch".into(),
+            }))
+            .expect("the attach's claim begins its construction");
+        assert!(progress.publish_step(token, "fake-epoch", norn_store::Step::Names));
+        let params = norn_wire::GetParams::new(
+            norn_wire::VaultAddress::name(name.clone()),
+            norn_wire::ResolutionTarget::new("subject").unwrap(),
+        );
+        let request = loading::Request::Get(&params);
+        // The read that queued the target, reduced to its interest.
+        let queued = match entry.gate.lock().unwrap().join_requests(request) {
+            Some(loading::Joined::New(interest)) => interest,
+            _ => panic!("the first interest in the target opens its slot"),
+        };
+        assert!(progress.publish_targets(token, "fake-epoch", &["subject".to_owned()]));
+        // The pool's one connection is out, so the admitted read leaves the
+        // gate for its acquisition.
+        let busy = match entry.gate.lock().unwrap().early(request) {
+            loading::Early::Admitted(admitted) => admitted.pool.try_take().unwrap(),
+            _ => panic!("the ready target admits its Get"),
+        };
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        *ops.readers.acquisition_blocked.lock().unwrap() = Some((false, entered_tx, release_rx));
+        thread::scope(|scope| {
+            let reading = scope.spawn(|| {
+                host.begin_query_read(&name, norn_store::ReadNeed::Source, request)
+                    .map(drop)
+            });
+            entered_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the admitted read left the gate for the connection");
+            // The queuing read answers: its interest and its connection go.
+            drop((queued, busy));
+            release_tx.send(()).unwrap();
+            let answered = reading.join().unwrap();
+            assert!(
+                answered.is_ok(),
+                "the read lost the target that admitted it: {:?}",
+                answered.err()
+            );
+        });
+        assert!(
+            matches!(
+                entry.gate.lock().unwrap().early(request),
+                loading::Early::Waits
+            ),
+            "the target's slot outlived every read that held it"
+        );
         ops.attach_release.store(true, Ordering::SeqCst);
         wait_for_state(&host, &name, TrustState::Ready);
     }
