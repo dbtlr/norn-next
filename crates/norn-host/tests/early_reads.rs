@@ -1024,6 +1024,132 @@ fn any_fact_withdraws_every_early_capability_and_the_build_still_converges() {
     );
 }
 
+/// Holds the first early read at its established snapshot, keeping its
+/// interest in its target live, and lets every later read through.
+#[derive(Default)]
+struct FirstRead {
+    /// Whether the first read is held, and whether it was let go.
+    state: Mutex<(bool, bool)>,
+    moved: Condvar,
+}
+impl FirstRead {
+    fn wait(&self) {
+        wait_until("the first early read established", BUDGET, || {
+            if self.state.lock().unwrap().0 {
+                Observed::Met(())
+            } else {
+                Observed::pending("no early read established")
+            }
+        })
+        .unwrap();
+    }
+    fn release(&self) {
+        self.state.lock().unwrap_or_else(|p| p.into_inner()).1 = true;
+        self.moved.notify_all();
+    }
+    fn established(&self) {
+        let mut state = self.state.lock().unwrap();
+        if state.0 {
+            return;
+        }
+        state.0 = true;
+        self.moved.notify_all();
+        let (_released, timeout) = self
+            .moved
+            .wait_timeout_while(state, Duration::from_secs(60), |state| !state.1)
+            .unwrap();
+        assert!(!timeout.timed_out(), "the first read was never released");
+    }
+}
+struct ReleaseFirstRead<'a>(&'a FirstRead);
+impl Drop for ReleaseFirstRead<'_> {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
+struct FirstReadProbe {
+    construction: Arc<Probe>,
+    read: Arc<FirstRead>,
+}
+impl LoadingProbe for FirstReadProbe {
+    fn at(&self, boundary: LoadingBoundary) {
+        match boundary {
+            LoadingBoundary::QueryEstablished => self.read.established(),
+            LoadingBoundary::QueryBuilt => {}
+            _ => self.construction.at(boundary),
+        }
+    }
+}
+
+/// Contract item 18: a Get target the build pulled ahead and published ready
+/// is withdrawn by a fact that arrives while a live interest holds it.
+#[test]
+fn a_fact_withdraws_a_pulled_ahead_ready_target() {
+    let fixture = Fixture::new("early-fact-withdraws-ready-target");
+    let construction = Probe::new([
+        LoadingBoundary::StepComplete(Step::Names),
+        LoadingBoundary::CanonicalPage,
+        LoadingBoundary::TargetReady,
+    ]);
+    let first = Arc::new(FirstRead::default());
+    let host = fixture.host(Arc::new(FirstReadProbe {
+        construction: construction.clone(),
+        read: first.clone(),
+    }));
+    std::thread::scope(|scope| {
+        let _release = Release(&construction);
+        let _release_read = ReleaseFirstRead(&first);
+        let _demand = host.demand(&name()).unwrap();
+        construction.wait(LoadingBoundary::StepComplete(Step::Names));
+        construction.release();
+        construction.wait(LoadingBoundary::CanonicalPage);
+        let held = spawn_get(scope, &host, get("first"));
+        waits(&host, 1);
+        construction.release();
+        // The build holds after publishing the target ready, and the read it
+        // admitted holds its interest in that target at its snapshot.
+        construction.wait(LoadingBoundary::TargetReady);
+        first.wait();
+        let admitted = host.get(&get("first")).unwrap();
+        assert!(
+            warming(&admitted.answer.reading.trust),
+            "the ready target admits a Get before the content step ends"
+        );
+        std::fs::write(fixture.root.join("late.md"), "---\nrank: 40\n---\n# Late\n").unwrap();
+        wait_until(
+            "the fact withdraws the ready target",
+            BUDGET,
+            || match host.get(&get("first")) {
+                Err(refused) if refused.code() == &ReasonCode::HostEntryNotReady => {
+                    Observed::Met(())
+                }
+                other => Observed::pending(format!("{other:?}")),
+            },
+        )
+        .unwrap();
+        let began = Instant::now();
+        assert_eq!(
+            host.get(&get("first")).unwrap_err().code(),
+            &ReasonCode::HostEntryNotReady
+        );
+        assert!(
+            began.elapsed() < Duration::from_secs(2),
+            "withdrawn refuses at once"
+        );
+        first.release();
+        held.recv_timeout(BUDGET.work()).unwrap().ok();
+        construction.release();
+    });
+    ready(&host);
+    wait_until("the late document is served", BUDGET, || {
+        match host.find(&ranked("40")) {
+            Ok(found) if found.answer.report.page.rows.len() == 1 => Observed::Met(()),
+            other => Observed::pending(format!("{other:?}")),
+        }
+    })
+    .unwrap();
+}
+
 /// Contract item 18: an overflow withdraws every capability, and Ready follows
 /// through the ordinary overflow recovery.
 #[test]
