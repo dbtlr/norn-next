@@ -409,7 +409,12 @@ fn a_sealed_rich_get_contains_ordinary_links_anchor_context_and_findings() {
             norn_wire::LinkHealth::Broken
         ]
     );
-    let findings = document.findings.unwrap();
+    let norn_wire::Content::Known {
+        value: findings, ..
+    } = document.findings.unwrap()
+    else {
+        panic!("the sealed source findings must be known");
+    };
     assert_eq!(findings.total, 1);
     assert_eq!(findings.items[0].kind, norn_wire::FindingKind::Broken);
 }

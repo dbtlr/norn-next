@@ -1087,13 +1087,13 @@ fn a_rows_findings_column_carries_what_validate_answers_at_its_path() {
             (ordinal, finding.kind.as_str(), finding.id)
         });
         assert_eq!(
-            findings.total,
+            crate::common::known(&findings).total,
             validated.len() as u64,
             "{}",
             row.path.as_str()
         );
         assert_eq!(
-            findings.items,
+            crate::common::known(&findings).items,
             validated
                 .into_iter()
                 .take(NESTED_ROW_CEILING)
@@ -1101,7 +1101,7 @@ fn a_rows_findings_column_carries_what_validate_answers_at_its_path() {
             "{}",
             row.path.as_str()
         );
-        kept += findings.items.len() as u64;
+        kept += crate::common::known(&findings).items.len() as u64;
     }
     let by_path = |at: &str| {
         found
@@ -1113,13 +1113,20 @@ fn a_rows_findings_column_carries_what_validate_answers_at_its_path() {
     };
     let long = by_path("long/doc.md");
     assert_eq!(
-        (long.items.len(), long.total),
+        (
+            crate::common::known(&long).items.len(),
+            crate::common::known(&long).total
+        ),
         (NESTED_ROW_CEILING, NESTED_ROW_CEILING as u64 + 3)
     );
-    assert!(long.is_truncated());
+    assert!(crate::common::known(&long).is_truncated());
     let a = by_path("notes/a.md");
     assert_eq!(
-        a.items.iter().map(|item| item.kind).collect::<Vec<_>>(),
+        crate::common::known(&a)
+            .items
+            .iter()
+            .map(|item| item.kind)
+            .collect::<Vec<_>>(),
         vec![
             FindingKind::FrontmatterUnreadable,
             FindingKind::PathNamesNoDocument,
@@ -1128,18 +1135,22 @@ fn a_rows_findings_column_carries_what_validate_answers_at_its_path() {
         ],
         "the findings about the document, then link 0's, then link 1's"
     );
-    assert_eq!(a.items[1].head.total(), 3);
+    assert_eq!(crate::common::known(&a).items[1].head.total(), 3);
     // Only the ambiguous link's finding carries a hint, though link 0's and
     // the document's stand in a class too.
     assert_eq!(
-        a.items
+        crate::common::known(&a)
+            .items
             .iter()
             .map(|item| item.hint.is_some())
             .collect::<Vec<_>>(),
         [false, false, false, true]
     );
-    assert_eq!(by_path("notes/B.md").items, Vec::new());
-    assert_eq!(by_path("notes/B.md").total, 0);
+    assert_eq!(
+        crate::common::known(&by_path("notes/B.md")).items,
+        Vec::new()
+    );
+    assert_eq!(crate::common::known(&by_path("notes/B.md")).total, 0);
     assert_eq!(
         found.work.finding_rows, kept,
         "the head read past the ceiling"
@@ -1162,7 +1173,7 @@ fn a_rows_findings_column_carries_what_validate_answers_at_its_path() {
         .map(|row| {
             (
                 row.path.as_str().to_string(),
-                row.findings.as_ref().expect("the findings column").total,
+                crate::common::known(row.findings.as_ref().expect("the findings column")).total,
             )
         })
         .collect();

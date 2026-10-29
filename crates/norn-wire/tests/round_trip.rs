@@ -699,6 +699,7 @@ fn columns() -> Vec<Column> {
 /// Every reading a link's health takes.
 fn link_healths() -> Vec<LinkHealth> {
     vec![
+        LinkHealth::Loading,
         LinkHealth::Healthy,
         LinkHealth::Broken,
         LinkHealth::Ambiguous,
@@ -4290,7 +4291,13 @@ fn a_body_reports_the_cut_through_its_byte_length() {
 #[test]
 fn a_links_health_is_the_count_of_what_it_resolves_to() {
     let rows = link_rows();
-    assert_eq!(rows.len(), link_healths().len());
+    assert_eq!(
+        rows.len(),
+        link_healths()
+            .into_iter()
+            .filter(|health| *health != LinkHealth::Loading)
+            .count()
+    );
     assert_eq!(rows[0].health(), LinkHealth::Broken);
     assert_eq!(rows[1].health(), LinkHealth::Healthy);
     assert_eq!(rows[2].health(), LinkHealth::Ambiguous);
@@ -4739,9 +4746,12 @@ fn a_link_row_whose_head_is_wider_than_the_bound_refuses_the_read() {
     let json = link_row_json("ambiguous", &nine[..CANDIDATE_HEAD], 9);
     let read: LinkRow =
         serde_json::from_str(&json).unwrap_or_else(|error| panic!("reading {json}: {error}"));
-    assert_eq!(read.targets.candidates().len(), CANDIDATE_HEAD);
-    assert_eq!(read.targets.total(), 9);
-    assert!(read.targets.is_truncated());
+    assert_eq!(
+        read.targets.as_ref().unwrap().candidates().len(),
+        CANDIDATE_HEAD
+    );
+    assert_eq!(read.targets.as_ref().unwrap().total(), 9);
+    assert!(read.targets.as_ref().unwrap().is_truncated());
     assert_eq!(read.health(), LinkHealth::Ambiguous);
 }
 
@@ -5261,7 +5271,7 @@ fn every_response_carrying_finding_rows_carries_the_rule_sets_they_cite() {
     .expect("a find report as JSON");
     assert_eq!(find["rule_sets"], sets);
     assert_eq!(
-        find["page"]["rows"][0]["findings"]["items"][0]["rule_set"],
+        find["page"]["rows"][0]["findings"]["value"]["items"][0]["rule_set"],
         3
     );
 
@@ -6193,7 +6203,7 @@ fn every_document_row_setter_lands_in_the_bytes() {
     assert_eq!(
         wire(&request),
         [
-            r##"{"path":"notes/a.md","fields":{"state":"known","value":{"type":{"kind":"scalar","raw":"note"}}},"body":{"state":"known","value":{"text":"Design\n","byte_length":4096}},"links":{"state":"known","value":{"items":[{"family":"wikilink","embed":false,"protocol":null,"target":"a","title":"A","anchor":{"kind":"heading","text":"Design"},"span":{"line":3,"column":1,"byte_offset":42},"targets":{"candidates":[],"total":0},"health":"broken"},{"family":"wikilink","embed":false,"protocol":null,"target":"a","title":"A","anchor":{"kind":"heading","text":"Design"},"span":{"line":3,"column":1,"byte_offset":42},"targets":{"candidates":[{"path":"notes/a.md","suffix":"notes/a"}],"total":1},"health":"healthy"},{"family":"wikilink","embed":false,"protocol":null,"target":"a","title":"A","anchor":{"kind":"heading","text":"Design"},"span":{"line":3,"column":1,"byte_offset":42},"targets":{"candidates":[{"path":"notes/a.md","suffix":"notes/a"},{"path":"archive/a.md","suffix":"archive/a"}],"total":2},"health":"ambiguous"},{"family":"markdown","embed":false,"protocol":"https","target":"example.com/page","title":"","anchor":null,"span":{"line":3,"column":1,"byte_offset":42},"targets":{"candidates":[],"total":0},"health":"not_judged"}],"total":9}},"headings":{"state":"known","value":{"items":[{"level":2,"text":"Design","slug":"design","span":{"line":3,"column":1,"byte_offset":42}}],"total":1}},"blocks":{"state":"known","value":{"items":[{"id":"a1","span":null}],"total":1}},"tags":{"state":"known","value":{"items":[{"name":"draft","source":"frontmatter","span":{"line":3,"column":1,"byte_offset":42}}],"total":1}},"findings":{"items":[{"id":7,"kind":"document/undeclared-tag","severity":"warning","path":"notes/a.md","target":"draft","span":{"line":3,"column":1,"byte_offset":42},"head":{"candidates":[{"path":"notes/glossary.md","suffix":"notes/glossary"},{"path":"archive/glossary.md","suffix":"archive/glossary"}],"total":9},"hint":{"hint":"resolves","target":"glossary"},"message":"the tag is not declared","generation":12,"rule_set":null,"value":null}],"total":1}}"##,
+            r##"{"path":"notes/a.md","fields":{"state":"known","value":{"type":{"kind":"scalar","raw":"note"}}},"body":{"state":"known","value":{"text":"Design\n","byte_length":4096}},"links":{"state":"known","value":{"items":[{"family":"wikilink","embed":false,"protocol":null,"target":"a","title":"A","anchor":{"kind":"heading","text":"Design"},"span":{"line":3,"column":1,"byte_offset":42},"targets":{"candidates":[],"total":0},"health":"broken"},{"family":"wikilink","embed":false,"protocol":null,"target":"a","title":"A","anchor":{"kind":"heading","text":"Design"},"span":{"line":3,"column":1,"byte_offset":42},"targets":{"candidates":[{"path":"notes/a.md","suffix":"notes/a"}],"total":1},"health":"healthy"},{"family":"wikilink","embed":false,"protocol":null,"target":"a","title":"A","anchor":{"kind":"heading","text":"Design"},"span":{"line":3,"column":1,"byte_offset":42},"targets":{"candidates":[{"path":"notes/a.md","suffix":"notes/a"},{"path":"archive/a.md","suffix":"archive/a"}],"total":2},"health":"ambiguous"},{"family":"markdown","embed":false,"protocol":"https","target":"example.com/page","title":"","anchor":null,"span":{"line":3,"column":1,"byte_offset":42},"targets":{"candidates":[],"total":0},"health":"not_judged"}],"total":9}},"headings":{"state":"known","value":{"items":[{"level":2,"text":"Design","slug":"design","span":{"line":3,"column":1,"byte_offset":42}}],"total":1}},"blocks":{"state":"known","value":{"items":[{"id":"a1","span":null}],"total":1}},"tags":{"state":"known","value":{"items":[{"name":"draft","source":"frontmatter","span":{"line":3,"column":1,"byte_offset":42}}],"total":1}},"findings":{"state":"known","value":{"items":[{"id":7,"kind":"document/undeclared-tag","severity":"warning","path":"notes/a.md","target":"draft","span":{"line":3,"column":1,"byte_offset":42},"head":{"candidates":[{"path":"notes/glossary.md","suffix":"notes/glossary"},{"path":"archive/glossary.md","suffix":"archive/glossary"}],"total":9},"hint":{"hint":"resolves","target":"glossary"},"message":"the tag is not declared","generation":12,"rule_set":null,"value":null}],"total":1}}}"##,
         ]
         .concat()
     );
@@ -12568,10 +12578,13 @@ fn unreadable_content_is_distinct_from_unprojected_and_empty_content() {
             serde_json::json!({"state":"unknown","reason":"unreadable"})
         );
     }
-    assert_eq!(json["findings"]["items"][0]["kind"], "document/unreadable");
-    assert_eq!(json["findings"]["items"][0]["severity"], "error");
     assert_eq!(
-        json["findings"]["items"][0]["message"],
+        json["findings"]["value"]["items"][0]["kind"],
+        "document/unreadable"
+    );
+    assert_eq!(json["findings"]["value"]["items"][0]["severity"], "error");
+    assert_eq!(
+        json["findings"]["value"]["items"][0]["message"],
         "Permission denied (os error 13)"
     );
     assert_eq!(wire(&bare), r#"{"path":"locked.md"}"#);
@@ -12587,7 +12600,7 @@ fn unreadable_content_is_distinct_from_unprojected_and_empty_content() {
         serde_json::from_str(r#"{"path":"locked.md","body":null}"#).expect("unprojected null");
     assert_eq!(null, bare);
     assert!(
-        serde_json::from_str::<Content<BodyText>>(r#"{"state":"unknown","reason":"loading"}"#)
+        serde_json::from_str::<Content<BodyText>>(r#"{"state":"unknown","reason":"future"}"#)
             .is_err()
     );
 }
@@ -12656,8 +12669,8 @@ fn collection_content_pages_round_trip_unknown_unreadable_and_known_empty_values
     }
     let findings = CollectionPage::findings(Page::new(vec![finding_row()], None, vec![]), []);
     let json = serde_json::to_value(&findings).unwrap();
-    assert!(json["page"].get("state").is_none());
-    assert_eq!(json["page"]["rows"][0]["id"], 7);
+    assert_eq!(json["page"]["state"], "known");
+    assert_eq!(json["page"]["value"]["rows"][0]["id"], 7);
     round_trip(&findings);
 }
 
@@ -12703,4 +12716,61 @@ fn a_missing_path_beneath_a_mark_round_trips_as_not_judged() {
     .unwrap()
     .with_target_gap(TargetGap::Marked);
     assert_eq!(held.health(), LinkHealth::Healthy);
+}
+
+#[test]
+fn loading_content_round_trips() {
+    let value: norn_wire::Content<String> =
+        serde_json::from_value(serde_json::json!({"state":"unknown","reason":"loading"})).unwrap();
+    assert_eq!(
+        serde_json::to_value(value).unwrap(),
+        serde_json::json!({"state":"unknown","reason":"loading"})
+    );
+}
+
+#[test]
+fn a_loading_link_carries_no_targets() {
+    let loading = serde_json::json!({"family":"wikilink","embed":false,"protocol":null,"target":"note","title":null,"anchor":null,"span":null,"targets":null,"health":"loading"});
+    let constructed = LinkRow::new(
+        LinkFamily::Wikilink,
+        false,
+        None,
+        "note",
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(constructed.health(), LinkHealth::Loading);
+    assert!(constructed.targets.is_none());
+    assert_eq!(serde_json::to_value(&constructed).unwrap(), loading);
+    let row: LinkRow = serde_json::from_value(loading.clone()).unwrap();
+    assert_eq!(serde_json::to_value(row).unwrap(), loading);
+    let mut invalid = loading.clone();
+    invalid["health"] = serde_json::json!("broken");
+    assert!(serde_json::from_value::<LinkRow>(invalid).is_err());
+    let mut invalid = loading;
+    invalid["targets"] = serde_json::json!({"candidates":[],"total":0});
+    assert!(serde_json::from_value::<LinkRow>(invalid).is_err());
+}
+
+#[test]
+fn findings_columns_are_content() {
+    for findings in [
+        serde_json::json!({"state":"unknown","reason":"loading"}),
+        serde_json::json!({"state":"known","value":{"items":[],"total":0}}),
+    ] {
+        let json = serde_json::json!({"path":"note.md","findings":findings});
+        let row: DocumentRow = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(serde_json::to_value(row).unwrap(), json);
+    }
+    for page in [
+        serde_json::json!({"state":"unknown","reason":"loading"}),
+        serde_json::json!({"state":"known","value":{"rows":[],"next":null,"moved":[]}}),
+    ] {
+        let json = serde_json::json!({"of":"findings","page":page,"rule_sets":[]});
+        let row: CollectionPage = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(serde_json::to_value(row).unwrap(), json);
+    }
 }

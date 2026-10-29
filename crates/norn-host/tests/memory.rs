@@ -2468,7 +2468,7 @@ fn a_linked_stem(rows: &[DocumentRow]) -> Option<(String, DocumentPath, Document
                 && link.protocol.is_none()
                 && link.anchor.is_none()
                 && !link.target.contains('/');
-            match link.targets.candidates() {
+            match link.targets.as_ref().expect("known targets").candidates() {
                 [only] if bare && link.health() == LinkHealth::Healthy => {
                     Some((link.target.clone(), only.path.clone(), row.path.clone()))
                 }

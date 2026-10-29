@@ -64,7 +64,7 @@ pub enum CollectionSelector {
 /// `{"of":"links","page":{"state":"known","value":{"rows":[…],"next":null,"moved":[]}}}`.
 /// Content pages use `Content` to distinguish a known page, including an
 /// empty page, from unknown content with a reason. A broken document answers
-/// `{"state":"unknown","reason":"unreadable"}`. Findings page normally.
+/// `{"state":"unknown","reason":"unreadable"}`. Findings remain known for broken documents and are unknown while relations load.
 /// The `of` tag names the collection and its row type.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "of", rename_all = "snake_case")]
@@ -98,7 +98,7 @@ pub enum CollectionPage {
     #[non_exhaustive]
     Findings {
         /// The page.
-        page: Page<FindingRow>,
+        page: Content<Page<FindingRow>>,
         /// Every rule set the page's rows cite, each once, in the order of its
         /// identity; empty where no row cites one.
         rule_sets: Vec<RuleSet>,
@@ -127,9 +127,12 @@ impl CollectionPage {
     }
 
     /// A page of findings, with the rule sets its rows cite.
-    pub fn findings(page: Page<FindingRow>, rule_sets: impl IntoIterator<Item = RuleSet>) -> Self {
+    pub fn findings(
+        page: impl Into<Content<Page<FindingRow>>>,
+        rule_sets: impl IntoIterator<Item = RuleSet>,
+    ) -> Self {
         CollectionPage::Findings {
-            page,
+            page: page.into(),
             rule_sets: rule_sets.into_iter().collect(),
         }
     }

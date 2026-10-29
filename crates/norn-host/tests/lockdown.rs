@@ -701,9 +701,23 @@ fn assert_directory_link_health(serving: &Serving, vault: &Vault, directory: &st
             norn_wire::LinkHealth::Broken
         }
     );
-    assert_eq!(links.items[0].targets.total(), 0);
+    assert_eq!(
+        links.items[0]
+            .targets
+            .as_ref()
+            .expect("known targets")
+            .total(),
+        0
+    );
     assert_eq!(links.items[1].health(), norn_wire::LinkHealth::Healthy);
-    assert_eq!(links.items[1].targets.total(), 1);
+    assert_eq!(
+        links.items[1]
+            .targets
+            .as_ref()
+            .expect("known targets")
+            .total(),
+        1
+    );
     let findings = vault
         .store()
         .begin_request()

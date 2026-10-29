@@ -234,6 +234,10 @@ pub(crate) fn projected_findings<'r>(
     documents
         .into_iter()
         .filter_map(|document| document.findings.as_ref())
+        .filter_map(|findings| match findings {
+            norn_wire::Content::Known { value, .. } => Some(value),
+            _ => None,
+        })
         .flat_map(|findings| findings.items.iter())
 }
 

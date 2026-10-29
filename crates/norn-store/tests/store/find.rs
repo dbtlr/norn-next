@@ -4336,3 +4336,67 @@ fn a_resolutions_ceiling_probe_stops_before_reading_the_whole_admitted_class() {
         "the ceiling probe read the admitted class beyond its bound"
     );
 }
+
+#[test]
+fn a_relations_loading_find_withholds_only_resolution_and_findings() {
+    let seeded = Seeded::new("relations-loading-find");
+    let params = request().with_columns([
+        Column::links(),
+        Column::findings(),
+        Column::body(),
+        Column::fields(),
+    ]);
+    let ready = seeded.snapshot().find(&params, &declared()).unwrap();
+    let loading = seeded
+        .snapshot()
+        .relations_loading()
+        .find(&params, &declared())
+        .unwrap();
+    let mut expected = serde_json::to_value(&ready.rows).unwrap();
+    for row in expected.as_array_mut().unwrap() {
+        row["findings"] = serde_json::json!({"state":"unknown","reason":"loading"});
+        for link in row["links"]["value"]["items"].as_array_mut().unwrap() {
+            link["health"] = serde_json::json!("loading");
+            link["targets"] = serde_json::Value::Null;
+        }
+    }
+    assert!(loading.rule_sets.is_empty());
+    assert_eq!(serde_json::to_value(&loading.rows).unwrap(), expected);
+}
+
+#[test]
+fn a_broken_document_keeps_its_findings_while_loading() {
+    let mut seeded = Seeded::new("broken-loading-find");
+    let mut finding = crate::common::unread_block("broken.md");
+    finding.kind = FindingKind::UnreadableDocument;
+    seeded
+        .store
+        .begin_request()
+        .apply_increment(
+            norn_store::IncrementProvenance::Derived,
+            [norn_store::Change::Unreadable {
+                path: crate::common::path("broken.md"),
+            }],
+            &[norn_store::DerivedFinding {
+                facts: finding,
+                replaces: None,
+                bytes_hash: None,
+            }],
+            &declared(),
+        )
+        .unwrap();
+    let params = request()
+        .with_predicates([Predicate::path("broken.md")])
+        .with_columns([Column::findings()]);
+    let ready = seeded.snapshot().find(&params, &declared()).unwrap();
+    let loading = seeded
+        .snapshot()
+        .relations_loading()
+        .find(&params, &declared())
+        .unwrap();
+    assert_eq!(loading.rows, ready.rows);
+    assert_eq!(
+        crate::common::known(loading.rows[0].findings.as_ref().unwrap()).items[0].kind,
+        FindingKind::UnreadableDocument
+    );
+}

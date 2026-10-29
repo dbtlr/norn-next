@@ -300,11 +300,13 @@ fn reading(row: &LinkRow) -> (LinkHealth, Vec<String>, u64) {
     (
         row.health(),
         row.targets
+            .as_ref()
+            .expect("known targets")
             .candidates()
             .iter()
             .map(|candidate| candidate.path.as_str().to_string())
             .collect(),
-        row.targets.total(),
+        row.targets.as_ref().expect("known targets").total(),
     )
 }
 
@@ -538,6 +540,8 @@ fn a_wikilink_is_healthy_broken_or_ambiguous_by_what_its_target_names() {
         assert_eq!(
             links[1]
                 .targets
+                .as_ref()
+                .expect("known targets")
                 .candidates()
                 .iter()
                 .map(|candidate| candidate.suffix.as_str())
@@ -1438,15 +1442,26 @@ fn a_links_head_is_cut_in_the_statement_that_names_it() {
             .expect("the glossary link");
         assert_eq!(
             (
-                glossary.targets.candidates().len(),
-                glossary.targets.total()
+                glossary
+                    .targets
+                    .as_ref()
+                    .expect("known targets")
+                    .candidates()
+                    .len(),
+                glossary.targets.as_ref().expect("known targets").total()
             ),
             (CANDIDATE_HEAD, 7),
             "{order:?}"
         );
         let carried: u64 = links
             .iter()
-            .map(|link| link.targets.candidates().len() as u64)
+            .map(|link| {
+                link.targets
+                    .as_ref()
+                    .expect("known targets")
+                    .candidates()
+                    .len() as u64
+            })
             .sum();
         let ceiling = (links.len() * CANDIDATE_HEAD) as u64;
         let getting = GetParams::new(address(), resolution("src/many"));

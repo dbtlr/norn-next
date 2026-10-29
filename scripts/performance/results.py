@@ -18,7 +18,7 @@ def validate_paths(actual: list[str], expected: list[str], limit: int) -> None:
         raise ValueError("a result does not match the authored workload")
 
 
-CONTENT_COLUMNS = ("fields", "body", "links", "headings", "blocks", "tags")
+CONTENT_COLUMNS = ("fields", "body", "links", "headings", "blocks", "tags", "findings")
 # A section or block answer carries its anchor row and body in the same carrier.
 ANCHORED_CONTENT = ("heading", "block", "body")
 

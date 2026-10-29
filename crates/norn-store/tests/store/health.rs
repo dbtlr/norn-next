@@ -352,12 +352,19 @@ fn finding_head(finding: &FindingFacts) -> Vec<(String, String)> {
 }
 
 fn row_head(row: &LinkRow) -> Vec<(String, String)> {
-    named(row.targets.candidates().iter().map(|candidate| {
-        (
-            candidate.path.as_str().to_string(),
-            candidate.suffix.clone(),
-        )
-    }))
+    named(
+        row.targets
+            .as_ref()
+            .expect("known targets")
+            .candidates()
+            .iter()
+            .map(|candidate| {
+                (
+                    candidate.path.as_str().to_string(),
+                    candidate.suffix.clone(),
+                )
+            }),
+    )
 }
 
 // ---- what the judgment finds ----
@@ -432,7 +439,11 @@ fn judgment_agrees_with_the_links_column_health() {
                     | FindingKind::MissingAnchor
                     | FindingKind::VaultScheme => {
                         assert_eq!(finding_head(finding), row_head(row), "{context}");
-                        assert_eq!(finding.candidates_total, row.targets.total(), "{context}");
+                        assert_eq!(
+                            finding.candidates_total,
+                            row.targets.as_ref().expect("known targets").total(),
+                            "{context}"
+                        );
                     }
                     other => panic!("{context}: a finding of kind {other:?}"),
                 }
@@ -863,7 +874,10 @@ fn a_head_merged_across_two_keys_is_cut_to_the_bound() {
         assert_eq!(finding.candidates.len(), CANDIDATE_HEAD, "{order:?}");
         assert_eq!(finding_head(&finding), row_head(&row), "{order:?}");
         assert_eq!(
-            (finding.candidates_total, row.targets.total()),
+            (
+                finding.candidates_total,
+                row.targets.as_ref().expect("known targets").total()
+            ),
             (8, 8),
             "{order:?}"
         );
@@ -957,7 +971,11 @@ fn mixed_candidate_heads_preserve_order_totals_and_exact_paths() {
         for finding in &findings {
             let link = &links[finding.ordinal.expect("a link ordinal") as usize];
             assert_eq!(finding_head(finding), row_head(link), "{order:?}");
-            assert_eq!(finding.candidates_total, link.targets.total(), "{order:?}");
+            assert_eq!(
+                finding.candidates_total,
+                link.targets.as_ref().expect("known targets").total(),
+                "{order:?}"
+            );
         }
     }
 }
@@ -993,7 +1011,13 @@ fn the_exact_path_comes_first_across_a_links_keys() {
     let (finding, row) =
         judged_beside_the_links_column("health-exact-twins", Sensitive, &documents, "[[c/abc.md]]");
     assert_eq!(finding.kind, FindingKind::Ambiguous);
-    assert_eq!((finding.candidates_total, row.targets.total()), (9, 9));
+    assert_eq!(
+        (
+            finding.candidates_total,
+            row.targets.as_ref().expect("known targets").total()
+        ),
+        (9, 9)
+    );
     assert_eq!(finding_head(&finding), row_head(&row));
     assert!(
         finding
@@ -1020,6 +1044,8 @@ fn the_exact_path_comes_first_across_a_links_keys() {
             .iter()
             .map(|row| {
                 row.targets
+                    .as_ref()
+                    .expect("known targets")
                     .candidates()
                     .iter()
                     .map(|candidate| candidate.path.as_str().to_string())
@@ -2047,7 +2073,7 @@ fn the_links_column_reads_not_judged_beneath_a_mark() {
         .unwrap();
     let links = vault.links("ref.md");
     assert_eq!(links[0].health(), LinkHealth::NotJudged);
-    assert_eq!(links[0].targets.total(), 0);
+    assert_eq!(links[0].targets.as_ref().expect("known targets").total(), 0);
     assert_eq!(links[1].health(), LinkHealth::Broken);
 }
 
