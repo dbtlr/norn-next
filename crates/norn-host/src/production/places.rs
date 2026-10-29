@@ -14,8 +14,10 @@
 //! ([`DocumentPath::unrendered_ancestor`]), a segment with no marker below it
 //! is one name, and each marked segment lists one folder per candidate — so a
 //! reading never walks a subtree, and a wide sibling folder is read by nothing.
-//! A job keeps each folder's marked names once, so a sweep filing many places
-//! under one refused folder lists the folder above it once.
+//! A job lists each folder once and keeps its marked names by the segment they
+//! render to, so a reading looks its candidates up rather than scanning the
+//! folder: many refused names in one folder cost one listing and one lookup
+//! per place, never one comparison per name per place.
 
 use std::ffi::OsString;
 use std::ops::ControlFlow;
@@ -43,7 +45,23 @@ pub(super) struct PlaceReadings {
     /// the only names a marked segment can be — or `None` where the folder
     /// could not be listed. Unmarked names are never kept, so what this holds
     /// follows the vault's refused spellings rather than its width.
-    folders: BTreeMap<PathBuf, Option<Vec<OsString>>>,
+    folders: BTreeMap<PathBuf, Option<MarkedNames>>,
+}
+
+/// One folder's marked names, keyed by the segment each renders to: once as a
+/// folder above a place, once as the place's own leaf. The two differ only for
+/// a name whose stem the grammar refuses, which only a leaf reads.
+#[derive(Default)]
+struct MarkedNames {
+    as_folder: BTreeMap<String, Vec<OsString>>,
+    as_leaf: BTreeMap<String, Vec<OsString>>,
+}
+
+impl MarkedNames {
+    fn rendering_to(&self, segment: &str, leaf: bool) -> &[OsString] {
+        let names = if leaf { &self.as_leaf } else { &self.as_folder };
+        names.get(segment).map_or(&[], Vec::as_slice)
+    }
 }
 
 impl PlaceReadings {
@@ -82,16 +100,12 @@ impl PlaceReadings {
                 let Some(names) = self.marked_names(vault, folder) else {
                     return Ok(None);
                 };
-                for name in names {
-                    let candidate = folder.join(name);
-                    let renders = if leaf {
-                        DocumentPath::rendered(&candidate) == *place
-                    } else {
-                        rendered_folder_name(name) == *segment
-                    };
-                    if renders {
-                        next.push(candidate);
-                    }
+                // A rendering is its folders' renderings above its leaf's, so a
+                // name under a folder that renders onto the place's ancestors
+                // renders onto the place exactly when its own segment does.
+                for name in names.rendering_to(segment, leaf) {
+                    count_place_candidate();
+                    next.push(folder.join(name));
                 }
             }
             candidates = next;
@@ -134,14 +148,25 @@ impl PlaceReadings {
     /// The names in `folder` whose rendering carries the marker, listed once
     /// per job; `None` where the folder could not be listed. A folder the walk
     /// reaches no folder at holds no name.
-    fn marked_names(&mut self, vault: &norn_fs::Vault, folder: &Path) -> Option<&[OsString]> {
+    fn marked_names(&mut self, vault: &norn_fs::Vault, folder: &Path) -> Option<&MarkedNames> {
         if !self.folders.contains_key(folder) {
-            let mut marked = Vec::new();
+            let mut marked = MarkedNames::default();
             let listed = vault.visit_folder_names(folder, |name| {
-                if rendered_folder_name(name).contains(RENDERED_MARKER)
-                    || DocumentPath::rendered(Path::new(name)).carries_marker()
-                {
-                    marked.push(name.to_owned());
+                let as_folder = rendered_folder_name(name);
+                let as_leaf = DocumentPath::rendered(Path::new(name)).as_str().to_owned();
+                if as_folder.contains(RENDERED_MARKER) {
+                    marked
+                        .as_folder
+                        .entry(as_folder)
+                        .or_default()
+                        .push(name.to_owned());
+                }
+                if as_leaf.contains(RENDERED_MARKER) {
+                    marked
+                        .as_leaf
+                        .entry(as_leaf)
+                        .or_default()
+                        .push(name.to_owned());
                 }
                 ControlFlow::Continue(())
             });
@@ -153,18 +178,43 @@ impl PlaceReadings {
             };
             self.folders.insert(folder.to_owned(), names);
         }
-        self.folders[folder].as_deref()
+        self.folders[folder].as_ref()
     }
 }
 
-/// Re-derive the spelling findings a refused spelling the vault walk no
-/// longer yields stated: at its own place, where the name could have been a
-/// document, and at the places beneath it, where it could have been a folder
-/// no stored path sits under.
+#[cfg(test)]
+thread_local! {
+    /// The candidate names this thread's place readings looked up, which a
+    /// case reads to hold a reading to the names that render onto its place.
+    static PLACE_CANDIDATES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn count_place_candidate() {
+    PLACE_CANDIDATES.with(|seen| seen.set(seen.get() + 1));
+}
+
+#[cfg(not(test))]
+fn count_place_candidate() {}
+
+/// The candidate names this thread's place readings have looked up.
+#[cfg(test)]
+pub(super) fn place_candidates() -> usize {
+    PLACE_CANDIDATES.with(std::cell::Cell::get)
+}
+
+/// Re-derive the spelling findings a refused spelling's places hold: its own
+/// place, where the name could be or have been a document, and the places
+/// beneath it, where it could be or have been a folder no stored path sits
+/// under.
 ///
-/// A report that a path is gone does not say what the path was, so both are
-/// read; each costs nothing where the spelling could not have been that.
-pub(super) fn read_places_of_a_spelling_gone(
+/// **Every arm of a scoped leg that meets a refused spelling ends here**,
+/// whatever it found at the path. A report does not say what the path was
+/// before — a file that became a folder leaves its own place behind, and a
+/// folder that became a file, or lost what it held, leaves the places
+/// beneath — so both are read, and each costs nothing where the spelling could
+/// not have been that.
+pub(super) fn read_places_of_a_refused_spelling(
     pending: &mut Pending<'_>,
     vault: &norn_fs::Vault,
     path: &Path,
@@ -187,7 +237,7 @@ pub(super) fn read_places_of_a_spelling_gone(
 }
 
 /// Re-derive the spelling findings at every place the documents under a
-/// refused folder rendered onto, once the folder is gone.
+/// refused folder rendered onto.
 ///
 /// The folder's own spelling addresses no range of stored paths, since no
 /// path carrying it is storable, so the places are found from the findings

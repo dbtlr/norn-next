@@ -730,13 +730,6 @@ pub(crate) fn prefix_successor(prefix: &str) -> Option<String> {
     None
 }
 
-/// One segment as a document-path segment: every character the grammar refuses
-/// replaced, and a segment the grammar refuses whole marked ahead of.
-///
-/// This is the rendering half of [`DocumentPath::new`]'s refusals, and it
-/// answers them one for one — the backslash and control-byte refusals by
-/// replacement, and the empty, `.` and `..` segment refusals by the marker. The
-/// pair is what makes [`DocumentPath::rendered`] total.
 /// The segment a folder named `name` occupies in every place
 /// [`DocumentPath::rendered`] names beneath it.
 ///
@@ -749,6 +742,13 @@ pub fn rendered_folder_name(name: &std::ffi::OsStr) -> String {
     rendered_segment(&name.to_string_lossy())
 }
 
+/// One segment as a document-path segment: every character the grammar refuses
+/// replaced, and a segment the grammar refuses whole marked ahead of.
+///
+/// This is the rendering half of [`DocumentPath::new`]'s refusals, and it
+/// answers them one for one — the backslash and control-byte refusals by
+/// replacement, and the empty, `.` and `..` segment refusals by the marker. The
+/// pair is what makes [`DocumentPath::rendered`] total.
 fn rendered_segment(segment: &str) -> String {
     let mut rendered: String = segment
         .chars()

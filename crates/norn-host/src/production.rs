@@ -3039,7 +3039,13 @@ fn scoped_increment(
                 if unreadable.kind() == norn_fs::UnreadKind::Unknown {
                     pending.withhold_entry(unreadable.path().as_path());
                 }
-                pending.read_place(&vault, &DocumentPath::rendered(unreadable.path().as_path()))?;
+                places::read_places_of_a_refused_spelling(
+                    &mut pending,
+                    &vault,
+                    unreadable.path().as_path(),
+                    policy.store_page_size,
+                    stored_path_order(sensitivity),
+                )?;
                 continue;
             }
             // The name's own stat met a path failure, which is the same fact a
@@ -3074,7 +3080,7 @@ fn scoped_increment(
                 // root's spelling, so the places it rendered onto keep what the
                 // other spellings rendering there say.
                 if skip.reason().stands() {
-                    places::read_places_of_a_spelling_gone(
+                    places::read_places_of_a_refused_spelling(
                         &mut pending,
                         &vault,
                         skip.path().as_path(),
@@ -3126,6 +3132,16 @@ fn scoped_increment(
                         )?;
                     }
                 }
+                // A refused file that became this folder leaves its own place
+                // behind, and the places beneath a refused folder include the
+                // ones whose spellings left it.
+                places::read_places_of_a_refused_spelling(
+                    &mut pending,
+                    &vault,
+                    path,
+                    policy.store_page_size,
+                    stored_path_order(sensitivity),
+                )?;
                 continue;
             }
             // A path that is not there has no document to quarantine. It still
@@ -3163,7 +3179,7 @@ fn scoped_increment(
                         .account
                         .walked(HealScope::from(scope), stored_path_order(sensitivity));
                 }
-                places::read_places_of_a_spelling_gone(
+                places::read_places_of_a_refused_spelling(
                     &mut pending,
                     &vault,
                     path,
@@ -3180,8 +3196,16 @@ fn scoped_increment(
         let document_path = match identity {
             Ok(document) => document,
             Err(_) => {
+                // A refused folder that became this file leaves the places
+                // beneath it, which the reading takes with the file's own.
+                places::read_places_of_a_refused_spelling(
+                    &mut pending,
+                    &vault,
+                    path,
+                    policy.store_page_size,
+                    stored_path_order(sensitivity),
+                )?;
                 if is_markdown(path) {
-                    pending.read_place(&vault, &DocumentPath::rendered(path))?;
                     if pending.is_full() {
                         pending.flush()?;
                     }
@@ -3521,6 +3545,19 @@ fn quarantine_subtree(
     for fact in walk {
         let file = match fact.map_err(effect)? {
             norn_fs::WalkFact::File(file) => file,
+            // A name whose own stat failed is still a spelling standing at its
+            // place, so it is filed with the rest of them rather than beside.
+            norn_fs::WalkFact::Unreadable(unreadable)
+                if unreadable.kind() != norn_fs::UnreadKind::Directory
+                    && is_markdown(unreadable.path().as_path())
+                    && document_path(unreadable.path().as_path()).is_err() =>
+            {
+                if unreadable.kind() == norn_fs::UnreadKind::Unknown {
+                    pending.withhold_entry(unreadable.path().as_path());
+                }
+                pending.read_place(vault, &DocumentPath::rendered(unreadable.path().as_path()))?;
+                continue;
+            }
             norn_fs::WalkFact::Unreadable(unreadable) => {
                 pending.unreadable_fact(&unreadable, None)?;
                 continue;
@@ -12347,10 +12384,8 @@ mod tests {
         .unwrap();
     }
 
-    /// Every spelling finding the store holds, as (place, detail), sorted:
-    /// what a case compares the watcher leg's store against the vault heal's
-    /// by, since the vault heal is the leg that equals a build from zero.
-    fn every_spelling_finding(store: &mut Store) -> Vec<(String, String)> {
+    /// Every finding the store holds, as (place, kind, detail), sorted.
+    fn every_finding(store: &mut Store) -> Vec<(String, String, String)> {
         let mut found = Vec::new();
         let mut after = None;
         loop {
@@ -12360,37 +12395,39 @@ mod tests {
                 .unwrap();
             let Some((last, _)) = page.last() else { break };
             after = Some(*last);
-            found.extend(
-                page.into_iter()
-                    .map(|(_, finding)| finding)
-                    .filter(|finding| finding.kind == "document/path-names-no-document")
-                    .map(|finding| {
-                        (
-                            finding.path.as_str().to_string(),
-                            finding.detail.unwrap_or_default(),
-                        )
-                    }),
-            );
+            found.extend(page.into_iter().map(|(_, finding)| {
+                (
+                    finding.path.as_str().to_string(),
+                    finding.kind,
+                    finding.detail.unwrap_or_default(),
+                )
+            }));
         }
         found.sort_unstable();
         found
     }
 
-    /// Assert the watcher leg left the spelling findings a build from zero of
-    /// the same tree holds: the vault heal re-reads every spelling and prunes
-    /// what nothing renders onto, and it must find nothing to change.
-    fn assert_the_vault_heal_agrees(
-        ops: &ProductionEntryOps,
-        name: &VaultName,
-        attachment: &mut ProductionAttachment,
-        progress: &ProgressReporter<ProductionAttachment>,
-    ) {
-        let watched = every_spelling_finding(&mut attachment.store);
-        heal_the_vault(ops, name, attachment, progress);
+    /// Assert the attachment's store holds the rows and findings a build from
+    /// zero of the same tree holds, which is what a maintained store owes.
+    fn assert_a_build_from_zero_agrees(f: &Fixture, attachment: &mut ProductionAttachment) {
+        let database = f.root.join("from-zero.sqlite3");
+        let _ = fs::remove_file(&database);
+        let mut built = Store::open(&database, proven_order(f), crate::DERIVATION_VERSION).unwrap();
+        heal_from_zero(
+            &mut built,
+            f.vault().as_path(),
+            &exclusions(&attachment.registration, &attachment.shadows),
+        )
+        .unwrap();
         assert_eq!(
-            watched,
-            every_spelling_finding(&mut attachment.store),
-            "the watcher leg left spelling findings a build from zero does not hold"
+            stored_paths(&mut attachment.store),
+            stored_paths(&mut built),
+            "the maintained store holds rows a build from zero does not"
+        );
+        assert_eq!(
+            every_finding(&mut attachment.store),
+            every_finding(&mut built),
+            "the maintained store holds findings a build from zero does not"
         );
     }
 
@@ -12430,7 +12467,7 @@ mod tests {
             0,
             "the spelling's finding outlived the spelling"
         );
-        assert_the_vault_heal_agrees(&ops, &name, &mut attachment, &progress);
+        assert_a_build_from_zero_agrees(&f, &mut attachment);
         ops.detach(&name, attachment);
     }
 
@@ -12463,7 +12500,7 @@ mod tests {
         );
 
         assert_eq!(finding_total(&mut attachment.store), 0);
-        assert_the_vault_heal_agrees(&ops, &name, &mut attachment, &progress);
+        assert_a_build_from_zero_agrees(&f, &mut attachment);
         ops.detach(&name, attachment);
     }
 
@@ -12502,7 +12539,7 @@ mod tests {
             both,
             "a report about one spelling took the other's finding"
         );
-        assert_the_vault_heal_agrees(&ops, &name, &mut attachment, &progress);
+        assert_a_build_from_zero_agrees(&f, &mut attachment);
         ops.detach(&name, attachment);
     }
 
@@ -12540,7 +12577,7 @@ mod tests {
             all,
             "a flush inside the reading lost or doubled a spelling"
         );
-        assert_the_vault_heal_agrees(&ops, &name, &mut attachment, &progress);
+        assert_a_build_from_zero_agrees(&f, &mut attachment);
         ops.detach(&name, attachment);
     }
 
@@ -12577,7 +12614,7 @@ mod tests {
             left[0].contains("bad\\u{2}name.md"),
             "the finding left standing is not the remaining spelling's: {left:?}"
         );
-        assert_the_vault_heal_agrees(&ops, &name, &mut attachment, &progress);
+        assert_a_build_from_zero_agrees(&f, &mut attachment);
         ops.detach(&name, attachment);
     }
 
@@ -12629,7 +12666,7 @@ mod tests {
             left[0].contains("bad\\u{2}dir/note.md"),
             "the finding left standing is not the sibling's: {left:?}"
         );
-        assert_the_vault_heal_agrees(&ops, &name, &mut attachment, &progress);
+        assert_a_build_from_zero_agrees(&f, &mut attachment);
         ops.detach(&name, attachment);
     }
 
@@ -12670,7 +12707,286 @@ mod tests {
             both,
             "the sweep took the sibling directory's finding"
         );
-        assert_the_vault_heal_agrees(&ops, &name, &mut attachment, &progress);
+        assert_a_build_from_zero_agrees(&f, &mut attachment);
+        ops.detach(&name, attachment);
+    }
+
+    /// **A sweep meeting a colliding spelling under a folder it cannot search
+    /// files nothing twice.** The sweep marks the folder unreadable, and the
+    /// reading of the place the other spelling renders onto cannot see past
+    /// it, so it concludes nothing there: each spelling keeps one finding until
+    /// the folder reads again, as an unreadable folder keeps what is beneath
+    /// it.
+    #[cfg(unix)]
+    #[test]
+    fn a_sweep_files_an_unreadable_colliding_spelling_once() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let f = Fixture::new("swept-unreadable-collision");
+        for folder in ["bad\u{1}dir", "bad\u{1}dir/lk\u{1}", "bad\u{1}dir/lk\u{2}"] {
+            if fs::create_dir(f.vault().join(folder)).is_err() {
+                eprintln!("skipped: this filesystem does not create `{folder:?}`");
+                return;
+            }
+        }
+        fs::write(f.vault().join("bad\u{1}dir/lk\u{1}/a.md"), "body").unwrap();
+        fs::write(f.vault().join("bad\u{1}dir/lk\u{2}/a.md"), "body").unwrap();
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let place = "bad\u{fffd}dir/lk\u{fffd}/a.md";
+        assert_eq!(spellings_filed_at(&mut attachment.store, place).len(), 2);
+
+        // Names under `lk\1` list and no longer stat.
+        let denied = f.vault().join("bad\u{1}dir/lk\u{1}");
+        fs::set_permissions(&denied, fs::Permissions::from_mode(0o400)).unwrap();
+        if fs::metadata(denied.join("a.md")).is_ok() {
+            eprintln!("skipped: this account stats beneath a mode-400 directory");
+            fs::set_permissions(&denied, fs::Permissions::from_mode(0o755)).unwrap();
+            ops.detach(&name, attachment);
+            return;
+        }
+        fs::write(f.vault().join("bad\u{1}dir/lk\u{2}/a.md"), "edited").unwrap();
+        watcher_leg(
+            &ops,
+            &name,
+            &mut attachment,
+            &progress,
+            f.vault().as_path(),
+            &["bad\u{1}dir"],
+        );
+        let watched = spellings_filed_at(&mut attachment.store, place);
+        let marked = sorted_kinds(&mut attachment.store, "bad\u{fffd}dir/lk\u{fffd}");
+        fs::set_permissions(&denied, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(watched.len(), 2, "the place holds {watched:?}");
+        assert_ne!(watched[0], watched[1], "one spelling was filed twice");
+        assert_eq!(marked, ["directory/unreadable"]);
+
+        // A folder the reading could not see into concluded nothing beneath
+        // it, and once it reads again the place holds what a build from zero
+        // files there. The sweep leaves the folder's own unreadable mark
+        // standing, which NORN-478 tracks.
+        fs::write(f.vault().join("bad\u{1}dir/lk\u{1}/a.md"), "edited").unwrap();
+        watcher_leg(
+            &ops,
+            &name,
+            &mut attachment,
+            &progress,
+            f.vault().as_path(),
+            &["bad\u{1}dir"],
+        );
+        assert_eq!(spellings_filed_at(&mut attachment.store, place), watched);
+        ops.detach(&name, attachment);
+    }
+
+    /// **A refused file that becomes a folder leaves its own place.** The report
+    /// names a folder now, and the folder's documents are swept; the place the
+    /// file rendered onto renders nothing any more.
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_file_that_becomes_a_folder_ends_its_finding() {
+        let f = Fixture::new("watched-file-becomes-folder");
+        if !write_or_report(&f.vault().join("x\u{1}.md"), b"body") {
+            return;
+        }
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        assert_eq!(
+            spellings_filed_at(&mut attachment.store, "x\u{fffd}.md").len(),
+            1
+        );
+
+        fs::remove_file(f.vault().join("x\u{1}.md")).unwrap();
+        fs::create_dir(f.vault().join("x\u{1}.md")).unwrap();
+        fs::write(f.vault().join("x\u{1}.md/a.md"), "body").unwrap();
+        watcher_leg(
+            &ops,
+            &name,
+            &mut attachment,
+            &progress,
+            f.vault().as_path(),
+            &["x\u{1}.md"],
+        );
+
+        assert!(
+            spellings_filed_at(&mut attachment.store, "x\u{fffd}.md").is_empty(),
+            "the file's finding outlived the file"
+        );
+        assert_eq!(
+            spellings_filed_at(&mut attachment.store, "x\u{fffd}.md/a.md").len(),
+            1
+        );
+        assert_a_build_from_zero_agrees(&f, &mut attachment);
+        ops.detach(&name, attachment);
+    }
+
+    /// A file whose stem the grammar refuses that becomes a folder leaves its
+    /// own place the same way, though the folder's spelling addresses the
+    /// documents stored beneath it.
+    #[cfg(unix)]
+    #[test]
+    fn a_dot_stem_file_that_becomes_a_folder_ends_its_finding() {
+        let f = Fixture::new("watched-dot-stem-becomes-folder");
+        fs::write(f.vault().join("..md"), "refused stem").unwrap();
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        assert_eq!(
+            spellings_filed_at(&mut attachment.store, "\u{fffd}..md").len(),
+            1
+        );
+
+        fs::remove_file(f.vault().join("..md")).unwrap();
+        fs::create_dir(f.vault().join("..md")).unwrap();
+        fs::write(f.vault().join("..md/note.md"), "body").unwrap();
+        watcher_leg(
+            &ops,
+            &name,
+            &mut attachment,
+            &progress,
+            f.vault().as_path(),
+            &["..md"],
+        );
+
+        assert_eq!(finding_total(&mut attachment.store), 0);
+        assert_eq!(stored_paths(&mut attachment.store), ["..md/note.md"]);
+        assert_a_build_from_zero_agrees(&f, &mut attachment);
+        ops.detach(&name, attachment);
+    }
+
+    /// **A refused folder that becomes a file leaves the places beneath it.** A
+    /// regular file holds nothing beneath it, and the folder's spelling
+    /// addresses no stored path, so the places are found from the findings.
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_folder_that_becomes_a_file_ends_the_findings_beneath_it() {
+        let f = Fixture::new("watched-folder-becomes-file");
+        if fs::create_dir(f.vault().join("x\u{1}.md")).is_err() {
+            eprintln!("skipped: this filesystem does not create `x\\u{{1}}.md`");
+            return;
+        }
+        fs::write(f.vault().join("x\u{1}.md/a.md"), "body").unwrap();
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        assert_eq!(
+            spellings_filed_at(&mut attachment.store, "x\u{fffd}.md/a.md").len(),
+            1
+        );
+
+        fs::remove_dir_all(f.vault().join("x\u{1}.md")).unwrap();
+        fs::write(f.vault().join("x\u{1}.md"), "body").unwrap();
+        watcher_leg(
+            &ops,
+            &name,
+            &mut attachment,
+            &progress,
+            f.vault().as_path(),
+            &["x\u{1}.md"],
+        );
+
+        assert!(
+            spellings_filed_at(&mut attachment.store, "x\u{fffd}.md/a.md").is_empty(),
+            "a document of the folder kept its finding"
+        );
+        assert_eq!(
+            spellings_filed_at(&mut attachment.store, "x\u{fffd}.md").len(),
+            1
+        );
+        assert_a_build_from_zero_agrees(&f, &mut attachment);
+        ops.detach(&name, attachment);
+    }
+
+    /// **A report about a refused folder ends the findings of what left it.**
+    /// The sweep files what it walks; the places beneath the folder's
+    /// rendering it did not reach are read too, so a document deleted inside
+    /// the folder loses its finding though the report named only the folder.
+    #[cfg(unix)]
+    #[test]
+    fn a_sweep_of_a_refused_folder_ends_the_findings_of_files_that_left_it() {
+        let f = Fixture::new("swept-folder-lost-a-file");
+        if fs::create_dir(f.vault().join("bad\u{1}dir")).is_err() {
+            eprintln!("skipped: this filesystem does not create `bad\\u{{1}}dir`");
+            return;
+        }
+        fs::write(f.vault().join("bad\u{1}dir/a.md"), "body").unwrap();
+        fs::write(f.vault().join("bad\u{1}dir/b.md"), "body").unwrap();
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        assert_eq!(finding_total(&mut attachment.store), 2);
+
+        fs::remove_file(f.vault().join("bad\u{1}dir/a.md")).unwrap();
+        watcher_leg(
+            &ops,
+            &name,
+            &mut attachment,
+            &progress,
+            f.vault().as_path(),
+            &["bad\u{1}dir"],
+        );
+
+        assert!(
+            spellings_filed_at(&mut attachment.store, "bad\u{fffd}dir/a.md").is_empty(),
+            "the deleted document kept its finding"
+        );
+        assert_eq!(
+            spellings_filed_at(&mut attachment.store, "bad\u{fffd}dir/b.md").len(),
+            1
+        );
+        assert_a_build_from_zero_agrees(&f, &mut attachment);
+        ops.detach(&name, attachment);
+    }
+
+    /// **Many refused names in one folder cost one lookup per place.** Each
+    /// reading looks up the names rendering onto its own place in the folder's
+    /// listing, so a batch naming every one of them considers each name once
+    /// rather than every name once per place.
+    #[cfg(unix)]
+    #[test]
+    fn reading_many_refused_names_in_one_folder_looks_up_only_each_places_own() {
+        const NAMES: usize = 200;
+        let f = Fixture::new("place-reading-many-refused");
+        fs::create_dir(f.vault().join("d")).unwrap();
+        let spellings: Vec<String> = (0..NAMES)
+            .map(|index| format!("d/n{index:03}\u{1}.md"))
+            .collect();
+        for spelling in &spellings {
+            if !write_or_report(&f.vault().join(spelling), b"body") {
+                return;
+            }
+        }
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        assert_eq!(finding_total(&mut attachment.store), NAMES as u64);
+
+        for spelling in &spellings {
+            fs::write(f.vault().join(spelling), "edited").unwrap();
+        }
+        let normalizer = norn_fs::PathNormalizer::detect(f.vault().as_path()).unwrap();
+        let dirty = spellings
+            .iter()
+            .map(|spelling| normalizer.normalize(Path::new(spelling)).unwrap())
+            .collect();
+        let before = places::place_candidates();
+        scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            &dirty,
+            ProductionPolicy::new(2, 2).unwrap(),
+            &progress.healing(),
+            &exclusions(&attachment.registration, &attachment.shadows),
+        )
+        .unwrap();
+
+        assert_eq!(
+            places::place_candidates() - before,
+            NAMES,
+            "a reading considered names that do not render onto its place"
+        );
+        assert_eq!(finding_total(&mut attachment.store), NAMES as u64);
         ops.detach(&name, attachment);
     }
 
@@ -14019,7 +14335,7 @@ mod tests {
             findings_at(&mut attachment.store, place).is_empty(),
             "the increment left a finding under a root no walk of this vault yields"
         );
-        assert_the_vault_heal_agrees(&ops, &name, &mut attachment, &progress);
+        assert_a_build_from_zero_agrees(&f, &mut attachment);
         ops.detach(&name, attachment);
     }
 
@@ -14061,7 +14377,7 @@ mod tests {
             findings_at(&mut attachment.store, place).is_empty(),
             "the increment left a finding at a place no spelling renders onto"
         );
-        assert_the_vault_heal_agrees(&ops, &name, &mut attachment, &progress);
+        assert_a_build_from_zero_agrees(&f, &mut attachment);
         ops.detach(&name, attachment);
     }
 
