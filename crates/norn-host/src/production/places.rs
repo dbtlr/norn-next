@@ -71,9 +71,17 @@ impl PlaceReadings {
     }
 
     /// Every spelling in the vault that renders onto `place` and names a
-    /// Markdown file the vault walk would quarantine, or `None` where a folder
-    /// along the way could not be listed — a reading that cannot see every
-    /// spelling concludes nothing, so the place keeps what stands there.
+    /// Markdown file the vault walk would quarantine, or `None` where it found
+    /// none and a folder on the way hid some.
+    ///
+    /// **A hidden folder is passed over as the vault heal passes over it.**
+    /// A heal files every spelling it reaches at the place, and the first of
+    /// them replaces what stood there, so a spelling beneath a folder it could
+    /// not list or search is stated nowhere — as in a build from zero, which
+    /// marks that folder instead. Where the reading reaches no spelling at all
+    /// and a folder hid some, it concludes nothing, as a heal that files
+    /// nothing at the place takes nothing there: the place keeps what stands
+    /// until the folder reads again.
     pub(super) fn spellings(
         &mut self,
         vault: &norn_fs::Vault,
@@ -87,6 +95,7 @@ impl PlaceReadings {
             ancestor.split('/').count()
         };
         let mut candidates = vec![PathBuf::from(ancestor)];
+        let mut hidden = false;
         for (index, segment) in segments.iter().enumerate().skip(spelled) {
             let leaf = index + 1 == segments.len();
             let mut next = Vec::new();
@@ -98,7 +107,8 @@ impl PlaceReadings {
                     continue;
                 }
                 let Some(names) = self.marked_names(vault, folder) else {
-                    return Ok(None);
+                    hidden = true;
+                    continue;
                 };
                 // A rendering is its folders' renderings above its leaf's, so a
                 // name under a folder that renders onto the place's ancestors
@@ -125,11 +135,25 @@ impl PlaceReadings {
                 // A folder on the way that cannot be listed hides what is under
                 // it, as it does from the vault walk.
                 Err(unreadable) if unreadable.kind() == norn_fs::UnreadKind::Directory => {
-                    return Ok(None);
+                    hidden = true;
+                    continue;
                 }
                 // A name whose own stat failed is still a spelling standing
-                // there, which the vault walk's revisit files the same way.
-                Err(unreadable) => unreadable.path().clone(),
+                // there, which the vault walk's revisit files the same way —
+                // unless the walk cannot enter the folder holding it, which a
+                // folder that lists and refuses a search is: the walk marks
+                // that folder and reads no name beneath it.
+                Err(unreadable) => {
+                    let parent = candidate.parent().unwrap_or(Path::new(""));
+                    if !parent.as_os_str().is_empty()
+                        && let Ok(norn_fs::WalkFact::Unreadable(folder)) = vault.fact(parent)
+                        && folder.kind() == norn_fs::UnreadKind::Directory
+                    {
+                        hidden = true;
+                        continue;
+                    }
+                    unreadable.path().clone()
+                }
             };
             let path = at.as_path();
             if !is_markdown(path) {
@@ -142,7 +166,7 @@ impl PlaceReadings {
                 });
             }
         }
-        Ok(Some(spellings))
+        Ok((!spellings.is_empty() || !hidden).then_some(spellings))
     }
 
     /// The names in `folder` whose rendering carries the marker, listed once

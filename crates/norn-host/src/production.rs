@@ -12712,14 +12712,14 @@ mod tests {
     }
 
     /// **A sweep meeting a colliding spelling under a folder it cannot search
-    /// files nothing twice.** The sweep marks the folder unreadable, and the
-    /// reading of the place the other spelling renders onto cannot see past
-    /// it, so it concludes nothing there: each spelling keeps one finding until
-    /// the folder reads again, as an unreadable folder keeps what is beneath
-    /// it.
+    /// leaves what a build from zero holds.** The sweep marks the folder
+    /// unreadable, and the reading of the place the other spelling renders
+    /// onto passes over the folder as the vault heal does: it files the
+    /// spelling it reaches, once, and the one beneath the folder is stated
+    /// nowhere.
     #[cfg(unix)]
     #[test]
-    fn a_sweep_files_an_unreadable_colliding_spelling_once() {
+    fn a_sweep_passes_over_a_colliding_spelling_under_a_folder_it_cannot_search() {
         use std::os::unix::fs::PermissionsExt;
 
         let f = Fixture::new("swept-unreadable-collision");
@@ -12757,14 +12757,22 @@ mod tests {
         );
         let watched = spellings_filed_at(&mut attachment.store, place);
         let marked = sorted_kinds(&mut attachment.store, "bad\u{fffd}dir/lk\u{fffd}");
+        let agreed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            assert_a_build_from_zero_agrees(&f, &mut attachment)
+        }));
         fs::set_permissions(&denied, fs::Permissions::from_mode(0o755)).unwrap();
-        assert_eq!(watched.len(), 2, "the place holds {watched:?}");
-        assert_ne!(watched[0], watched[1], "one spelling was filed twice");
+        assert_eq!(watched.len(), 1, "the place holds {watched:?}");
+        assert!(
+            watched[0].contains("lk\\u{2}"),
+            "the place holds {watched:?}"
+        );
         assert_eq!(marked, ["directory/unreadable"]);
+        if let Err(disagreement) = agreed {
+            std::panic::resume_unwind(disagreement);
+        }
 
-        // A folder the reading could not see into concluded nothing beneath
-        // it, and once it reads again the place holds what a build from zero
-        // files there. The sweep leaves the folder's own unreadable mark
+        // Once the folder reads again, the spelling beneath it is filed beside
+        // the other. The sweep leaves the folder's own unreadable mark
         // standing, which NORN-478 tracks.
         fs::write(f.vault().join("bad\u{1}dir/lk\u{1}/a.md"), "edited").unwrap();
         watcher_leg(
@@ -12775,7 +12783,7 @@ mod tests {
             f.vault().as_path(),
             &["bad\u{1}dir"],
         );
-        assert_eq!(spellings_filed_at(&mut attachment.store, place), watched);
+        assert_eq!(spellings_filed_at(&mut attachment.store, place).len(), 2);
         ops.detach(&name, attachment);
     }
 

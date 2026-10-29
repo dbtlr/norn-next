@@ -705,8 +705,10 @@ spelling addresses no range of stored paths, the places beneath its rendering, f
 findings standing there. That covers a refused spelling that is edited, leaves, becomes a folder or
 stands refused, and a refused folder that leaves, loses a file, becomes a file or stands refused.
 A reading costs the folders along one path, each listed once per job and looked up by the segment
-its names render to, and never a subtree; a folder it cannot list or search concludes nothing, and
-the place keeps what it holds until the folder reads again. A walk rooted below an unrendered ancestor that a real
+its names render to, and never a subtree. A folder it cannot list or search is passed over as the
+vault heal passes over it — the spellings beneath it are stated nowhere, and a build from zero
+marks the folder instead — and a reading that reaches no spelling while a folder hid some concludes
+nothing, so the place keeps what it holds until the folder reads again. A walk rooted below an unrendered ancestor that a real
 folder's own marker-carrying name puts above it still concludes nothing at the places there, and the
 next heal converges them. The collision is where the sides tell apart most
 clearly — the document whose bytes were refused can leave while a refused spelling still renders
