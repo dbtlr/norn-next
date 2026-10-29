@@ -367,9 +367,15 @@ impl Decided {
     /// read both sides of a place re-derives both and takes neither, and the
     /// two scopes tell apart only where an act reaches one side alone.
     pub(crate) const fn rederives(self) -> DiscardScope<'static> {
+        DiscardScope::Kinds(self.kinds())
+    }
+
+    /// The kinds this side concludes, which is what a page over the places an
+    /// act of this side re-derives selects on.
+    pub(crate) const fn kinds(self) -> &'static [FindingKind] {
         match self {
-            Decided::BySpelling => DiscardScope::Kinds(&SPELLING_KINDS),
-            Decided::ByBytes => DiscardScope::Kinds(&CONTENT_KINDS),
+            Decided::BySpelling => &SPELLING_KINDS,
+            Decided::ByBytes => &CONTENT_KINDS,
         }
     }
 

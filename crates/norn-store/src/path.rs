@@ -737,6 +737,18 @@ pub(crate) fn prefix_successor(prefix: &str) -> Option<String> {
 /// answers them one for one — the backslash and control-byte refusals by
 /// replacement, and the empty, `.` and `..` segment refusals by the marker. The
 /// pair is what makes [`DocumentPath::rendered`] total.
+/// The segment a folder named `name` occupies in every place
+/// [`DocumentPath::rendered`] names beneath it.
+///
+/// Rendering is per segment and only the leaf's stem is read as a stem, so
+/// this is the whole of what a folder contributes to a rendering. A caller
+/// looking for the spellings that render onto a place lists a folder and keeps
+/// the names whose rendering is the place's segment there; the corpus in
+/// `tests/paths.rs` holds this to `rendered` for every refusal it states.
+pub fn rendered_folder_name(name: &std::ffi::OsStr) -> String {
+    rendered_segment(&name.to_string_lossy())
+}
+
 fn rendered_segment(segment: &str) -> String {
     let mut rendered: String = segment
         .chars()

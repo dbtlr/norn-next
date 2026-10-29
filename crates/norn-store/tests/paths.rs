@@ -9,7 +9,8 @@
 use std::path::Path;
 
 use norn_store::{
-    ClassKey, DirectoryPrefix, DocumentPath, RENDERED_MARKER, StoreError, suffix_probe,
+    ClassKey, DirectoryPrefix, DocumentPath, RENDERED_MARKER, StoreError, rendered_folder_name,
+    suffix_probe,
 };
 
 /// The single indexed range a target without a trailing `.md` opens.
@@ -213,6 +214,35 @@ fn a_rendering_names_an_ancestor_the_vault_spells_the_same_way() {
         assert!(
             ancestor.is_empty() || ancestor == spelled,
             "`{path}` rendered to an ancestor `{ancestor}` the vault spells `{spelled}`"
+        );
+    }
+}
+
+/// **A rendering is its folders' renderings above its leaf's.** A caller
+/// reading the spellings of a place lists one folder per marked segment and
+/// keeps the names that render to that segment, so the segment a folder
+/// renders to has to be the one every place beneath it carries, and the leaf
+/// has to render as it does alone.
+#[test]
+fn a_rendering_is_its_folders_renderings_above_its_leaf() {
+    let admitted = ["glossary.md", "docs/norn/glossary.md", "..md/note.md"];
+    let refused = UNNORMALIZED.iter().map(|(path, _)| *path);
+    for path in admitted.into_iter().chain(refused) {
+        let (mut composed, leaf) = match path.rsplit_once('/') {
+            Some((folders, leaf)) => (
+                folders
+                    .split('/')
+                    .map(|folder| rendered_folder_name(std::ffi::OsStr::new(folder)))
+                    .collect::<Vec<String>>(),
+                leaf,
+            ),
+            None => (Vec::new(), path),
+        };
+        composed.push(DocumentPath::rendered(Path::new(leaf)).as_str().to_string());
+        assert_eq!(
+            DocumentPath::rendered(Path::new(path)).as_str(),
+            composed.join("/"),
+            "`{path}` renders other than its folders and its leaf do"
         );
     }
 }

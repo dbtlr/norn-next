@@ -695,13 +695,18 @@ place in the job where the vanished root's own spelling the directory grammar re
 root addresses no range of stored paths and which of the places it hid is unknowable from outside
 it; and a place is named by every spelling that renders onto it,
 so a walk rooted below that place's deepest unrendered ancestor read some of those spellings and
-never the rest and concludes nothing there. That last one is what keeps a scoped leg off the places
-its own refused root hides: the leg read one of the spellings rendering there and the vault heal
-reads them all, so the two legs agree on authority and the heal is what converges the places. It
-bites twice — on the rendered place a refused root stands at where the document grammar refuses its
-spelling, and on every marker-carrying place beneath a refused root whose spelling no prefix admits,
-which the leg has no range of stored paths to register for at all. Both are bounded by the next
-heal, and until it runs the maintained store holds findings a build from zero does not. The collision is where the sides tell apart most
+never the rest and concludes nothing there. **A scoped leg told about a refused spelling reads
+its place instead**: a report names one spelling and the place is named by all of them, so the
+leg lists the folders along the place's path — the deepest one spelled as written, and one per
+candidate at each marked segment — and files every spelling it finds there, the first replacing
+what stood; where it finds none, the place's spelling findings end. That covers a refused spelling
+that is edited, that leaves, or whose root stands refused, and a refused folder that leaves or
+stands refused, whose spelling addresses no range of stored paths: the places beneath it are found
+from the findings under its rendering and each is read the same way. A reading costs the folders
+along one path, each listed once per job, and never a subtree; a folder it cannot list concludes
+nothing, and the place keeps what it holds. A walk rooted below an unrendered ancestor that a real
+folder's own marker-carrying name puts above it still concludes nothing at the places there, and the
+next heal converges them. The collision is where the sides tell apart most
 clearly — the document whose bytes were refused can leave while a refused spelling still renders
 onto its place, and the walk that still reads that spelling ends the content findings there and
 leaves the spelling ones. **A
