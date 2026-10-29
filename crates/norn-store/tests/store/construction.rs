@@ -1190,8 +1190,12 @@ fn target_candidates_bound_and_total() {
     );
     // A commit inside the group keeps its guard: the next write reopens.
     let commits = group.store().construction_group_commits();
-    group.store().commit_step_group().unwrap();
+    assert!(group.store().commit_step_group().unwrap());
     assert_eq!(group.store().construction_group_commits(), commits + 1);
+    assert!(
+        !group.store().commit_step_group().unwrap(),
+        "nothing was open"
+    );
     assert_eq!(group.store().construction_group_room(), 2048);
     group
         .begin_request()

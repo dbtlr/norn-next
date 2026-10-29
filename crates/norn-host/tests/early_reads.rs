@@ -1366,8 +1366,8 @@ fn a_requested_document_answers_before_content_ends() {
 
 /// Contract item 9: a by-name target ambiguous among provisional names answers
 /// ambiguous only once every candidate passed step 2; a byte-quarantined
-/// candidate leaves a unique answer; a class over one chunk waits for
-/// vault-wide Structure.
+/// candidate leaves a unique answer; a class over one chunk, and a Get naming
+/// an undeclared field, wait for vault-wide Structure.
 #[test]
 fn a_provisional_ambiguity_waits_for_its_candidates() {
     let fixture = Fixture::new("early-provisional-ambiguity");
@@ -1383,14 +1383,16 @@ fn a_provisional_ambiguity_waits_for_its_candidates() {
         LoadingBoundary::StepComplete(Step::Content),
     ]);
     let host = fixture.host(probe.clone());
-    let (dup, solo, many) = std::thread::scope(|scope| {
+    let undeclared = get("solo").with_columns([Column::path(), Column::field("color")]);
+    let (dup, solo, many, colored) = std::thread::scope(|scope| {
         let _release = Release(&probe);
         let _demand = host.demand(&name()).unwrap();
         probe.wait(LoadingBoundary::StepComplete(Step::Names));
         let dup = spawn_get(scope, &host, get("dup"));
         let solo = spawn_get(scope, &host, get("solo"));
         let many = spawn_get(scope, &host, get("many"));
-        waits(&host, 3);
+        let colored = spawn_get(scope, &host, undeclared.clone());
+        waits(&host, 4);
         probe.release();
         // Held before Structure publishes: only pulled-ahead targets answer.
         probe.wait(LoadingBoundary::StepComplete(Step::Content));
@@ -1400,8 +1402,17 @@ fn a_provisional_ambiguity_waits_for_its_candidates() {
             many.try_recv().is_err(),
             "a class over one chunk was answered before vault-wide Structure"
         );
+        assert!(
+            colored.try_recv().is_err(),
+            "an undeclared field was answered before vault-wide Structure"
+        );
         probe.release();
-        (dup, solo, many.recv_timeout(BUDGET.work()).unwrap())
+        (
+            dup,
+            solo,
+            many.recv_timeout(BUDGET.work()).unwrap(),
+            colored.recv_timeout(BUDGET.work()).unwrap(),
+        )
     });
     ready(&host);
     let ambiguous = dup.as_ref().unwrap_err();
@@ -1419,6 +1430,7 @@ fn a_provisional_ambiguity_waits_for_its_candidates() {
         other => panic!("{other:?}"),
     }
     assert_exact!("a class over one chunk", &many, &host.get(&get("many")));
+    assert_exact!("an undeclared field", &colored, &host.get(&undeclared));
     assert_eq!(
         many.unwrap_err().code(),
         &ReasonCode::VaultAmbiguousTarget,

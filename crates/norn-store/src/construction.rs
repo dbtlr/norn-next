@@ -360,10 +360,12 @@ impl Store {
     }
 
     /// Commit the open group's chunks now and keep its guard, so the next
-    /// write opens a fresh transaction under it. A pulled-ahead request's
-    /// reader takes its snapshot after this commit, so it sees its document.
-    /// Outside a group this is refused, like every construction write.
-    pub fn commit_step_group(&mut self) -> Result<(), StoreError> {
+    /// write opens a fresh transaction under it; whether a transaction was
+    /// open to commit (a rare increment may have closed it already). A
+    /// pulled-ahead request's reader takes its snapshot after this commit, so
+    /// it sees its document. Outside a group this is refused, like every
+    /// construction write.
+    pub fn commit_step_group(&mut self) -> Result<bool, StoreError> {
         if !self.steps.as_ref().is_some_and(|s| s.group_guard) {
             return Err(refused(
                 self,
@@ -371,7 +373,9 @@ impl Store {
                 "a group guard is required",
             ));
         }
-        close_group(self)
+        let open = self.steps.as_ref().is_some_and(|s| s.group_open);
+        close_group(self)?;
+        Ok(open)
     }
 
     /// How many more documents the open group admits before its

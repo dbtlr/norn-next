@@ -237,11 +237,12 @@ fn drain(
     if let Scope::Content(pending, _) = scope {
         pending.flush()?;
     }
-    if wrote > 0 || !ready.is_empty() {
-        scope.store().commit_step_group().map_err(store_effect)?;
+    if (wrote > 0 || !ready.is_empty())
+        && scope.store().commit_step_group().map_err(store_effect)?
+    {
         ops.evidence.count_construction_commit_for_requests();
-        ops.evidence.count_pull_ahead_documents(wrote);
     }
+    ops.evidence.count_pull_ahead_documents(wrote);
     publisher.publish_targets(&ready);
     #[cfg(feature = "induced-failure")]
     ops.loading_boundary(LoadingBoundary::RequestsDrained);
