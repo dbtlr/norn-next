@@ -7,7 +7,7 @@
 //! production attachment that walked it, and the derived store that attachment
 //! left behind.
 //!
-//! Six bars, all counts:
+//! Seven bars, all counts:
 //!
 //! - **Zero on warm.** A request that only reads derives nothing, over the
 //!   ~2k-document `realistic` profile — the scale the gates assert against. It
@@ -100,6 +100,11 @@
 //!   and the weight of a placement walk — is varied alone over one document,
 //!   and moves the counts it reaches in proportion and no other.
 //!
+//! - **An early read scans no vault table under the indexes its step
+//!   built.** A from-zero build is held at each step it publishes, every read
+//!   shape that step admits is asked, and every statement those reads began is
+//!   planned with only the indexes the store held then.
+//!
 //! **Every reading is recorded, zero included.** A gate that passes says only
 //! that nothing moved; which counters were asked and what each read is the
 //! evidence behind it, and the write's non-zero reading beside them is what says
@@ -115,8 +120,9 @@
 //!
 //! **The read-through-a-hold bars read the host's account**, which a build
 //! reads only behind `induced-failure`, so the lane step names the feature. A
-//! build without it compiles every case and refuses the two that read the
-//! account when they run, rather than passing them having read nothing.
+//! build without it compiles every case but the early-read census, whose
+//! construction probe exists only behind it, and refuses the two that read
+//! the account when they run, rather than passing them having read nothing.
 #![cfg(unix)]
 #![allow(clippy::disallowed_methods)] // Harness scaffolding: this suite's own generated tree.
 
@@ -871,8 +877,8 @@ title: abcdefgh
 ";
 
 /// What one judgment of [`PARAMETER_PROBE`] under `rules` paid: a vault
-/// attached empty so first-index metadata and canonical construction finish
-/// before the probe is written. Only its watcher derivation is counted.
+/// attached empty so its from-zero construction finishes before the probe is
+/// written. Only its watcher derivation is counted.
 fn judged_under(label: &str, rules: &str) -> CounterSnapshot {
     let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), label).expect("a sandbox");
     let root = sandbox.work_dir().join("judged");
@@ -973,7 +979,7 @@ fn follows_the_parameter(
 /// **The logical rule counters follow each declared parameter, and only
 /// proportionally.** One document is judged under schemas differing in one
 /// parameter at a time, each written under a live attachment after the empty
-/// vault's first-index construction finishes:
+/// vault's from-zero construction finishes:
 ///
 /// - **rule count R**: R rules none of which selects the document evaluate R
 ///   rules and R selector terms, and read each term's ten bytes;
@@ -6672,45 +6678,10 @@ fn a_vault_file_births_link_health_work_follows_its_in_links_at_both_scales() {
 #[test]
 #[ignore = "counter-lane case: runs in dedicated full-regression counter steps"]
 fn marking_and_relisting_a_directory_costs_the_same_at_both_scales() {
-    const CHILD: &str = "NORN_DIRECTORY_COST_CHILD";
-    if std::env::var_os(CHILD).is_none() {
-        // Statement recording is process-wide. One exact child keeps unrelated
-        // counter cases out of both windows even when the parent runs in parallel.
-        let sandbox = Sandbox::new(
-            Path::new(env!("CARGO_TARGET_TMPDIR")),
-            "directory-cost-child",
-        )
-        .expect("a child sandbox");
-        let mut run = norn_testkit::process::Run::new(
-            &sandbox,
-            std::env::current_exe().expect("this binary"),
-        )
-        .args([
-            "--exact",
-            "marking_and_relisting_a_directory_costs_the_same_at_both_scales",
-            "--include-ignored",
-            "--nocapture",
-        ])
-        .env(CHILD, "1")
-        .deadline(Duration::from_secs(240));
-        if let Some(summary) = std::env::var_os("GITHUB_STEP_SUMMARY") {
-            run = run.env("GITHUB_STEP_SUMMARY", summary);
-        }
-        let ran = run.wait().expect("run the cost pair alone");
-        assert!(
-            ran.stdout_text().contains("running 1 test\n"),
-            "{}",
-            ran.stdout_text()
-        );
-        assert_eq!(
-            ran.status,
-            norn_testkit::process::RunStatus::Exited(0),
-            "{}\n{}",
-            ran.stdout_text(),
-            ran.stderr_text()
-        );
-        eprint!("{}", ran.stdout_text());
-        eprint!("{}", ran.stderr_text());
+    if !alone_in_a_child(
+        "marking_and_relisting_a_directory_costs_the_same_at_both_scales",
+        "NORN_DIRECTORY_COST_CHILD",
+    ) {
         return;
     }
     let small = norn_fixtures::Profile::by_name("ambiguous").expect("the ambiguity profile");
@@ -6721,6 +6692,46 @@ fn marking_and_relisting_a_directory_costs_the_same_at_both_scales() {
         ScaleObservation::new(&large, directory_mark_and_relist(&large)),
     )
     .assert_size_independent();
+}
+
+/// Whether this process is the child that runs `case` alone; where it is
+/// not, run that child, hold it to having run the one case and passed, and
+/// answer `false`. Statement recording is process-wide, so one exact child
+/// keeps unrelated counter cases out of a recorded window even when the
+/// parent runs them in parallel.
+fn alone_in_a_child(case: &str, child: &str) -> bool {
+    if std::env::var_os(child).is_some() {
+        return true;
+    }
+    let sandbox = Sandbox::new(
+        Path::new(env!("CARGO_TARGET_TMPDIR")),
+        &format!("{}-child", case.replace('_', "-")),
+    )
+    .expect("a child sandbox");
+    let mut run =
+        norn_testkit::process::Run::new(&sandbox, std::env::current_exe().expect("this binary"))
+            .args(["--exact", case, "--include-ignored", "--nocapture"])
+            .env(child, "1")
+            .deadline(Duration::from_secs(240));
+    if let Some(summary) = std::env::var_os("GITHUB_STEP_SUMMARY") {
+        run = run.env("GITHUB_STEP_SUMMARY", summary);
+    }
+    let ran = run.wait().expect("run the case alone");
+    assert!(
+        ran.stdout_text().contains("running 1 test\n"),
+        "{}",
+        ran.stdout_text()
+    );
+    assert_eq!(
+        ran.status,
+        norn_testkit::process::RunStatus::Exited(0),
+        "{}\n{}",
+        ran.stdout_text(),
+        ran.stderr_text()
+    );
+    eprint!("{}", ran.stdout_text());
+    eprint!("{}", ran.stderr_text());
+    false
 }
 
 /// Measure mark filing plus names-only clearing, then row restoration plus mark ending.
@@ -6869,5 +6880,561 @@ fn directory_phase_counters(
     measured.set(format!("{phase}_statements"), statements);
     for (name, value) in counters.readings() {
         measured.set(format!("{phase}_{name}"), value);
+    }
+}
+
+/// **An early read scans no vault-sized table under the indexes its step
+/// built.** A from-zero build creates each deferred secondary index as the
+/// step after which its first reader is admitted ends, before that step
+/// publishes; this holds the reads it then admits to that. A real host builds
+/// a vault from zero and is held at each step it publishes, where the build
+/// writes nothing: a pulled-ahead Get at the names step, field and path
+/// Finds at content, structure Finds and every Get shape at structure,
+/// `HasFinding` and validate at relations, and search and a text-matching
+/// Find once full text commits. Every statement each one began is recorded,
+/// with the indexes the store held at that moment, and planned on the finished
+/// store with every index the step had not yet built dropped; no plan reads a
+/// relation end to end but the full-text index's configuration.
+///
+/// The record is process-wide, so the case runs alone in a child.
+#[cfg(feature = "induced-failure")]
+#[test]
+#[ignore = "counter-lane case: runs in dedicated full-regression counter steps"]
+fn every_admitted_early_statement_seeks_under_the_indexes_its_step_built() {
+    if alone_in_a_child(
+        "every_admitted_early_statement_seeks_under_the_indexes_its_step_built",
+        "NORN_EARLY_CENSUS_CHILD",
+    ) {
+        early_census::run();
+    }
+}
+
+#[cfg(feature = "induced-failure")]
+mod early_census {
+    use std::collections::{BTreeSet, VecDeque};
+    use std::path::Path;
+    use std::sync::{Arc, Condvar, Mutex, mpsc};
+    use std::time::Duration;
+
+    use norn_host::{LoadingBoundary, LoadingProbe, ProductionPolicy};
+    use norn_store::{Step, Store, induced_failure};
+    use norn_testkit::explain::{PlanRow, QueryPlan};
+    use norn_testkit::process::Sandbox;
+    use norn_testkit::wait::{Budget, Observed, wait_until};
+    use norn_wire::{
+        CollectionSelector, Column, Direction, FindParams, FindingKind, GetParams, Predicate,
+        ResolutionTarget, SearchParams, Sort, SortKey, TrustState, ValidateParams, VaultAddress,
+    };
+
+    use super::attach;
+
+    const BUDGET: Budget = Budget::new(Duration::from_secs(60), Duration::from_millis(100));
+
+    /// The documents the census reads, planted beside the generated tree:
+    /// fields, headings, a block, tags and links, one of them broken.
+    const PLANTED: [(&str, &str); 2] = [
+        (
+            "census/subject.md",
+            "---\nstatus: draft\nrank: 3\ntags: [censusfront]\n---\n# Subject\n\
+             Census text #censustag [[census/other]] [[census-nowhere]]\n\
+             ## Part\nA block ^censusblock\n",
+        ),
+        (
+            "census/other.md",
+            "---\nstatus: done\n---\n# Other\nBack to [[census/subject#Part]]\n",
+        ),
+    ];
+
+    #[derive(Default)]
+    struct State {
+        next: VecDeque<LoadingBoundary>,
+        current: Option<LoadingBoundary>,
+        released: bool,
+        stop: bool,
+    }
+
+    /// Holds whichever thread reaches each boundary of its queue, in turn,
+    /// until released.
+    #[derive(Default)]
+    struct Hold {
+        state: Mutex<State>,
+        moved: Condvar,
+    }
+
+    impl Hold {
+        fn new(points: impl IntoIterator<Item = LoadingBoundary>) -> Arc<Self> {
+            let hold = Self::default();
+            hold.state.lock().unwrap().next = points.into_iter().collect();
+            Arc::new(hold)
+        }
+        fn wait(&self, point: LoadingBoundary) {
+            wait_until("a held boundary", BUDGET, || {
+                match self.state.lock().unwrap().current {
+                    Some(current) if current == point => Observed::Met(()),
+                    current => Observed::pending(format!("{point:?}, at {current:?}")),
+                }
+            })
+            .unwrap();
+        }
+        fn release(&self) {
+            self.state.lock().unwrap().released = true;
+            self.moved.notify_all();
+        }
+        fn finish(&self) {
+            self.state.lock().unwrap_or_else(|p| p.into_inner()).stop = true;
+            self.moved.notify_all();
+        }
+        fn at(&self, boundary: LoadingBoundary) {
+            let mut state = self.state.lock().unwrap();
+            if state.stop || state.next.front() != Some(&boundary) {
+                return;
+            }
+            state.next.pop_front();
+            state.current = Some(boundary);
+            state.released = false;
+            self.moved.notify_all();
+            let (mut state, _) = self
+                .moved
+                .wait_timeout_while(state, Duration::from_secs(120), |s| !s.released && !s.stop)
+                .unwrap();
+            state.current = None;
+        }
+    }
+
+    /// The build's boundaries to one hold, the reads' to another.
+    struct Probe {
+        build: Arc<Hold>,
+        reads: Arc<Hold>,
+    }
+
+    impl LoadingProbe for Probe {
+        fn at(&self, boundary: LoadingBoundary) {
+            match boundary {
+                LoadingBoundary::QueryEstablished | LoadingBoundary::QueryBuilt => {
+                    self.reads.at(boundary)
+                }
+                _ => self.build.at(boundary),
+            }
+        }
+    }
+
+    impl Drop for Probe {
+        fn drop(&mut self) {
+            self.build.finish();
+            self.reads.finish();
+        }
+    }
+
+    /// What one admission step's reads began, and the indexes the store held
+    /// as they ran.
+    struct Window {
+        step: Step,
+        statements: Vec<String>,
+        indexes: BTreeSet<String>,
+    }
+
+    fn target(text: &str) -> ResolutionTarget {
+        ResolutionTarget::new(text).unwrap()
+    }
+
+    pub(super) fn run() {
+        induced_failure::record_statements_begun();
+        let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), "early-census")
+            .expect("a sandbox");
+        let vault = attach::Vault::generate(&sandbox.work_dir().join("attached"), "tiny");
+        for (path, text) in PLANTED {
+            let at = vault.path().join(path);
+            std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+            std::fs::write(at, text).unwrap();
+        }
+        norn_fs::watch::settle_prior_changes(&sandbox.work_dir(), BUDGET.work()).unwrap();
+        let address = VaultAddress::name(vault.name().clone());
+        let get = |text: &str| GetParams::new(address.clone(), target(text));
+        let find = || FindParams::new(address.clone()).with_limit(5);
+        let build = Hold::new([
+            LoadingBoundary::StepComplete(Step::Names),
+            LoadingBoundary::TargetReady,
+            LoadingBoundary::StepComplete(Step::Content),
+            LoadingBoundary::StepComplete(Step::Structure),
+            LoadingBoundary::Published(Step::Relations),
+            LoadingBoundary::Published(Step::FullTextComplete),
+        ]);
+        let reads = Hold::new([LoadingBoundary::QueryEstablished]);
+        let probe = Arc::new(Probe {
+            build: Arc::clone(&build),
+            reads: Arc::clone(&reads),
+        });
+        let host = vault.host_composed(ProductionPolicy::new(128, 128).unwrap(), |ops| {
+            ops.with_loading_probe(probe.clone())
+        });
+        let database = vault.database();
+        let indexes = || -> BTreeSet<String> {
+            let database = norn_db::open_read_only(&database).adopted.unwrap();
+            let mut statement = database
+                .connection()
+                .prepare(
+                    "SELECT name FROM sqlite_schema WHERE type = 'index' \
+                     AND name NOT LIKE 'sqlite_%'",
+                )
+                .unwrap();
+            statement
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        let mut windows = Vec::new();
+        let mut window = |step, run: &mut dyn FnMut()| {
+            induced_failure::statements_begun();
+            run();
+            let statements = induced_failure::statements_begun();
+            windows.push(Window {
+                step,
+                statements,
+                indexes: indexes(),
+            });
+        };
+        let served = |early: bool| {
+            assert!(early, "a census read was refused or answered canonically");
+        };
+        std::thread::scope(|scope| {
+            let _demand = host.demand(vault.name()).unwrap();
+            build.wait(LoadingBoundary::StepComplete(Step::Names));
+            // A Get waiting at the names step is pulled ahead at the next drain.
+            let (send, answer) = mpsc::sync_channel(1);
+            let host = &*host;
+            let pulled = get("census/subject");
+            scope.spawn(move || {
+                let _ = send.send(host.get(&pulled));
+            });
+            wait_until("the Get joins the pull-ahead queue", BUDGET, || match host
+                .read_evidence()
+                .pull_ahead_requests
+            {
+                0 => Observed::pending("not queued"),
+                _ => Observed::Met(()),
+            })
+            .unwrap();
+            build.release();
+            build.wait(LoadingBoundary::TargetReady);
+            reads.wait(LoadingBoundary::QueryEstablished);
+            window(Step::Names, &mut || {
+                reads.release();
+                let early = answer.recv_timeout(BUDGET.work()).unwrap().unwrap();
+                served(matches!(
+                    early.answer.reading.trust,
+                    TrustState::Warming { .. }
+                ));
+            });
+            build.release();
+
+            build.wait(LoadingBoundary::StepComplete(Step::Content));
+            let content = [
+                find().with_predicates([Predicate::equal_to("status", "draft")]),
+                find().with_predicates([Predicate::not_equal_to("status", "draft")]),
+                find().with_predicates([Predicate::in_any(
+                    "status",
+                    ["draft".to_string(), "done".to_string()],
+                )]),
+                find().with_predicates([Predicate::has("rank")]),
+                find().with_predicates([Predicate::missing("rank")]),
+                find().with_predicates([Predicate::before("rank", "5")]),
+                find().with_predicates([Predicate::after("rank", "1")]),
+                find().with_predicates([Predicate::path("census/**")]),
+                find()
+                    .with_predicates([Predicate::has("status")])
+                    .with_columns([Column::path(), Column::field("status"), Column::fields()])
+                    .with_sort(Sort::new(SortKey::field("rank"), Direction::Descending)),
+                find().with_sort(Sort::new(SortKey::path(), Direction::Ascending)),
+            ];
+            window(Step::Content, &mut || {
+                for params in &content {
+                    let early = host.find(params).unwrap();
+                    served(matches!(
+                        early.answer.reading.trust,
+                        TrustState::Warming { .. }
+                    ));
+                }
+            });
+            build.release();
+
+            build.wait(LoadingBoundary::StepComplete(Step::Structure));
+            let structure = [
+                find().with_predicates([Predicate::tag("censustag")]),
+                find().with_predicates([Predicate::links_to(target("census/other"))]),
+                find().with_predicates([Predicate::resolves(target("subject"))]),
+                find()
+                    .with_predicates([Predicate::path("census/**")])
+                    .with_columns([
+                        Column::path(),
+                        Column::body(),
+                        Column::links(),
+                        Column::headings(),
+                        Column::blocks(),
+                        Column::tags(),
+                        Column::findings(),
+                    ]),
+            ];
+            let gets = [
+                get("census/subject"),
+                get("subject"),
+                get("census/subject").with_columns([Column::path(), Column::field("status")]),
+                get("census/subject#Part"),
+                get("census/subject#^censusblock"),
+                get("census/subject").with_collection(CollectionSelector::Links),
+                get("census/subject").with_collection(CollectionSelector::Headings),
+                get("census/subject").with_collection(CollectionSelector::Blocks),
+                get("census/subject").with_collection(CollectionSelector::Tags),
+                get("census/subject").with_collection(CollectionSelector::Findings),
+                get("census-nowhere"),
+            ];
+            window(Step::Structure, &mut || {
+                for params in &structure {
+                    let early = host.find(params).unwrap();
+                    served(matches!(
+                        early.answer.reading.trust,
+                        TrustState::Warming { .. }
+                    ));
+                }
+                for params in &gets {
+                    match host.get(params) {
+                        Ok(early) => served(matches!(
+                            early.answer.reading.trust,
+                            TrustState::Warming { .. }
+                        )),
+                        // An unknown target is an answer the build's rows derived.
+                        Err(refusal) => assert_eq!(
+                            refusal.code(),
+                            &norn_wire::ReasonCode::VaultUnknownTarget,
+                            "{refusal:?}"
+                        ),
+                    }
+                }
+            });
+            build.release();
+
+            build.wait(LoadingBoundary::Published(Step::Relations));
+            let validates = [
+                ValidateParams::new(address.clone()).with_limit(5),
+                ValidateParams::new(address.clone())
+                    .with_kinds([FindingKind::Broken])
+                    .with_limit(5),
+                ValidateParams::new(address.clone())
+                    .with_predicates([Predicate::path("census/**")])
+                    .with_limit(5),
+                ValidateParams::new(address.clone()).summarized(),
+            ];
+            window(Step::Relations, &mut || {
+                let early = host
+                    .find(&find().with_predicates([Predicate::has_finding(FindingKind::Broken)]))
+                    .unwrap();
+                served(matches!(
+                    early.answer.reading.trust,
+                    TrustState::Warming { .. }
+                ));
+                let early = host.get(&get("census/subject")).unwrap();
+                served(matches!(
+                    early.answer.reading.trust,
+                    TrustState::Warming { .. }
+                ));
+                for params in &validates {
+                    let early = host.validate(params).unwrap();
+                    served(matches!(
+                        early.answer.reading.trust,
+                        TrustState::Warming { .. }
+                    ));
+                }
+            });
+            build.release();
+
+            build.wait(LoadingBoundary::Published(Step::FullTextComplete));
+            let searches = [
+                SearchParams::new(address.clone(), "census").with_limit(5),
+                SearchParams::new(address.clone(), "census")
+                    .with_predicates([Predicate::equal_to("status", "draft")])
+                    .with_columns([Column::path(), Column::fields()])
+                    .with_limit(5),
+            ];
+            window(Step::FullTextComplete, &mut || {
+                for params in &searches {
+                    let early = host.search(params).unwrap();
+                    served(matches!(
+                        early.answer.reading.trust,
+                        TrustState::Warming { .. }
+                    ));
+                }
+                let early = host
+                    .find(&find().with_predicates([Predicate::matches("census")]))
+                    .unwrap();
+                served(matches!(
+                    early.answer.reading.trust,
+                    TrustState::Warming { .. }
+                ));
+            });
+            build.release();
+        });
+        attach::wait_for_ready(&host, vault.name(), attach::READY_LIMIT);
+        induced_failure::stop_recording_statements();
+        drop(host);
+        drop(probe);
+
+        let mut store = vault.store();
+        let finished = indexes();
+        let mut built: Option<&BTreeSet<String>> = None;
+        let mut unbarred = Vec::new();
+        for window in &windows {
+            assert!(window.indexes.is_subset(&finished), "{:?}", window.step);
+            if let Some(earlier) = built {
+                assert!(earlier.is_subset(&window.indexes), "{:?}", window.step);
+            }
+            built = Some(&window.indexes);
+            let plans = plans_without(
+                &mut store,
+                &statements(window),
+                &(&finished - &window.indexes),
+            );
+            eprintln!(
+                "{:?}: {} statements planned without {:?}",
+                window.step,
+                plans.len(),
+                &finished - &window.indexes
+            );
+            unbarred.extend(
+                census(&plans)
+                    .into_iter()
+                    .map(|found| format!("at {:?}: {found}", window.step)),
+            );
+        }
+        // Each step's reads were held before the next step built its indexes.
+        let (names, content) = (&windows[0], &windows[1]);
+        assert!(
+            !names.indexes.contains("document_fields_typed")
+                && !content.indexes.contains("link_keys_key"),
+            "a step's reads ran after a later step built its indexes"
+        );
+        assert!(
+            unbarred.is_empty(),
+            "{} early statement(s) read a vault table end to end:\n\n{}",
+            unbarred.len(),
+            unbarred.join("\n\n")
+        );
+        // The bar sees an index a step has not built: content's reads planned
+        // under the names step's indexes scan.
+        let early = plans_without(
+            &mut store,
+            &statements(content),
+            &(&finished - &names.indexes),
+        );
+        assert!(
+            !census(&early).is_empty(),
+            "content's reads planned without its indexes, and the census found every one searched"
+        );
+    }
+
+    /// The statements a window's reads began, as the census plans them.
+    fn statements(window: &Window) -> BTreeSet<String> {
+        let statements: BTreeSet<String> = window
+            .statements
+            .iter()
+            .filter_map(|sql| judged(sql))
+            .collect();
+        assert!(
+            !statements.is_empty(),
+            "{:?} recorded no statement",
+            window.step
+        );
+        statements
+    }
+
+    /// Every plan in `plans` with a step that reads a vault table end to end,
+    /// spelled with its statement and its plan: a scan of a table but the
+    /// full-text configuration, or an automatic index built over a table,
+    /// which reads it whole to build. An automatic index over a materialized
+    /// subquery indexes rows the statement already bounded, and a scan of one
+    /// is judged by its own steps.
+    fn census(plans: &[QueryPlan]) -> Vec<String> {
+        plans
+            .iter()
+            .filter_map(|plan| {
+                let subqueries: BTreeSet<&str> = plan
+                    .rows()
+                    .iter()
+                    .filter_map(|row| {
+                        row.detail
+                            .strip_prefix("MATERIALIZE ")
+                            .or_else(|| row.detail.strip_prefix("CO-ROUTINE "))
+                    })
+                    .map(str::trim)
+                    .collect();
+                let unbounded: Vec<String> = plan
+                    .unbounded_steps()
+                    .into_iter()
+                    .filter(|row| !admitted_scan(plan, row))
+                    .chain(plan.rows().iter().filter(|row| {
+                        row.uses_automatic_index()
+                            && !row
+                                .searches()
+                                .is_some_and(|name| subqueries.contains(plan.table_of(name)))
+                    }))
+                    .map(PlanRow::to_string)
+                    .collect();
+                (!unbounded.is_empty()).then(|| {
+                    let rows: Vec<String> = plan.rows().iter().map(PlanRow::to_string).collect();
+                    format!(
+                        "{}\nunbounded: {}\nplan: {}",
+                        plan.sql(),
+                        unbounded.join("; "),
+                        rows.join("; ")
+                    )
+                })
+            })
+            .collect()
+    }
+
+    /// The statement the census plans for one the trace recorded: a nested
+    /// statement as it is, without its marker; none for a transaction's
+    /// control, which plans nothing.
+    fn judged(recorded: &str) -> Option<String> {
+        let sql = recorded.strip_prefix("-- ").unwrap_or(recorded);
+        let verb = sql.split_whitespace().next()?.to_ascii_uppercase();
+        (!matches!(verb.as_str(), "BEGIN" | "COMMIT" | "ROLLBACK" | "END")).then(|| sql.to_string())
+    }
+
+    /// The full-text index's configuration, which FTS5 reads whole by its own
+    /// statement: one version row, whatever the vault holds.
+    fn admitted_scan(plan: &QueryPlan, scan: &PlanRow) -> bool {
+        plan.sql() == "SELECT k, v FROM 'main'.'documents_fts_config'"
+            && scan.detail == "SCAN main.documents_fts_config"
+    }
+
+    /// The plan of each of `statements` on `store` with `absent` dropped, in
+    /// a transaction rolled back after, so the store keeps every index.
+    fn plans_without(
+        store: &mut Store,
+        statements: &BTreeSet<String>,
+        absent: &BTreeSet<String>,
+    ) -> Vec<QueryPlan> {
+        induced_failure::execute_out_of_band(store, "BEGIN").unwrap();
+        for index in absent {
+            induced_failure::execute_out_of_band(store, &format!("DROP INDEX \"{index}\""))
+                .unwrap();
+        }
+        let plans = statements
+            .iter()
+            .map(|sql| {
+                let explained = induced_failure::explain_out_of_band(store, sql)
+                    .unwrap_or_else(|error| panic!("explaining {sql}: {error:?}"));
+                QueryPlan::new(
+                    sql,
+                    explained
+                        .steps
+                        .into_iter()
+                        .map(|step| PlanRow::new(step.id, step.parent, step.detail))
+                        .collect(),
+                )
+            })
+            .collect();
+        induced_failure::execute_out_of_band(store, "ROLLBACK").unwrap();
+        plans
     }
 }

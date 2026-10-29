@@ -1075,3 +1075,133 @@ fn construction_page_read_steps_per_document_stay_flat_at_four_times_the_vault()
         );
     }
 }
+
+/// A target's construction candidates are its resolution class with the step
+/// each still owes: exact-path precedence hides suffix candidates until the
+/// exact one is withdrawn, and a class over the limit is not listed.
+#[test]
+fn target_candidates_bound_and_total() {
+    use crate::common::{document, path};
+    use norn_store::{
+        AmbiguityIgnore, Change, ContentModel, ContentWrite, IncrementProvenance, Span, Step,
+    };
+    let scratch = Scratch::new("construction-target-candidates");
+    let mut store = scratch.open();
+    store.defer_link_health().unwrap();
+    store.begin_steps().unwrap();
+    let named = [
+        "alpha.md",
+        "folder/alpha.md",
+        "b/dup.md",
+        "c/dup.md",
+        "x/many.md",
+        "y/many.md",
+        "z/many.md",
+    ];
+    store
+        .begin_request()
+        .apply_increment(
+            IncrementProvenance::Derived,
+            named
+                .iter()
+                .map(|name| Change::Named { path: path(name) })
+                .chain([Change::Unreadable {
+                    path: path("broken.md"),
+                }]),
+            &[],
+            &ContentModel::none(),
+        )
+        .unwrap();
+    store.finish_step(Step::Names).unwrap();
+    let none = AmbiguityIgnore::none();
+    let owes = |store: &mut Store, target: &str, limit: usize| {
+        store
+            .begin_request()
+            .target_candidates(target, &none, limit)
+            .unwrap()
+            .map(|candidates| {
+                candidates
+                    .into_iter()
+                    .map(|candidate| (candidate.path.as_str().to_owned(), candidate.owes))
+                    .collect::<Vec<_>>()
+            })
+    };
+    let pair = |name: &str, step: Option<Step>| (name.to_owned(), step);
+    assert_eq!(
+        owes(&mut store, "alpha", 8),
+        Some(vec![pair("alpha.md", Some(Step::Content))])
+    );
+    assert_eq!(
+        owes(&mut store, "dup", 8),
+        Some(vec![
+            pair("b/dup.md", Some(Step::Content)),
+            pair("c/dup.md", Some(Step::Content)),
+        ])
+    );
+    assert_eq!(owes(&mut store, "many", 2), None);
+    assert_eq!(owes(&mut store, "many", 3).map(|all| all.len()), Some(3));
+    assert_eq!(
+        owes(&mut store, "broken", 8),
+        Some(vec![pair("broken.md", None)])
+    );
+    assert_eq!(owes(&mut store, "missing", 8), Some(Vec::new()));
+    let mut group = store.step_group().unwrap();
+    group
+        .begin_request()
+        .withdraw_content(&path("alpha.md"))
+        .unwrap();
+    assert_eq!(
+        owes(group.store(), "alpha", 8),
+        Some(vec![pair("folder/alpha.md", Some(Step::Content))])
+    );
+    group
+        .begin_request()
+        .write_content(
+            &[ContentWrite {
+                facts: document("folder/alpha.md", "h", "body"),
+                origin: Span {
+                    line: 1,
+                    column: 1,
+                    byte_offset: 0,
+                },
+            }],
+            &[],
+            &ContentModel::none(),
+        )
+        .unwrap();
+    assert_eq!(
+        owes(group.store(), "alpha", 8),
+        Some(vec![pair("folder/alpha.md", Some(Step::Structure))])
+    );
+    let rows = vec![
+        group
+            .begin_request()
+            .structure_document(&path("folder/alpha.md"))
+            .unwrap()
+            .unwrap(),
+    ];
+    group
+        .begin_request()
+        .write_structure(&rows, &[], &ContentModel::none())
+        .unwrap();
+    assert_eq!(
+        owes(group.store(), "alpha", 8),
+        Some(vec![pair("folder/alpha.md", None)])
+    );
+    // A commit inside the group keeps its guard: the next write reopens.
+    let commits = group.store().construction_group_commits();
+    assert!(group.store().commit_step_group().unwrap());
+    assert_eq!(group.store().construction_group_commits(), commits + 1);
+    assert!(
+        !group.store().commit_step_group().unwrap(),
+        "nothing was open"
+    );
+    assert_eq!(group.store().construction_group_room(), 2048);
+    group
+        .begin_request()
+        .withdraw_content(&path("b/dup.md"))
+        .unwrap();
+    assert_eq!(group.store().construction_group_room(), 2047);
+    group.commit().unwrap();
+    assert!(store.commit_step_group().is_err());
+}

@@ -23,6 +23,22 @@ CONTENT_COLUMNS = ("fields", "body", "links", "headings", "blocks", "tags", "fin
 ANCHORED_CONTENT = ("heading", "block", "body")
 
 
+# A from-zero build's early answer before relations are judged: the findings
+# column reads as still loading, and each link's targets and health with it.
+LOADING = {"state": "unknown", "reason": "loading"}
+
+
+def relations_loading(stage, first_index) -> bool:
+    """Whether a whole Get reads its relation parts as loading, which only an
+    early first-index answer may; every other part stays exact."""
+    if stage["answer"]["report"].get("document", {}).get("findings") != LOADING:
+        return False
+    trust = (stage["answer"].get("reading") or {}).get("trust", {})
+    if not (first_index and trust.get("state") == "warming" and trust.get("phase") == "healing"):
+        raise ValueError("only an early first-index answer reads its relations as loading")
+    return True
+
+
 def known(value):
     """The value inside a known content carrier; unknown content is never a timed success."""
     if (isinstance(value, dict) and value.get("state") in ("known", "unknown")
@@ -33,12 +49,13 @@ def known(value):
     return value
 
 
-def decode_content(report: dict) -> dict:
-    """Unwrap the wire's known/unknown content carriers in place, once, before any check reads them."""
+def decode_content(report: dict, *, loading=False) -> dict:
+    """Unwrap the wire's known/unknown content carriers in place, once, before any check reads them.
+    Where `loading`, a findings column read as still loading is kept as it is."""
     document = report.get("document")
     if isinstance(document, dict):
         for column in CONTENT_COLUMNS:
-            if column in document:
+            if column in document and not (loading and column == "findings" and document[column] == LOADING):
                 document[column] = known(document[column])
     for key in ANCHORED_CONTENT:
         if key in report:
@@ -143,8 +160,10 @@ def distribution(values: list[int]) -> dict:
 
 
 def whole_get_answer(stage, *, first_index=False):
-    """Keep the complete record while comparing finding content across store epochs."""
-    decode_content(stage["answer"]["report"])
+    """Keep the complete record while comparing finding content across store epochs.
+    An early first-index answer may read its relation parts as loading."""
+    loading = relations_loading(stage, first_index)
+    decode_content(stage["answer"]["report"], loading=loading)
     answer = copy.deepcopy(stage["answer"])
     report = answer["report"]
     document = report.get("document", {})
@@ -168,13 +187,16 @@ def whole_get_answer(stage, *, first_index=False):
         epoch, generation = stage.get("projection_epoch"), stage.get("projection_generation")
     if not isinstance(epoch, str) or not epoch or type(generation) is not int or generation < 0:
         raise ValueError("whole-record projection provenance is missing or invalid")
-    for key in ("headings", "blocks", "tags", "links", "findings"):
+    for link in document["links"].get("items", []) if isinstance(document["links"], dict) else []:
+        if (link.get("health") == "loading") != loading or (loading and link.get("targets") is not None):
+            raise ValueError("a link's resolution reads as loading exactly where its relations are")
+    for key in ("headings", "blocks", "tags", "links") + (() if loading else ("findings",)):
         collection = document[key]
         if (not isinstance(collection, dict) or type(collection.get("total")) is not int
                 or not isinstance(collection.get("items"), list)
                 or collection["total"] != len(collection["items"])):
             raise ValueError("whole-record collection is truncated or has an incorrect total")
-    findings = document["findings"]
+    findings = {"items": []} if loading else document["findings"]
     finding_ids = set()
     for finding in findings["items"]:
         if (type(finding.get("id")) is not int or finding["id"] <= 0
@@ -202,8 +224,13 @@ def validate_first_get(response, manifest, *, private=False):
 
 def validate_first_get_content(response, manifest, *, first_index=False):
     """Shared authored whole-record oracle after the caller validates its envelope."""
+    loading = relations_loading(response, first_index)
     normalized = whole_get_answer(response, first_index=first_index)
-    validate_read("current", {"op": "get", "target": "bench/small.md"}, response, manifest)
+    # The record check reads body and fields alone, never the findings column.
+    checked = copy.deepcopy(response)
+    checked["answer"]["report"]["document"].pop("findings", None)
+    validate_read("current", {"op": "get", "target": "bench/small.md"}, checked, manifest)
+    relations = ("links",) if loading else ("links", "findings")
     source = "---\nstatus: draft\nperf_bucket: probe\n---\n" + manifest["small_body"]
 
     def span(token):
@@ -217,7 +244,7 @@ def validate_first_get_content(response, manifest, *, first_index=False):
         expected = [{"level": level, "slug": slug, "text": text, "span": span(raw)}
                     for level, slug, text, raw in headings]
         if doc["headings"]["items"] != expected or any(doc[key]["items"] for key in
-                                                     ("blocks", "tags", "links", "findings")):
+                                                     ("blocks", "tags") + relations):
             raise ValueError("whole get rich collections differ from the authored base fixture")
         return normalized
     requirements = manifest["whole_get_requirements"]
@@ -233,9 +260,12 @@ def validate_first_get_content(response, manifest, *, first_index=False):
              ("profilemissingcoldtarget", "[[profilemissingcoldtarget]]", None, None, "target-missing"),
              ("large", "[[large#ProfileMissingHeading]]", {"kind": "heading", "text": "ProfileMissingHeading"}, "bench/large.md", "anchor-missing"),
              ("large", "[[large#^profilemissingblock]]", {"kind": "block", "id": "profilemissingblock"}, "bench/large.md", "block-ref-missing")]
-    report = payload("current", response)
+    # Decoded in place by `whole_get_answer`, findings left loading where they read so.
+    report = response["answer"]["report"]
     doc = report['document']
-    columns = {'headings': 3, 'blocks': 0, 'tags': 1, 'links': 5, 'findings': 3}
+    columns = {'headings': 3, 'blocks': 0, 'tags': 1, 'links': 5}
+    if not loading:
+        columns['findings'] = 3
     if report.get('shape') != 'record' or any(k not in doc for k in columns):
         raise ValueError('whole get omitted a rich collection')
     for name, total in columns.items():
@@ -247,10 +277,12 @@ def validate_first_get_content(response, manifest, *, first_index=False):
         candidates = [{'path': path, 'suffix': target}] if path else []
         if (actual['target'] != target or actual['anchor'] != anchor or actual['span'] != span(raw)
                 or actual['family'] != 'wikilink' or actual['embed'] or actual['protocol'] is not None
-                or actual['title'] is not None or actual['health'] != ('healthy' if path else 'broken')
-                or actual['targets'] != {'candidates': candidates, 'total': len(candidates)}):
+                or actual['title'] is not None
+                or (loading and (actual['health'], actual['targets']) != ('loading', None))
+                or (not loading and (actual['health'] != ('healthy' if path else 'broken')
+                                     or actual['targets'] != {'candidates': candidates, 'total': len(candidates)}))):
             raise ValueError('whole get link answer differs from authored targets/anchors')
-    findings = doc['findings']['items']
+    findings = [] if loading else doc['findings']['items']
     for actual, (target, raw, anchor, path, reason) in zip(findings, links[2:]):
         expected_target = raw[2:-2]
         expected_kind = 'link/missing-anchor' if path else 'link/broken'

@@ -153,7 +153,7 @@ fn next_attach_converges_after_process_death_mid_increment() {
 struct DieAfterNames;
 
 impl LoadingProbe for DieAfterNames {
-    fn at(&self, boundary: LoadingBoundary<'_>) {
+    fn at(&self, boundary: LoadingBoundary) {
         if matches!(
             boundary,
             LoadingBoundary::StepComplete(norn_store::Step::Names)
@@ -256,7 +256,7 @@ fn next_attach_rebuilds_from_zero_after_process_death_mid_build() {
 struct DieAtTheFirstJudgmentChunk;
 
 impl LoadingProbe for DieAtTheFirstJudgmentChunk {
-    fn at(&self, boundary: LoadingBoundary<'_>) {
+    fn at(&self, boundary: LoadingBoundary) {
         if matches!(boundary, LoadingBoundary::LinkHealthChunk) {
             std::process::abort();
         }
@@ -363,7 +363,7 @@ fn next_attach_rebuilds_from_zero_after_process_death_mid_judgment() {
 struct DieAtTheFirstFullTextBatch;
 
 impl LoadingProbe for DieAtTheFirstFullTextBatch {
-    fn at(&self, boundary: LoadingBoundary<'_>) {
+    fn at(&self, boundary: LoadingBoundary) {
         if matches!(boundary, LoadingBoundary::FullTextBatch) {
             std::process::abort();
         }
@@ -710,7 +710,7 @@ struct DieMidDocumentStep {
     structure: bool,
 }
 impl LoadingProbe for DieMidDocumentStep {
-    fn at(&self, boundary: LoadingBoundary<'_>) {
+    fn at(&self, boundary: LoadingBoundary) {
         if !matches!(boundary, LoadingBoundary::CanonicalPage) {
             return;
         }

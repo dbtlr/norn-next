@@ -1,11 +1,12 @@
 //! Construction boundaries that admit read shapes.
 //!
-//! NORN-468 PR C (host early admission) is the consuming layer. The host still
-//! uses disposable loading sources today, so this table is not yet on its path.
-//! Future wire variants fall back to Ready; they never gain early admission.
+//! The host's request-aware acquisition admits a request early once its
+//! build has published the step this table names for its shape. Future wire
+//! variants fall back to Ready; they never gain early admission.
 
 use norn_wire::{
-    Anchor, CollectionSelector, Column, FindParams, GetParams, Predicate, SortKey, Verb,
+    Anchor, CollectionSelector, Column, FindParams, GetParams, Predicate, SearchParams, SortKey,
+    ValidateParams, Verb,
 };
 
 /// The end of the construction step that admits a shape, or canonical Ready.
@@ -77,7 +78,7 @@ pub fn find(params: &FindParams) -> Boundary {
         .fold(Boundary::Content, std::cmp::max)
 }
 
-/// Vault-wide Get admission. PR C may admit a target earlier once all its
+/// Vault-wide Get admission. The host admits a target earlier once all its
 /// candidates have content and the resolved document has committed structure.
 /// An undeclared Field projection still requires vault-wide Structure.
 pub fn get(params: &GetParams) -> Boundary {
@@ -104,7 +105,29 @@ pub fn get(params: &GetParams) -> Boundary {
     }
 }
 
-/// Earliest verb capability; Get and Find also require shape classification.
+/// A validate reads relation judgments, and every fact its conjunction names.
+pub fn validate(params: &ValidateParams) -> Boundary {
+    params
+        .predicates
+        .iter()
+        .map(predicate)
+        .fold(verb(Verb::Validate), std::cmp::max)
+}
+
+/// A search reads the full-text index the closing transaction completes, and
+/// every fact its conjunction and projection name. Only its lexical rung
+/// reads the store; semantic engines start after Ready.
+pub fn search(params: &SearchParams) -> Boundary {
+    params
+        .predicates
+        .iter()
+        .map(predicate)
+        .chain(params.columns.iter().map(column))
+        .fold(verb(Verb::Search), std::cmp::max)
+}
+
+/// Earliest verb capability; Get, Find, validate and search also require
+/// shape classification.
 /// Plans, writes and all other verbs have no early capability.
 pub fn verb(value: Verb) -> Boundary {
     match value {
@@ -219,6 +242,26 @@ fn every_shape_has_one_step() {
             assert_eq!(get(&continued), Boundary::Structure);
         }
     }
-    let params = FindParams::new(vault).with_predicates([Predicate::matches("word")]);
+    let params = FindParams::new(vault.clone()).with_predicates([Predicate::matches("word")]);
     assert_eq!(find(&params), Boundary::FullTextComplete);
+    let checked = ValidateParams::new(vault.clone());
+    assert_eq!(validate(&checked), Boundary::Relations);
+    assert_eq!(
+        validate(&checked.clone().with_predicates([Predicate::tag("x")])),
+        Boundary::Relations
+    );
+    assert_eq!(
+        validate(&checked.with_predicates([Predicate::matches("word")])),
+        Boundary::FullTextComplete
+    );
+    let searched = SearchParams::new(vault, "word");
+    assert_eq!(search(&searched), Boundary::FullTextComplete);
+    assert_eq!(
+        search(
+            &searched
+                .with_predicates([Predicate::has_finding(norn_wire::FindingKind::Broken)])
+                .with_columns([Column::findings()])
+        ),
+        Boundary::FullTextComplete
+    );
 }

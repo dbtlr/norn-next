@@ -97,9 +97,10 @@ use norn_wire::{
     SearchReport, Unsatisfied, VaultName,
 };
 
+use crate::lifecycle::loading::Request;
 use crate::lifecycle::{EntryOps, Host, ReadSource, SnapshotSource};
 use crate::read::{Answered, BuildRefused, Built, every_page};
-use crate::semantic::{SemanticAnswer, VectorRefusal, freshness};
+use crate::semantic::{SemanticAnswer, SemanticRefusal, VectorRefusal, freshness};
 
 /// The constant of reciprocal-rank fusion: a document ranked `rank` by a rung,
 /// counted from one, scores `1 / (RRF_K + rank)` from that rung.
@@ -497,36 +498,69 @@ where
         &self,
         params: &SearchParams,
     ) -> Result<Answered<SearchReport, SearchCost>, ErrorEnvelope> {
-        self.answer_read(&params.vault, |vault, snapshot, declared| {
-            let selection = with_runtime(&params.rungs).map_err(BuildRefused::Answered)?;
-            let limit = page_limit(params.limit)?;
-            let mut cost = SearchCost::default();
-            let vector = if samples_vector(selection) {
-                self.sample_vector(vault, snapshot, params, declared, &mut cost)?
-            } else {
-                VectorSample::Unsampled
-            };
-            let resolved = resolve(selection, &vector).map_err(BuildRefused::Answered)?;
-            // A resolution over an answered sample holds the vector rung, and
-            // one over any other sample does not, so the sample alone says
-            // which ladder runs.
-            let VectorSample::Answered(answered) = vector else {
-                return lexical_answer(snapshot, params, declared, resolved, cost);
-            };
-            let (answer, restriction) = *answered;
-            ranked_answer(
-                snapshot,
-                params,
-                declared,
-                RankedInputs {
-                    resolved,
-                    answer,
-                    restriction,
-                    limit,
-                },
-                cost,
-            )
+        let vault = params.vault.registered_name();
+        self.answer_query(&params.vault, Request::Search(params), |hold| {
+            hold.search(params, |snapshot, declared, early| {
+                self.search_on(vault, snapshot, declared, params, early)
+            })
         })
+    }
+
+    /// One search's answer on `snapshot`. An early hold samples no vector
+    /// rung: it reads as the rung of an engine not yet prepared.
+    fn search_on(
+        &self,
+        vault: &VaultName,
+        snapshot: &Snapshot,
+        declared: &ContentModel,
+        params: &SearchParams,
+        early: bool,
+    ) -> Result<Built<SearchReport, SearchCost>, BuildRefused> {
+        let selection = with_runtime(&params.rungs).map_err(BuildRefused::Answered)?;
+        let limit = page_limit(params.limit)?;
+        let mut cost = SearchCost::default();
+        let vector = if !samples_vector(selection) {
+            VectorSample::Unsampled
+        } else if early {
+            self.unprepared_vector(vault)
+        } else {
+            self.sample_vector(vault, snapshot, params, declared, &mut cost)?
+        };
+        let resolved = resolve(selection, &vector).map_err(BuildRefused::Answered)?;
+        // A resolution over an answered sample holds the vector rung, and
+        // one over any other sample does not, so the sample alone says
+        // which ladder runs.
+        let VectorSample::Answered(answered) = vector else {
+            return lexical_answer(snapshot, params, declared, resolved, cost);
+        };
+        let (answer, restriction) = *answered;
+        ranked_answer(
+            snapshot,
+            params,
+            declared,
+            RankedInputs {
+                resolved,
+                answer,
+                restriction,
+                limit,
+            },
+            cost,
+        )
+    }
+
+    /// The vector rung as an early hold finds it: the refusal a lookup of
+    /// `vault`'s engine answers, and an engine standing from before this
+    /// build read as one still preparing, since engines start after `Ready`.
+    fn unprepared_vector(&self, vault: &VaultName) -> VectorSample {
+        let Some(engines) = self.ops().semantic() else {
+            return VectorSample::Refused(VectorRefusal::not_composed());
+        };
+        VectorSample::Refused(VectorRefusal::of(
+            engines
+                .standing(vault)
+                .err()
+                .unwrap_or(SemanticRefusal::Preparing),
+        ))
     }
 
     /// Sample the vector rung of `vault`, the vault `params` addresses:

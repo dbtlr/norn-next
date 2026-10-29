@@ -6,8 +6,10 @@
 //! a [`VaultAnswer`] carrying the reading the hold was taken under. Every
 //! refusal on that path leaves as `norn-wire`'s one envelope: the address's,
 //! the hold's through [`ReadRefusal::answer`](crate::ReadRefusal::answer), and
-//! the builder's through [`page_refusal`]. First-index Get and Find use a closed,
-//! request-specific hold from the same acquisition core. A builder whose canonical store finds its
+//! the builder's through [`page_refusal`]. Get, Find, validate and search take
+//! their hold through request-aware acquisition, which admits them early on a
+//! from-zero build whose published step completes what they read; every other
+//! verb holds canonically. A builder whose canonical store finds its
 //! derived data damaged is the one refusal the entry answers for: the damage
 //! is published on the entry, which owes the rebuild that resolves it, and the
 //! read is refused with what the entry then publishes.
@@ -80,7 +82,8 @@ impl HoldReading {
     ///
     /// A hold is taken only under a published demand that answers a read —
     /// `Ready`, the healing of an entry that has derived every fact the
-    /// read met, or claim-owned first-index warming — so the demand answers with its state, and the trust an
+    /// read met, or the warming of a from-zero build whose published step
+    /// admits the read — so the demand answers with its state, and the trust an
     /// answer carries is what the entry published at the instant its
     /// snapshot was established; one that did not would be refused with its
     /// own envelope, through the mapping every demand renders through. A
@@ -170,11 +173,22 @@ where
         })
     }
 
-    fn answer_query<R, W>(
+    /// Answer one read verb through request-aware acquisition: a canonical
+    /// hold where the entry serves, or an early hold on a from-zero build
+    /// whose published step admits `request`, its builder exposed only the
+    /// operation `request` names.
+    ///
+    /// An early answer, and any refusal its rows derived, is given only while
+    /// no accepted fact or coverage loss known now withdrew the capability it
+    /// was read under. A builder's own envelope, and storage and resource
+    /// failures, leave as they are.
+    pub(crate) fn answer_query<R, W>(
         &self,
         address: &norn_wire::VaultAddress,
         request: crate::lifecycle::loading::Request<'_>,
-        build: impl FnOnce(&crate::lifecycle::loading::QueryHold<O>) -> Result<Built<R, W>, PageRefusal>,
+        build: impl FnOnce(
+            &crate::lifecycle::loading::QueryHold<O>,
+        ) -> Result<Built<R, W>, BuildRefused>,
     ) -> Result<Answered<R, W>, ErrorEnvelope> {
         let name = address.registered_name();
         let hold = self
@@ -184,16 +198,14 @@ where
         #[cfg(feature = "induced-failure")]
         hold.query_boundary(self, false);
         let result = build(&hold);
-        if let Err(refusal) = &result {
-            hold.record_page_failure(refusal);
-        }
         #[cfg(feature = "induced-failure")]
         hold.query_boundary(self, true);
         // Storage/resource failures keep their actual type. Other refusals require
         // the same final authority judgment as successful rows.
         let depends_on_source = match &result {
             Ok(_) => true,
-            Err(refusal) => match refusal {
+            Err(BuildRefused::Answered(_)) => false,
+            Err(BuildRefused::Page(refusal)) => match refusal {
                 PageRefusal::Store(_)
                 | PageRefusal::CountCursorExpired
                 | PageRefusal::CountResultBusy
@@ -216,11 +228,16 @@ where
             },
         };
         if depends_on_source && !hold.current() {
-            return Err(ReadRefusal::FirstIndex(hold.reading().published().clone()).answer(name));
+            return Err(
+                ReadRefusal::StillIndexing(hold.reading().published().clone()).answer(name),
+            );
         }
-        let built = result.map_err(|refusal| match page_refusal(refusal) {
-            PageRefused::Answered(envelope) => envelope,
-            PageRefused::Damaged(detail) => hold.damage(self, detail).answer(name),
+        let built = result.map_err(|refused| match refused {
+            BuildRefused::Answered(envelope) => envelope,
+            BuildRefused::Page(refusal) => match page_refusal(refusal) {
+                PageRefused::Answered(envelope) => envelope,
+                PageRefused::Damaged(detail) => hold.damage(self, detail).answer(name),
+            },
         })?;
         Ok(Answered {
             answer: VaultAnswer::new(reading, built.unsatisfied, built.report)
@@ -269,9 +286,11 @@ where
         &self,
         params: &ValidateParams,
     ) -> Result<Answered<ValidateReport, ValidateWork>, ErrorEnvelope> {
-        self.answer_read(&params.vault, |_, snapshot, declared| {
-            Ok(snapshot.validate(params, declared)?.into())
-        })
+        self.answer_query(
+            &params.vault,
+            crate::lifecycle::loading::Request::Validate(params),
+            |hold| Ok(hold.validate(params)?.into()),
+        )
     }
 
     /// Answer a `describe`: one page of the facets `params` asks for, from

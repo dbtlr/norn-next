@@ -6,8 +6,8 @@ known-answer fixtures, executable identity, and a self-contained HTML report.
 
 These measurements describe the selected workflows. They are not acceptance
 thresholds, correctness oracles, CLI measurements, or long-duration leak tests.
-First-open Get and supported metadata Find use production admission under
-[ADR 0043](decisions/0043-first-index-complete-reads.md). The baseline uses an
+Reads that meet a from-zero build use production early admission under
+[ADR 0045](decisions/0045-a-from-zero-build-writes-once-in-steps.md). The baseline uses an
 opt-in integration-test worker, which adds no product dependency or API.
 
 ## Build and run
@@ -79,6 +79,21 @@ python3 scripts/performance/baseline.py \
   --output "$PERF_HOME/run-002"
 python3 scripts/performance/report.py "$PERF_HOME/run-002"
 ```
+
+Add `--loading operator-prefix-public` to take the public first Get and first
+Find on the current worker's caller thread while it attaches. This mode needs a
+worker built with the `induced-failure` feature: build it with
+`provenance.py --startup-profile`, and pass that build's receipt as
+`--current-build`. A worker built without the feature refuses the mode. The
+legacy daemon starts as usual. The worker writes both answers to
+`loading-checkpoints.json` in each run's work directory. The runner checks each
+served answer against the fixture: an early Get may read link resolution, link
+health and findings as still loading, and every other part must match exactly.
+Each answer's
+`first_answers` sample records `query_host_ns`, its disposition and where it
+was read from. `early_step` names the build step that admitted an early answer,
+and `canonical` marks a canonical read. The sample also records the pull-ahead
+evidence the build had spent by then.
 
 The runner checks the frozen tree digest before copying it. This avoids treating
 a generator revision as a runtime change. Output directories must be new;
@@ -252,6 +267,10 @@ Nested link-health timings separate candidate resolution, link reads, finding
 discards, and finding writes. Preparation scopes distinguish compiling or
 retrieving SQL statements from executing them. The finding metadata scope
 includes its generation update and schema-fingerprint read.
+
+A fresh profiled build must read each document once. The runner rejects a cell
+whose `document_opens` differs from the document count plus one, the single read
+of the vault's declaration.
 
 After the first validated query, the runner records database, WAL, and shared
 memory file lengths while the worker remains open. These readings are outside

@@ -3,7 +3,7 @@ import copy
 import json
 from pathlib import Path
 import unittest
-from results import validate_first_get
+from results import validate_first_get, validate_first_get_content
 
 
 def example():
@@ -82,6 +82,49 @@ class WholeGetChecks(unittest.TestCase):
         changed["answer"]["report"]["document"]["links"]["items"][0]["health"] = "broken"
         with self.assertRaises(ValueError):
             validate_first_get(changed, manifest)
+
+    def test_an_early_answer_may_read_its_relations_as_loading(self):
+        loading = dict(state='unknown', reason='loading')
+        warming = {'state': 'warming', 'phase': 'healing'}
+        response, manifest = example()
+        response['answer']['reading']['trust'] = warming
+        response['answer']['report']['document']['findings'] = loading
+        validate_first_get_content(copy.deepcopy(response), manifest, first_index=True)
+        with self.assertRaises(ValueError):
+            validate_first_get_content(copy.deepcopy(response), manifest)
+        ready = copy.deepcopy(response)
+        ready['answer']['reading']['trust'] = {'state': 'ready'}
+        with self.assertRaises(ValueError):
+            validate_first_get_content(ready, manifest, first_index=True)
+        changed = copy.deepcopy(response)
+        changed['answer']['report']['document']['headings']['items'][0]['slug'] = 'wrong'
+        with self.assertRaises(ValueError):
+            validate_first_get_content(changed, manifest, first_index=True)
+
+    def test_an_early_rich_answer_withholds_only_link_resolution_and_findings(self):
+        def early():
+            response = dict(answer=json.loads(Path(__file__).with_name("testdata").joinpath("rich_get.json").read_text()))
+            response['answer']['reading']['trust'] = {'state': 'warming', 'phase': 'healing'}
+            document = response['answer']['report']['document']
+            document['findings'] = dict(state='unknown', reason='loading')
+            for link in document['links']['items']:
+                link.update(health='loading', targets=None)
+            return response
+        manifest = dict(small_body=early()["answer"]["report"]["document"]["body"]["text"],
+            whole_get_requirements=dict(target="small", path="bench/small.md", added_links=5,
+                required_tag="coldprobe", missing_document="profilemissingcoldtarget",
+                missing_heading="ProfileMissingHeading", missing_block="profilemissingblock"))
+        validate_first_get_content(early(), manifest, first_index=True)
+        for key, value in [('health', 'broken'), ('targets', dict(candidates=[], total=0)),
+                           ('target', 'wrong'), ('anchor', None)]:
+            changed = early()
+            changed['answer']['report']['document']['links']['items'][0][key] = value
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                validate_first_get_content(changed, manifest, first_index=True)
+        changed = early()
+        changed['answer']['report']['document']['tags']['items'] = []
+        with self.assertRaises(ValueError):
+            validate_first_get_content(changed, manifest, first_index=True)
 
     def test_native_provenance_is_required_and_handles_cannot_alias(self):
         response, manifest = example()

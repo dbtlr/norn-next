@@ -213,6 +213,12 @@ pub trait ReadSource: Send + Sync + 'static {
     /// hold, so the gate-held statement bar is not a number the establishment
     /// reports about itself.
     fn establish(turn: Self::Turn) -> Result<Established<Self::Snapshot>, ReaderUnavailable>;
+
+    /// Mark an early snapshot established before its build judged relations,
+    /// so link resolution, link health and findings read as still loading.
+    fn relations_loading(snapshot: Self::Snapshot) -> Self::Snapshot {
+        snapshot
+    }
 }
 
 /// What establishing one read's snapshot produced.
@@ -277,14 +283,10 @@ impl std::error::Error for ReaderUnavailable {}
 
 /// The effectful half of an entry lifecycle.
 pub trait EntryOps: Send + Sync + 'static {
-    /// Whether this adapter constructs request-specific first-index sources.
-    fn first_index_reads(&self) -> bool {
-        false
-    }
-
-    /// Conservative candidacy observed before serving a registration, outside entry gates.
-    /// This permits waiting only; the current attach must still prove Created-empty storage
-    /// and unchanged watcher coverage before publishing any first-index source.
+    /// Conservative candidacy observed before serving a registration, outside entry gates:
+    /// a vault with no store file is provisional, so a read meeting its first attach waits
+    /// for the from-zero build to begin. It permits waiting only; that build must still
+    /// capture watcher authority and publish a step before any read is admitted early.
     /// Adapters wrapping production operations must forward this method too.
     fn first_index_candidate(&self, _registration: &Registration) -> bool {
         false
@@ -1087,7 +1089,8 @@ impl<A: SnapshotSource> Entry<A> {
                 trust: TrustState::Unattached,
                 initial_attach_started: false,
                 initial_loading_candidate: storage == CanonicalStoreObservation::Absent,
-                loading: None,
+                construction: None,
+                construction_revision: 0,
                 trust_unbroken_since_ready: false,
                 coverage: Coverage::none(),
                 reader: None,
@@ -1137,7 +1140,12 @@ impl<A: SnapshotSource> Entry<A> {
 struct EntryState<A: SnapshotSource> {
     initial_attach_started: bool,
     initial_loading_candidate: bool,
-    loading: Option<loading::Loading<A::Reader>>,
+    /// The from-zero build this entry's early reads are admitted against, or
+    /// the provisional first attach a read waits on before that build begins.
+    construction: Option<loading::Construction<A::Reader>>,
+    /// Moves with every construction begin, publication and closure, and with
+    /// nothing else: it is what wakes a read waiting for a capability.
+    construction_revision: u64,
     trust: TrustState,
     /// Whether the entry's trust has stood unbroken since it last published
     /// `Ready`: no withdrawal of trust, no teardown, no new coverage and no
@@ -1528,7 +1536,7 @@ enum ReadStance {
 struct ReadStanding {
     stance: ReadStance,
     derived_through: u64,
-    loading_revision: Option<u64>,
+    construction_revision: u64,
 }
 
 impl<A: SnapshotSource> Stanced for EntryState<A> {
@@ -1546,7 +1554,7 @@ impl<A: SnapshotSource> Stanced for EntryState<A> {
         ReadStanding {
             stance: self.read_stance(),
             derived_through: self.pending.derived_through,
-            loading_revision: self.loading.as_ref().map(|loading| loading.revision),
+            construction_revision: self.construction_revision,
         }
     }
 
@@ -1574,18 +1582,7 @@ impl<A: SnapshotSource> Stanced for EntryState<A> {
     /// later mints, and each queued apply is answered with the reader
     /// unavailable, as a read over the entry is refused.
     fn end_hold(&mut self) {
-        if self
-            .loading
-            .as_ref()
-            .is_some_and(|loading| !self.claim.stands_at(loading.claim) || loading.withdrawn())
-            || self.trust == TrustState::Ready
-            || self.stands_on_a_cause()
-            || self.owes_a_rung()
-        {
-            self.close_loading();
-        } else {
-            self.retire_damaged_loading_sources();
-        }
+        self.close_stale_construction();
         if !self.applies.is_empty() && self.stands_on_a_cause() {
             self.answer_queued_applies();
         } else if !self.applies.is_empty() && self.serves_with_no_reader() {
@@ -2553,7 +2550,7 @@ fn schedule_demand<A: SnapshotSource>(state: &mut EntryState<A>, name: &VaultNam
         if state.initial_loading_candidate
             && let Job::Attach(_, epoch) = &job
         {
-            state.loading = Some(loading::Loading::provisional(*epoch));
+            state.construction = Some(loading::Construction::Provisional { claim: *epoch });
         }
     }
     job
@@ -2667,6 +2664,25 @@ fn judge_damage_a_read_met<A: SnapshotSource>(
         scheduled: false,
     };
     let published = state.published_demand();
+    // Damage an early read met on a build's own store withdraws that build's
+    // capabilities at once; the build goes on, and the claim's end publishes
+    // the damage and owes rung 3, as for damage a read meets under any claim.
+    if state.reads_construction(ran_on) {
+        state.close_construction();
+        if state.rebuild_required || state.stands_parked() {
+            return refused(ReadRefusal::NotServing(published));
+        }
+        if state.damage_met_under_a_claim.is_none() {
+            state.damage_met_under_a_claim = Some(detail);
+        }
+        if publish_damage_a_read_met(state, name).is_none() {
+            return refused(ReadRefusal::NotServing(state.published_demand()));
+        }
+        return DamageVerdict {
+            refusal: ReadRefusal::NotServing(state.published_demand()),
+            scheduled: true,
+        };
+    }
     let on_that_handle = state
         .reader
         .as_ref()
@@ -4339,8 +4355,10 @@ pub enum ReadRefusal {
     /// bound ran out, or, where another holder kept the entry's gate past the
     /// bound, what the read last read under it.
     Unsettled(Demand),
-    /// The first-index capability did not become available inside the read bound.
-    FirstIndex(Demand),
+    /// The entry is under a from-zero build, and the step that admits this
+    /// read early was not published inside the read's bound, or a capability
+    /// the read was admitted under was withdrawn before its answer was exposed.
+    StillIndexing(Demand),
     /// The entry is serving and its read seam is not: the mint that would have
     /// given it a handle failed, or the snapshot could not be established. A
     /// read whose way to the entry another holder kept past its bound — the
@@ -4351,7 +4369,10 @@ pub enum ReadRefusal {
 /// One client operation's lifecycle guard and immediate trust answer.
 /// Dropping it ends the demand lease and starts a fresh idle interval.
 pub struct DemandLease<O: EntryOps> {
-    /// The queue reservation expires with the same demand that owns this read.
+    /// This read's interest in its target in a build's pull-ahead queue,
+    /// joined while it waits or taken where the ready target admits it. The
+    /// queue holds it weakly, so the slot expires with the demand that owns
+    /// the read.
     loading_interest: Option<Arc<()>>,
     outcome: Demand,
     /// The vault this lease was demanded under. It is the lease's own whether
@@ -5833,21 +5854,10 @@ impl<O: EntryOps> Host<O> {
             !scheduled || stance == ReadStance::Refuse,
             "a read scheduled work over an entry that then {stance:?}s"
         );
-        let staged =
-            state.loading.is_some() && self.shared.ops.first_index_reads() && request.eligible();
-        let interest = if staged {
-            state
-                .loading
-                .as_mut()
-                .and_then(|loading| loading.interested(request))
-        } else {
-            None
-        };
-        state
-            .lease
-            .as_mut()
-            .expect("read acquisition owns its lease")
-            .loading_interest = interest;
+        // A read with an early capability over an entry under construction
+        // may wait for the build that capability is published by. The
+        // construction is read first, so a read at `Ready` classifies nothing.
+        let early_capable = state.constructing() && request.boundary().is_some();
         if stance == ReadStance::Refuse && scheduled {
             // The dispatch is the demand's, and its one failure is the
             // worker pool being gone — which is the host coming down, and is
@@ -5858,7 +5868,7 @@ impl<O: EntryOps> Host<O> {
             // answers now, and a job it does not hand off is the dispatcher
             // tick's retry to send.
             let published = state.published_demand();
-            if !staged {
+            if !early_capable {
                 let outside = state.let_the_gate_go();
                 let _ = dispatch_pending_where_free(&self.shared, &entry);
                 drop(outside);
@@ -5877,31 +5887,86 @@ impl<O: EntryOps> Host<O> {
         // is taking in: recorded under the first hold that finds the entry
         // settling, before any wait, and never moved after.
         let mut met_at = None;
+        // Whether this read was counted past its build's pull-ahead bound.
+        let mut past_bound = false;
         let (turn, reader, early) = loop {
-            let selected = staged.then(|| state.loading_source(request)).flatten();
-            let loading_wait = staged && selected.is_none() && state.waits_for_loading(request);
+            // A construction is read only where the canonical stance refuses:
+            // a serving or settling entry answers from its own reader.
+            let (selected, early_wait) = match stance {
+                ReadStance::Refuse => match state.early(request) {
+                    loading::Early::Admitted(mut admitted) => {
+                        // A Get admitted through its pulled-ahead target keeps
+                        // that target's slot under its own lease, so the read
+                        // that queued it may end before this one answers.
+                        if let Some(interest) = admitted.take_interest() {
+                            state
+                                .lease
+                                .as_mut()
+                                .expect("read acquisition owns its lease")
+                                .loading_interest = Some(interest);
+                        }
+                        (Some(admitted), false)
+                    }
+                    loading::Early::Waits => {
+                        // A waiting Get's interest joins its build's queue
+                        // for pull-ahead; past the bound it waits for its
+                        // vault-wide step.
+                        let joined = state.join_requests(request);
+                        let interest = match joined {
+                            Some(loading::Joined::New(interest)) => {
+                                self.shared.reads.count_pull_ahead_request();
+                                Some(interest)
+                            }
+                            Some(loading::Joined::Shared(interest)) => Some(interest),
+                            Some(loading::Joined::PastBound) => {
+                                if !past_bound {
+                                    past_bound = true;
+                                    self.shared.reads.count_request_past_bound();
+                                }
+                                None
+                            }
+                            None => None,
+                        };
+                        if interest.is_some() {
+                            state
+                                .lease
+                                .as_mut()
+                                .expect("read acquisition owns its lease")
+                                .loading_interest = interest;
+                        }
+                        (None, true)
+                    }
+                    loading::Early::Refused => (None, false),
+                },
+                ReadStance::Settle | ReadStance::Serve => (None, false),
+            };
             if stance == ReadStance::Settle && met_at.is_none() {
                 met_at = Some(state.change_met_at());
             }
             match stance {
-                ReadStance::Refuse if selected.is_none() && !loading_wait => {
+                ReadStance::Refuse if selected.is_none() && !early_wait => {
                     return Err(ReadRefusal::NotServing(state.published_demand()));
                 }
-                _ if loading_wait
+                _ if early_wait
                     || (stance == ReadStance::Settle && !state.answers_a_read(met_at)) =>
                 {
                     let published = state.published_demand();
-                    if Instant::now() >= deadline {
-                        self.shared.reads.count_settle_expiry();
-                        return Err(if loading_wait {
-                            ReadRefusal::FirstIndex(published)
+                    let expired = |published| {
+                        if early_wait {
+                            ReadRefusal::StillIndexing(published)
                         } else {
                             ReadRefusal::Unsettled(published)
-                        });
+                        }
+                    };
+                    if Instant::now() >= deadline {
+                        self.shared.reads.count_settle_expiry();
+                        return Err(expired(published));
                     }
                     // The let-go reads the stance's generation under this
                     // hold, so every change published after the gate goes
-                    // back moves past it.
+                    // back moves past it. A construction moves it only by a
+                    // begin, a publication or a closure, and its watcher
+                    // authority by a withdrawal: progress counters never do.
                     let (earlier, outside) = opening.let_the_gate_go(state);
                     // Accounted where the wait begins, so a reading taken
                     // while this read waits names it.
@@ -5914,11 +5979,7 @@ impl<O: EntryOps> Host<O> {
                         rounds.take_the_gate_again_after_settling(outside, earlier, deadline)
                     else {
                         self.shared.reads.count_settle_expiry();
-                        return Err(if loading_wait {
-                            ReadRefusal::FirstIndex(published)
-                        } else {
-                            ReadRefusal::Unsettled(published)
-                        });
+                        return Err(expired(published));
                     };
                     (state, opening, stance) = round;
                     continue;
@@ -5933,8 +5994,8 @@ impl<O: EntryOps> Host<O> {
             // so it is accounted here rather than on the way out: every path
             // below this line is a path that already paid for it, the
             // refusals included.
-            let reader = if let Some(source) = &selected {
-                Arc::clone(&source.reader)
+            let reader = if let Some(admitted) = &selected {
+                Arc::clone(&admitted.pool)
             } else {
                 let minted = state.remint_for_a_read();
                 mint_statements += minted.statements;
@@ -5951,18 +6012,14 @@ impl<O: EntryOps> Host<O> {
             };
             // The connection is free, so this hold is the hold that
             // establishes and the stance above is the one the answer carries.
-            if selected.is_none()
-                && let Some(turn) = reader.try_take_for(need, deadline)
-            {
-                break (turn, reader, None);
+            if let Some(turn) = reader.try_take_for(need, deadline) {
+                break (turn, reader, selected);
             }
             // Capacity waits and cold opens run outside the gate, only within
-            // the original deadline. A serving entry may lack shared capacity.
+            // the original deadline. A serving entry may lack shared capacity,
+            // and an early read's capability already stands here: either way
+            // the bound ran out on a resource, which keeps its own refusal.
             if Instant::now() >= deadline {
-                if selected.is_some() {
-                    self.shared.reads.count_settle_expiry();
-                    return Err(ReadRefusal::FirstIndex(state.published_demand()));
-                }
                 return Err(ReadRefusal::ReaderUnavailable(ReaderUnavailable::new(
                     "reader capacity was unavailable past this read's bound",
                 )));
@@ -5976,36 +6033,28 @@ impl<O: EntryOps> Host<O> {
             // contended acquisition while it is still waiting rather than once
             // another read has let it through or its bound has run out.
             self.shared.reads.count_reader_wait();
-            // Root identity is the only request-path filesystem check, and only for early sources.
+            // Root identity is the only request-path filesystem check, and
+            // only for early holds.
             let root_current = selected
                 .as_ref()
-                .is_none_or(|source| source.authority.check_root());
+                .is_none_or(|admitted| admitted.authority_root_current());
             let acquired = if root_current {
                 reader.acquire_for(need, deadline)
             } else {
                 Ok(None)
             };
-            // A late disposable failure belongs to its physical source even if
-            // the deadline prevents another gate take. No canonical judgment runs.
-            let acquired = acquired.map_err(|error| match &selected {
-                Some(source) => source.unavailable(error),
-                None => error,
-            });
-            let root_current = root_current
-                && selected
-                    .as_ref()
-                    .is_none_or(|source| source.authority.check_root());
             let open_damage = acquired
                 .as_ref()
                 .err()
-                .filter(|error| selected.is_none() && error.damaged)
+                .filter(|error| error.damaged)
                 .map(|error| error.detail.clone());
             // What may have moved is the entry: the round reads its stance
             // afresh, and a handle waited for is checked to still be the
             // handle its reads run on. A rung-3 rebuild swaps one for another
             // while the entry goes on serving, a schema reload closes one and
-            // mints another, and a teardown takes the entry out of service
-            // while the handle stands.
+            // mints another, a teardown takes the entry out of service while
+            // the handle stands, and a build closes or replaces the
+            // construction an early read was admitted against.
             // A gate held past the bound refuses the read as the connection
             // wait running out: the entry served when the read let the gate
             // go, and only its read seam was taken. The turn, where the wait
@@ -6024,13 +6073,8 @@ impl<O: EntryOps> Host<O> {
             // Every exit below can release the last replaced pool handle,
             // including a retired acquisition that returned no connection.
             state.retired_readers.push(Arc::clone(&reader));
-            let still_the_entrys = if let Some(source) = &selected {
-                root_current
-                    && state
-                        .loading_source(request)
-                        .is_some_and(|standing| Arc::ptr_eq(&standing, source))
-                    && state.claim.stands_at(source.claim)
-                    && source.admits()
+            let still_the_entrys = if let Some(admitted) = &selected {
+                root_current && state.still_admits(admitted, request)
             } else {
                 state
                     .reader
@@ -6039,9 +6083,6 @@ impl<O: EntryOps> Host<O> {
             };
             let turn = match acquired {
                 Ok(turn) => turn,
-                Err(error) if selected.is_some() => {
-                    return Err(ReadRefusal::ReaderUnavailable(error));
-                }
                 Err(error) if error.damaged && still_the_entrys => {
                     let verdict = judge_damage_a_read_met(
                         &mut state,
@@ -6056,14 +6097,19 @@ impl<O: EntryOps> Host<O> {
                     drop(outside);
                     return Err(verdict.refusal);
                 }
+                // A construction closed or replaced while the cold open ran
+                // is answered by the current stance on the next round.
+                Err(error) if selected.is_some() && still_the_entrys => {
+                    return Err(ReadRefusal::ReaderUnavailable(error));
+                }
                 Err(error) if still_the_entrys && state.answers_a_read(met_at) => {
                     return Err(ReadRefusal::ReaderUnavailable(error));
                 }
                 Err(_) => None,
             };
             // An exhausted capacity wait keeps its resource refusal while its
-            // early source still stands. Replacement or withdrawal is answered
-            // by the current stance on the next round.
+            // early capability still stands. Replacement or withdrawal is
+            // answered by the current stance on the next round.
             let Some(turn) = turn else {
                 if selected.is_some() && still_the_entrys && Instant::now() >= deadline {
                     return Err(ReadRefusal::ReaderUnavailable(ReaderUnavailable::new(
@@ -6092,12 +6138,14 @@ impl<O: EntryOps> Host<O> {
         // so they and the snapshot established below describe one
         // declaration, and a preview reads its ground off the hold rather
         // than taking the gate again past its bound. The demand
-        // is the one this hold answers under: `Ready`, or the healing of an
-        // entry that has derived every fact this read met.
+        // is the one this hold answers under: `Ready`, the healing of an
+        // entry that has derived every fact this read met, or the warming of
+        // a build whose published step admits this read. An early hold lends
+        // no plan ground: it exposes only the operation it was admitted for.
         let published = state.published_demand();
         let content_model = early.as_ref().map_or_else(
             || Arc::clone(&state.active_content_model),
-            |source| Arc::clone(&source.model),
+            |admitted| Arc::clone(&admitted.model),
         );
         let plan_ground = if early.is_some() {
             None
@@ -6107,11 +6155,7 @@ impl<O: EntryOps> Host<O> {
         let established = match <O::Attachment as SnapshotSource>::Reader::establish(turn) {
             Ok(established) => established,
             Err(unavailable) => {
-                let unavailable = early.as_ref().map_or_else(
-                    || unavailable.clone(),
-                    |source| source.unavailable(unavailable.clone()),
-                );
-                let verdict = (early.is_none() && unavailable.damaged).then(|| {
+                let verdict = unavailable.damaged.then(|| {
                     judge_damage_a_read_met(
                         &mut state,
                         name,
@@ -6135,6 +6179,15 @@ impl<O: EntryOps> Host<O> {
                     }));
             }
         };
+        // Relation judgments a build has not yet made read as still loading.
+        let snapshot = if early
+            .as_ref()
+            .is_some_and(|admitted| admitted.relations_loading)
+        {
+            <O::Attachment as SnapshotSource>::Reader::relations_loading(established.snapshot)
+        } else {
+            established.snapshot
+        };
         state.pin();
         let (hold, outside) = opening.give_the_gate_back(state);
         let lease = outside.into_lease();
@@ -6142,11 +6195,16 @@ impl<O: EntryOps> Host<O> {
             .reads
             .count_establishment_under_the_gate(hold, mint_statements);
         self.shared.reads.count_read();
+        if let Some(admitted) = &early {
+            self.shared
+                .reads
+                .count_early_read_served(admitted.published());
+        }
         Ok(loading::QueryHold::new(
             ReadHold {
                 entry,
                 reader,
-                snapshot: Some(established.snapshot),
+                snapshot: Some(snapshot),
                 reading: HoldReading {
                     published,
                     store: established.reading,
@@ -6947,6 +7005,9 @@ fn end_job_leg<O: EntryOps>(
         give_back(shared.ops.as_ref(), name, attachment);
     }
     let mut state = entry.gate.lock().expect("entry gate poisoned");
+    // A construction this leg began, or the provisional one its attach was
+    // scheduled with, ends with the leg: no build of this claim runs on.
+    state.close_construction_of(epoch);
     // Coverage that reached the ops here reached them through neither a release
     // window nor the route around one, so the close it was owed came from
     // whatever moved the entry past this leg's epoch.
@@ -7106,6 +7167,11 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     let mut state = entry.gate.lock().expect("entry gate poisoned");
                     if state.claim.stands_at(epoch) {
                         state.claim.release();
+                        // The attach gave its store back, so damage an early
+                        // read met on that store's build goes with it, and no
+                        // read can judge that build's pool from here on.
+                        state.damage_met_under_a_claim = None;
+                        state.close_construction();
                         park_identity_refusal(&mut state, refusal.to_string());
                     }
                     return None;
@@ -7160,6 +7226,16 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                 return result.ok().map(|(attachment, _, _)| attachment);
             }
             state.claim.release();
+            // Damage an early read met under this claim was met on this
+            // attach's own build. A failed attach gave that store back, so the
+            // verdict goes with it; a successful one installs that store, so it
+            // stands against the store installed below.
+            let damage_this_build_met = state.damage_met_under_a_claim.take();
+            if result.is_err() {
+                // A failed attach gave its store back: no read still running
+                // on its build's pool may leave a verdict behind it.
+                state.close_construction();
+            }
             match result {
                 Ok((attachment, observed, handoff_saturated)) => {
                     let took_in_a_fact = !observed.is_empty() || handoff_saturated;
@@ -7184,6 +7260,21 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                         // declaration again, and the facts this attach observed
                         // wait in `pending` for the heal that recovery runs.
                         state.withhold_trust_until_the_vault_changes(reason, took_in_a_fact);
+                        // Damage an early read met still names the store just
+                        // installed, so it stands for the claim's end to
+                        // publish, the rebuild it owes dominating the recovery.
+                        state.damage_met_under_a_claim = damage_this_build_met;
+                    } else if damage_this_build_met.is_some() {
+                        // The store this attach installs is the one an early
+                        // read found damaged: the damage is published in place
+                        // of `Ready`, and the claim goes on to the rebuild it
+                        // owes, which the facts standing in `pending` follow.
+                        state.damage_met_under_a_claim = damage_this_build_met;
+                        let rebuild = hand_on_carried_damage(&mut state, &name)
+                            .expect("the damage is carried");
+                        drop(state);
+                        drop(attach_claims);
+                        dispatch_handoff(shared, entry, epoch, rebuild);
                     } else if state.pending.is_empty() && !handoff_saturated {
                         state.trust = TrustState::Ready;
                     } else {
@@ -7387,6 +7478,14 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                         // a read's once a change arrives, asks for.
                         state.withhold_trust_until_the_vault_changes(reason, took_in_a_fact);
                         next = schedule_due_detach(&mut state, &name);
+                    } else if state.damage_met_under_a_claim.is_some() {
+                        // A recovery over an empty store is a from-zero build,
+                        // and an early read found the store it built damaged:
+                        // the damage is published in place of what the
+                        // recovery left, and the claim goes on to the rebuild
+                        // it owes, which the facts standing in `pending` and a
+                        // teardown the entry is due follow.
+                        next = hand_on_carried_damage(&mut state, &name);
                     } else if state.detach_due {
                         // A teardown the entry is due can be withdrawn by a
                         // demand before it runs, so what this recovery left is
@@ -8583,6 +8682,11 @@ fn run_reload_job<O: EntryOps>(
         Ok(judgment) => {
             record_active_declaration(&mut state, &*shared.ops, &name, &attachment);
             state.last_reload_error = None;
+            // A reload keeps the store it ran over, so damage a read met under
+            // its claim — an early read on a build it ran over an empty store,
+            // or a read on the standing handle — names the store it goes on
+            // holding.
+            let damage_a_read_met = state.damage_met_under_a_claim.take();
             state.clear_rung_requirements();
             match judgment.outcome {
                 ReloadOutcome::ConfigOnly => {
@@ -8597,6 +8701,20 @@ fn run_reload_job<O: EntryOps>(
                 ReloadOutcome::SchemaChanged => {
                     state.remint_coverage(&*shared.ops, epoch, attachment);
                 }
+            }
+            if let Some(detail) = damage_a_read_met {
+                // The damage is published in place of `Ready` and the claim
+                // goes on to the rebuild it owes, as for damage the reload
+                // met itself; the caller is answered with it.
+                state.damage_met_under_a_claim = Some(detail.clone());
+                let rebuild =
+                    hand_on_carried_damage(&mut state, &name).expect("the damage is carried");
+                drop(state);
+                let _ = reply.send(Err(ReloadRefusal::Runtime(JobFailure::StoreDamaged(
+                    detail,
+                ))));
+                dispatch_handoff(shared, entry, epoch, rebuild);
+                return None;
             }
             state.trust = TrustState::Ready;
             Ok(judgment)
@@ -18133,6 +18251,211 @@ mod tests {
         drop(lease);
     }
 
+    /// **Damage a read meets under a recovery's claim is published where the
+    /// recovery ends, and the recovery hands on to the rebuild it owes.** A
+    /// recovery keeps the store it ran over, so the verdict names the store
+    /// the entry goes on holding: the facts the recovery leaves owe a
+    /// reconcile, and that reconcile follows the rebuild rather than running
+    /// over a store a read found damaged.
+    #[test]
+    fn damage_a_read_meets_under_a_recovery_reaches_the_rebuild() {
+        let ops = Arc::new(FakeOps::default());
+        let name = VaultName::new("notes").unwrap();
+        let host = Arc::new(host_without_ambient_polling(
+            Arc::clone(&ops),
+            Roots::Absent(&[&name]),
+            1,
+        ));
+        let lease = host.demand(&name).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        let hold = host
+            .begin_read(&name)
+            .expect("a ready entry answers a read");
+        *ops.terminal_poll.lock().unwrap() = Some(WatchError::Backend("lost".into()));
+        poll_watchers(&host.shared);
+        wait_for_state(&host, &name, backend_lost());
+        ops.block_recover.store(true, Ordering::SeqCst);
+        let recovery = host.demand(&name).unwrap();
+        wait_for_flag("recover_started", &ops.recover_started);
+        let detail = "the store is damaged";
+        let refusal = host.withdraw_for_read_damage(&hold, detail.to_string());
+        assert!(
+            matches!(refusal, ReadRefusal::NotServing(_)),
+            "a read under the recovery's claim was refused with {refusal:?}"
+        );
+        drop(hold);
+
+        let reconciles = ops.reconciles.load(Ordering::SeqCst);
+        ops.block_reconcile.store(true, Ordering::SeqCst);
+        ops.block_rebuild.store(true, Ordering::SeqCst);
+        ops.recover_release.store(true, Ordering::SeqCst);
+        wait_until(
+            "the work the recovery hands on to",
+            lifecycle_wait_budget(),
+            || {
+                if ops.rebuild_started.load(Ordering::SeqCst)
+                    || ops.reconcile_started.load(Ordering::SeqCst)
+                {
+                    Observed::Met(())
+                } else {
+                    Observed::pending("the recovery has handed on to nothing")
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+        assert_eq!(
+            ops.reconciles.load(Ordering::SeqCst),
+            reconciles,
+            "a reconcile ran over a store a read found damaged before its rebuild"
+        );
+        assert_eq!(
+            host.state(&name),
+            answered(TrustState::untrusted(
+                UntrustedReason::store_damaged_rebuilding(detail)
+            )),
+            "the recovery published another state than the damage the read met"
+        );
+        ops.block_reconcile.store(false, Ordering::SeqCst);
+        ops.reconcile_release.store(true, Ordering::SeqCst);
+        ops.rebuild_release.store(true, Ordering::SeqCst);
+        wait_for_one_rebuild_to_ready(&host, &name, &ops);
+        drop((lease, recovery));
+    }
+
+    /// **A failed attach gives back the store a read found damaged, and the
+    /// verdict goes with it.** The attach that follows opens the store again
+    /// and publishes `Ready` over it, running no rebuild for damage met on a
+    /// store the entry no longer held.
+    #[test]
+    fn a_failed_attach_drops_the_damage_a_read_met_under_it() {
+        let ops = Arc::new(FakeOps::default());
+        let name = VaultName::new("notes").unwrap();
+        let host = Arc::new(host_without_ambient_polling(
+            Arc::clone(&ops),
+            Roots::Absent(&[&name]),
+            1,
+        ));
+        ops.block_attach.store(true, Ordering::SeqCst);
+        ops.terminal_attach.store(true, Ordering::SeqCst);
+        let lease = host.demand(&name).unwrap();
+        wait_for_flag("attach_started", &ops.attach_started);
+        {
+            let entry = host.shared.entries.get(&name).unwrap();
+            let mut state = entry.gate.lock().expect("entry gate poisoned");
+            // As an early read's damage judgment leaves it under a held claim.
+            state.damage_met_under_a_claim = Some("the store is damaged".into());
+        }
+        ops.block_attach.store(false, Ordering::SeqCst);
+        ops.attach_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &name, backend_lost());
+
+        let again = host.demand(&name).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        assert_eq!(
+            ops.rebuilds.load(Ordering::SeqCst),
+            0,
+            "an attach rebuilt for damage a read met on a store an earlier attach gave back"
+        );
+        drop((lease, again));
+    }
+
+    /// **An attach whose root the registry refuses once it returns gives back
+    /// the store a read found damaged, and the verdict goes with it.** The
+    /// attach after the root answers again publishes `Ready` over the store it
+    /// opens, running no rebuild for damage met on one it gave back.
+    #[cfg(unix)]
+    #[test]
+    fn a_registry_refused_attach_drops_the_damage_a_read_met_under_it() {
+        let scratch = temp_base("refused-attach-drops-damage");
+        let root = scratch.root().join("root");
+        let ops = Arc::new(FakeOps::default());
+        let name = VaultName::new("notes").unwrap();
+        let host = host_over_roots(Arc::clone(&ops), &[(&name, &root)], 1);
+
+        ops.block_attach.store(true, Ordering::SeqCst);
+        let lease = host.demand(&name).unwrap();
+        wait_for_flag("attach_started", &ops.attach_started);
+        {
+            let entry = host.shared.entries.get(&name).unwrap();
+            let mut state = entry.gate.lock().expect("entry gate poisoned");
+            // As an early read's damage judgment leaves it under a held claim.
+            state.damage_met_under_a_claim = Some("the store is damaged".into());
+        }
+        refuse_root_identity(&root);
+        ops.block_attach.store(false, Ordering::SeqCst);
+        ops.attach_release.store(true, Ordering::SeqCst);
+        wait_for_environmental_refusal(&host, &name);
+
+        std::fs::remove_file(&root).unwrap();
+        std::fs::create_dir(&root).unwrap();
+        let again = host.demand(&name).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        assert_eq!(
+            ops.rebuilds.load(Ordering::SeqCst),
+            0,
+            "an attach rebuilt for damage a read met on a store a refused attach gave back"
+        );
+        drop((lease, again, host));
+    }
+
+    /// **Damage a read meets under a reload's claim is published in place of
+    /// `Ready`, and the reload hands on to the rebuild it owes.** A reload
+    /// keeps the store it ran over, so the verdict the read carried to the
+    /// reload's end names the store the entry goes on holding: clearing it
+    /// with the rung requirements would publish `Ready` over a store a read
+    /// found damaged, with nothing scheduled to rebuild it.
+    #[test]
+    fn damage_a_read_meets_under_a_reload_reaches_the_rebuild() {
+        let ops = Arc::new(FakeOps::default());
+        ops.reload_supported.store(true, Ordering::SeqCst);
+        let name = VaultName::new("notes").unwrap();
+        let host = Arc::new(host_without_ambient_polling(
+            Arc::clone(&ops),
+            Roots::Absent(&[&name]),
+            1,
+        ));
+        let lease = host.demand(&name).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        let hold = host
+            .begin_read(&name)
+            .expect("a ready entry answers a read");
+        ops.block_reload.store(true, Ordering::SeqCst);
+        let asking = Arc::clone(&host);
+        let asked = name.clone();
+        let answer = thread::spawn(move || asking.reload(&asked));
+        wait_for_flag("reload_started", &ops.reload_started);
+        let detail = "the store is damaged";
+        let refusal = host.withdraw_for_read_damage(&hold, detail.to_string());
+        assert!(
+            matches!(refusal, ReadRefusal::ReaderUnavailable(_)),
+            "a read under the reload's claim was refused with {refusal:?}"
+        );
+        drop(hold);
+
+        ops.block_rebuild.store(true, Ordering::SeqCst);
+        ops.reload_release.store(true, Ordering::SeqCst);
+        assert_eq!(
+            answer.join().unwrap(),
+            Err(ReloadRefusal::Runtime(JobFailure::StoreDamaged(
+                detail.into()
+            ))),
+            "the reload answered over a store a read found damaged"
+        );
+        wait_for_flag("rebuild_started", &ops.rebuild_started);
+        assert_eq!(
+            host.state(&name),
+            answered(TrustState::untrusted(
+                UntrustedReason::store_damaged_rebuilding(detail)
+            )),
+            "the reload published another state than the damage the read met"
+        );
+        ops.rebuild_release.store(true, Ordering::SeqCst);
+        wait_for_one_rebuild_to_ready(&host, &name, &ops);
+        drop(lease);
+    }
+
     /// **The verdict an attach reports is the one that waits for a demand, and
     /// the entry then waits.** The attach acquired nothing, so there is no
     /// database for rung 3 to discard and no work the entry can owe itself.
@@ -20102,6 +20425,182 @@ mod tests {
                 "a waiter cannot close the last old handle under the gate"
             );
         });
+    }
+
+    /// **An early read whose construction closed while its cold open ran
+    /// answers the entry's current stance, not the open's failure.** The open
+    /// ran outside the gate against a pool the closure retired, so its failure
+    /// says nothing about the entry: the next round finds no construction and
+    /// refuses with what the entry publishes.
+    #[cfg(unix)]
+    #[test]
+    fn an_early_cold_open_failing_after_its_construction_closed_answers_the_current_stance() {
+        let _watcher_lease = norn_testkit::isolation::Lease::hold(
+            norn_testkit::isolation::REAL_WATCHER,
+            norn_testkit::isolation::acquisition_budget(lifecycle_wait_budget()),
+        );
+        let scratch = temp_base("early-cold-open-after-closure");
+        let root = scratch.join("vault");
+        std::fs::create_dir_all(root.join(".norn")).unwrap();
+        std::fs::write(root.join(".norn/schema.yaml"), "version: 1\n").unwrap();
+        norn_fs::watch::settle_prior_changes(scratch.root(), lifecycle_wait_budget().work())
+            .unwrap();
+        let (subscription, _own) =
+            norn_fs::watch::watch(&root, &root.join(".norn/schema.yaml")).unwrap();
+        subscription
+            .synchronize(lifecycle_wait_budget().work())
+            .unwrap();
+
+        let ops = Arc::new(FakeOps::default());
+        ops.block_attach.store(true, Ordering::SeqCst);
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
+        let _lease = host.demand(&name).unwrap();
+        wait_for_flag("attach_started", &ops.attach_started);
+        let entry = host.shared.entries.get(&name).unwrap().clone();
+        let progress = reporter(&entry, entry.gate.lock().unwrap().claim.epoch());
+        // The pool's one connection is out, so the read's acquisition is a
+        // cold open outside the gate.
+        let pool = FakeReader {
+            ledger: Arc::clone(&ops.readers),
+            free: Mutex::new(false),
+            returned: Condvar::new(),
+        };
+        let token = progress
+            .begin_construction(Some(loading::Begun {
+                pool,
+                model: Arc::new(ContentModel::none()),
+                authority: subscription.capture_build_authority().unwrap(),
+                store_epoch: "fake-epoch".into(),
+            }))
+            .expect("the attach's claim begins its construction");
+        assert!(progress.publish_step(token, "fake-epoch", norn_store::Step::FullTextComplete));
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        *ops.readers.acquisition_blocked.lock().unwrap() = Some((true, entered_tx, release_rx));
+        let params = norn_wire::GetParams::new(
+            norn_wire::VaultAddress::name(name.clone()),
+            norn_wire::ResolutionTarget::new("subject").unwrap(),
+        );
+        thread::scope(|scope| {
+            let reading = scope.spawn(|| {
+                host.begin_query_read(
+                    &name,
+                    norn_store::ReadNeed::Source,
+                    loading::Request::Get(&params),
+                )
+                .map(drop)
+            });
+            entered_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the early read left the gate for its cold open");
+            entry.gate.lock().unwrap().close_construction();
+            release_tx.send(()).unwrap();
+            let refusal = reading
+                .join()
+                .unwrap()
+                .expect_err("no construction stands to answer the read");
+            assert!(
+                matches!(refusal, ReadRefusal::NotServing(_)),
+                "the read was refused with a closed construction's open failure: {refusal:?}"
+            );
+        });
+        ops.attach_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &name, TrustState::Ready);
+    }
+
+    /// **A Get admitted through its pulled-ahead target holds that target
+    /// itself.** The read that queued the target lets its interest go while
+    /// this read waits outside the gate for the pool's connection; the target
+    /// still stands for this read, which answers its document, and the slot
+    /// goes with this read's own lease.
+    #[cfg(unix)]
+    #[test]
+    fn an_early_get_admitted_through_its_target_outlives_the_read_that_queued_it() {
+        let _watcher_lease = norn_testkit::isolation::Lease::hold(
+            norn_testkit::isolation::REAL_WATCHER,
+            norn_testkit::isolation::acquisition_budget(lifecycle_wait_budget()),
+        );
+        let scratch = temp_base("early-target-outlives-its-queuer");
+        let root = scratch.join("vault");
+        std::fs::create_dir_all(root.join(".norn")).unwrap();
+        std::fs::write(root.join(".norn/schema.yaml"), "version: 1\n").unwrap();
+        norn_fs::watch::settle_prior_changes(scratch.root(), lifecycle_wait_budget().work())
+            .unwrap();
+        let (subscription, _own) =
+            norn_fs::watch::watch(&root, &root.join(".norn/schema.yaml")).unwrap();
+        subscription
+            .synchronize(lifecycle_wait_budget().work())
+            .unwrap();
+
+        let ops = Arc::new(FakeOps::default());
+        ops.block_attach.store(true, Ordering::SeqCst);
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
+        let _lease = host.demand(&name).unwrap();
+        wait_for_flag("attach_started", &ops.attach_started);
+        let entry = host.shared.entries.get(&name).unwrap().clone();
+        let progress = reporter(&entry, entry.gate.lock().unwrap().claim.epoch());
+        let token = progress
+            .begin_construction(Some(loading::Begun {
+                pool: FakeReader {
+                    ledger: Arc::clone(&ops.readers),
+                    free: Mutex::new(true),
+                    returned: Condvar::new(),
+                },
+                model: Arc::new(ContentModel::none()),
+                authority: subscription.capture_build_authority().unwrap(),
+                store_epoch: "fake-epoch".into(),
+            }))
+            .expect("the attach's claim begins its construction");
+        assert!(progress.publish_step(token, "fake-epoch", norn_store::Step::Names));
+        let params = norn_wire::GetParams::new(
+            norn_wire::VaultAddress::name(name.clone()),
+            norn_wire::ResolutionTarget::new("subject").unwrap(),
+        );
+        let request = loading::Request::Get(&params);
+        // The read that queued the target, reduced to its interest.
+        let queued = match entry.gate.lock().unwrap().join_requests(request) {
+            Some(loading::Joined::New(interest)) => interest,
+            _ => panic!("the first interest in the target opens its slot"),
+        };
+        assert!(progress.publish_targets(token, "fake-epoch", &["subject".to_owned()]));
+        // The pool's one connection is out, so the admitted read leaves the
+        // gate for its acquisition.
+        let busy = match entry.gate.lock().unwrap().early(request) {
+            loading::Early::Admitted(admitted) => admitted.pool.try_take().unwrap(),
+            _ => panic!("the ready target admits its Get"),
+        };
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        *ops.readers.acquisition_blocked.lock().unwrap() = Some((false, entered_tx, release_rx));
+        thread::scope(|scope| {
+            let reading = scope.spawn(|| {
+                host.begin_query_read(&name, norn_store::ReadNeed::Source, request)
+                    .map(drop)
+            });
+            entered_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the admitted read left the gate for the connection");
+            // The queuing read answers: its interest and its connection go.
+            drop((queued, busy));
+            release_tx.send(()).unwrap();
+            let answered = reading.join().unwrap();
+            assert!(
+                answered.is_ok(),
+                "the read lost the target that admitted it: {:?}",
+                answered.err()
+            );
+        });
+        assert!(
+            matches!(
+                entry.gate.lock().unwrap().early(request),
+                loading::Early::Waits
+            ),
+            "the target's slot outlived every read that held it"
+        );
+        ops.attach_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &name, TrustState::Ready);
     }
 
     /// An attach that installs no coverage mints no reader. The mint is a limb

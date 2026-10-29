@@ -2,6 +2,7 @@
 """Run the frozen search/get/write workload and preserve every observation."""
 
 import argparse
+import copy
 import json
 import os
 import platform
@@ -14,7 +15,7 @@ import time
 from pathlib import Path
 
 from fixture import COMMON, MISSING, RARE, prepare_probes, tree_digest
-from results import record, validate_read, validate_write
+from results import record, validate_first_get_content, validate_read, validate_write
 from provenance import sha256, verify_build
 from transport import Current, Legacy, environment, issue_root, resources
 
@@ -78,6 +79,23 @@ def write_phase_summary(samples):
 
 def write_json(path, value):
     path.write_text(json.dumps(value, indent=2) + "\n")
+
+
+def acknowledge(root):
+    """Release each first read's caller as soon as its answer arrives.
+
+    Validation waits until Ready, so the parent never delays the next first read.
+    """
+    acks = root / "operator-prefix-acks"
+    acks.mkdir(parents=True, exist_ok=True)
+
+    def handler(stage):
+        sequence = stage["operator_prefix_sequence"]
+        pending = acks / f"{sequence}.pending"
+        write_json(pending, {"sequence": sequence, "probe": stage["probe"]})
+        pending.replace(pending.with_suffix(".json"))
+
+    return handler
 
 
 def append(file, value):
@@ -173,6 +191,30 @@ def verified_call(worker, engine, root, manifest, state, name, base_command, ite
             "readback_diagnostics": diagnostics, "wal_before": wal_before, "wal_after": wal_after}
 
 
+# What a public first answer reports beside its validated content.
+FIRST_ANSWER = ("startup_stage", "probe", "disposition", "query_host_ns", "early_answer",
+                "read_from", "early_step", "state_after_call", "pull_ahead")
+
+
+def first_answers(stages, manifest):
+    """Validate the first Get and first Find the public prefix took, as the
+    worker's loading checkpoints recorded them, and report each one's timing,
+    disposition and where it was read from: the from-zero build step that
+    admitted it early, or the canonical store. An early Get may read its
+    relation parts as still loading; every other part is checked exactly."""
+    answers = []
+    for stage in stages:
+        if stage["disposition"] == "served":
+            if stage["startup_stage"] == "public-get":
+                validate_first_get_content(copy.deepcopy(stage), manifest, first_index=True)
+            else:
+                validate_read("current", {"op": "find"}, copy.deepcopy(stage), manifest)
+        elif stage["disposition"] != "unavailable":
+            raise ValueError(f"the first {stage['startup_stage']} was refused: {stage.get('error')}")
+        answers.append({key: stage.get(key) for key in FIRST_ANSWER})
+    return answers
+
+
 def run_worker(args, engine, size, repetition, fixture, manifest, samples):
     short = "c" if engine == "current" else "l"
     root = args.output / "work" / f"{size}-{repetition}-{short}"
@@ -185,10 +227,10 @@ def run_worker(args, engine, size, repetition, fixture, manifest, samples):
                "fixture_sha256": manifest["tree_sha256"], "document_count": manifest["document_count"]}
     state = probe_state(manifest)
     began = time.perf_counter_ns()
-    loading = getattr(args, "loading", None)
-    if loading and engine != "current":
-        raise ValueError("public first-open loading is only supported by the current worker")
-    worker = cls(binary, root, loading=loading) if loading else cls(binary, root)
+    # The public first-open prefix is the current worker's; the legacy daemon starts as it always does.
+    loading = getattr(args, "loading", None) if engine == "current" else None
+    worker = (cls(binary, root, loading=loading, stage_handler=acknowledge(root)) if loading
+              else cls(binary, root))
     try:
         if loading:
             if (loading != "operator-prefix-public" or len(worker.stages) != 2
@@ -196,6 +238,12 @@ def run_worker(args, engine, size, repetition, fixture, manifest, samples):
                     != {("public-get", "whole_slug"), ("public-find", "active_page")}):
                 raise ValueError("warm comparison did not execute the requested loading mode")
             write_json(root / "loading-checkpoints.json", worker.stages)
+            answers = first_answers(json.loads((root / "loading-checkpoints.json").read_text()), manifest)
+            append(samples, {**context, "kind": "first_answers", "answers": answers})
+            for answer in answers:
+                read_from = answer["early_step"] or answer["read_from"] or "canonical"
+                print(f"{engine} {size} round {repetition}: {answer['startup_stage']} "
+                      f"{answer['disposition']} in {answer['query_host_ns'] / 1e9:.3f}s from {read_from}", flush=True)
         # A control hello can precede lazy indexing. Readiness includes a real validated query.
         first, _ = worker.call({"op": "search", "query": COMMON})
         validate_read(engine, {"op": "search", "query": COMMON}, first, manifest)
@@ -290,6 +338,8 @@ def main():
     parser.add_argument("--samples", type=int, default=25, help="use at least 400 for first-200 and after-payoff write comparison")
     parser.add_argument("--warmups", type=int, default=5)
     parser.add_argument("--repetitions", type=int, default=2)
+    parser.add_argument("--loading", choices=["operator-prefix-public"],
+                        help="take the public first Get and Find while the current worker attaches")
     args = parser.parse_args()
     args.output = args.output.expanduser().resolve()
     build = verify_build(args.current_build)
