@@ -21,7 +21,7 @@ from statistics import median
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "live_mode"))
 
-from baseline import READS, WRITES, generate_fixture, probe_state, verified_call, write_json
+from baseline import READS, WRITES, acknowledge, generate_fixture, probe_state, verified_call, write_json
 from fixture import COMMON, tree_digest
 from provenance import sha256, verify_build
 from results import validate_read
@@ -34,23 +34,6 @@ LOADING = "operator-prefix-public"
 WORK = ("documents_derived", "document_opens", "changesets_applied", "links_judged",
         "findings_written", "findings_discarded")
 SCENARIOS = [name for name, _ in READS] + WRITES
-
-
-def acknowledge(root):
-    """Release each first read's caller as soon as its answer arrives.
-
-    Validation waits until Ready, so the parent never delays the next first read.
-    """
-    acks = root / "operator-prefix-acks"
-    acks.mkdir(parents=True, exist_ok=True)
-
-    def handler(stage):
-        sequence = stage["operator_prefix_sequence"]
-        pending = acks / f"{sequence}.pending"
-        write_json(pending, {"sequence": sequence, "probe": stage["probe"]})
-        pending.replace(pending.with_suffix(".json"))
-
-    return handler
 
 
 def measured(name, timings, *, warmups, write_payoff):

@@ -61,9 +61,11 @@ class LoadingProtocolTests(unittest.TestCase):
                 (fixture / "vault").mkdir(parents=True)
                 manifest = {"tree_sha256": tree_digest(fixture / "vault"), "document_count": 0, "probe_bodies": {}}
                 args = SimpleNamespace(output=root, current="unused", loading=mode)
-                with patch("baseline.Current", return_value=Worker(stages)):
+                with patch("baseline.Current", return_value=Worker(stages)) as current:
                     with self.assertRaises(Accepted):
                         run_worker(args, "current", 0, 0, fixture, manifest, io.StringIO())
+                # The worker holds each first read's caller until the runner acknowledges it.
+                self.assertTrue(callable(current.call_args.kwargs.get("stage_handler")))
                 with patch("baseline.Current", return_value=Worker([("public-get", "whole_slug")])):
                     with self.assertRaisesRegex(ValueError, "requested loading mode"):
                         run_worker(args, "current", 0, 1, fixture, manifest, io.StringIO())

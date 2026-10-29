@@ -81,6 +81,23 @@ def write_json(path, value):
     path.write_text(json.dumps(value, indent=2) + "\n")
 
 
+def acknowledge(root):
+    """Release each first read's caller as soon as its answer arrives.
+
+    Validation waits until Ready, so the parent never delays the next first read.
+    """
+    acks = root / "operator-prefix-acks"
+    acks.mkdir(parents=True, exist_ok=True)
+
+    def handler(stage):
+        sequence = stage["operator_prefix_sequence"]
+        pending = acks / f"{sequence}.pending"
+        write_json(pending, {"sequence": sequence, "probe": stage["probe"]})
+        pending.replace(pending.with_suffix(".json"))
+
+    return handler
+
+
 def append(file, value):
     file.write(json.dumps(value, separators=(",", ":")) + "\n")
     file.flush()
@@ -212,7 +229,8 @@ def run_worker(args, engine, size, repetition, fixture, manifest, samples):
     began = time.perf_counter_ns()
     # The public first-open prefix is the current worker's; the legacy daemon starts as it always does.
     loading = getattr(args, "loading", None) if engine == "current" else None
-    worker = cls(binary, root, loading=loading) if loading else cls(binary, root)
+    worker = (cls(binary, root, loading=loading, stage_handler=acknowledge(root)) if loading
+              else cls(binary, root))
     try:
         if loading:
             if (loading != "operator-prefix-public" or len(worker.stages) != 2
