@@ -1431,7 +1431,12 @@ fn found_links(vault: &Vault, at: &str) -> BTreeMap<(String, String, Option<u64>
                 .unwrap_or_default();
             let resolves = match link.health() {
                 LinkHealth::Healthy => {
-                    format!("one:{}", link.targets.candidates()[0].path.as_str())
+                    format!(
+                        "one:{}",
+                        link.targets.as_ref().expect("known targets").candidates()[0]
+                            .path
+                            .as_str()
+                    )
                 }
                 LinkHealth::Ambiguous => "several".to_string(),
                 _ => "none".to_string(),

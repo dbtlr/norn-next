@@ -648,7 +648,9 @@ fn a_record_projects_each_column_as_a_find_row_projects_it() {
         )
     );
     assert_eq!(
-        row.findings.as_ref().map(|findings| findings.total),
+        row.findings
+            .as_ref()
+            .map(|findings| crate::common::known(findings).total),
         Some(2)
     );
     assert_eq!(row.tags.as_ref().map(known).map(|tags| tags.total), Some(2));
@@ -784,14 +786,26 @@ fn get_of_a_broken_document_answers_unknown_unreadable_columns_and_its_finding()
             })
         ));
         let findings = row.findings.as_ref().expect("findings project normally");
-        assert_eq!(findings.total, 1);
-        assert_eq!(findings.items.len(), 1);
-        assert_eq!(findings.items[0].kind, FindingKind::UnreadableDocument);
-        assert_eq!(findings.items[0].severity, Severity::Error);
-        assert_eq!(findings.items[0].message, "`broken.md` could not be read");
-        assert_eq!(findings.items[0].path.as_str(), "broken.md");
-        assert!(findings.items[0].target.is_none());
-        assert!(findings.items[0].span.is_none());
+        assert_eq!(crate::common::known(findings).total, 1);
+        assert_eq!(crate::common::known(findings).items.len(), 1);
+        assert_eq!(
+            crate::common::known(findings).items[0].kind,
+            FindingKind::UnreadableDocument
+        );
+        assert_eq!(
+            crate::common::known(findings).items[0].severity,
+            Severity::Error
+        );
+        assert_eq!(
+            crate::common::known(findings).items[0].message,
+            "`broken.md` could not be read"
+        );
+        assert_eq!(
+            crate::common::known(findings).items[0].path.as_str(),
+            "broken.md"
+        );
+        assert!(crate::common::known(findings).items[0].target.is_none());
+        assert!(crate::common::known(findings).items[0].span.is_none());
 
         let projected = vault.get(&getting("broken").with_columns([Column::body()]));
         assert!(
@@ -830,13 +844,19 @@ fn collection_gets_of_a_broken_document_are_unknown_but_findings_page_normally()
             let json = serde_json::to_value(&gotten.report).expect("a get report");
             assert_eq!(json["path"], "broken.md");
             if selector == CollectionSelector::Findings {
-                assert!(json["page"]["page"].get("state").is_none());
+                assert_eq!(json["page"]["page"]["state"], "known");
                 assert_eq!(
-                    json["page"]["page"]["rows"][0]["kind"],
+                    json["page"]["page"]["value"]["rows"][0]["kind"],
                     "document/unreadable"
                 );
-                assert_eq!(json["page"]["page"]["rows"].as_array().unwrap().len(), 1);
-                assert!(json["page"]["page"]["next"].is_null());
+                assert_eq!(
+                    json["page"]["page"]["value"]["rows"]
+                        .as_array()
+                        .unwrap()
+                        .len(),
+                    1
+                );
+                assert!(json["page"]["page"]["value"]["next"].is_null());
             } else {
                 assert_eq!(
                     json["page"]["page"],
@@ -1412,7 +1432,10 @@ fn page_of(report: &GetReport) -> (Vec<String>, Option<Cursor>) {
         }
         CollectionPage::Blocks { page, .. } => (read(&known(page).rows), known(page).next.clone()),
         CollectionPage::Tags { page, .. } => (read(&known(page).rows), known(page).next.clone()),
-        CollectionPage::Findings { page, .. } => (read(&page.rows), page.next.clone()),
+        CollectionPage::Findings { page, .. } => (
+            read(&crate::common::known(page).rows),
+            crate::common::known(page).next.clone(),
+        ),
         other => panic!("a page of no collection this suite knows: {other:?}"),
     }
 }
@@ -1483,7 +1506,10 @@ fn a_paths_findings_follow_link_position_not_filing_order() {
             else {
                 panic!("a get of the findings answered {:?}", gotten.report);
             };
-            (page.rows, page.next)
+            (
+                crate::common::known(&page).rows.clone(),
+                crate::common::known(&page).next.clone(),
+            )
         };
         assert_eq!(
             targets(&page(&findings).0),
@@ -1516,7 +1542,7 @@ fn a_paths_findings_follow_link_position_not_filing_order() {
             .findings
             .expect("the findings column");
         assert_eq!(
-            targets(&column.items),
+            targets(&crate::common::known(&column).items),
             per_path,
             "a find's column under {order:?}"
         );
@@ -1559,11 +1585,14 @@ fn a_find_columns_head_is_cut_in_link_order() {
         .found("linked.md", vec![Column::findings()])
         .findings
         .expect("the findings column");
-    assert_eq!(column.total, NESTED_ROW_CEILING as u64 + 1);
+    assert_eq!(
+        crate::common::known(&column).total,
+        NESTED_ROW_CEILING as u64 + 1
+    );
     let expected: Vec<String> = (0..NESTED_ROW_CEILING)
         .map(|at| format!("link-{at:03}"))
         .collect();
-    assert_eq!(targets(&column.items), expected);
+    assert_eq!(targets(&crate::common::known(&column).items), expected);
 }
 
 /// **A finding about the document stands ahead of one about the document's
@@ -1599,7 +1628,10 @@ fn a_finding_about_the_document_stands_ahead_of_one_about_its_first_link() {
             else {
                 panic!("a get of the findings answered {:?}", gotten.report);
             };
-            (page.rows, page.next)
+            (
+                crate::common::known(&page).rows.clone(),
+                crate::common::known(&page).next.clone(),
+            )
         };
         let validating = ValidateParams::new(address())
             .with_kinds([FindingKind::Broken, FindingKind::MissingAnchor]);
@@ -1645,7 +1677,7 @@ fn a_finding_about_the_document_stands_ahead_of_one_about_its_first_link() {
             .findings
             .expect("the findings column");
         assert_eq!(
-            targets(&column.items),
+            targets(&crate::common::known(&column).items),
             per_path,
             "a find's column under {order:?}"
         );
@@ -2779,7 +2811,11 @@ fn filled_class_totals_seek_admitted_members_without_stepping_ignored_namesakes(
         measured[2] = snapshot.counters().vm_steps() - before;
         let links = known(found.rows[0].links.as_ref().expect("a links column"));
         assert_eq!(
-            links.items[0].targets.total(),
+            links.items[0]
+                .targets
+                .as_ref()
+                .expect("known targets")
+                .total(),
             ADMITTED as u64,
             "the holder's link did not count the class's admitted members"
         );
@@ -2837,5 +2873,101 @@ fn filled_class_totals_seek_admitted_members_without_stepping_ignored_namesakes(
                 "{name} VM steps grew with ignored namesakes under {order:?}"
             );
         }
+    }
+}
+
+#[test]
+fn a_relations_loading_get_withholds_only_resolution_and_findings() {
+    let mut source = parsed("notes/a.md", &format!("{RECORD_BODY}[[b]] [[missing]]\n"));
+    source.links = ["b", "missing"]
+        .into_iter()
+        .map(|target| LinkFact {
+            field: None,
+            family: LinkFamily::Wikilink,
+            embed: false,
+            protocol: None,
+            target: target.to_string(),
+            title: None,
+            anchor: None,
+            span: None,
+        })
+        .collect();
+    let vault = Vault::holding(
+        "relations-loading-get",
+        Sensitive,
+        &[source, parsed("notes/b.md", "target\n")],
+    );
+    let params = getting("notes/a");
+    let ready = vault.get(&params);
+    let loading = vault
+        .snapshot()
+        .relations_loading()
+        .get(&params, &declared(), &Text)
+        .unwrap();
+    let mut expected = serde_json::to_value(&ready.report).unwrap();
+    expected["document"]["findings"] = serde_json::json!({"state":"unknown","reason":"loading"});
+    assert_eq!(
+        expected["document"]["links"]["value"]["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    for link in expected["document"]["links"]["value"]["items"]
+        .as_array_mut()
+        .unwrap()
+    {
+        link["health"] = serde_json::json!("loading");
+        link["targets"] = serde_json::Value::Null;
+    }
+    expected["rule_sets"] = serde_json::json!([]);
+    assert_eq!(serde_json::to_value(&loading.report).unwrap(), expected);
+    for selector in SELECTORS {
+        let params = getting("notes/a").with_collection(selector).with_limit(1);
+        let loading = vault
+            .snapshot()
+            .relations_loading()
+            .get(&params, &declared(), &Text)
+            .unwrap();
+        let ready = vault.get(&params);
+        let mut expected = serde_json::to_value(&ready.report).unwrap();
+        if selector == CollectionSelector::Findings {
+            expected["page"]["page"] = serde_json::json!({"state":"unknown","reason":"loading"});
+            expected["page"]["rule_sets"] = serde_json::json!([]);
+        } else if selector == CollectionSelector::Links {
+            for link in expected["page"]["page"]["value"]["rows"]
+                .as_array_mut()
+                .unwrap()
+            {
+                link["health"] = serde_json::json!("loading");
+                link["targets"] = serde_json::Value::Null;
+            }
+        }
+        assert_eq!(serde_json::to_value(&loading.report).unwrap(), expected);
+    }
+    for target in ["notes/a#Terms", "notes/a#^top"] {
+        let params = getting(target);
+        let loading = vault
+            .snapshot()
+            .relations_loading()
+            .get(&params, &declared(), &Text)
+            .unwrap();
+        assert_eq!(loading.report, vault.get(&params).report);
+    }
+}
+
+#[test]
+fn a_broken_document_keeps_its_findings_while_loading() {
+    let vault = broken_vault("broken-loading-get", false);
+    for params in [
+        getting("broken"),
+        getting("broken").with_collection(CollectionSelector::Findings),
+    ] {
+        let loading = vault
+            .snapshot()
+            .relations_loading()
+            .get(&params, &declared(), &Text)
+            .unwrap();
+        assert_eq!(loading.report, vault.get(&params).report);
     }
 }

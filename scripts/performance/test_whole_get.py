@@ -26,6 +26,17 @@ def example():
 
 
 class WholeGetChecks(unittest.TestCase):
+    def test_findings_content_wrapper_is_validated(self):
+        response, manifest = example()
+        document = response['answer']['report']['document']
+        document['findings'] = dict(state='known', value=document['findings'])
+        validate_first_get(response, manifest)
+        for reason in ['loading', 'unreadable']:
+            response, manifest = example()
+            response['answer']['report']['document']['findings'] = dict(state='unknown', reason=reason)
+            with self.subTest(reason=reason), self.assertRaises(ValueError):
+                validate_first_get(response, manifest)
+
     def test_native_rich_answer_rejects_omitted_truncated_and_wrong_fixture_collections(self):
         response, manifest = example()
         validate_first_get(response, manifest)

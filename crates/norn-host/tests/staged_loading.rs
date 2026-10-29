@@ -279,7 +279,7 @@ fn spawn_get<'scope, 'env>(
 }
 fn content(report: norn_wire::GetReport) -> serde_json::Value {
     let mut value = serde_json::to_value(report).unwrap();
-    for finding in value["document"]["findings"]["items"]
+    for finding in value["document"]["findings"]["value"]["items"]
         .as_array_mut()
         .unwrap()
     {

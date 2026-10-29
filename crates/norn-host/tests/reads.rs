@@ -1728,9 +1728,12 @@ fn a_row_judged_without_its_frontmatter_carries_the_finding_that_says_why() {
                 });
             let findings = row.findings.as_ref().expect("the findings column");
             assert!(
-                findings.items.iter().any(|finding| finding.kind == kind),
+                attach::known(findings)
+                    .items
+                    .iter()
+                    .any(|finding| finding.kind == kind),
                 "`{path}` carries {:?}, not a `{kind}` finding",
-                findings.items
+                attach::known(findings).items
             );
         }
     }

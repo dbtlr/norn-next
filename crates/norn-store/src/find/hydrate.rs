@@ -316,7 +316,7 @@ impl Snapshot {
             }
         }
 
-        for (row, unreadable) in rows.iter_mut().zip(unreadable) {
+        for (row, unreadable) in rows.iter_mut().zip(unreadable.iter().copied()) {
             if unreadable {
                 if row.links.is_some() {
                     row.links = Some(Content::unknown(UnknownReason::Unreadable));
@@ -336,9 +336,17 @@ impl Snapshot {
         if let Some(fingerprint) = findings_under {
             let paths: Vec<&str> = keys.iter().map(FoundKey::path).collect();
             let mut heads = self.read_findings(&paths, fingerprint, work, record)?;
-            for (row, path) in rows.iter_mut().zip(&paths) {
+            for ((row, path), unreadable) in rows.iter_mut().zip(&paths).zip(&unreadable) {
+                if self.relations_loading && !unreadable {
+                    row.findings = Some(Content::unknown(UnknownReason::Loading));
+                    continue;
+                }
                 let (items, total) = heads.remove(*path).unwrap_or_default();
-                row.findings = Some(Collection::new(items, total).map_err(cut_below_head)?);
+                row.findings = Some(
+                    Collection::new(items, total)
+                        .map_err(cut_below_head)?
+                        .into(),
+                );
             }
         }
         Ok(rows)

@@ -1987,9 +1987,20 @@ fn a_link_row_advertises_the_targets_and_the_health_read_off_them() {
         .collect()
     );
     assert_eq!(
-        schema["properties"]["targets"]["$ref"].as_str(),
+        schema["properties"]["targets"]["anyOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find_map(|value| value["$ref"].as_str()),
         Some("#/$defs/CandidateHead"),
         "a link row restates the head rather than referring to it"
+    );
+    assert!(
+        schema["properties"]["targets"]["anyOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value["type"] == "null")
     );
     assert_eq!(
         schema["$defs"]["CandidateHead"]["properties"]["candidates"]["maxItems"].as_u64(),
@@ -2005,7 +2016,7 @@ fn a_link_row_advertises_the_targets_and_the_health_read_off_them() {
             string_constant(branch)
                 .unwrap_or_else(|| panic!("a health branch is not a pinned string: {branch}"))
         })),
-        sorted(["healthy", "broken", "ambiguous", "not_judged"])
+        sorted(["healthy", "broken", "ambiguous", "not_judged", "loading"])
     );
     assert_eq!(
         sorted(branches(&schema_of::<LinkFamily>()).iter().map(|branch| {
@@ -4677,11 +4688,13 @@ fn content_schema_distinguishes_known_values_and_unknown_reasons() {
             .iter()
             .map(|branch| string_constant(branch).expect("a reason"))
             .collect::<Vec<_>>(),
-        ["unreadable"]
+        ["loading", "unreadable"]
     );
 
     let document = schema_of::<DocumentRow>();
-    for column in ["fields", "body", "links", "headings", "blocks", "tags"] {
+    for column in [
+        "fields", "body", "links", "headings", "blocks", "tags", "findings",
+    ] {
         let choices = document["properties"][column]["anyOf"]
             .as_array()
             .expect("optional content");
@@ -4699,7 +4712,7 @@ fn content_schema_distinguishes_known_values_and_unknown_reasons() {
         );
     }
     assert!(
-        !document["properties"]["findings"]
+        document["properties"]["findings"]
             .to_string()
             .contains("Content")
     );
@@ -4725,9 +4738,9 @@ fn content_schema_distinguishes_known_values_and_unknown_reasons() {
 }
 
 #[test]
-fn collection_content_pages_advertise_unknown_content_but_findings_stay_normal() {
+fn collection_content_pages_advertise_unknown_content() {
     let schema = schema_of::<CollectionPage>();
-    for selector in ["links", "headings", "blocks", "tags"] {
+    for selector in ["links", "headings", "blocks", "tags", "findings"] {
         let page = &branch(&schema, "of", selector)["properties"]["page"];
         let reference = page["$ref"].as_str().expect("a typed content carrier");
         let content = definition(&schema, reference.strip_prefix("#/$defs/").unwrap());
@@ -4745,13 +4758,4 @@ fn collection_content_pages_advertise_unknown_content_but_findings_stay_normal()
                 .contains("rows")
         );
     }
-    let findings = &branch(&schema, "of", "findings")["properties"]["page"];
-    let reference = findings["$ref"].as_str().expect("a normal findings page");
-    assert!(
-        property_names(definition(
-            &schema,
-            reference.strip_prefix("#/$defs/").unwrap()
-        ))
-        .contains("rows")
-    );
 }

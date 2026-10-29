@@ -967,7 +967,13 @@ fn a_searchs_links_column_counts_the_candidates_its_links_carry() {
     .items;
     let carried: u64 = links
         .iter()
-        .map(|link| link.targets.candidates().len() as u64)
+        .map(|link| {
+            link.targets
+                .as_ref()
+                .expect("known targets")
+                .candidates()
+                .len() as u64
+        })
         .sum();
     assert!(carried > 0, "the hit's links name no document: {links:?}");
     assert_eq!(linked.work.link_candidates_read, carried);

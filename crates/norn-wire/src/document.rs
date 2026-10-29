@@ -691,6 +691,8 @@ pub enum TargetGap {
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum LinkHealth {
+    /// Construction has not yet judged relations. Targets are withheld.
+    Loading,
     /// The target resolves to exactly one document or vault file.
     Healthy,
     /// The target resolves to no document or vault file.
@@ -804,7 +806,7 @@ pub enum LinkFamily {
 /// total, so a link a vault resolves many ways crosses as the first few of
 /// those documents and how many there were, and a link addressed elsewhere
 /// crosses with no document. `health` is derived from the link's addressing
-/// and that total rather than carried beside them: the constructor computes it
+/// and that total when targets are known; loading rows carry null targets: the constructor computes it
 /// and the read path recomputes it, so a row whose health disagrees with the
 /// documents it names has no representation on either side of the seam.
 #[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
@@ -832,8 +834,8 @@ pub struct LinkRow {
     /// text, or one in a block whose fields cannot be told apart.
     pub span: Option<Span>,
     /// The bounded head of the documents the target resolves to, in the
-    /// resolution ladder's own order, with how many there were.
-    pub targets: CandidateHead,
+    /// resolution ladder's own order, with how many there were; null while loading.
+    pub targets: Option<CandidateHead>,
     /// What resolving the target found, which is read off the documents it
     /// found.
     health: LinkHealth,
@@ -849,7 +851,8 @@ impl LinkRow {
     /// the vault. A link addressed elsewhere ([`LinkAddress::Elsewhere`])
     /// resolves to none, so a nonzero `targets` for one is refused
     /// ([`ElsewhereNamesDocuments`]) rather than built into a row the read
-    /// path would then refuse to read back.
+    /// path would then refuse to read back. Null targets construct loading health;
+    /// known targets always construct a resolved health.
     #[allow(clippy::too_many_arguments)] // A link row is the link's own facts; grouping them would mint a shape nothing else holds.
     pub fn new(
         family: LinkFamily,
@@ -859,11 +862,17 @@ impl LinkRow {
         title: Option<String>,
         anchor: Option<Anchor>,
         span: Option<Span>,
-        targets: CandidateHead,
+        targets: impl Into<Option<CandidateHead>>,
     ) -> Result<Self, ElsewhereNamesDocuments> {
         let target = target.into();
-        let health = LinkHealth::of_link(family, protocol.as_deref(), &target, targets.total());
-        ElsewhereNamesDocuments::check(health, targets.total())?;
+        let targets = targets.into();
+        let health = if let Some(targets) = &targets {
+            let health = LinkHealth::of_link(family, protocol.as_deref(), &target, targets.total());
+            ElsewhereNamesDocuments::check(health, targets.total())?;
+            health
+        } else {
+            LinkHealth::Loading
+        };
         Ok(LinkRow {
             family,
             embed,
@@ -880,12 +889,15 @@ impl LinkRow {
     /// Apply the store's account of an unreadable directory at this path.
     /// A resolved target keeps its ordinary judgment.
     pub fn with_target_gap(mut self, gap: TargetGap) -> Self {
+        let Some(targets) = &self.targets else {
+            return self;
+        };
         let address = LinkAddress::of(self.family, self.protocol.as_deref(), &self.target);
         let gap = match address {
             LinkAddress::RootedName(_) | LinkAddress::Relative(_) | LinkAddress::Rooted(_) => gap,
             _ => TargetGap::None,
         };
-        self.health = LinkHealth::of_address(address.kind(), self.targets.total(), gap);
+        self.health = LinkHealth::of_address(address.kind(), targets.total(), gap);
         self
     }
 
@@ -907,7 +919,7 @@ struct LinkRowFields {
     title: Option<String>,
     anchor: Option<Anchor>,
     span: Option<Span>,
-    targets: CandidateHead,
+    targets: Option<CandidateHead>,
     health: LinkHealth,
 }
 
@@ -923,23 +935,34 @@ impl<'de> Deserialize<'de> for LinkRow {
         D: Deserializer<'de>,
     {
         let fields = LinkRowFields::deserialize(deserializer)?;
-        let address = LinkAddress::of(fields.family, fields.protocol.as_deref(), &fields.target);
-        let gap = match (&address, fields.health) {
-            (
-                LinkAddress::RootedName(_) | LinkAddress::Relative(_) | LinkAddress::Rooted(_),
-                LinkHealth::NotJudged,
-            ) => TargetGap::Marked,
-            _ => TargetGap::None,
-        };
-        let derived = LinkHealth::of_address(address.kind(), fields.targets.total(), gap);
-        ElsewhereNamesDocuments::check(derived, fields.targets.total())
-            .map_err(D::Error::custom)?;
-        if fields.health != derived {
-            return Err(D::Error::custom(format!(
-                "the link's health {:?} is not the health of the {} documents it resolves to, {derived:?}",
-                fields.health,
-                fields.targets.total(),
-            )));
+        match (&fields.targets, fields.health) {
+            (None, LinkHealth::Loading) => {}
+            (None, _) | (Some(_), LinkHealth::Loading) => {
+                return Err(D::Error::custom(
+                    "loading health requires null targets, and null targets require loading health",
+                ));
+            }
+            (Some(targets), health) => {
+                let address =
+                    LinkAddress::of(fields.family, fields.protocol.as_deref(), &fields.target);
+                let gap = match (&address, health) {
+                    (
+                        LinkAddress::RootedName(_)
+                        | LinkAddress::Relative(_)
+                        | LinkAddress::Rooted(_),
+                        LinkHealth::NotJudged,
+                    ) => TargetGap::Marked,
+                    _ => TargetGap::None,
+                };
+                let derived = LinkHealth::of_address(address.kind(), targets.total(), gap);
+                ElsewhereNamesDocuments::check(derived, targets.total())
+                    .map_err(D::Error::custom)?;
+                if health != derived {
+                    return Err(D::Error::custom(
+                        "the link's health disagrees with its targets",
+                    ));
+                }
+            }
         }
         Ok(LinkRow {
             family: fields.family,
@@ -1118,6 +1141,8 @@ impl FieldValue {
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum UnknownReason {
+    /// Construction has not yet completed the requested facts.
+    Loading,
     /// The document could not be read, so no content facts are held for it.
     Unreadable,
 }
@@ -1193,9 +1218,10 @@ pub struct DocumentRow {
     /// The tags the document carries.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tags: Option<Content<Collection<TagRow>>>,
-    /// The findings standing over the document.
+    /// The findings standing over the document, or unknown while relations load.
+    /// An unreadable document keeps its known findings.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub findings: Option<Collection<FindingRow>>,
+    pub findings: Option<Content<Collection<FindingRow>>>,
 }
 
 impl DocumentRow {
@@ -1260,8 +1286,8 @@ impl DocumentRow {
 
     /// The row with the findings standing over it projected.
     #[must_use]
-    pub fn with_findings(mut self, findings: Collection<FindingRow>) -> Self {
-        self.findings = Some(findings);
+    pub fn with_findings(mut self, findings: impl Into<Content<Collection<FindingRow>>>) -> Self {
+        self.findings = Some(findings.into());
         self
     }
 }

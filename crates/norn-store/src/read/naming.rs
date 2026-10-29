@@ -169,6 +169,30 @@ impl Snapshot {
         record: &mut Vec<Ran>,
         candidates_read: &mut u64,
     ) -> Result<Vec<LinkRow>, StoreError> {
+        if self.relations_loading {
+            return links
+                .into_iter()
+                .map(|(_, link)| {
+                    let anchor = link.anchor.map(|anchor| match anchor {
+                        LinkAnchor::Heading { written, .. } => Anchor::heading(written),
+                        LinkAnchor::Block { id } => Anchor::block(id),
+                    });
+                    LinkRow::new(
+                        link.family.wire(),
+                        link.embed,
+                        link.protocol,
+                        link.target,
+                        link.title,
+                        anchor,
+                        link.span.map(wire_span),
+                        None,
+                    )
+                    .map_err(|problem| StoreError::Damaged {
+                        what: problem.to_string(),
+                    })
+                })
+                .collect();
+        }
         let ids: Vec<i64> = links.iter().map(|(id, _)| *id).collect();
         let mut named = self.link_targets(&ids, record, candidates_read)?;
         let heads: Vec<Head> = ids

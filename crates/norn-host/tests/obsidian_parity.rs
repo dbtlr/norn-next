@@ -395,13 +395,15 @@ fn answer_of(
 ) -> Answer {
     let heads: Vec<String> = link
         .targets
+        .as_ref()
+        .expect("known targets")
         .candidates()
         .iter()
         .map(|candidate| under_the_key(candidate.path.as_str()))
         .collect();
     assert_eq!(
         heads.len() as u64,
-        link.targets.total(),
+        link.targets.as_ref().expect("known targets").total(),
         "a head cut below its total"
     );
     match (link.health(), &heads[..]) {

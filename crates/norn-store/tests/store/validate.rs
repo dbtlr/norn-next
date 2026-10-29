@@ -3547,7 +3547,7 @@ fn projected<'r>(
     documents
         .into_iter()
         .filter_map(|document| document.findings.as_ref())
-        .flat_map(|findings| findings.items.iter())
+        .flat_map(|findings| crate::common::known(findings).items.iter())
         .collect()
 }
 
@@ -3634,7 +3634,7 @@ fn every_response_carrying_finding_rows_carries_exactly_the_rule_sets_they_cite(
                     page, rule_sets, ..
                 },
             ..
-        } => exactly_cited(&page.rows, &rule_sets),
+        } => exactly_cited(&crate::common::known(&page).rows, &rule_sets),
         other => panic!("a get of {at}'s findings answered {other:?}"),
     };
     assert_eq!(page("notes/c"), set_names(&[&["open"], &["tasks"]]));

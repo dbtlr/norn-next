@@ -545,6 +545,7 @@ impl ConnectionTurn {
             deadline: self.deadline,
             reading,
             directory_marks_present,
+            relations_loading: false,
             counters: Cell::new(counters),
         })
     }
@@ -686,6 +687,7 @@ pub(crate) fn last_write_generation(connection: &Connection) -> Result<i64, Stor
 /// }
 /// ```
 pub struct Snapshot {
+    pub(crate) relations_loading: bool,
     pub(crate) grant: RefCell<Option<crate::read_budget::Grant>>,
     pub(crate) deadline: Instant,
     reader: Arc<SnapshotReader>,
@@ -715,6 +717,16 @@ impl fmt::Debug for Snapshot {
 }
 
 impl Snapshot {
+    /// Withhold relation judgments until construction completes its relations step.
+    ///
+    /// NORN-468 PR C (host early admission) consumes this mark on early holds;
+    /// the host does not establish such holds on the canonical store yet.
+    #[must_use]
+    pub fn relations_loading(mut self) -> Self {
+        self.relations_loading = true;
+        self
+    }
+
     pub(crate) fn count_results(&self) -> &Arc<crate::count::CountResults> {
         &self.reader.count_results
     }

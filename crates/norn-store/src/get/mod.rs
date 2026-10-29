@@ -772,6 +772,12 @@ impl Snapshot {
     ) -> Result<CollectionPage, PageRefusal> {
         let collection = match selector {
             CollectionSelector::Findings => {
+                if self.relations_loading && self.body_of(named.document, lookups)?.is_some() {
+                    return Ok(CollectionPage::findings(
+                        Content::unknown(UnknownReason::Loading),
+                        [],
+                    ));
+                }
                 let page = self.finding_page(&named, limit, after, snapshot, lookups)?;
                 let rule_sets = self.rule_sets(&mut lookups.ran, &page.rows)?;
                 return Ok(CollectionPage::findings(page, rule_sets));
