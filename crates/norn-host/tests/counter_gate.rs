@@ -7454,6 +7454,7 @@ fn a_requeued_edit_costs_the_same_at_both_scales() {
         path: std::path::PathBuf,
         account: Mutex<Option<Arc<norn_host::JobEvidence>>>,
         statements: Mutex<usize>,
+        read_steps: Mutex<(u64, u64)>,
     }
     impl norn_host::LoadingProbe for Edit {
         fn at(&self, boundary: norn_host::LoadingBoundary) {
@@ -7477,10 +7478,16 @@ fn a_requeued_edit_costs_the_same_at_both_scales() {
                 }
                 norn_host::LoadingBoundary::RequeueStarted => {
                     norn_store::induced_failure::statements_begun();
+                    let spent = self.account.lock().unwrap().as_ref().unwrap().read();
+                    self.read_steps.lock().unwrap().0 =
+                        spent.changeset_read_steps + spent.requeue_read_steps;
                 }
                 norn_host::LoadingBoundary::Requeued => {
                     *self.statements.lock().unwrap() +=
                         norn_store::induced_failure::statements_begun().len();
+                    let spent = self.account.lock().unwrap().as_ref().unwrap().read();
+                    let mut work = self.read_steps.lock().unwrap();
+                    work.1 += spent.changeset_read_steps + spent.requeue_read_steps - work.0;
                 }
                 _ => {}
             }
@@ -7499,6 +7506,7 @@ fn a_requeued_edit_costs_the_same_at_both_scales() {
             path: root.join("doc00000.md"),
             account: Mutex::new(None),
             statements: Mutex::new(0),
+            read_steps: Mutex::new((0, 0)),
         });
         let ops = norn_host::ProductionEntryOps::new(
             norn_config::ConfigDirs::new(scratch.join("config"), scratch.join("data")).unwrap(),
@@ -7542,8 +7550,15 @@ fn a_requeued_edit_costs_the_same_at_both_scales() {
         assert_eq!(spent.documents_read_by_build, documents + 1);
         assert_eq!(spent.document_opens, documents + 2);
         let statements = *probe.statements.lock().unwrap();
+        assert!(spent.requeue_read_steps > 0);
         assert!(statements > 0);
-        (spent.requeued_documents, spent.requeue_commits, statements, spent.requeue_read_steps)
+        let read_steps = probe.read_steps.lock().unwrap().1;
+        (
+            spent.requeued_documents,
+            spent.requeue_commits,
+            statements,
+            read_steps,
+        )
     };
     assert_eq!(measure(2_000), measure(10_000));
 }

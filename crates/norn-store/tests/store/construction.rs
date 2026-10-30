@@ -1379,17 +1379,29 @@ fn requeued_page_work_is_independent_of_the_vault_queue() {
         let mut store = scratch.open();
         store.defer_link_health().unwrap();
         store.begin_steps().unwrap();
-        store.begin_request().apply_increment(
-            IncrementProvenance::Derived,
-            (0..documents).map(|n| Change::Named { path: path(&format!("doc{n:05}.md")) }),
-            &[], &ContentModel::none(),
-        ).unwrap();
+        store
+            .begin_request()
+            .apply_increment(
+                IncrementProvenance::Derived,
+                (0..documents).map(|n| Change::Named {
+                    path: path(&format!("doc{n:05}.md")),
+                }),
+                &[],
+                &ContentModel::none(),
+            )
+            .unwrap();
         store.finish_step(Step::Names).unwrap();
-        store.begin_request().apply_increment(
-            IncrementProvenance::Derived,
-            [Change::Named { path: path("doc00000.md") }],
-            &[], &ContentModel::none(),
-        ).unwrap();
+        store
+            .begin_request()
+            .apply_increment(
+                IncrementProvenance::Derived,
+                [Change::Named {
+                    path: path("doc00000.md"),
+                }],
+                &[],
+                &ContentModel::none(),
+            )
+            .unwrap();
         let mut request = store.begin_request();
         let page = request.requeued_page(128).unwrap();
         assert_eq!(page, [path("doc00000.md")]);

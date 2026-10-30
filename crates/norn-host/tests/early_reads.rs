@@ -1131,10 +1131,22 @@ fn a_fact_at_a_ready_target_withdraws_it_and_one_elsewhere_does_not() {
         std::fs::write(fixture.root.join("late.md"), "---\nrank: 40\n---\n# Late\n").unwrap();
         fact_recorded(&account, 0);
         // Rooted reads stay independent even when a backend reports a broad fact.
-        assert!(host.get(&get("/first")).is_ok());
+        let untouched = host.get(&get("/first")).unwrap();
+        for column in ["body", "headings"] {
+            assert_eq!(
+                json!(&untouched.answer.report)["document"][column],
+                json!(&admitted.answer.report)["document"][column]
+            );
+        }
         construction.release();
         construction.wait(LoadingBoundary::StepComplete(Step::Content));
-        assert!(host.get(&get("/first")).is_ok());
+        let untouched = host.get(&get("/first")).unwrap();
+        for column in ["body", "headings"] {
+            assert_eq!(
+                json!(&untouched.answer.report)["document"][column],
+                json!(&admitted.answer.report)["document"][column]
+            );
+        }
         let before = account.read().build_facts_recorded;
         std::fs::write(fixture.root.join("first.md"), "# Changed\n").unwrap();
         fact_recorded(&account, before);
@@ -1159,8 +1171,14 @@ fn a_fact_at_a_ready_target_withdraws_it_and_one_elsewhere_does_not() {
 
 fn assert_changed_body_and_heading(answer: GetAnswer) {
     let report = json!(&answer.unwrap().answer.report);
-    assert_eq!(report["document"]["body"]["value"]["text"], "# Changed\n", "{report}");
-    assert_eq!(report["document"]["headings"]["value"]["items"][0]["text"], "Changed", "{report}");
+    assert_eq!(
+        report["document"]["body"]["value"]["text"], "# Changed\n",
+        "{report}"
+    );
+    assert_eq!(
+        report["document"]["headings"]["value"]["items"][0]["text"], "Changed",
+        "{report}"
+    );
 }
 
 #[test]
@@ -1195,14 +1213,24 @@ fn a_requeued_pulled_ahead_target_waits_for_its_new_structure() {
         fact_recorded(&account, 0);
         construction.release();
         construction.wait(LoadingBoundary::Requeued);
+        let before = host.read_evidence().settle_waits;
         let second = spawn_get(scope, &host, get("/first"));
-        match second.recv_timeout(Duration::from_millis(200)) {
-            Ok(answer) => {
-                assert_changed_body_and_heading(answer);
-                panic!("the target still owes structure at the requeue boundary");
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(error) => panic!("second Get disconnected: {error}"),
+        let premature = wait_until(
+            "the second Get answers or waits for structure",
+            BUDGET,
+            || match second.try_recv() {
+                Ok(answer) => Observed::Met(Some(answer)),
+                Err(mpsc::TryRecvError::Empty) if host.read_evidence().settle_waits > before => {
+                    Observed::Met(None)
+                }
+                Err(mpsc::TryRecvError::Empty) => Observed::pending("Get has not met construction"),
+                Err(error) => panic!("second Get disconnected: {error}"),
+            },
+        )
+        .unwrap();
+        if let Some(answer) = premature {
+            assert_changed_body_and_heading(answer);
+            panic!("the target still owes structure at the requeue boundary");
         }
         construction.release();
         assert_changed_body_and_heading(second.recv_timeout(BUDGET.work()).unwrap());
