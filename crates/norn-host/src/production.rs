@@ -1797,10 +1797,15 @@ impl SkippedLinks {
         }
     }
 
-    /// Combine scoped observations in the whole walk's path order.
-    fn merge(&mut self, other: Self) {
+    /// Combine scoped observations by the walk's full-path byte key, folded
+    /// according to the volume's stored path order, before retaining the bound.
+    fn merge(&mut self, other: Self, order: StoredPathOrder) {
+        if other.0.is_empty() {
+            return;
+        }
         self.0.extend(other.0);
-        self.0.sort();
+        self.0
+            .sort_by_cached_key(|path| path_key(path.as_os_str().as_encoded_bytes(), order));
         self.0.dedup();
         self.0.truncate(SKIPPED_LINKS_RETAINED);
     }

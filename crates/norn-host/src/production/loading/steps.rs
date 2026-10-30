@@ -344,14 +344,10 @@ fn requeue_taken(
         if store.construction_step() != Some(Step::Names) {
             store.commit_step_group().map_err(store_effect)?;
         }
-        links.merge(scoped_increment_links(
-            store,
-            root,
-            &taken.roots,
-            ops.policy,
-            progress,
-            exclusions,
-        )?);
+        links.merge(
+            scoped_increment_links(store, root, &taken.roots, ops.policy, progress, exclusions)?,
+            store.path_order(),
+        );
         let mut documents = 0;
         if store.construction_step() != Some(Step::Names) {
             let source = norn_fs::Vault::open(root, exclusions).map_err(effect)?;
@@ -407,7 +403,7 @@ fn requeue_taken(
                 pending.store.commit_step_group().map_err(store_effect)?;
             }
             close_job(store, root, exclusions, ops.policy, &mut account)?;
-            links.merge(account.links);
+            links.merge(account.links, store.path_order());
         }
         if store.construction_step() != Some(Step::Names) {
             store.commit_step_group().map_err(store_effect)?;

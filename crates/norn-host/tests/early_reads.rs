@@ -3702,8 +3702,10 @@ fn requeued_link_advisories_keep_the_whole_walk_order() {
 fn requeued_link_advisories_retain_the_whole_walk_first_sixteen() {
     let fixture = Fixture::new("requeue-link-advisory");
     std::fs::create_dir_all(fixture.root.join("a")).unwrap();
-    for path in std::iter::once("a-b.md".to_owned()).chain((0..16).map(|n| format!("a/x{n:02}.md"))) {
-        std::os::unix::fs::symlink(fixture.root.join("doc00.md"), fixture.root.join(&path)).unwrap();
+    for path in std::iter::once("a-b.md".to_owned()).chain((0..16).map(|n| format!("a/x{n:02}.md")))
+    {
+        std::os::unix::fs::symlink(fixture.root.join("doc00.md"), fixture.root.join(&path))
+            .unwrap();
     }
     let probe = Probe::new([LoadingBoundary::StepComplete(Step::Content)]);
     let ops = fixture.ops(probe.clone());
