@@ -109,7 +109,7 @@ pub struct JobEvidence {
     requeued_documents: AtomicU64,
     requeue_commits: AtomicU64,
     requeue_ns: AtomicU64,
-
+    requeue_read_steps: AtomicU64,
     build_fact_withdrawals: AtomicU64,
     construction_checkpoint_busy: AtomicU64,
     content_step_commits: AtomicU64,
@@ -249,12 +249,18 @@ pub struct EvidenceReading {
     pub build_fact_withdrawals_capacity: u64,
     /// Accepted root reports during construction.
     pub build_facts_recorded: u64,
+    /// Completed construction requeue drains.
     pub requeue_drains: u64,
+    /// Filesystem roots taken by construction requeue drains.
     pub requeued_roots: u64,
+    /// Documents re-derived by construction requeue drains.
     pub requeued_documents: u64,
+    /// Store commits made during construction requeue drains.
     pub requeue_commits: u64,
+    /// Elapsed nanoseconds spent in construction requeue drains.
     pub requeue_ns: u64,
-
+    /// SQLite VM steps spent selecting construction requeue pages.
+    pub requeue_read_steps: u64,
     /// Constructions whose coverage or fact bound withdrew all capabilities.
     pub build_fact_withdrawals: u64,
     /// Construction checkpoints a reader prevented from truncating the WAL.
@@ -449,6 +455,7 @@ impl EvidenceReading {
                 .saturating_sub(earlier.requeued_documents),
             requeue_commits: self.requeue_commits.saturating_sub(earlier.requeue_commits),
             requeue_ns: self.requeue_ns.saturating_sub(earlier.requeue_ns),
+            requeue_read_steps: self.requeue_read_steps.saturating_sub(earlier.requeue_read_steps),
             build_facts_recorded: self
                 .build_facts_recorded
                 .saturating_sub(earlier.build_facts_recorded),
@@ -612,6 +619,7 @@ impl JobEvidence {
             requeued_documents: get(&self.requeued_documents),
             requeue_commits: get(&self.requeue_commits),
             requeue_ns: get(&self.requeue_ns),
+            requeue_read_steps: get(&self.requeue_read_steps),
             build_facts_recorded: get(&self.build_facts_recorded),
             build_fact_withdrawals: get(&self.build_fact_withdrawals),
             construction_checkpoint_busy: get(&self.construction_checkpoint_busy),
@@ -2528,6 +2536,10 @@ impl JobEvidence {
         self.early_reads_held_by_fact
             .fetch_add(1, Ordering::Relaxed);
     }
+    pub(crate) fn count_requeue_read_steps(&self, steps: u64) {
+        self.requeue_read_steps.fetch_add(steps, Ordering::Relaxed);
+    }
+
     pub(crate) fn count_requeue(
         &self,
         roots: u64,

@@ -7543,7 +7543,7 @@ fn a_requeued_edit_costs_the_same_at_both_scales() {
         assert_eq!(spent.document_opens, documents + 2);
         let statements = *probe.statements.lock().unwrap();
         assert!(statements > 0);
-        (spent.requeued_documents, spent.requeue_commits, statements)
+        (spent.requeued_documents, spent.requeue_commits, statements, spent.requeue_read_steps)
     };
     assert_eq!(measure(2_000), measure(10_000));
 }

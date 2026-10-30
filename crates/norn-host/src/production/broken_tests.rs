@@ -1181,3 +1181,24 @@ fn a_findings_only_flush_outside_a_group_takes_the_increment_path() {
     pending.file(plan_quarantine(Path::new("..md"), document_path(Path::new("..md")).unwrap_err()), None);
     pending.flush().unwrap();
 }
+
+#[test]
+fn ordinary_document_steps_keep_the_configured_findings_flush_bound() {
+    for step in [norn_store::Step::Content, norn_store::Step::Structure] {
+        let f = Fixture::watcherless("ordinary-findings-bound");
+        let mut store = Store::open(f.root.join("steps.sqlite3"), proven_order(&f), crate::DERIVATION_VERSION).unwrap();
+        store.defer_link_health().unwrap();
+        store.begin_steps().unwrap();
+        store.finish_step(norn_store::Step::Names).unwrap();
+        if step == norn_store::Step::Structure {
+            store.finish_step(norn_store::Step::Content).unwrap();
+        }
+        let root = f.vault();
+        let mut account = Account::default();
+        let mut pending = Pending::new(&mut store, 2, &root, &[], &mut account).unwrap();
+        for spelling in ["..md", "...md"] {
+            pending.file(plan_quarantine(Path::new(spelling), document_path(Path::new(spelling)).unwrap_err()), None);
+        }
+        assert!(pending.is_full(), "{step:?} must flush at the configured findings bound");
+    }
+}
