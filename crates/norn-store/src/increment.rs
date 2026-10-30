@@ -321,8 +321,13 @@ pub(crate) fn apply(
         generation = Some(stamp);
         let mut statements = Statements::prepare(&transaction)?;
         for (index, change) in std::iter::once(first).chain(entries).enumerate() {
-            if (matches!(change, Change::Named { .. }) && !matches!(step, Some(crate::Step::Names | crate::Step::Content | crate::Step::Structure)))
+            if (matches!(change, Change::Named { .. })
+                && !matches!(
+                    step,
+                    Some(crate::Step::Names | crate::Step::Content | crate::Step::Structure)
+                ))
                 || (step.is_some() && matches!(change, Change::Upsert(_)))
+                || (matches!(change, Change::Death { .. }) && step == Some(crate::Step::Relations))
             {
                 return Err(StoreError::Lifecycle {
                     operation: "applying an increment",
@@ -424,6 +429,8 @@ pub(crate) fn apply(
                 // The death's own provenance, which is a different thing from
                 // the changeset's mark this function was called with.
                 Change::Death { path, .. } if step.is_some() => {
+                    transaction.execute("DELETE FROM temp.construction_requeue WHERE document = (SELECT id FROM documents WHERE path = ?1)", [path.as_str()])
+                        .map_err(|e| error::sql("ending requeue progress", e))?;
                     transaction.execute("DELETE FROM temp.construction_progress WHERE document = (SELECT id FROM documents WHERE path = ?1)", [path.as_str()])
                         .map_err(|e| error::sql("ending construction progress", e))?;
                     let removed = statements.delete_document.query_row([path.as_str()], |_| Ok(())).optional()
@@ -450,6 +457,8 @@ pub(crate) fn apply(
             if step.is_some()
                 && let Change::Unreadable { path } = &change
             {
+                transaction.execute("DELETE FROM temp.construction_requeue WHERE document = (SELECT id FROM documents WHERE path = ?1)", [path.as_str()])
+                        .map_err(|e| error::sql("ending requeue progress", e))?;
                 transaction.execute("DELETE FROM temp.construction_progress WHERE document = (SELECT id FROM documents WHERE path = ?1)", [path.as_str()]).map_err(|e| error::sql("ending broken progress", e))?;
             }
             tally.findings_discarded +=
@@ -521,6 +530,9 @@ pub(crate) fn apply(
 
     // Counters record what happened, so they move after the commit that made it
     // happen.
+    if let Some(steps) = store.steps.as_mut() {
+        steps.increment_commits += 1;
+    }
     counters.add(Counter::DocumentsNamed, tally.documents_named);
     counters.add(Counter::DocumentsUpserted, tally.documents_upserted);
     counters.add(Counter::DocumentsDeleted, tally.documents_deleted);
