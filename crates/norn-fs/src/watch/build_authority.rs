@@ -316,6 +316,13 @@ impl Subscription {
         {
             return None;
         }
+        // Replacement wakes old waiters but is not a coverage-loss event.
+        state
+            .build_authority
+            .facts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .observer = None;
         state.build_authority.invalidate();
         state
             .build_authority

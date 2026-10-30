@@ -2486,19 +2486,22 @@ the resolver's comparison key and ambiguity-ignore rules. Refused target spellin
 conservatively touch every root. Only file create, remove and data-modify reports
 are leaf roots; every other kind includes descendants, persistently for that root.
 
-Each request fixes its fact sequence when it first meets construction. A touched
-Get and every vault-wide capability wait for outstanding roots through that
+Each request fixes its fact sequence and target class when it first meets a construction.
+Replacing that construction discards the meeting and compiles a new target class against
+the replacement model. A touched Get and every vault-wide capability wait for outstanding roots through that
 sequence. Currently those roots remain outstanding until `Ready`; construction
 does not take or requeue them. An untouched Get keeps answering, including after
-Relations, with link resolution, health and findings rendered loading while a fact
-it met stands. A fully published construction retains its authority across the
-claim handoff into pre-`Ready` reconcile, closing at `Ready` or the reconcile's end.
+Relations, with link resolution, health and findings rendered loading while any fact
+is outstanding at admission. A fully published construction retains its authority
+across the claim handoff into pre-`Ready` reconcile, closing at `Ready` or the reconcile's end.
 
 Rescans, schema or control-path facts, root or backend coverage loss, dirty-root
 widening and the 1,025th distinct root withdraw every capability. Construction
 continues and reconciles before `Ready`. Recorded roots remain available for final
-checks throughout construction: a concerning report newer than admission rejects
-the result, even if the root no longer owes derivation. A Get with known relations
+checks throughout construction: admission and final exposure refuse a concerning report
+newer than the meeting while that root still owes derivation, or any concerning report
+newer than admission even if the root no longer owes derivation. Facts newer than the
+meeting never extend a wait; they refuse the read instead. A Get with known relations
 also checks every root because its relation data reads the vault.
 Watcher callbacks never take the entry gate. Recording a fact wakes nothing;
 coverage withdrawal moves the stance signal. Each early acquisition checks its build's root identity outside the entry gate and

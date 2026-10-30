@@ -833,6 +833,15 @@ impl Subscription {
         let mut batch = closed_before.unwrap_or_default();
         if let Some((root, ledger, accumulated)) = work {
             batch.merge(suppress(&root, &ledger, accumulated));
+            // Merging pre-window roots can cross the cap even when neither
+            // accumulation crossed it at acceptance.
+            if batch.rescans.contains(&RescanScope::Vault) {
+                self.state
+                    .lock()
+                    .expect("watch state poisoned")
+                    .build_authority
+                    .invalidate();
+            }
         }
         Ok(batch)
     }

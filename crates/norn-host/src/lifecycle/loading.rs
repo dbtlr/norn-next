@@ -234,12 +234,16 @@ pub(super) enum Early<R: ReadSource> {
     /// The request's step is not yet published, or no build has begun under a
     /// provisional first attach: the request waits under its deadline.
     Waits,
+    /// A newer concerning fact withdrew this meeting: refuse as still indexing.
+    Withdrawn,
     /// No capability stands for this request: refuse at once.
     Refused,
 }
 
 /// A request fixes its name class and fact requirement at its first building hold.
+/// A replacement construction takes a new meeting against its own pinned model.
 pub(super) struct Meeting {
+    token: BuildToken,
     sequence: u64,
     touch: Option<Arc<norn_store::early::Touch>>,
     held_by_fact: bool,
@@ -253,6 +257,7 @@ pub(crate) struct Admitted<R> {
     authority: BuildAuthority,
     evidence: Arc<crate::evidence::JobEvidence>,
     admitted_at: u64,
+    met_at: u64,
     touch: Option<Arc<norn_store::early::Touch>>,
     vault_wide: bool,
     token: BuildToken,
@@ -264,7 +269,7 @@ pub(crate) struct Admitted<R> {
     /// that admitted it, for the read's lease to keep: the read that queued
     /// the target may end first.
     interest: Option<Arc<()>>,
-    /// Relations were unfinished or a fact this request met still stood.
+    /// Relations were unfinished or any fact was outstanding at admission.
     pub(super) relations_loading: bool,
 }
 
@@ -276,6 +281,7 @@ impl<R> Clone for Admitted<R> {
             authority: self.authority.clone(),
             evidence: self.evidence.clone(),
             admitted_at: self.admitted_at,
+            met_at: self.met_at,
             touch: self.touch.clone(),
             vault_wide: self.vault_wide,
             token: self.token,
@@ -288,10 +294,12 @@ impl<R> Clone for Admitted<R> {
 }
 
 impl<R> Admitted<R> {
+    /// Newer facts refuse rather than extend the meeting's wait. Reports after
+    /// admission also refuse after derivation, since the held snapshot predates them.
     fn facts_current(&self) -> bool {
         self.authority.visit_roots(|_, mut roots| {
-            !Iterator::any(&mut roots, |(root, reported, _, beneath)| {
-                reported > self.admitted_at
+            !Iterator::any(&mut roots, |(root, reported, underived, beneath)| {
+                (reported > self.admitted_at || (reported > self.met_at && underived.is_some()))
                     && (self.vault_wide
                         || self.touch.as_ref().is_none_or(|touch| {
                             root.as_path()
@@ -574,7 +582,14 @@ impl<A: SnapshotSource> EntryState<A> {
             Some(Construction::Building(building))
                 if self.claim.stands_at(building.claim) && building.authority.admits() =>
             {
+                if met
+                    .as_ref()
+                    .is_some_and(|meeting| meeting.token != building.token)
+                {
+                    *met = None;
+                }
                 let meeting = met.get_or_insert_with(|| Meeting {
+                    token: building.token,
                     sequence: building.authority.sequence(),
                     touch: request.pulled_ahead_target(&building.model).map(|target| {
                         Arc::new(norn_store::early::Touch::of(
@@ -591,8 +606,8 @@ impl<A: SnapshotSource> EntryState<A> {
                         let mut held = false;
                         let mut outstanding = false;
                         for (root, _, underived, beneath) in roots {
+                            outstanding |= underived.is_some();
                             if underived.is_some_and(|from| from <= met) {
-                                outstanding = true;
                                 held |= touch.as_ref().is_none_or(|touch| {
                                     root.as_path()
                                         .to_str()
@@ -625,9 +640,10 @@ impl<A: SnapshotSource> EntryState<A> {
                 };
                 let relations_loading =
                     !reaches(Some(published), Boundary::Relations) || outstanding;
-                Early::Admitted(Admitted {
+                let admitted = Admitted {
                     evidence: building.evidence.clone(),
                     admitted_at,
+                    met_at: meeting.sequence,
                     vault_wide: touch.is_none() || !relations_loading,
                     touch: touch.clone(),
                     pool: Arc::clone(&building.pool),
@@ -638,7 +654,11 @@ impl<A: SnapshotSource> EntryState<A> {
                     target,
                     interest,
                     relations_loading,
-                })
+                };
+                if !admitted.facts_current() {
+                    return Early::Withdrawn;
+                }
+                Early::Admitted(admitted)
             }
             _ => Early::Refused,
         }

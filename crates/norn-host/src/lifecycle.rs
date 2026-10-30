@@ -5950,6 +5950,9 @@ impl<O: EntryOps> Host<O> {
                         }
                         (None, true)
                     }
+                    loading::Early::Withdrawn => {
+                        return Err(ReadRefusal::StillIndexing(state.published_demand()));
+                    }
                     loading::Early::Refused => (None, false),
                 },
                 ReadStance::Settle | ReadStance::Serve => (None, false),
