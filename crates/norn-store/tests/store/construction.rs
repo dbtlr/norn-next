@@ -1331,10 +1331,16 @@ fn requeued_documents_page_first_and_death_writes_no_tombstone() {
         .begin_request()
         .apply_increment(
             IncrementProvenance::Derived,
-            [Change::Death {
-                path: path("z.md"),
-                provenance: Provenance::WatcherRemoval,
-            }],
+            [
+                Change::Death {
+                    path: path("z.md"),
+                    provenance: Provenance::WatcherRemoval,
+                },
+                Change::Death {
+                    path: path("a.md"),
+                    provenance: Provenance::WatcherRemoval,
+                },
+            ],
             &[],
             &ContentModel::none(),
         )
@@ -1353,4 +1359,13 @@ fn requeued_documents_page_first_and_death_writes_no_tombstone() {
             .unwrap()
             .is_none()
     );
+    assert!(
+        store
+            .begin_request()
+            .stored_tombstone(&path("a.md"))
+            .unwrap()
+            .is_none()
+    );
+    assert!(store.begin_request().content_page(8).unwrap().is_empty());
+    store.finish_step(Step::Content).unwrap();
 }

@@ -580,8 +580,14 @@ fn a_report_after_admission_refuses_even_after_derivation() {
         }
     })
     .unwrap();
+    // Retirement freezes acceptance history as Ready does, while an established
+    // hold keeps that history. Later backend reports cannot mask this predicate.
+    admitted.authority.retire();
     let taken = subscription.take_build_roots().unwrap();
     admitted.authority.mark_derived(&taken.roots, taken.through);
+    admitted.authority.visit_roots(|_, mut roots| {
+        assert!(Iterator::all(&mut roots, |(_, _, owed, _)| owed.is_none()));
+    });
     assert!(
         !admitted.facts_current(),
         "the held snapshot predates even a derived report"
