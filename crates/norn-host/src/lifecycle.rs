@@ -7732,8 +7732,18 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
             None
         }
         Job::Reconcile(name, epoch) => loop {
+            // The probe reports a reconcile turn only when one will run: a stale
+            // claim or a queued apply ends the job before it takes coverage.
             #[cfg(feature = "induced-failure")]
-            shared.ops.loading_reconcile_boundary();
+            {
+                let live = {
+                    let state = entry.gate.lock().expect("entry gate poisoned");
+                    state.claim.stands_at(epoch) && !state.applies_waiting()
+                };
+                if live {
+                    shared.ops.loading_reconcile_boundary();
+                }
+            }
             let (mut attachment, work, through) = {
                 let mut state = entry.gate.lock().expect("entry gate poisoned");
                 if !state.claim.stands_at(epoch) {

@@ -467,7 +467,7 @@ touches, until its path is derived again:
   the reconcile that precedes `Ready`.
 - **A Get of that document waits** until its path is derived again. Other Gets are
   unaffected. After Relations, an unaffected Get answers with link resolution, link
-  health and findings rendered loading while any fact it met remains outstanding.
+  health and findings rendered loading while any fact is outstanding at its admission.
 - **Every vault-wide capability waits for it** — field Find, the step-3 shapes, link health
   and search — until every requeued path has run again, and from step 5 on until the
   reconcile.
