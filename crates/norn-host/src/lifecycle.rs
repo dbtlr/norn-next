@@ -20528,6 +20528,79 @@ mod tests {
         wait_for_state(&host, &name, TrustState::Ready);
     }
 
+    /// **A construction that begins over a damage verdict publishes warming,
+    /// and over any other untrusted reason leaves it standing.** Only a
+    /// rebuild owed under the store-damaged-rebuilding verdict admits early
+    /// reads by beginning its construction (ADR 0045); another reason stays
+    /// the entry's answer, even beside an owed rebuild.
+    #[cfg(unix)]
+    #[test]
+    fn a_construction_publishes_warming_over_a_damage_verdict_only() {
+        let _watcher_lease = norn_testkit::isolation::Lease::hold(
+            norn_testkit::isolation::REAL_WATCHER,
+            norn_testkit::isolation::acquisition_budget(lifecycle_wait_budget()),
+        );
+        let scratch = temp_base("construction-over-a-damage-verdict");
+        let root = scratch.join("vault");
+        std::fs::create_dir_all(root.join(".norn")).unwrap();
+        std::fs::write(root.join(".norn/schema.yaml"), "version: 1\n").unwrap();
+        norn_fs::watch::settle_prior_changes(scratch.root(), lifecycle_wait_budget().work())
+            .unwrap();
+        let (subscription, _own) =
+            norn_fs::watch::watch(&root, &root.join(".norn/schema.yaml")).unwrap();
+        subscription
+            .synchronize(lifecycle_wait_budget().work())
+            .unwrap();
+
+        let ops = Arc::new(FakeOps::default());
+        ops.block_attach.store(true, Ordering::SeqCst);
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
+        let _lease = host.demand(&name).unwrap();
+        wait_for_flag("attach_started", &ops.attach_started);
+        let entry = host.shared.entries.get(&name).unwrap().clone();
+        let progress = reporter(&entry, entry.gate.lock().unwrap().claim.epoch());
+        let begin = || {
+            progress
+                .begin_construction(Some(loading::Begun {
+                    pool: FakeReader {
+                        ledger: Arc::clone(&ops.readers),
+                        free: Mutex::new(true),
+                        returned: Condvar::new(),
+                    },
+                    model: Arc::new(ContentModel::none()),
+                    authority: subscription.capture_build_authority().unwrap(),
+                    store_epoch: "fake-epoch".into(),
+                }))
+                .expect("the claim begins its construction")
+        };
+
+        let lost = TrustState::untrusted(UntrustedReason::environmental_refusal("refused"));
+        {
+            let mut state = entry.gate.lock().unwrap();
+            state.trust = lost.clone();
+            state.rebuild_required = true;
+        }
+        begin();
+        assert_eq!(entry.gate.lock().unwrap().trust, lost);
+
+        entry.gate.lock().unwrap().trust =
+            TrustState::untrusted(UntrustedReason::store_damaged_rebuilding("damaged"));
+        begin();
+        {
+            let mut state = entry.gate.lock().unwrap();
+            assert!(
+                matches!(state.trust, TrustState::Warming { .. }),
+                "{:?}",
+                state.trust
+            );
+            assert!(state.rebuild_required, "the rebuild stays owed");
+            state.rebuild_required = false;
+        }
+        ops.attach_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &name, TrustState::Ready);
+    }
+
     /// **A Get admitted through its pulled-ahead target holds that target
     /// itself.** The read that queued the target lets its interest go while
     /// this read waits outside the gate for the pool's connection; the target
