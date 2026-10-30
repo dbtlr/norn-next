@@ -4745,11 +4745,16 @@ impl<'s> Pending<'s> {
     }
 
     /// Keep a respelling's death and replacement together even at a chunk bound.
+    ///
+    /// It settles the content step's queue first, so the death and the change
+    /// its caller queues next for `path` both land after what that step
+    /// already filed — a refused spelling's finding the same walk met earlier.
     fn retire_respelling(
         &mut self,
         path: &DocumentPath,
         standing: Option<&DocumentPath>,
     ) -> Result<(), JobFailure> {
+        self.settle_content()?;
         if let Some(old) = standing.filter(|old| *old != path) {
             if self.changes.len() + 2 > self.bound {
                 self.flush()?;
