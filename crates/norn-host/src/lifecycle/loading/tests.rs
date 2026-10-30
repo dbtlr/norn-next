@@ -456,14 +456,23 @@ fn a_replacement_construction_takes_a_fresh_meeting() {
         ));
         assert!(meeting.as_ref().unwrap().sequence > 0);
     }
-    begin(&progress, &subscription, &store, &budget);
+    let first = meeting.as_ref().unwrap().token;
+    let replacement = begin(&progress, &subscription, &store, &budget);
     {
         let state = entry.gate.lock().unwrap();
         assert!(matches!(
             state.early(Request::Find(&params), &mut meeting),
             Early::Waits
         ));
-        assert_eq!(meeting.as_ref().unwrap().sequence, 0);
+        let Some(Construction::Building(building)) = &state.construction else {
+            panic!("the replacement construction stands");
+        };
+        // Late reports of the earlier write may reach the new authority, so the
+        // fresh meeting is judged against that authority, never against zero.
+        let meeting = meeting.as_ref().unwrap();
+        assert_ne!(meeting.token, first);
+        assert_eq!(meeting.token, replacement);
+        assert_eq!(meeting.sequence, building.authority.sequence());
     }
     subscription.finish_heal().unwrap();
 }
