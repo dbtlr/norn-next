@@ -3272,6 +3272,7 @@ fn a_requeued_edit_answers_its_new_bytes_before_ready() {
 #[test]
 fn name_changes_land_before_ready_and_step_four_facts_wait_for_reconcile() {
     let fixture = Fixture::new("requeue-names");
+    fixture.add("fallback/created.md", "# Fallback\n");
     let probe = Probe::new([
         LoadingBoundary::StepComplete(Step::Content),
         LoadingBoundary::StepComplete(Step::Structure),
@@ -3300,10 +3301,22 @@ fn name_changes_land_before_ready_and_step_four_facts_wait_for_reconcile() {
     .unwrap();
     probe.release();
     probe.wait(LoadingBoundary::StepComplete(Step::Structure));
-    assert!(host.get(&get("/created")).is_ok());
-    assert!(host.get(&get("/renamed")).is_ok());
-    assert!(host.get(&get("/doc01")).is_err());
-    assert!(host.get(&get("/doc02")).is_err());
+    let created = host.get(&get("created")).unwrap();
+    let norn_wire::GetReport::Record { document, .. } = created.answer.report else {
+        panic!("a document Get returns a record");
+    };
+    assert_eq!(
+        document.path.as_str(),
+        "created.md",
+        "the new exact candidate wins"
+    );
+    assert!(host.get(&get("renamed")).is_ok());
+    for target in ["doc01", "doc02"] {
+        assert_eq!(
+            host.get(&get(target)).unwrap_err().code(),
+            &ReasonCode::VaultUnknownTarget
+        );
+    }
     let requeued = account.read().requeued_roots;
     let reports = account.read().build_facts_recorded;
     fixture.add("later.md", "# Later\n");
@@ -3313,6 +3326,18 @@ fn name_changes_land_before_ready_and_step_four_facts_wait_for_reconcile() {
     assert_eq!(account.read().requeued_roots, requeued);
     probe.release();
     ready(&host);
+    wait_until("untaken fact derived by reconcile", BUDGET, || {
+        let spent = account.read();
+        if spent.documents_derived > spent.documents_read_by_build {
+            Observed::Met(())
+        } else {
+            Observed::pending("reconcile evidence not published")
+        }
+    })
+    .unwrap();
+    let spent = account.read();
+    assert_eq!(spent.requeued_documents, 2);
+    assert_eq!(spent.documents_derived, spent.documents_read_by_build + 1);
     drop(host);
     project(&fixture.store_path(), &fixture.root).assert_equivalent(
         &from_scratch(&fixture, "reference"),
