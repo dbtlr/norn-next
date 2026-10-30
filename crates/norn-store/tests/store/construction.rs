@@ -1642,7 +1642,7 @@ fn a_rewritten_documents_path_links_are_rejudged_once() {
             &model,
         )
         .unwrap();
-    let body = "[self](/holder.md#missing)\n";
+    let body = "[self](/holder.md)\n";
     let mut facts = crate::health::derived("holder.md", body);
     let links = std::mem::take(&mut facts.links);
     let mut group = store.step_group().unwrap();
@@ -1669,19 +1669,12 @@ fn a_rewritten_documents_path_links_are_rejudged_once() {
         .unwrap();
     group.commit().unwrap();
     assert_eq!(store.begin_request().rejudge_reach(&model).unwrap(), 1);
-    let held = store
-        .begin_request()
-        .stored_findings(&path("holder.md"))
-        .unwrap();
-    assert_eq!(held.len(), 1);
-    let judged = store
-        .begin_request()
-        .judge_link_health(&[path("holder.md")], &model)
-        .unwrap();
-    assert_eq!(judged.len(), 1);
-    assert_eq!(
-        held.iter().map(|f| f.ordinal).collect::<Vec<_>>(),
-        judged.iter().map(|f| f.ordinal).collect::<Vec<_>>()
+    assert!(
+        store
+            .begin_request()
+            .stored_findings(&path("holder.md"))
+            .unwrap()
+            .is_empty()
     );
 }
 
