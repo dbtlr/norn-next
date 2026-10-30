@@ -7452,6 +7452,8 @@ fn a_requeued_edit_costs_the_same_at_both_scales() {
     use std::sync::{Arc, Mutex};
     struct Edit {
         path: std::path::PathBuf,
+        boundary: norn_host::LoadingBoundary,
+        edited: std::sync::atomic::AtomicBool,
         account: Mutex<Option<Arc<norn_host::JobEvidence>>>,
         statements: Mutex<usize>,
         read_steps: Mutex<(u64, u64)>,
@@ -7459,7 +7461,10 @@ fn a_requeued_edit_costs_the_same_at_both_scales() {
     impl norn_host::LoadingProbe for Edit {
         fn at(&self, boundary: norn_host::LoadingBoundary) {
             match boundary {
-                norn_host::LoadingBoundary::StepComplete(norn_store::Step::Content) => {
+                point
+                    if point == self.boundary
+                        && !self.edited.swap(true, std::sync::atomic::Ordering::SeqCst) =>
+                {
                     let account = self.account.lock().unwrap().clone().unwrap();
                     let before = account.read().build_facts_recorded;
                     std::fs::write(&self.path, "# Changed\n").unwrap();
@@ -7492,17 +7497,27 @@ fn a_requeued_edit_costs_the_same_at_both_scales() {
             }
         }
     }
-    let measure = |documents| {
+    let measure = |documents, boundary| {
         let scratch = norn_testkit::scratch::Scratch::new("requeue-scale");
         let root = scratch.join("vault");
         std::fs::create_dir_all(root.join(".norn")).unwrap();
         std::fs::write(root.join(".norn/schema.yaml"), "version: 1\n").unwrap();
         for n in 0..documents {
-            std::fs::write(root.join(format!("doc{n:05}.md")), "# Original\n").unwrap();
+            std::fs::write(
+                root.join(format!("doc{n:05}.md")),
+                if n == 1 {
+                    "[[doc00000#Original]]\n"
+                } else {
+                    "# Original\n[[missing]]\n"
+                },
+            )
+            .unwrap();
         }
         norn_fs::watch::settle_prior_changes(scratch.root(), Duration::from_secs(10)).unwrap();
         let probe = Arc::new(Edit {
             path: root.join("doc00000.md"),
+            boundary,
+            edited: std::sync::atomic::AtomicBool::new(false),
             account: Mutex::new(None),
             statements: Mutex::new(0),
             read_steps: Mutex::new((0, 0)),
@@ -7559,12 +7574,19 @@ fn a_requeued_edit_costs_the_same_at_both_scales() {
             read_steps,
         )
     };
-    let small = measure(2_000);
-    let large = measure(10_000);
-    eprintln!("requeue work at 2k: {small:?}; at 10k: {large:?}");
-    assert_eq!(small, large);
-    assert!(
-        small.3 > 128,
-        "a requeue must include increment reads, not only queue paging: {small:?}"
-    );
+    for boundary in [
+        norn_host::LoadingBoundary::StepComplete(norn_store::Step::Content),
+        norn_host::LoadingBoundary::LinkHealthChunk,
+    ] {
+        let small = measure(2_000, boundary);
+        let large = measure(10_000, boundary);
+        eprintln!(
+            "requeue {boundary:?}: 2k={small:?}, 10k={large:?} (documents, commits, statements, read steps)"
+        );
+        assert_eq!(small, large);
+        assert!(
+            small.3 > 128,
+            "a requeue must include increment reads, not only queue paging: {small:?}"
+        );
+    }
 }

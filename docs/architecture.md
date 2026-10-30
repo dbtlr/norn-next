@@ -2431,8 +2431,8 @@ ordinary refusal. A construction begun under the gate replaces any earlier one, 
 its pool and waking its waiters; no authority is reused.
 
 The build publishes each step as it ends: names, content and structure after the step's
-last group commits and its deferred indexes are built, relations after the one link-health
-judgment, and full text after the closing transaction. Publication binds the claim, the
+last group commits and its deferred indexes are built, relations after the complete link-health
+judgment and re-judgment of every requeued reach, and full text after the closing transaction. Publication binds the claim, the
 build, the store epoch and an admitting authority under the entry gate, and a changed
 claim or build, withdrawn authority, park, out-of-service entry, release or known damage
 publishes nothing. It never publishes `Ready` or trust unbroken since `Ready`. `Ready`
@@ -2490,15 +2490,21 @@ are leaf roots; every other kind includes descendants, persistently for that roo
 Each request fixes its fact sequence and target class when it first meets a construction.
 Replacing that construction discards the meeting and compiles a new target class against
 the replacement model. A touched Get and every vault-wide capability wait for outstanding roots through that
-sequence. During Names, Content and Structure, the build takes roots from its own
+sequence. During Names, Content, Structure and Relations, the build takes roots from its own
 open heal window ahead of the ordinary queue. The scoped walk resets touched names;
 the same content and structure routines run them through the current step.
 A taken root beneath a directory marked unlistable derives nothing, as a from-zero
 build never lists there; a root at the directory itself lists it again.
 Each step drains until no roots remain before it ends. Committed derivation
 satisfies the taken sequence and clears touched targets' ready flags, waking
-waiters to resolve candidates again. Facts accepted during or after Relations
-remain for the pre-`Ready` reconcile, which receives only untaken facts. An untouched Get keeps answering, including after
+waiters to resolve candidates again. During Relations, link health stays deferred
+while accepted roots run through the same names, content and structure routines.
+Before publishing each requeue, the store re-judges the changed classes and path
+keys, the rewritten documents' outgoing links, and directory ranges whose marks
+were filed or ended. Writers retain this reach across chunk commits, including
+content and structure findings and relisted directories. The build repeats until
+no roots remain, ends deferral, then publishes Relations. This costs the requeued
+reach rather than the vault. Facts accepted from FullText on remain for the pre-`Ready` reconcile, which receives only untaken facts. An untouched Get keeps answering, including after
 Relations, with link resolution, health and findings rendered loading while any fact
 is outstanding at admission. A fully published construction retains its authority
 across the claim handoff into pre-`Ready` reconcile, closing at `Ready` or the reconcile's end.
