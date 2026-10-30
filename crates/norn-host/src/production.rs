@@ -12705,6 +12705,77 @@ mod tests {
         }
     }
 
+    /// **A requeue keeps a refused spelling's finding at the place it shares
+    /// with a quarantined document.** The vault holds a marker-named document
+    /// whose bytes do not decode and a refused spelling that renders onto that
+    /// same place. A fact at either spelling or at another document, taken in
+    /// any step up to and including Relations, runs its path through again;
+    /// the place still holds both causes and the build equals a from-scratch
+    /// derivation.
+    #[cfg(all(unix, feature = "induced-failure"))]
+    #[test]
+    fn a_requeue_keeps_a_refused_spellings_finding_at_a_collided_place() {
+        use norn_store::Step;
+        let mut divergent = Vec::new();
+        for at in [
+            crate::LoadingBoundary::CanonicalPage,
+            crate::LoadingBoundary::StepComplete(Step::Names),
+            crate::LoadingBoundary::StepComplete(Step::Content),
+            crate::LoadingBoundary::StepComplete(Step::Structure),
+            crate::LoadingBoundary::LinkHealthChunk,
+        ] {
+            for (file, touch) in [
+                ("bad\\name.md", Touch::File),
+                ("bad\u{fffd}name.md", Touch::File),
+                ("other\u{fffd}doc.md", Touch::File),
+            ] {
+                let f = Fixture::new("collision-requeued");
+                fs::write(f.vault().join("bad\u{fffd}name.md"), UNDECODABLE).unwrap();
+                fs::write(f.vault().join("other\u{fffd}doc.md"), "a real document").unwrap();
+                // A link, so link health judges a chunk the fact can land in.
+                fs::write(f.vault().join("links.md"), "[x](missing.md)\n").unwrap();
+                if !write_or_report(&f.vault().join("bad\\name.md"), b"body") {
+                    return;
+                }
+                norn_fs::watch::settle_prior_changes(f.root.root(), lifecycle_budget().work())
+                    .unwrap();
+                let (ops, name) = f.ops(2);
+                let probe = FactAt {
+                    at,
+                    file: f.vault().join(file),
+                    touch,
+                    fired: Default::default(),
+                    account: ops.account(),
+                };
+                let ops = ops.with_loading_probe(Arc::new(probe));
+                let case = format!("{touch:?} fact for {file:?} at {at:?}");
+                let mut attachment = ops
+                    .attach(&f.registration(), &ProgressReporter::disconnected())
+                    .unwrap();
+                assert!(
+                    ops.evidence.read().requeued_roots >= 1,
+                    "{case}: the build takes the fact"
+                );
+                let mut scratch = scratch_store(
+                    &f,
+                    "collision-requeued-oracle",
+                    ProductionPolicy::new(2, 2).unwrap(),
+                );
+                let place = sorted_kinds(&mut attachment.store, "bad\u{fffd}name.md");
+                let oracle = sorted_kinds(&mut scratch, "bad\u{fffd}name.md");
+                if place != oracle
+                    || derived_vault(&mut attachment.store, &f.vault())
+                        != derived_vault(&mut scratch, &f.vault())
+                    || finding_total(&mut attachment.store) != finding_total(&mut scratch)
+                {
+                    divergent.push(format!("{case}: {place:?} against {oracle:?}"));
+                }
+                ops.detach(&name, attachment);
+            }
+        }
+        assert!(divergent.is_empty(), "{divergent:#?}");
+    }
+
     /// **The path the deletion itself names is a scope too.** A watcher reports
     /// the path an event happened at, and a document that left is a path the
     /// filesystem answers is not there — an answer about that path and
