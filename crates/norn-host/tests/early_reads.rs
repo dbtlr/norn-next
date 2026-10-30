@@ -1727,6 +1727,72 @@ fn a_rebuild_under_a_damage_verdict_serves_early_reads_once_its_construction_beg
     );
 }
 
+/// Contract items 8 and 20: damage an early read meets on a damage rebuild's
+/// own construction is handed to another rebuild, as on a first build, so the
+/// first `Ready` is never published over the store the read found damaged.
+#[test]
+fn early_damage_during_a_damage_rebuild_takes_another_rebuild() {
+    let fixture = Fixture::new("early-damage-during-rebuild");
+    let probe = Probe::new([]);
+    let ops = fixture.ops(probe.clone());
+    let account = ops.account();
+    let host = fixture.host_over(ops, norn_host::READ_SETTLE_BOUND);
+    let _demand = host.demand(&name()).unwrap();
+    ready(&host);
+    {
+        let mut state = probe.state.lock().unwrap();
+        state.seen.clear();
+        state.next = [LoadingBoundary::Published(Step::FullTextComplete)]
+            .into_iter()
+            .collect();
+    }
+    damage_every_table(&fixture.store_path());
+    std::thread::scope(|_| {
+        let _release = Release(&probe);
+        wait_until(
+            "a read meets the damage and the rebuild begins",
+            BUDGET,
+            || {
+                let _ = host.count(&CountParams::new(address()));
+                if probe.state.lock().unwrap().current.is_some() {
+                    Observed::Met(())
+                } else {
+                    Observed::pending("no rebuild yet")
+                }
+            },
+        )
+        .unwrap();
+        probe.wait(LoadingBoundary::Published(Step::FullTextComplete));
+        assert!(warming(&host.state(&name()).unwrap()));
+        // The rebuild's closing transaction has run: the build writes and
+        // reads no more of the store, so the early read alone meets this.
+        damage_every_table(&fixture.store_path());
+        let refused = host.find(&ranked("2")).unwrap_err();
+        assert_eq!(
+            refused.code(),
+            &ReasonCode::HostEntryNotReady,
+            "{refused:?}"
+        );
+        probe.release();
+    });
+    ready(&host);
+    assert_eq!(
+        account.read().from_zero_builds,
+        3,
+        "the first Ready after the rebuild is a third build's"
+    );
+    assert_eq!(
+        host.find(&ranked("2"))
+            .unwrap()
+            .answer
+            .report
+            .page
+            .rows
+            .len(),
+        1
+    );
+}
+
 /// Contract item 20: an early read's environmental failure is not damage.
 #[test]
 fn an_early_environmental_failure_is_not_damage() {
