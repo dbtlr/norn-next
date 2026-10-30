@@ -17,7 +17,7 @@ use crate::error::StoreError;
 use crate::find::path_list;
 use crate::health::LinkSelection;
 use crate::json::{FrontmatterValue, canonical_json};
-use crate::path::{ClassKey, PathKey, SuffixKey};
+use crate::path::{ClassKey, DocumentPath, PathKey, SuffixKey};
 use crate::resolve;
 
 /// Which arm of [`heads_sql`] and [`totals_sql`] a row came from: a suffix
@@ -35,6 +35,8 @@ pub(crate) enum Selected {
     /// By the documents holding them: an equality seek of `documents_path`
     /// per path, then of `links_document_ordinal` per document. Read whole.
     Documents,
+    /// One holding document, paged by link ordinal without the deferred change-feed index.
+    Document,
     /// By the write that stamped their documents: a seek of
     /// `documents_change_feed` at one generation, in path order, then of
     /// `links_document_ordinal` per document. Read a page at a time.
@@ -166,6 +168,12 @@ pub(crate) fn links_sql(key: SuffixKey, selected: Selected) -> String {
                    AND lw.ordinal > CASE WHEN dw.path = ?2 THEN ?3 ELSE -1 END
                  ORDER BY dw.path, lw.ordinal LIMIT ?5"
             .to_string(),
+        Selected::Document => "SELECT lw.id AS link, dw.path AS after_text,
+                        lw.ordinal AS after_first, 0 AS after_second
+                 FROM documents AS dw CROSS JOIN links AS lw
+                 WHERE dw.path = ?1 AND lw.document = dw.id AND lw.ordinal > ?3
+                 ORDER BY lw.ordinal LIMIT ?5"
+            .to_string(),
         Selected::Written => "SELECT lw.id AS link, dw.path AS after_text,
                         lw.ordinal AS after_first, 0 AS after_second
                  FROM documents AS dw CROSS JOIN links AS lw
@@ -259,6 +267,11 @@ pub(crate) fn judged_discard_parameters(
 /// and its bound.
 pub(crate) fn written_parameters(generation: i64, after: &After, limit: usize) -> Vec<Value> {
     paged(Value::Integer(generation), after, limit)
+}
+
+/// One document's links after the last judged ordinal.
+pub(crate) fn document_parameters(path: &DocumentPath, after: &After, limit: usize) -> Vec<Value> {
+    paged(Value::Text(path.as_str().to_owned()), after, limit)
 }
 
 /// The values [`links_sql`] binds over one page of a class: its upper bound,

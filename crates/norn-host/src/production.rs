@@ -4687,7 +4687,7 @@ fn rows_the_changeset_leaves(changes: &[Change]) -> BTreeMap<&DocumentPath, bool
 /// discard clears the finding with no second mechanism.
 struct Pending<'s> {
     /// Construction walks write names only, including requeues during Content
-    /// and Structure. Only the initial Names step defers refused spellings.
+    /// through Relations. Only the initial Names step defers refused spellings.
     names: bool,
     content: Vec<norn_store::ContentWrite>,
     misses: norn_wire::WatcherMisses,
@@ -4759,7 +4759,12 @@ impl<'s> Pending<'s> {
         let declared = Declaration::read(store)?;
         let names = matches!(
             store.construction_step(),
-            Some(norn_store::Step::Names | norn_store::Step::Content | norn_store::Step::Structure)
+            Some(
+                norn_store::Step::Names
+                    | norn_store::Step::Content
+                    | norn_store::Step::Structure
+                    | norn_store::Step::Relations
+            )
         );
         let bound = if names {
             bound.saturating_mul(16).min(2048)
@@ -5127,6 +5132,37 @@ impl<'s> Pending<'s> {
                 .map_err(store_effect)?;
             return Ok(());
         }
+        self.file_spellings(spellings)
+    }
+
+    /// Re-file the spellings at a place a construction reset emptied, which
+    /// content then left without a row. The reset ended every finding there,
+    /// so unlike [`Pending::read_place`] there is nothing to discard, and no
+    /// discard opens inside the build's step group.
+    fn refile_reset_place(
+        &mut self,
+        vault: &norn_fs::Vault,
+        place: &DocumentPath,
+    ) -> Result<(), JobFailure> {
+        if !self.account.places.first_reading(place) {
+            return Ok(());
+        }
+        match self.account.places.spellings(vault, place)? {
+            Some(spellings) => self.file_spellings(spellings),
+            None => Ok(()),
+        }
+    }
+
+    fn file_spellings(&mut self, mut spellings: Vec<places::Spelling>) -> Result<(), JobFailure> {
+        // A listing yields names in no particular order; a from-scratch build
+        // files a place's spellings in byte order, and the findings read back
+        // in the order they were filed.
+        spellings.sort_by(|a, b| {
+            a.path
+                .as_os_str()
+                .as_encoded_bytes()
+                .cmp(b.path.as_os_str().as_encoded_bytes())
+        });
         // A place can hold more spellings than one flush may, and a flush keeps
         // what this scope has replaced, so the rest of them append.
         for spelling in spellings {
@@ -12698,6 +12734,87 @@ mod tests {
                 ops.detach(&name, attachment);
             }
         }
+    }
+
+    /// **A requeue keeps a refused spelling's finding at the place it shares
+    /// with a quarantined document.** The vault holds a marker-named document
+    /// whose bytes do not decode and a refused spelling that renders onto that
+    /// same place. A fact at either spelling or at another document, taken in
+    /// any step up to and including Relations, runs its path through again;
+    /// the place still holds both causes and the build equals a from-scratch
+    /// derivation.
+    #[cfg(all(unix, feature = "induced-failure"))]
+    #[test]
+    fn a_requeue_keeps_a_refused_spellings_finding_at_a_collided_place() {
+        use norn_store::Step;
+        let mut divergent = Vec::new();
+        for at in [
+            crate::LoadingBoundary::CanonicalPage,
+            crate::LoadingBoundary::StepComplete(Step::Names),
+            crate::LoadingBoundary::StepComplete(Step::Content),
+            crate::LoadingBoundary::StepComplete(Step::Structure),
+            crate::LoadingBoundary::LinkHealthChunk,
+        ] {
+            for (file, touch) in [
+                ("bad\\name.md", Touch::File),
+                ("bad\u{fffd}name.md", Touch::File),
+                ("other\u{fffd}doc.md", Touch::File),
+            ] {
+                let f = Fixture::new("collision-requeued");
+                fs::write(f.vault().join("bad\u{fffd}name.md"), UNDECODABLE).unwrap();
+                fs::write(f.vault().join("other\u{fffd}doc.md"), "a real document").unwrap();
+                // A link, so link health judges a chunk the fact can land in.
+                fs::write(f.vault().join("links.md"), "[x](missing.md)\n").unwrap();
+                if !write_or_report(&f.vault().join("bad\\name.md"), b"body") {
+                    return;
+                }
+                // Two more spellings of the same place, so the order the place's
+                // findings are filed in is compared too: a from-scratch build
+                // files them in byte order, whatever order a listing yields.
+                for spelling in [&b"bad\x01name.md"[..], &b"bad\xffname.md"[..]] {
+                    use std::os::unix::ffi::OsStrExt;
+                    let path = f.vault().join(std::ffi::OsStr::from_bytes(spelling));
+                    if !write_or_report(&path, b"body") {
+                        return;
+                    }
+                }
+                norn_fs::watch::settle_prior_changes(f.root.root(), lifecycle_budget().work())
+                    .unwrap();
+                let (ops, name) = f.ops(2);
+                let probe = FactAt {
+                    at,
+                    file: f.vault().join(file),
+                    touch,
+                    fired: Default::default(),
+                    account: ops.account(),
+                };
+                let ops = ops.with_loading_probe(Arc::new(probe));
+                let case = format!("{touch:?} fact for {file:?} at {at:?}");
+                let mut attachment = ops
+                    .attach(&f.registration(), &ProgressReporter::disconnected())
+                    .unwrap();
+                assert!(
+                    ops.evidence.read().requeued_roots >= 1,
+                    "{case}: the build takes the fact"
+                );
+                let mut scratch = scratch_store(
+                    &f,
+                    "collision-requeued-oracle",
+                    ProductionPolicy::new(2, 2).unwrap(),
+                );
+                let place = sorted_kinds(&mut attachment.store, "bad\u{fffd}name.md");
+                let oracle = sorted_kinds(&mut scratch, "bad\u{fffd}name.md");
+                if place != oracle
+                    || derived_vault(&mut attachment.store, &f.vault())
+                        != derived_vault(&mut scratch, &f.vault())
+                    || finding_total(&mut attachment.store) != finding_total(&mut scratch)
+                {
+                    divergent.push(format!("{case}: {place:?} against {oracle:?}"));
+                }
+                ops.detach(&name, attachment);
+            }
+        }
+        assert!(divergent.is_empty(), "{divergent:#?}");
     }
 
     /// **The path the deletion itself names is a scope too.** A watcher reports

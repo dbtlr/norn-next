@@ -409,6 +409,7 @@ struct Pages<'a> {
 /// What a paged selection selects by.
 enum PagedBy<'a> {
     Written(i64),
+    Document(&'a DocumentPath),
     Every,
     Class(&'a ClassKey),
     Path(&'a PathKey),
@@ -454,6 +455,15 @@ impl<'a> Pages<'a> {
         }
     }
 
+    /// A touched document's outgoing links, using only its path and ordinal indexes.
+    fn document(path: &'a DocumentPath) -> Self {
+        Self {
+            selected: Selected::Document,
+            by: PagedBy::Document(path),
+            after: Some(After::written_start()),
+        }
+    }
+
     /// Every stored link, once, in binary path and ordinal order.
     fn every() -> Self {
         Pages {
@@ -487,6 +497,9 @@ impl<'a> Pages<'a> {
             return Ok(None);
         };
         let values = match self.by {
+            PagedBy::Document(path) => {
+                statement::document_parameters(path, &after, LINK_HEALTH_CHUNK)
+            }
             PagedBy::Every => statement::every_parameters(&after, LINK_HEALTH_CHUNK),
             PagedBy::Written(generation) => {
                 statement::written_parameters(generation, &after, LINK_HEALTH_CHUNK)
@@ -671,12 +684,41 @@ pub(crate) fn redecide(
     paths: &BTreeSet<PathKey>,
     directories: &BTreeSet<DirectoryPrefix>,
 ) -> Result<Redecided, StoreError> {
+    redecide_reach(
+        transaction,
+        work,
+        ignore,
+        generation,
+        classes,
+        paths,
+        directories,
+        None,
+    )
+}
+
+/// Re-decide a construction requeue, including outgoing links across all its commits.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn redecide_reach(
+    transaction: &Transaction<'_>,
+    work: &ReadWork,
+    ignore: &AmbiguityIgnore,
+    generation: Option<i64>,
+    classes: &BTreeSet<ClassKey>,
+    paths: &BTreeSet<PathKey>,
+    directories: &BTreeSet<DirectoryPrefix>,
+    documents: Option<&BTreeSet<DocumentPath>>,
+) -> Result<Redecided, StoreError> {
     let key = SuffixKey::Comparison;
     let writer = OnWriter {
         connection: transaction,
         work,
     };
     let stamp = generation.unwrap_or(-1);
+    let rewritten: BTreeSet<_> = documents
+        .into_iter()
+        .flatten()
+        .map(DocumentPath::as_str)
+        .collect();
     let mut range_discarded = 0;
     for prefix in directories {
         let (lower, upper) = statement::directory_bounds(prefix);
@@ -712,7 +754,14 @@ pub(crate) fn redecide(
         Ok(())
     };
 
-    if let Some(generation) = generation {
+    if let Some(documents) = documents {
+        for document in documents {
+            let mut pages = Pages::document(document);
+            while let Some(links) = pages.next(&writer, key)? {
+                file(links, &mut summaries)?;
+            }
+        }
+    } else if let Some(generation) = generation {
         let mut written = Pages::written(generation);
         while let Some(links) = written.next(&writer, key)? {
             file(links, &mut summaries)?;
@@ -776,6 +825,7 @@ pub(crate) fn redecide(
             while let Some(mut links) = pages.next(&writer, key)? {
                 links.retain(|held| {
                     held.generation != stamp
+                        && !rewritten.contains(held.holder.as_str())
                         && !held.keys.iter().any(|(text, segments, _)| {
                             segments.is_some()
                                 && class_of(text).is_some_and(|other| {
@@ -795,6 +845,7 @@ pub(crate) fn redecide(
             while let Some(mut links) = pages.next(&writer, key)? {
                 links.retain(|held| {
                     held.generation != stamp
+                        && !rewritten.contains(held.holder.as_str())
                         && !held.keys.iter().any(|(text, segments, _)| {
                             segments.is_none()
                                 && text.as_str() < path.as_str()
@@ -810,6 +861,7 @@ pub(crate) fn redecide(
         while let Some(mut links) = pages.next(&writer, key)? {
             links.retain(|held| {
                 held.generation != stamp
+                    && !rewritten.contains(held.holder.as_str())
                     && !reached_by_a_class(held, classes)
                     && !held.keys.iter().any(|(text, segments, _)| {
                         segments.is_none()

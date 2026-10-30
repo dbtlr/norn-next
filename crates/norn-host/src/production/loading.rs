@@ -322,13 +322,31 @@ impl ProductionEntryOps {
         )?;
         let declared = Declaration::read(&mut attachment.store)?;
         let mut request = attachment.store.begin_request();
-        let result = request.judge_link_health_once(declared.model.content_model(), &mut || {
-            #[cfg(feature = "induced-failure")]
-            self.loading_boundary(LoadingBoundary::LinkHealthChunk);
-        });
+        let result =
+            request.judge_link_health_deferred(declared.model.content_model(), &mut || {
+                #[cfg(feature = "induced-failure")]
+                self.loading_boundary(LoadingBoundary::LinkHealthChunk);
+            });
         let steps = request.read_steps();
         crate::evidence::count_increment_work(&request.finish(), steps);
         result.map_err(store_effect)?;
+        // The document steps' job ends have run, so nothing prunes against this
+        // account; only the links the requeue skipped are carried on.
+        let mut relations = Account::default();
+        steps::requeue(
+            self,
+            &mut attachment.store,
+            &attachment.covered_root,
+            &exclusions,
+            &healing,
+            publisher,
+            attachment.subscription.as_ref(),
+            false,
+            &mut relations,
+        )?;
+        let order = attachment.store.path_order();
+        attachment.skipped_links.merge(relations.links, order);
+        attachment.store.begin_request().end_link_health_deferral();
         publisher.publish(Step::Relations);
         loop {
             let mut request = attachment.store.begin_request();

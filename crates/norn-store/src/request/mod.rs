@@ -426,6 +426,17 @@ impl<'a> Request<'a> {
         declared: &ContentModel,
         checkpoint: &mut impl FnMut(),
     ) -> Result<(), StoreError> {
+        self.judge_link_health_deferred(declared, checkpoint)?;
+        self.end_link_health_deferral();
+        Ok(())
+    }
+
+    /// Judge every link, leaving deferral on for construction's requeued reach.
+    pub fn judge_link_health_deferred(
+        &mut self,
+        declared: &ContentModel,
+        checkpoint: &mut impl FnMut(),
+    ) -> Result<(), StoreError> {
         let pinned: Option<String> =
             norn_db::meta::get_meta(self.store.connection(), ddl::meta::VAULT_SCHEMA_FINGERPRINT)?;
         increment::refuse_a_declaration_the_store_does_not_pin(declared, pinned.as_deref())?;
@@ -436,8 +447,58 @@ impl<'a> Request<'a> {
             &mut self.counters,
             checkpoint,
         )?;
-        self.store.link_health_deferred = false;
         Ok(())
+    }
+
+    /// End deferral after every requeued reach has been judged.
+    pub fn end_link_health_deferral(&mut self) {
+        self.store.link_health_deferred = false;
+    }
+
+    /// Judge only paths written or killed during Relations and directory marks
+    /// filed or ended there. The writers retain this reach across chunk commits.
+    pub fn rejudge_reach(&mut self, declared: &ContentModel) -> Result<u64, StoreError> {
+        if self.store.construction_step() != Some(crate::Step::Relations)
+            || !self.store.link_health_deferred
+        {
+            return Err(StoreError::Lifecycle {
+                operation: "rejudging construction reach",
+                path: self.store.path().to_path_buf(),
+                message: "Relations with deferred link health required".into(),
+            });
+        }
+        let pinned: Option<String> =
+            norn_db::meta::get_meta(self.store.connection(), ddl::meta::VAULT_SCHEMA_FINGERPRINT)?;
+        increment::refuse_a_declaration_the_store_does_not_pin(declared, pinned.as_deref())?;
+        let reach = self
+            .store
+            .steps
+            .as_mut()
+            .map(|s| std::mem::take(&mut s.reach))
+            .unwrap_or_default();
+        let transaction = self
+            .store
+            .database
+            .immediate_transaction("rejudging construction reach")?;
+        let stamp = norn_db::meta::next_generation(&transaction)?;
+        let result = health::redecide_reach(
+            &transaction,
+            &self.read_work,
+            declared.ambiguity_ignore(),
+            Some(stamp),
+            &reach.classes,
+            &reach.paths,
+            &reach.directories,
+            Some(&reach.documents),
+        )?;
+        transaction
+            .commit()
+            .map_err(|e| error::sql("committing construction rejudgment", e))?;
+        if let Some(steps) = self.store.steps.as_mut() {
+            steps.increment_commits += 1;
+        }
+        count_redecision(&mut self.counters, &result);
+        Ok(result.links)
     }
 
     /// Index one committed batch of at most 2,048 documents by id, including
@@ -506,6 +567,11 @@ impl<'a> Request<'a> {
         transaction
             .commit()
             .map_err(|error| error::sql("committing a finding", error))?;
+        if let Some(steps) = self.store.steps.as_mut()
+            && steps.step == crate::Step::Relations
+        {
+            steps.reach.directories.extend(directories);
+        }
         self.counters.add(Counter::FindingsWritten, 1);
         count_redecision(&mut self.counters, &redecided);
         Ok(())
@@ -570,6 +636,11 @@ impl<'a> Request<'a> {
         transaction
             .commit()
             .map_err(|error| error::sql("committing findings discard", error))?;
+        if let Some(steps) = self.store.steps.as_mut()
+            && steps.step == crate::Step::Relations
+        {
+            steps.reach.directories.extend(directories);
+        }
         self.counters.add(Counter::FindingsDiscarded, discarded);
         count_redecision(&mut self.counters, &redecided);
         Ok(Invalidation {
@@ -660,6 +731,11 @@ impl<'a> Request<'a> {
         transaction
             .commit()
             .map_err(|error| error::sql("committing a schema pin", error))?;
+        if let Some(steps) = self.store.steps.as_mut()
+            && steps.step == crate::Step::Relations
+        {
+            steps.reach.directories.extend(directories);
+        }
         self.counters.add(Counter::VaultSchemaPins, 1);
         count_redecision(&mut self.counters, &redecided);
         self.counters.add(Counter::FindingsDiscarded, discarded);

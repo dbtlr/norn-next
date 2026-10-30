@@ -1822,7 +1822,7 @@ fn a_fact_during_a_damage_rebuild_withdraws_only_what_it_touches() {
         state.seen.clear();
         state.next = [
             LoadingBoundary::StepComplete(Step::Names),
-            LoadingBoundary::Published(Step::Structure),
+            LoadingBoundary::FullTextBatch,
             LoadingBoundary::Reconciling,
         ]
         .into_iter()
@@ -1848,7 +1848,7 @@ fn a_fact_during_a_damage_rebuild_withdraws_only_what_it_touches() {
         assert!(warming(&host.state(&name()).unwrap()));
         probe.release();
         // Both targets have completed their own step 3 before the fact.
-        probe.wait(LoadingBoundary::Published(Step::Structure));
+        probe.wait(LoadingBoundary::FullTextBatch);
         assert!(host.get(&get("/doc00")).is_ok());
         let before = account.read().build_facts_recorded;
         std::fs::write(fixture.root.join("doc00.md"), "# Changed\n[[first]]\n").unwrap();
@@ -3003,17 +3003,14 @@ fn a_get_whose_target_a_fact_touches_waits() {
 #[test]
 fn untouched_gets_answer_through_the_pre_ready_reconcile() {
     let fixture = Fixture::new("reconcile-build-get");
-    let probe = Probe::new([
-        LoadingBoundary::StepComplete(Step::Structure),
-        LoadingBoundary::Reconciling,
-    ]);
+    let probe = Probe::new([LoadingBoundary::FullTextBatch, LoadingBoundary::Reconciling]);
     let ops = fixture.ops(probe.clone());
     let account = ops.account();
     let host = fixture.host_over(ops, norn_host::READ_SETTLE_BOUND);
     std::thread::scope(|scope| {
         let _release = Release(&probe);
         let _demand = host.demand(&name()).unwrap();
-        probe.wait(LoadingBoundary::StepComplete(Step::Structure));
+        probe.wait(LoadingBoundary::FullTextBatch);
         std::fs::write(fixture.root.join("late.md"), "# Late\n").unwrap();
         fact_recorded(&account, 0);
         let start = host.read_evidence().settle_waits;
@@ -3353,13 +3350,14 @@ fn a_requeued_edit_answers_its_new_bytes_before_ready() {
 }
 
 #[test]
-fn name_changes_land_before_ready_and_step_four_facts_wait_for_reconcile() {
+fn name_changes_land_before_ready_and_step_five_facts_wait_for_reconcile() {
     let fixture = Fixture::new("requeue-names");
     fixture.add("fallback/created.md", "# Fallback\n");
     let probe = Probe::new([
         LoadingBoundary::StepComplete(Step::Content),
         LoadingBoundary::StepComplete(Step::Structure),
         LoadingBoundary::Published(Step::Relations),
+        LoadingBoundary::FullTextBatch,
     ]);
     let ops = fixture.ops(probe.clone());
     let account = ops.account();
@@ -3400,12 +3398,14 @@ fn name_changes_land_before_ready_and_step_four_facts_wait_for_reconcile() {
             &ReasonCode::VaultUnknownTarget
         );
     }
+    probe.release();
+    probe.wait(LoadingBoundary::Published(Step::Relations));
     let requeued = account.read().requeued_roots;
     let reports = account.read().build_facts_recorded;
     fixture.add("later.md", "# Later\n");
     fact_recorded(&account, reports);
     probe.release();
-    probe.wait(LoadingBoundary::Published(Step::Relations));
+    probe.wait(LoadingBoundary::FullTextBatch);
     assert_eq!(account.read().requeued_roots, requeued);
     probe.release();
     ready(&host);
@@ -3741,6 +3741,63 @@ fn requeued_link_advisories_retain_the_whole_walk_first_sixteen() {
 }
 
 #[test]
+fn link_advisories_requeued_during_step_four_equal_from_scratch() {
+    let fixture = Fixture::new("relations-requeue-link-advisory");
+    std::fs::create_dir_all(fixture.root.join("a")).unwrap();
+    for path in std::iter::once("a-b.md".to_owned()).chain((0..16).map(|n| format!("a/x{n:02}.md")))
+    {
+        std::os::unix::fs::symlink(fixture.root.join("doc00.md"), fixture.root.join(&path))
+            .unwrap();
+    }
+    let probe = Probe::new([
+        LoadingBoundary::LinkHealthChunk,
+        LoadingBoundary::Published(Step::Relations),
+    ]);
+    let ops = fixture.ops(probe.clone());
+    let account = ops.account();
+    let host = fixture.host_over(ops, norn_host::READ_SETTLE_BOUND);
+    let _release = Release(&probe);
+    let _demand = host.demand(&name()).unwrap();
+    probe.wait(LoadingBoundary::LinkHealthChunk);
+    let before = account.read().build_facts_recorded;
+    for path in ["a-b.md", "a/x03.md"] {
+        std::fs::remove_file(fixture.root.join(path)).unwrap();
+        std::os::unix::fs::symlink(fixture.root.join("doc00.md"), fixture.root.join(path)).unwrap();
+    }
+    std::os::unix::fs::symlink("doc00.md", fixture.root.join("a-c.md")).unwrap();
+    // Every path's fact is accepted before Relations takes them.
+    fact_recorded(&account, before + 2);
+    probe.release();
+    probe.wait(LoadingBoundary::Published(Step::Relations));
+    assert!(
+        account.read().requeued_roots >= 3,
+        "Relations takes every link fact"
+    );
+    probe.release();
+    ready(&host);
+    let advisories = host.inspect(&name()).unwrap().advisories;
+    assert!(
+        advisories.iter().any(|advisory| matches!(
+            advisory, norn_host::AttachmentAdvisory::SymlinkSkipped { path } if path == "a-c.md"
+        )),
+        "{advisories:?}"
+    );
+    drop(host);
+    let dirs = ConfigDirs::new(
+        fixture.scratch.join("reference-config"),
+        fixture.scratch.join("reference-data"),
+    )
+    .unwrap();
+    let reference = fixture.host_over(
+        ProductionEntryOps::new(dirs, ProductionPolicy::new(2, 2).unwrap()),
+        norn_host::READ_SETTLE_BOUND,
+    );
+    let _demand = reference.demand(&name()).unwrap();
+    ready(&reference);
+    assert_eq!(advisories, reference.inspect(&name()).unwrap().advisories);
+}
+
+#[test]
 fn a_case_respelling_during_each_document_step_equals_from_scratch() {
     use norn_testkit::churn::{folding, runs_where_the_volume_folds};
     for step in [Step::Names, Step::Content, Step::Structure] {
@@ -3780,4 +3837,116 @@ fn a_case_respelling_during_each_document_step_equals_from_scratch() {
         project(&fixture.store_path(), &fixture.root)
             .assert_equivalent(&from_scratch(&fixture, "reference"), "folded respelling");
     }
+}
+
+#[test]
+fn a_fact_during_step_four_rejudges_its_reach() {
+    for change in ["create", "delete", "heading"] {
+        assert_step_four_rejudges_its_reach(change);
+    }
+}
+
+#[test]
+fn a_folder_renamed_during_step_four_rejudges_its_reach() {
+    assert_step_four_rejudges_its_reach("folder");
+}
+
+#[test]
+fn a_path_target_deleted_during_step_four_rejudges_its_reach() {
+    assert_step_four_rejudges_its_reach("path-delete");
+}
+
+fn assert_step_four_rejudges_its_reach(change: &str) {
+    let fixture = Fixture::new("relations-requeue");
+    fixture.add(
+            "source.md",
+            "[[created]]\n[[target#Before]]\n[relative](target.md#Before)\n[folder](/folder/inside.md)\n[path](/asset.png)\n",
+        );
+    fixture.add("target.md", "# Before\n");
+    fixture.add("folder/inside.md", "# Inside\n");
+    fixture.add("asset.png", "asset");
+    let probe = Probe::new([
+        LoadingBoundary::LinkHealthChunk,
+        LoadingBoundary::Published(Step::Relations),
+    ]);
+    let ops = fixture.ops(probe.clone());
+    let account = ops.account();
+    let host = fixture.host_over(ops, norn_host::READ_SETTLE_BOUND);
+    let _release = Release(&probe);
+    let _demand = host.demand(&name()).unwrap();
+    probe.wait(LoadingBoundary::LinkHealthChunk);
+    let before = account.read().build_facts_recorded;
+    match change {
+        "create" => fixture.add("created.md", "# Created\n[[created#Absent]]\n[[absent]]\n"),
+        "delete" => std::fs::remove_file(fixture.root.join("target.md")).unwrap(),
+        "folder" => {
+            std::fs::rename(fixture.root.join("folder"), fixture.root.join("moved")).unwrap()
+        }
+        "path-delete" => std::fs::remove_file(fixture.root.join("asset.png")).unwrap(),
+        _ => fixture.add("target.md", "# After\n[[target#Absent]]\n[[absent]]\n"),
+    }
+    fact_recorded(&account, before);
+    probe.release();
+    probe.wait(LoadingBoundary::Published(Step::Relations));
+    assert!(
+        account.read().requeued_roots > 0,
+        "{change} must requeue before Relations"
+    );
+    let shape = ValidateParams::new(address());
+    let early = host.validate(&shape).unwrap();
+    probe.release();
+    ready(&host);
+    assert_eq!(
+        json!(early.answer.report),
+        json!(host.validate(&shape).unwrap().answer.report)
+    );
+    drop(host);
+    project(&fixture.store_path(), &fixture.root)
+        .assert_equivalent(&from_scratch(&fixture, "reference"), change);
+}
+
+#[test]
+fn a_directory_relisted_during_step_four_rejudges_the_links_beneath_it() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new("construction-relist");
+    fixture.add("locked/inside.md", "# Restored\n[[absent]]\n");
+    fixture.add("outside.md", "[inside](locked/inside.md)\n");
+    let directory = fixture.root.join("locked");
+    let restore = RestoreMode(directory.clone(), 0o755);
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o000)).unwrap();
+    assert!(std::fs::read_dir(&directory).is_err());
+    let probe = Probe::new([
+        LoadingBoundary::LinkHealthChunk,
+        LoadingBoundary::Published(Step::Relations),
+    ]);
+    let ops = fixture.ops(probe.clone());
+    let account = ops.account();
+    let host = fixture.host_over(ops, norn_host::READ_SETTLE_BOUND);
+    let _release = Release(&probe);
+    let _demand = host.demand(&name()).unwrap();
+    probe.wait(LoadingBoundary::LinkHealthChunk);
+    drop(restore);
+    fact_recorded(&account, 0);
+    probe.release();
+    probe.wait(LoadingBoundary::Published(Step::Relations));
+    let answer = host.get(&get("/locked/inside")).unwrap();
+    assert!(
+        serde_json::to_string(&answer.answer.report)
+            .unwrap()
+            .contains("Restored")
+    );
+    assert!(account.read().requeue_links_rejudged > 0);
+    let shape = ValidateParams::new(address());
+    let early = host.validate(&shape).unwrap();
+    probe.release();
+    ready(&host);
+    assert_eq!(
+        json!(early.answer.report),
+        json!(host.validate(&shape).unwrap().answer.report)
+    );
+    drop(host);
+    project(&fixture.store_path(), &fixture.root).assert_equivalent(
+        &from_scratch(&fixture, "reference"),
+        "directory relisted before Relations",
+    );
 }

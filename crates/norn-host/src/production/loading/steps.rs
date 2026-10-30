@@ -275,9 +275,9 @@ pub(super) fn documents(
 }
 
 /// Take accepted roots ahead of the ordinary queue, finish their owed steps,
-/// commit, then publish their derivation. Nothing calls this from Relations on.
+/// commit, then publish their derivation. Nothing calls this from FullText on.
 #[allow(clippy::too_many_arguments)]
-fn requeue(
+pub(super) fn requeue(
     ops: &ProductionEntryOps,
     store: &mut Store,
     root: &Path,
@@ -391,8 +391,24 @@ fn requeue_taken(
                 documents += content.len() as u64;
                 content_chunk(ops, &mut pending, &source, &content)?;
                 pending.flush()?;
+                // Each reset ended every finding at its place, including the
+                // spellings that render there. Where content leaves no row,
+                // those spellings stand again, as the content step's spelling
+                // pass reads them once occupancy settles.
+                for path in &content {
+                    let stands = pending
+                        .store
+                        .begin_request()
+                        .stored_document(path)
+                        .map_err(store_effect)?
+                        .is_some();
+                    if !stands {
+                        pending.refile_reset_place(&source, path)?;
+                    }
+                }
+                pending.flush()?;
                 pending.store.commit_step_group().map_err(store_effect)?;
-                if stage == Some(Step::Structure) {
+                if matches!(stage, Some(Step::Structure | Step::Relations)) {
                     for path in paths {
                         let row = pending
                             .store
@@ -411,6 +427,16 @@ fn requeue_taken(
         }
         if store.construction_step() != Some(Step::Names) {
             store.commit_step_group().map_err(store_effect)?;
+        }
+        if store.construction_step() == Some(Step::Relations) {
+            let declared = Declaration::read(store)?;
+            let mut request = store.begin_request();
+            let links = request
+                .rejudge_reach(declared.model.content_model())
+                .map_err(store_effect)?;
+            // The scoped requeue meter records these reads before publication.
+            count_increment_work(&request.finish(), 0);
+            ops.evidence.count_requeue_links_rejudged(links);
         }
         ops.evidence.count_requeue(
             taken.roots.len() as u64,
