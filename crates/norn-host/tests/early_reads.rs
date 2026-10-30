@@ -3781,3 +3781,40 @@ fn a_case_respelling_during_each_document_step_equals_from_scratch() {
             .assert_equivalent(&from_scratch(&fixture, "reference"), "folded respelling");
     }
 }
+
+#[test]
+fn a_fact_during_step_four_rejudges_its_reach() {
+    for change in ["create", "delete", "heading"] {
+        let fixture = Fixture::new("relations-requeue");
+        fixture.add("source.md", "[[created]]\n[[target#Before]]\n[relative](target.md#Before)\n");
+        fixture.add("target.md", "# Before\n");
+        let probe = Probe::new([
+            LoadingBoundary::LinkHealthChunk,
+            LoadingBoundary::Published(Step::Relations),
+        ]);
+        let ops = fixture.ops(probe.clone());
+        let account = ops.account();
+        let host = fixture.host_over(ops, norn_host::READ_SETTLE_BOUND);
+        let _release = Release(&probe);
+        let _demand = host.demand(&name()).unwrap();
+        probe.wait(LoadingBoundary::LinkHealthChunk);
+        let before = account.read().build_facts_recorded;
+        match change {
+            "create" => fixture.add("created.md", "# Created\n[[absent]]\n"),
+            "delete" => std::fs::remove_file(fixture.root.join("target.md")).unwrap(),
+            _ => fixture.add("target.md", "# After\n[[absent]]\n"),
+        }
+        fact_recorded(&account, before);
+        probe.release();
+        probe.wait(LoadingBoundary::Published(Step::Relations));
+        assert!(account.read().requeued_roots > 0, "{change} must requeue before Relations");
+        let shape = ValidateParams::new(address());
+        let early = host.validate(&shape).unwrap();
+        probe.release();
+        ready(&host);
+        assert_eq!(json!(early.answer.report), json!(host.validate(&shape).unwrap().answer.report));
+        drop(host);
+        project(&fixture.store_path(), &fixture.root)
+            .assert_equivalent(&from_scratch(&fixture, "reference"), change);
+    }
+}
