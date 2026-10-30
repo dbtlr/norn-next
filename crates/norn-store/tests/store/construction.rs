@@ -1614,3 +1614,179 @@ fn a_requeued_documents_outgoing_links_are_all_judged_across_pages() {
         judged.iter().map(|f| f.ordinal).collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn a_rewritten_documents_path_links_are_rejudged_once() {
+    use crate::common::path;
+    use norn_store::{Change, ContentModel, ContentWrite, IncrementProvenance, Span, Step};
+    let scratch = Scratch::new("requeued-path-once");
+    let mut store = scratch.open();
+    let model = ContentModel::none();
+    store.defer_link_health().unwrap();
+    store.begin_steps().unwrap();
+    for step in [Step::Names, Step::Content, Step::Structure] {
+        store.finish_step(step).unwrap();
+    }
+    store
+        .begin_request()
+        .judge_link_health_deferred(&model, &mut || {})
+        .unwrap();
+    store
+        .begin_request()
+        .apply_increment(
+            IncrementProvenance::Derived,
+            [Change::Named {
+                path: path("holder.md"),
+            }],
+            &[],
+            &model,
+        )
+        .unwrap();
+    let body = "[self](holder.md#missing)\n";
+    let mut facts = crate::health::derived("holder.md", body);
+    let links = std::mem::take(&mut facts.links);
+    let mut group = store.step_group().unwrap();
+    group
+        .begin_request()
+        .write_content(
+            &[ContentWrite {
+                facts,
+                origin: Span {
+                    line: 1,
+                    column: 1,
+                    byte_offset: 0,
+                },
+            }],
+            &[],
+            &model,
+        )
+        .unwrap();
+    let mut rows = group.begin_request().structure_page(8).unwrap();
+    rows[0].facts.links = links;
+    group
+        .begin_request()
+        .write_structure(&rows, &[], &model)
+        .unwrap();
+    group.commit().unwrap();
+    assert_eq!(store.begin_request().rejudge_reach(&model).unwrap(), 1);
+    let held = store
+        .begin_request()
+        .stored_findings(&path("holder.md"))
+        .unwrap();
+    assert_eq!(held.len(), 1);
+    let judged = store
+        .begin_request()
+        .judge_link_health(&[path("holder.md")], &model)
+        .unwrap();
+    assert_eq!(judged.len(), 1);
+    assert_eq!(
+        held.iter().map(|f| f.ordinal).collect::<Vec<_>>(),
+        judged.iter().map(|f| f.ordinal).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn an_increment_ending_a_nested_directory_mark_rejudges_its_links() {
+    use crate::common::{document, path};
+    use norn_store::{
+        Change, ContentModel, ContentWrite, DerivedFinding, DirectoryPrefix, IncrementProvenance,
+        Span, Step,
+    };
+    let scratch = Scratch::new("increment-directory-reach");
+    let mut store = scratch.open();
+    store.defer_link_health().unwrap();
+    store.begin_steps().unwrap();
+    let model = ContentModel::none();
+    store
+        .begin_request()
+        .apply_increment(
+            IncrementProvenance::Derived,
+            [Change::Named {
+                path: path("ref.md"),
+            }],
+            &[],
+            &model,
+        )
+        .unwrap();
+    store.finish_step(Step::Names).unwrap();
+    let mut group = store.step_group().unwrap();
+    group
+        .begin_request()
+        .write_content(
+            &[ContentWrite {
+                facts: document("ref.md", "ref", "[x](/locked/inner/gone.md)\n"),
+                origin: Span {
+                    line: 1,
+                    column: 1,
+                    byte_offset: 0,
+                },
+            }],
+            &[],
+            &model,
+        )
+        .unwrap();
+    let mut rows = group.begin_request().structure_page(8).unwrap();
+    rows[0].facts.links = crate::health::derived("ref.md", "[x](/locked/inner/gone.md)\n").links;
+    group
+        .begin_request()
+        .write_structure(&rows, &[], &model)
+        .unwrap();
+    group.commit().unwrap();
+    store.finish_step(Step::Content).unwrap();
+    store.finish_step(Step::Structure).unwrap();
+    store
+        .begin_request()
+        .judge_link_health_deferred(&model, &mut || {})
+        .unwrap();
+    assert_eq!(
+        store
+            .begin_request()
+            .stored_findings(&path("ref.md"))
+            .unwrap()
+            .len(),
+        1
+    );
+
+    store
+        .begin_request()
+        .apply_increment(
+            IncrementProvenance::Derived,
+            [],
+            &[DerivedFinding {
+                facts: crate::health::directory_mark("locked/inner"),
+                replaces: None,
+                bytes_hash: None,
+            }],
+            &model,
+        )
+        .unwrap();
+    store.begin_request().rejudge_reach(&model).unwrap();
+    assert!(
+        store
+            .begin_request()
+            .stored_findings(&path("ref.md"))
+            .unwrap()
+            .is_empty()
+    );
+
+    // Withdrawing the parent ends its nested mark. The target remains absent,
+    // so the formerly unjudged link must report broken again.
+    store
+        .begin_request()
+        .apply_increment(
+            IncrementProvenance::Derived,
+            [Change::BeneathUnlistable {
+                prefix: DirectoryPrefix::new("locked").unwrap(),
+            }],
+            &[],
+            &model,
+        )
+        .unwrap();
+    store.begin_request().rejudge_reach(&model).unwrap();
+    let findings = store
+        .begin_request()
+        .stored_findings(&path("ref.md"))
+        .unwrap();
+    assert_eq!(findings.len(), 1);
+    assert_eq!(findings[0].kind, norn_wire::FindingKind::Broken.as_str());
+}
