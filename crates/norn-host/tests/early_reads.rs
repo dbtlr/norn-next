@@ -3803,7 +3803,7 @@ fn assert_step_four_rejudges_its_reach(change: &str) {
     let fixture = Fixture::new("relations-requeue");
     fixture.add(
             "source.md",
-            "[[created]]\n[[target#Before]]\n[relative](target.md#Before)\n[folder](folder/inside.md)\n[path](asset.png)\n",
+            "[[created]]\n[[target#Before]]\n[relative](target.md#Before)\n[folder](/folder/inside.md)\n[path](/asset.png)\n",
         );
     fixture.add("target.md", "# Before\n");
     fixture.add("folder/inside.md", "# Inside\n");

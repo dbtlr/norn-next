@@ -1642,7 +1642,7 @@ fn a_rewritten_documents_path_links_are_rejudged_once() {
             &model,
         )
         .unwrap();
-    let body = "[self](holder.md#missing)\n";
+    let body = "[self](/holder.md#missing)\n";
     let mut facts = crate::health::derived("holder.md", body);
     let links = std::mem::take(&mut facts.links);
     let mut group = store.step_group().unwrap();
