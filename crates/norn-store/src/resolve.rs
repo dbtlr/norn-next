@@ -277,6 +277,50 @@ impl TargetClass {
         })
     }
 
+    pub(crate) fn touches(&self, root: &str, beneath: bool) -> bool {
+        if self.rooted {
+            let root = comparison_key(root);
+            let on_chain = |path: &str| {
+                path == root
+                    || path
+                        .strip_prefix(&root)
+                        .is_some_and(|tail| tail.starts_with('/'))
+                    || root
+                        .strip_prefix(path)
+                        .is_some_and(|tail| tail.starts_with('/'))
+            };
+            return self.probe.ranges().any(|(lower, _)| {
+                let path = lower
+                    .trim_end_matches('/')
+                    .split('/')
+                    .rev()
+                    .collect::<Vec<_>>()
+                    .join("/");
+                on_chain(&path) || on_chain(&format!("{path}.md"))
+            });
+        }
+        if beneath {
+            return true;
+        }
+        let mut path = root;
+        loop {
+            if let Ok(key) = crate::path::DocumentPath::new(path)
+                && self.admits(path)
+                && self
+                    .probe
+                    .ranges()
+                    .any(|(lower, upper)| key.suffix_key() >= lower && key.suffix_key() < upper)
+            {
+                return true;
+            }
+            let Some((parent, _)) = path.rsplit_once('/') else {
+                break;
+            };
+            path = parent;
+        }
+        false
+    }
+
     /// The probe the class is read through.
     pub fn probe(&self) -> &SuffixProbe {
         &self.probe

@@ -449,7 +449,7 @@ impl crate::Request<'_> {
     /// Read the next bounded set of names owing content. The vault pass selects
     /// by stage; NORN-468 pull-ahead supplies a requested target's candidates
     /// ([`Self::target_candidates`]) to the same content writer instead, and
-    /// NORN-469 requeue will supply individual paths there too.
+    /// NORN-469 PR B requeue will supply individual paths there too.
     pub fn content_page(&mut self, limit: usize) -> Result<Vec<crate::DocumentPath>, StoreError> {
         check_limit(limit)?;
         Self::read_all_on(
@@ -481,7 +481,7 @@ impl crate::Request<'_> {
 
     /// Fetch one arbitrary document owing structure, without walking the queue.
     /// NORN-468 pull-ahead selects a requested target's resolved document here,
-    /// and NORN-469 requeue will select single paths too; the ordinary pass
+    /// and NORN-469 PR B requeue will select single paths too; the ordinary pass
     /// keeps stage selection in [`Self::structure_page`].
     pub fn structure_document(
         &mut self,
@@ -651,7 +651,7 @@ impl crate::Request<'_> {
 
     /// Append structure once, with body ordinals after the frontmatter counts
     /// recorded by content. The vault pass and NORN-468 pull-ahead share this
-    /// arbitrary-set seam, and NORN-469 requeue will too; pull-ahead may call
+    /// arbitrary-set seam, and NORN-469 PR B requeue will too; pull-ahead may call
     /// it during the content step for a requested document.
     pub fn write_structure(
         &mut self,

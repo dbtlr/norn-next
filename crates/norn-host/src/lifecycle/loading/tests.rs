@@ -150,6 +150,16 @@ fn an_established_early_hold_survives_host_destruction_without_retaining_coverag
 
 #[test]
 fn watcher_withdrawal_moves_the_host_signal_without_a_dispatcher_or_gate_retake() {
+    watcher_signal(false);
+}
+
+#[test]
+fn a_recorded_fact_wakes_nothing_and_withdrawal_does() {
+    watcher_signal(true);
+}
+
+#[allow(clippy::disallowed_methods)] // The test owns the vault fixture.
+fn watcher_signal(record_first: bool) {
     let scratch = Scratch::new("construction-watcher-signal-binding");
     let _watcher = isolation::Lease::hold(
         isolation::REAL_WATCHER,
@@ -179,6 +189,20 @@ fn watcher_withdrawal_moves_the_host_signal_without_a_dispatcher_or_gate_retake(
         };
         let seen = entry.gate.stance_generation();
         let takes = entry.gate.times_taken();
+        if record_first {
+            let sequence = building.authority.sequence();
+            std::fs::write(scratch.join("vault/late.md"), "# Late\n").unwrap();
+            wait_until("accepted fact without the entry gate", BUDGET, || {
+                if building.authority.sequence() > sequence {
+                    Observed::Met(())
+                } else {
+                    Observed::pending("fact not accepted")
+                }
+            })
+            .unwrap();
+            assert_eq!(entry.gate.stance_generation(), seen);
+            assert!(building.authority.admits());
+        }
         // Invalidate the actual bound authority while the gate is unavailable.
         // A watcher wake must touch only the signal and cannot rely on end_hold.
         building.authority.invalidate();
@@ -266,9 +290,10 @@ fn begin(
 ) -> BuildToken {
     progress
         .begin_construction(Some(Begun {
+            evidence: Default::default(),
             pool: store.reader_pool(budget),
             model: Arc::new(ContentModel::none()),
-            authority: subscription.capture_build_authority().unwrap(),
+            authority: subscription.capture_build_authority(&[]).unwrap(),
             store_epoch: store.epoch().to_owned(),
         }))
         .expect("a standing claim begins its construction")
@@ -332,9 +357,10 @@ fn stale_publication_is_refused() {
         assert!(
             progress
                 .begin_construction(Some(Begun {
+                    evidence: Default::default(),
                     pool: store.reader_pool(&budget),
                     model: Arc::new(ContentModel::none()),
-                    authority: subscription.capture_build_authority().unwrap(),
+                    authority: subscription.capture_build_authority(&[]).unwrap(),
                     store_epoch: epoch.clone(),
                 }))
                 .is_none(),
@@ -347,7 +373,7 @@ fn stale_publication_is_refused() {
     assert!(!progress.publish_step(token, &epoch, Step::Content));
     assert!(progress.publish_step(successor, &epoch, Step::Names));
     // A withdrawn authority publishes nothing more.
-    subscription.capture_build_authority().unwrap();
+    subscription.capture_build_authority(&[]).unwrap();
     assert!(!progress.publish_step(successor, &epoch, Step::Content));
     // A changed claim publishes nothing.
     let successor = begin(&progress, &subscription, &store, &budget);

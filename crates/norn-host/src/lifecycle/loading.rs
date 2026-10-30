@@ -94,6 +94,7 @@ pub(crate) struct BuildToken(u64);
 /// captured for this build alone, and the store's epoch.
 pub(crate) struct Begun<R> {
     pub(crate) pool: R,
+    pub(crate) evidence: Arc<crate::evidence::JobEvidence>,
     pub(crate) model: Arc<ContentModel>,
     pub(crate) authority: BuildAuthority,
     pub(crate) store_epoch: String,
@@ -119,9 +120,11 @@ impl<R: ReadSource> Construction<R> {
 }
 
 /// A from-zero build's publications, bound to the claim, store, model and
-/// watcher authority it began under.
+/// watcher authority it began under. A fully published build rebinds its claim
+/// to the pre-Ready reconcile without replacing its acceptance history.
 pub(super) struct Building<R: ReadSource> {
     claim: u64,
+    evidence: Arc<crate::evidence::JobEvidence>,
     token: BuildToken,
     store_epoch: String,
     pool: Arc<R>,
@@ -235,11 +238,23 @@ pub(super) enum Early<R: ReadSource> {
     Refused,
 }
 
-/// One request's admission against a build's publications.
+/// A request fixes its name class and fact requirement at its first building hold.
+pub(super) struct Meeting {
+    sequence: u64,
+    touch: Option<Arc<norn_store::early::Touch>>,
+    held_by_fact: bool,
+}
+
+/// One request's admission against a build's publications and accepted-fact sequence.
+/// The compiled target and vault-wide flag bound its final exposure check.
 pub(crate) struct Admitted<R> {
     pub(super) pool: Arc<R>,
     pub(super) model: Arc<ContentModel>,
     authority: BuildAuthority,
+    evidence: Arc<crate::evidence::JobEvidence>,
+    admitted_at: u64,
+    touch: Option<Arc<norn_store::early::Touch>>,
+    vault_wide: bool,
     token: BuildToken,
     published: Step,
     /// The target the build published ready for this request ahead of its
@@ -249,7 +264,7 @@ pub(crate) struct Admitted<R> {
     /// that admitted it, for the read's lease to keep: the read that queued
     /// the target may end first.
     interest: Option<Arc<()>>,
-    /// The build had not judged relations when this request was admitted.
+    /// Relations were unfinished or a fact this request met still stood.
     pub(super) relations_loading: bool,
 }
 
@@ -259,6 +274,10 @@ impl<R> Clone for Admitted<R> {
             pool: Arc::clone(&self.pool),
             model: Arc::clone(&self.model),
             authority: self.authority.clone(),
+            evidence: self.evidence.clone(),
+            admitted_at: self.admitted_at,
+            touch: self.touch.clone(),
+            vault_wide: self.vault_wide,
             token: self.token,
             published: self.published,
             target: self.target.clone(),
@@ -269,6 +288,20 @@ impl<R> Clone for Admitted<R> {
 }
 
 impl<R> Admitted<R> {
+    fn facts_current(&self) -> bool {
+        self.authority.visit_roots(|_, mut roots| {
+            !Iterator::any(&mut roots, |(root, reported, _, beneath)| {
+                reported > self.admitted_at
+                    && (self.vault_wide
+                        || self.touch.as_ref().is_none_or(|touch| {
+                            root.as_path()
+                                .to_str()
+                                .is_none_or(|root| touch.touches(root, beneath))
+                        }))
+            })
+        })
+    }
+
     /// The last step the build had published when it admitted this request.
     pub(super) fn published(&self) -> Step {
         self.published
@@ -321,6 +354,7 @@ impl<A: SnapshotSource> ProgressReporter<A> {
         state.construction_revision += 1;
         let token = BuildToken(state.construction_revision);
         state.construction = Some(Construction::Building(Building {
+            evidence: begun.evidence,
             claim: self.epoch,
             token,
             store_epoch: begun.store_epoch,
@@ -449,10 +483,27 @@ impl<A: SnapshotSource> EntryState<A> {
         }
     }
 
+    /// Carry fully published construction authority into its pre-Ready reconcile.
+    pub(super) fn hand_on_reconcile(&mut self, name: &VaultName) -> Job {
+        let previous = self.claim.epoch();
+        let next = self
+            .claim
+            .hand_on(|epoch| Job::Reconcile(name.clone(), epoch));
+        if let Some(Construction::Building(building)) = &mut self.construction
+            && building.claim == previous
+            && building.published == Some(Step::FullTextComplete)
+        {
+            building.claim = self.claim.epoch();
+            building.evidence.count_construction_rebind();
+        }
+        next
+    }
+
     /// Close construction, retiring its pool outside the gate and waking every waiter.
     pub(super) fn close_construction(&mut self) {
         if let Some(construction) = self.construction.take() {
             if let Construction::Building(building) = construction {
+                building.authority.retire();
                 building.pool.retire();
                 // The deferred pool reference prevents any last connection close here.
                 self.retired_readers.push(building.pool);
@@ -502,7 +553,11 @@ impl<A: SnapshotSource> EntryState<A> {
     /// Once step 1 has ended, a Get whose target the build has published
     /// ready is admitted before vault-wide Structure; one whose target is not
     /// yet ready waits, and [`Self::join_requests`] queues its interest.
-    pub(super) fn early(&self, request: Request<'_>) -> Early<A::Reader> {
+    pub(super) fn early(
+        &self,
+        request: Request<'_>,
+        met: &mut Option<Meeting>,
+    ) -> Early<A::Reader> {
         let Some(boundary) = request.boundary() else {
             return Early::Refused;
         };
@@ -519,6 +574,41 @@ impl<A: SnapshotSource> EntryState<A> {
             Some(Construction::Building(building))
                 if self.claim.stands_at(building.claim) && building.authority.admits() =>
             {
+                let meeting = met.get_or_insert_with(|| Meeting {
+                    sequence: building.authority.sequence(),
+                    touch: request.pulled_ahead_target(&building.model).map(|target| {
+                        Arc::new(norn_store::early::Touch::of(
+                            target,
+                            building.model.ambiguity_ignore(),
+                        ))
+                    }),
+                    held_by_fact: false,
+                });
+                let touch = &meeting.touch;
+                let (admitted_at, held, outstanding) =
+                    building.authority.visit_roots(|sequence, roots| {
+                        let met = meeting.sequence;
+                        let mut held = false;
+                        let mut outstanding = false;
+                        for (root, _, underived, beneath) in roots {
+                            if underived.is_some_and(|from| from <= met) {
+                                outstanding = true;
+                                held |= touch.as_ref().is_none_or(|touch| {
+                                    root.as_path()
+                                        .to_str()
+                                        .is_none_or(|root| touch.touches(root, beneath))
+                                });
+                            }
+                        }
+                        (sequence, held, outstanding)
+                    });
+                if held {
+                    if !meeting.held_by_fact {
+                        building.evidence.count_fact_hold();
+                        meeting.held_by_fact = true;
+                    }
+                    return Early::Waits;
+                }
                 let Some(published) = building.published else {
                     return Early::Waits;
                 };
@@ -533,7 +623,13 @@ impl<A: SnapshotSource> EntryState<A> {
                     };
                     (Some(target.to_owned()), Some(interest))
                 };
+                let relations_loading =
+                    !reaches(Some(published), Boundary::Relations) || outstanding;
                 Early::Admitted(Admitted {
+                    evidence: building.evidence.clone(),
+                    admitted_at,
+                    vault_wide: touch.is_none() || !relations_loading,
+                    touch: touch.clone(),
                     pool: Arc::clone(&building.pool),
                     model: Arc::clone(&building.model),
                     authority: building.authority.clone(),
@@ -541,7 +637,7 @@ impl<A: SnapshotSource> EntryState<A> {
                     published,
                     target,
                     interest,
-                    relations_loading: !reaches(Some(published), Boundary::Relations),
+                    relations_loading,
                 })
             }
             _ => Early::Refused,
@@ -576,7 +672,8 @@ impl<A: SnapshotSource> EntryState<A> {
                         .target
                         .as_deref()
                         .is_none_or(|target| building.requests.ready(target))
-        ) && admitted.serves(request)
+        ) && admitted.facts_current()
+            && admitted.serves(request)
     }
 
     /// Whether this entry holds a construction a waiting early request could meet.
@@ -690,9 +787,16 @@ where
     /// Whether no accepted fact or coverage loss known now withdrew the
     /// capability an early hold answers under. Canonical holds are current.
     pub(crate) fn current(&self) -> bool {
-        self.early
-            .as_ref()
-            .is_none_or(|early| early.authority.check_root())
+        self.early.as_ref().is_none_or(|early| {
+            if !early.authority.check_root() {
+                return false;
+            }
+            if !early.facts_current() {
+                early.evidence.count_fact_refusal();
+                return false;
+            }
+            true
+        })
     }
 
     pub(crate) fn damage(&self, host: &Host<O>, detail: String) -> ReadRefusal {

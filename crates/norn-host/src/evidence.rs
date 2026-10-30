@@ -97,6 +97,14 @@ pub struct JobEvidence {
     recoveries_run: AtomicU64,
     rebuilds_run: AtomicU64,
     from_zero_builds: AtomicU64,
+    early_reads_held_by_fact: AtomicU64,
+    early_final_checks_refused_by_fact: AtomicU64,
+    construction_rebinds: AtomicU64,
+    build_fact_withdrawals_coverage: AtomicU64,
+    build_fact_withdrawals_control: AtomicU64,
+    build_fact_withdrawals_capacity: AtomicU64,
+    build_facts_recorded: AtomicU64,
+    build_fact_withdrawals: AtomicU64,
     construction_checkpoint_busy: AtomicU64,
     content_step_commits: AtomicU64,
     structure_step_commits: AtomicU64,
@@ -221,6 +229,22 @@ pub struct EvidenceReading {
     /// under construction, whichever route reached it. An attach over a finished
     /// store adds none.
     pub from_zero_builds: u64,
+    /// Requests that waited for an accepted fact, each counted once.
+    pub early_reads_held_by_fact: u64,
+    /// Final exposures rejected by a newer concerning fact.
+    pub early_final_checks_refused_by_fact: u64,
+    /// Fully published constructions carried into a reconcile claim.
+    pub construction_rebinds: u64,
+    /// Full withdrawals caused by coverage, rescan, or schema loss.
+    pub build_fact_withdrawals_coverage: u64,
+    /// Full withdrawals caused by a control-path root.
+    pub build_fact_withdrawals_control: u64,
+    /// Full withdrawals caused by the distinct-root bound.
+    pub build_fact_withdrawals_capacity: u64,
+    /// Accepted root reports during construction.
+    pub build_facts_recorded: u64,
+    /// Constructions whose coverage or fact bound withdrew all capabilities.
+    pub build_fact_withdrawals: u64,
     /// Construction checkpoints a reader prevented from truncating the WAL.
     pub construction_checkpoint_busy: u64,
     /// Transactions from-zero content steps committed, early commits for
@@ -388,6 +412,30 @@ impl EvidenceReading {
                 .saturating_sub(earlier.changeset_read_steps),
             recoveries_run: self.recoveries_run.saturating_sub(earlier.recoveries_run),
             rebuilds_run: self.rebuilds_run.saturating_sub(earlier.rebuilds_run),
+            early_reads_held_by_fact: self
+                .early_reads_held_by_fact
+                .saturating_sub(earlier.early_reads_held_by_fact),
+            early_final_checks_refused_by_fact: self
+                .early_final_checks_refused_by_fact
+                .saturating_sub(earlier.early_final_checks_refused_by_fact),
+            construction_rebinds: self
+                .construction_rebinds
+                .saturating_sub(earlier.construction_rebinds),
+            build_fact_withdrawals_coverage: self
+                .build_fact_withdrawals_coverage
+                .saturating_sub(earlier.build_fact_withdrawals_coverage),
+            build_fact_withdrawals_control: self
+                .build_fact_withdrawals_control
+                .saturating_sub(earlier.build_fact_withdrawals_control),
+            build_fact_withdrawals_capacity: self
+                .build_fact_withdrawals_capacity
+                .saturating_sub(earlier.build_fact_withdrawals_capacity),
+            build_facts_recorded: self
+                .build_facts_recorded
+                .saturating_sub(earlier.build_facts_recorded),
+            build_fact_withdrawals: self
+                .build_fact_withdrawals
+                .saturating_sub(earlier.build_fact_withdrawals),
             from_zero_builds: self
                 .from_zero_builds
                 .saturating_sub(earlier.from_zero_builds),
@@ -534,6 +582,14 @@ impl JobEvidence {
             recoveries_run: get(&self.recoveries_run),
             rebuilds_run: get(&self.rebuilds_run),
             from_zero_builds: get(&self.from_zero_builds),
+            early_reads_held_by_fact: get(&self.early_reads_held_by_fact),
+            early_final_checks_refused_by_fact: get(&self.early_final_checks_refused_by_fact),
+            construction_rebinds: get(&self.construction_rebinds),
+            build_fact_withdrawals_coverage: get(&self.build_fact_withdrawals_coverage),
+            build_fact_withdrawals_control: get(&self.build_fact_withdrawals_control),
+            build_fact_withdrawals_capacity: get(&self.build_fact_withdrawals_capacity),
+            build_facts_recorded: get(&self.build_facts_recorded),
+            build_fact_withdrawals: get(&self.build_fact_withdrawals),
             construction_checkpoint_busy: get(&self.construction_checkpoint_busy),
             content_step_commits: get(&self.content_step_commits),
             structure_step_commits: get(&self.structure_step_commits),
@@ -2425,4 +2481,34 @@ pub(crate) fn rewrite_selection_steps_of<T>(run: impl FnOnce() -> T) -> (T, u64)
     let ran = run();
     let tallied = REWRITE_SELECTION_STEPS.with(|cell| cell.replace(standing));
     (ran, tallied)
+}
+
+impl norn_fs::watch::BuildObserver for JobEvidence {
+    fn recorded(&self, count: u64) {
+        self.build_facts_recorded
+            .fetch_add(count, Ordering::Relaxed);
+    }
+    fn withdrawn(&self, cause: norn_fs::watch::BuildWithdrawal) {
+        self.build_fact_withdrawals.fetch_add(1, Ordering::Relaxed);
+        let counter = match cause {
+            norn_fs::watch::BuildWithdrawal::Coverage => &self.build_fact_withdrawals_coverage,
+            norn_fs::watch::BuildWithdrawal::Control => &self.build_fact_withdrawals_control,
+            norn_fs::watch::BuildWithdrawal::Capacity => &self.build_fact_withdrawals_capacity,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+impl JobEvidence {
+    pub(crate) fn count_fact_hold(&self) {
+        self.early_reads_held_by_fact
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    pub(crate) fn count_fact_refusal(&self) {
+        self.early_final_checks_refused_by_fact
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    pub(crate) fn count_construction_rebind(&self) {
+        self.construction_rebinds.fetch_add(1, Ordering::Relaxed);
+    }
 }

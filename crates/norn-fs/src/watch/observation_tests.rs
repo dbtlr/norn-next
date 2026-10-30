@@ -197,7 +197,9 @@ fn observation_rejects_overflow_control_loss_and_a_replaced_root() {
 #[test]
 fn an_established_build_authority_proof_survives_admin_close_but_records_late_contradictions() {
     let (_lease, _scratch, watch) = fixture();
-    let proof = watch.capture_build_authority(&[]).expect("unchanged coverage");
+    let proof = watch
+        .capture_build_authority(&[])
+        .expect("unchanged coverage");
     assert!(proof.check_root());
     assert!(proof.admits());
     let state = Arc::clone(&watch.state);
@@ -213,11 +215,12 @@ fn an_established_build_authority_proof_survives_admin_close_but_records_late_co
         Ok(Event::new(EventKind::Create(CreateKind::File)).add_path(root.join("late.md"))),
     );
     assert!(
-        !proof.held_is_current(),
-        "accepted late contradiction is retained"
+        proof.held_is_current(),
+        "a late path fact preserves coverage"
     );
+    assert_eq!(proof.sequence(), 1);
     drop(state);
-    assert!(!proof.held_is_current());
+    assert!(proof.held_is_current());
 }
 
 #[test]
@@ -378,9 +381,9 @@ fn a_build_authority_is_captured_fresh_after_an_accepted_fact() {
         Ok(Event::new(EventKind::Create(CreateKind::File))
             .add_path(watch.covered_root().join("first.md"))),
     );
-    assert!(!first.admits());
-    assert!(!first.held_is_current());
-    assert_eq!(signal.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(first.admits());
+    assert!(first.held_is_current());
+    assert_eq!(signal.0.load(std::sync::atomic::Ordering::SeqCst), 0);
     assert!(!watch.finish_heal().unwrap().is_empty());
     let second = watch
         .capture_build_authority(&[])
@@ -392,8 +395,8 @@ fn a_build_authority_is_captured_fresh_after_an_accepted_fact() {
         Ok(Event::new(EventKind::Create(CreateKind::File))
             .add_path(watch.covered_root().join("second.md"))),
     );
-    assert!(!second.admits());
-    assert!(!second.held_is_current());
+    assert!(second.admits());
+    assert!(second.held_is_current());
     assert!(!first.held_is_current());
     assert_eq!(signal.0.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
@@ -468,4 +471,103 @@ fn a_new_capture_withdraws_and_wakes_the_previous_build_authority() {
     assert!(second.admits());
     first.invalidate();
     assert!(second.held_is_current());
+}
+
+#[test]
+fn only_file_kinds_record_a_leaf_root() {
+    let (_lease, _scratch, watch) = fixture();
+    watch.begin_heal();
+    let proof = watch.capture_build_authority(&[]).unwrap();
+    for (kind, beneath) in [
+        (EventKind::Create(CreateKind::File), false),
+        (EventKind::Remove(notify::event::RemoveKind::File), false),
+        (
+            EventKind::Modify(ModifyKind::Data(notify::event::DataChange::Any)),
+            false,
+        ),
+        (EventKind::Create(CreateKind::Folder), true),
+        (
+            EventKind::Modify(ModifyKind::Metadata(notify::event::MetadataKind::Any)),
+            true,
+        ),
+        (EventKind::Modify(ModifyKind::Name(RenameMode::Any)), true),
+    ] {
+        let proof = watch.capture_build_authority(&[]).unwrap();
+        ingest(
+            &watch.state,
+            Ok(Event::new(kind).add_path(watch.covered_root().join("note.md"))),
+        );
+        proof.visit_roots(|sequence, roots| {
+            assert_eq!(sequence, 1);
+            let roots: Vec<_> = roots.collect();
+            assert_eq!(roots.len(), 1);
+            assert_eq!(roots[0].3, beneath);
+        });
+        assert!(proof.admits());
+    }
+    assert!(
+        !proof.admits(),
+        "a successor capture withdraws its predecessor"
+    );
+}
+
+#[test]
+fn the_fact_cap_withdraws_everything() {
+    let (_lease, _scratch, watch) = fixture();
+    watch.begin_heal();
+    let proof = watch.capture_build_authority(&[]).unwrap();
+    for n in 0..=super::build_authority::BUILD_FACT_CAP {
+        ingest(
+            &watch.state,
+            Ok(Event::new(EventKind::Create(CreateKind::File))
+                .add_path(watch.covered_root().join(format!("fact-{n}.md")))),
+        );
+    }
+    assert!(!proof.admits());
+    proof.visit_roots(|_, roots| assert_eq!(roots.count(), 1024));
+}
+
+#[test]
+fn nothing_is_recorded_before_capture_or_after_retirement() {
+    let (_lease, _scratch, watch) = fixture();
+    watch.begin_heal();
+    let report = || {
+        ingest(
+            &watch.state,
+            Ok(Event::new(EventKind::Create(CreateKind::File))
+                .add_path(watch.covered_root().join("note.md"))),
+        )
+    };
+    report();
+    let proof = watch.capture_build_authority(&[]).unwrap();
+    assert_eq!(proof.sequence(), 0);
+    proof.retire();
+    report();
+    assert_eq!(proof.sequence(), 0);
+}
+
+#[test]
+fn coverage_loss_schema_and_control_facts_withdraw_everything() {
+    let (_lease, _scratch, watch) = fixture();
+    watch.begin_heal();
+    let control = watch
+        .state
+        .lock()
+        .unwrap()
+        .normalizer
+        .normalize(Path::new("control.yaml"))
+        .unwrap();
+    let proof = watch.capture_build_authority(&[control]).unwrap();
+    ingest(
+        &watch.state,
+        Ok(Event::new(EventKind::Create(CreateKind::File))
+            .add_path(watch.covered_root().join("control.yaml"))),
+    );
+    assert!(!proof.admits());
+    let proof = watch.capture_build_authority(&[]).unwrap();
+    watch.state.lock().unwrap().rescan(RescanScope::Schema);
+    assert!(!proof.admits());
+    let proof = watch.capture_build_authority(&[]).unwrap();
+    ingest(&watch.state, Err(notify::Error::generic("coverage lost")));
+    assert!(!proof.admits());
 }

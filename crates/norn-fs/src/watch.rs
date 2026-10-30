@@ -27,8 +27,8 @@ use crate::{Identity, PostState, path_identity};
 
 mod build_authority;
 mod faults;
-pub use build_authority::BuildAuthority;
 use build_authority::BuildProof;
+pub use build_authority::{BUILD_FACT_CAP, BuildAuthority, BuildObserver, BuildWithdrawal};
 
 use faults::{Boundary, HealWindow, WatchFaults};
 
@@ -1828,7 +1828,6 @@ impl State {
         }
     }
     fn batch(&mut self) -> &mut Batch {
-        self.build_authority.invalidate();
         #[cfg(any(test, feature = "induced-failure"))]
         {
             self.observation_revision = self.observation_revision.and_then(|n| n.checked_add(1));
@@ -1843,6 +1842,7 @@ impl State {
         &mut pending.batch
     }
     fn rescan(&mut self, scope: RescanScope) {
+        self.build_authority.invalidate();
         let batch = self.batch();
         batch.rescans.insert(scope);
         if scope == RescanScope::Vault {
@@ -2148,6 +2148,7 @@ fn ingest_effect(
         state.rescan(RescanScope::Schema);
     }
     if schema_dirty {
+        state.build_authority.invalidate();
         state.batch().schema_dirty = true;
     }
     if vault_rescan {
@@ -2156,12 +2157,14 @@ fn ingest_effect(
     let Some(normalized) = dirty_root else {
         return;
     };
+    state.build_authority.record(&normalized, kind);
     let batch = state.batch();
     if !batch.rescans.contains(&RescanScope::Vault) {
         batch.note_vault_root(normalized, reported_spelling(kind));
         if batch.vault_roots.len() >= DIRTY_ROOT_CAP {
             batch.clear_vault_roots();
             batch.rescans.insert(RescanScope::Vault);
+            state.build_authority.invalidate();
         }
     }
 }

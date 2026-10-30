@@ -9,6 +9,25 @@ use norn_wire::{
     ValidateParams, Verb,
 };
 
+/// A request's compiled name class for bounded, in-memory fact admission.
+/// Refused spellings conservatively touch every root.
+#[derive(Clone)]
+pub struct Touch(Option<crate::TargetClass>);
+
+impl Touch {
+    /// Compile once, using the same grammar and ignore rules as resolution.
+    pub fn of(target: &str, ignore: &crate::AmbiguityIgnore) -> Self {
+        Self(crate::TargetClass::compile(target, ignore).ok())
+    }
+
+    /// Whether this root can change the target or one of its candidate names.
+    pub fn touches(&self, root: &str, beneath: bool) -> bool {
+        self.0
+            .as_ref()
+            .is_none_or(|class| class.touches(root, beneath))
+    }
+}
+
 /// The end of the construction step that admits a shape, or canonical Ready.
 /// Full text is admitted only after the closing transaction, never mid-batch.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -280,4 +299,25 @@ fn touch_compares_candidate_classes_and_ancestor_chains() {
     assert!(rooted.touches("a/note.md", false));
     assert!(!rooted.touches("b", true));
     assert!(Touch::of("../bad", &ignore).touches("anything", false));
+}
+
+#[cfg(test)]
+#[test]
+fn touch_rooted_targets_keep_segment_and_extension_boundaries() {
+    let touch = Touch::of("/a/note", &crate::AmbiguityIgnore::none());
+    assert!(touch.touches("a/note.md/child", true));
+    assert!(!touch.touches("a.md", false));
+    assert!(!touch.touches("ab", true));
+    assert!(!touch.touches("a/noted.md", false));
+}
+
+#[cfg(test)]
+#[test]
+fn touch_suffix_targets_apply_ambiguity_ignore_to_ancestors() {
+    let ignore = crate::AmbiguityIgnore::new([norn_wire::Pattern::parse("archive").unwrap()]);
+    let touch = Touch::of("note", &ignore);
+    assert!(!touch.touches("archive/note.md", false));
+    assert!(touch.touches("public/note.md", false));
+    assert!(touch.touches("public/note.md/child", false));
+    assert!(touch.touches("archive", true));
 }

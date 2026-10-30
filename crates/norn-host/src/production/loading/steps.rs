@@ -205,7 +205,7 @@ impl Scope<'_, '_> {
 /// snapshot sees its documents. A drain that wrote and readied nothing commits
 /// nothing, so a build with no request pending commits as the pass alone does.
 ///
-/// NORN-469 notes stay true here: a drain runs only inside a step group during
+/// NORN-469 PR B notes stay true here: a drain runs only inside a step group during
 /// steps 2 and 3, so neither a changeless content flush nor a vacated revisit
 /// is asked of it outside one; [`content_chunk`] never fills `account.freed`;
 /// and the content writer's default directory set is safe only while link
@@ -316,7 +316,7 @@ fn settle(
 
 /// Derive an arbitrary set of at most one host chunk, with no held-row input.
 /// The vault pass supplies the stage-1 queue a chunk at a time, and NORN-468
-/// pull-ahead ([`drain`]) the candidates of a requested target; NORN-469
+/// pull-ahead ([`drain`]) the candidates of a requested target; NORN-469 PR B
 /// requeue will select single paths here too.
 pub(in crate::production) fn content_chunk(
     ops: &ProductionEntryOps,
@@ -430,7 +430,7 @@ pub(in crate::production) fn content_chunk(
 
 /// Scan stored bytes one document at a time, then release that scan before the
 /// next. The vault pass supplies a page, and NORN-468 pull-ahead ([`drain`]) a
-/// requested target's resolved document; NORN-469 requeue will supply single
+/// requested target's resolved document; NORN-469 PR B requeue will supply single
 /// documents to this same seam.
 fn structure_chunk(
     store: &mut Store,
