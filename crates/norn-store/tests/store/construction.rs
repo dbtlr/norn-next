@@ -1544,3 +1544,73 @@ fn requeued_step_writers_retain_directory_marks_for_rejudgment() {
         assert!(store.link_health_deferred());
     }
 }
+
+#[test]
+fn a_requeued_documents_outgoing_links_are_all_judged_across_pages() {
+    use crate::common::path;
+    use norn_store::{Change, ContentModel, ContentWrite, IncrementProvenance, Span, Step};
+    let scratch = Scratch::new("requeued-outgoing-pages");
+    let mut store = scratch.open();
+    let model = ContentModel::none();
+    store.defer_link_health().unwrap();
+    store.begin_steps().unwrap();
+    for step in [Step::Names, Step::Content, Step::Structure] {
+        store.finish_step(step).unwrap();
+    }
+    store
+        .begin_request()
+        .judge_link_health_deferred(&model, &mut || {})
+        .unwrap();
+    store
+        .begin_request()
+        .apply_increment(
+            IncrementProvenance::Derived,
+            [Change::Named {
+                path: path("holder.md"),
+            }],
+            &[],
+            &model,
+        )
+        .unwrap();
+    let body = "[[missing]]\n".repeat(600);
+    let mut facts = crate::health::derived("holder.md", &body);
+    let links = std::mem::take(&mut facts.links);
+    let mut group = store.step_group().unwrap();
+    group
+        .begin_request()
+        .write_content(
+            &[ContentWrite {
+                facts,
+                origin: Span {
+                    line: 1,
+                    column: 1,
+                    byte_offset: 0,
+                },
+            }],
+            &[],
+            &model,
+        )
+        .unwrap();
+    let mut rows = group.begin_request().structure_page(8).unwrap();
+    rows[0].facts.links = links;
+    group
+        .begin_request()
+        .write_structure(&rows, &[], &model)
+        .unwrap();
+    group.commit().unwrap();
+    assert_eq!(store.begin_request().rejudge_reach(&model).unwrap(), 600);
+    let held = store
+        .begin_request()
+        .stored_findings(&path("holder.md"))
+        .unwrap();
+    assert_eq!(held.len(), 600);
+    let judged = store
+        .begin_request()
+        .judge_link_health(&[path("holder.md")], &model)
+        .unwrap();
+    assert_eq!(judged.len(), 600);
+    assert_eq!(
+        held.iter().map(|f| f.ordinal).collect::<Vec<_>>(),
+        judged.iter().map(|f| f.ordinal).collect::<Vec<_>>()
+    );
+}

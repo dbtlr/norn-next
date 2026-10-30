@@ -489,7 +489,7 @@ impl<'a> Request<'a> {
             &reach.classes,
             &reach.paths,
             &reach.directories,
-            &reach.generations,
+            Some(&reach.documents),
         )?;
         transaction
             .commit()
