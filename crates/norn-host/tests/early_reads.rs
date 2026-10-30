@@ -3659,6 +3659,86 @@ fn a_symbolic_link_met_on_requeue_keeps_its_advisory() {
 }
 
 #[test]
+fn requeued_link_advisories_keep_the_whole_walk_order() {
+    let fixture = Fixture::new("requeue-link-advisory");
+    std::fs::create_dir_all(fixture.root.join("a")).unwrap();
+    for path in ["a-b.md", "a/x.md"] {
+        std::os::unix::fs::symlink(fixture.root.join("doc00.md"), fixture.root.join(path)).unwrap();
+    }
+    let probe = Probe::new([LoadingBoundary::StepComplete(Step::Content)]);
+    let ops = fixture.ops(probe.clone());
+    let account = ops.account();
+    let host = fixture.host_over(ops, norn_host::READ_SETTLE_BOUND);
+    let _release = Release(&probe);
+    let _demand = host.demand(&name()).unwrap();
+    probe.wait(LoadingBoundary::StepComplete(Step::Content));
+    std::os::unix::fs::symlink("doc00.md", fixture.root.join("link.md")).unwrap();
+    fact_recorded(&account, 0);
+    probe.release();
+    ready(&host);
+    let advisories = host.inspect(&name()).unwrap().advisories;
+    assert!(
+        advisories.iter().any(|advisory| matches!(
+            advisory, norn_host::AttachmentAdvisory::SymlinkSkipped { path } if path == "link.md"
+        )),
+        "{advisories:?}"
+    );
+    drop(host);
+    let dirs = ConfigDirs::new(
+        fixture.scratch.join("reference-config"),
+        fixture.scratch.join("reference-data"),
+    )
+    .unwrap();
+    let reference = fixture.host_over(
+        ProductionEntryOps::new(dirs, ProductionPolicy::new(2, 2).unwrap()),
+        norn_host::READ_SETTLE_BOUND,
+    );
+    let _demand = reference.demand(&name()).unwrap();
+    ready(&reference);
+    assert_eq!(advisories, reference.inspect(&name()).unwrap().advisories);
+}
+
+#[test]
+fn requeued_link_advisories_retain_the_whole_walk_first_sixteen() {
+    let fixture = Fixture::new("requeue-link-advisory");
+    std::fs::create_dir_all(fixture.root.join("a")).unwrap();
+    for path in std::iter::once("a-b.md".to_owned()).chain((0..16).map(|n| format!("a/x{n:02}.md"))) {
+        std::os::unix::fs::symlink(fixture.root.join("doc00.md"), fixture.root.join(&path)).unwrap();
+    }
+    let probe = Probe::new([LoadingBoundary::StepComplete(Step::Content)]);
+    let ops = fixture.ops(probe.clone());
+    let account = ops.account();
+    let host = fixture.host_over(ops, norn_host::READ_SETTLE_BOUND);
+    let _release = Release(&probe);
+    let _demand = host.demand(&name()).unwrap();
+    probe.wait(LoadingBoundary::StepComplete(Step::Content));
+    std::os::unix::fs::symlink("doc00.md", fixture.root.join("a-c.md")).unwrap();
+    fact_recorded(&account, 0);
+    probe.release();
+    ready(&host);
+    let advisories = host.inspect(&name()).unwrap().advisories;
+    assert!(
+        advisories.iter().any(|advisory| matches!(
+            advisory, norn_host::AttachmentAdvisory::SymlinkSkipped { path } if path == "a-c.md"
+        )),
+        "{advisories:?}"
+    );
+    drop(host);
+    let dirs = ConfigDirs::new(
+        fixture.scratch.join("reference-config"),
+        fixture.scratch.join("reference-data"),
+    )
+    .unwrap();
+    let reference = fixture.host_over(
+        ProductionEntryOps::new(dirs, ProductionPolicy::new(2, 2).unwrap()),
+        norn_host::READ_SETTLE_BOUND,
+    );
+    let _demand = reference.demand(&name()).unwrap();
+    ready(&reference);
+    assert_eq!(advisories, reference.inspect(&name()).unwrap().advisories);
+}
+
+#[test]
 fn a_case_respelling_during_each_document_step_equals_from_scratch() {
     use norn_testkit::churn::{folding, runs_where_the_volume_folds};
     for step in [Step::Names, Step::Content, Step::Structure] {
