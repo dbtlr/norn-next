@@ -988,10 +988,15 @@ fn a_requeued_file_beneath_a_directory_marked_at_first_build_derives_nothing() {
     let mut attachment = ops
         .attach(&f.registration(), &ProgressReporter::disconnected())
         .expect("an unlistable directory does not refuse attach");
+    // FSEvents can report one write as several deliveries at the file, which
+    // the build may take in separate drains. Each is a root beneath the mark,
+    // so the count of roots is at least one and every drain derives nothing.
+    // The write changes no entry of `locked` itself, so no root lists it.
+    let spent = ops.evidence.read();
+    assert!(spent.requeued_roots >= 1, "the build takes the fact");
     assert_eq!(
-        ops.evidence.read().requeued_roots,
-        1,
-        "the build takes the fact"
+        spent.requeued_documents, 0,
+        "a root beneath the mark derives nothing"
     );
     let findings = findings_at(&mut attachment.store, "locked");
     assert_eq!(findings.len(), 1, "{findings:?}");

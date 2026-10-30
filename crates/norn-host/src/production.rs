@@ -2621,14 +2621,14 @@ where
                     files.next();
                     pending.passed_over(&root, reason);
                     if let Some(row) = row {
-                        rolling_death(&mut pending, row.path.clone());
+                        rolling_death(&mut pending, row.path.clone())?;
                     }
                 }
                 norn_fs::WalkFact::File(file) if !is_markdown(file.path().as_path()) => {
                     let path = file.path().as_path().to_owned();
                     let count = counts_rolling_write(pending.account, file.stat());
                     files.next();
-                    last_read_spelling = merge_file(&mut pending, &path, row, count);
+                    last_read_spelling = merge_file(&mut pending, &path, row, count)?;
                 }
                 norn_fs::WalkFact::File(file)
                     if pending.account.rolling && document_path(file.path().as_path()).is_err() =>
@@ -2682,7 +2682,7 @@ where
                         }
                         norn_fs::Opened::Nothing => {
                             if let Some(row) = row {
-                                rolling_death(&mut pending, row.path.clone());
+                                rolling_death(&mut pending, row.path.clone())?;
                             }
                         }
                     }
@@ -2708,7 +2708,7 @@ where
                     norn_fs::WalkFact::File(file) if !is_markdown(file.path().as_path()) => {
                         let count = counts_rolling_write(pending.account, file.stat());
                         last_read_spelling =
-                            merge_file(&mut pending, file.path().as_path(), Some(row), count);
+                            merge_file(&mut pending, file.path().as_path(), Some(row), count)?;
                     }
                     norn_fs::WalkFact::File(file) => {
                         let spelling = file
@@ -2730,7 +2730,7 @@ where
                                 merge_read(&mut pending, &spelling, read, row.document.as_ref())?;
                             }
                             norn_fs::Opened::Nothing => {
-                                rolling_death(&mut pending, row.path.clone())
+                                rolling_death(&mut pending, row.path.clone())?;
                             }
                             norn_fs::Opened::UnreadableFolder { folder, cause, .. } => {
                                 unreadable_names.absorb(&folder);
@@ -2754,11 +2754,11 @@ where
                     }
                     norn_fs::WalkFact::Skipped(skip) => {
                         pending.passed_over(skip.path().as_path(), skip.reason());
-                        rolling_death(&mut pending, row.path.clone());
+                        rolling_death(&mut pending, row.path.clone())?;
                     }
                 }
             } else {
-                rolling_death(&mut pending, row.path.clone());
+                rolling_death(&mut pending, row.path.clone())?;
             }
             through = db_key.expect("a stored row");
             after = Some(row.path.clone());
@@ -2806,11 +2806,15 @@ fn path_key(path: &[u8], order: StoredPathOrder) -> Vec<u8> {
     }
 }
 
-fn rolling_death(pending: &mut Pending<'_>, path: DocumentPath) {
+fn rolling_death(pending: &mut Pending<'_>, path: DocumentPath) -> Result<(), JobFailure> {
     if pending.account.rolling {
         pending.misses.deleted += 1;
     }
+    // A construction walk in the content step may have queued a finding just
+    // before this row's death; the change never shares that flush.
+    pending.settle_content()?;
     pending.push(target_death(path, Provenance::HealPrune));
+    Ok(())
 }
 
 /// A file dies without a hash or tombstone; both deaths re-judge its keys.
@@ -2829,11 +2833,12 @@ fn merge_file(
     path: &Path,
     row: Option<&StoredTarget>,
     count: bool,
-) -> Option<String> {
-    let path = document_path(path)
-        .ok()
-        .filter(DocumentPath::is_vault_file)?;
+) -> Result<Option<String>, JobFailure> {
+    let Some(path) = document_path(path).ok().filter(DocumentPath::is_vault_file) else {
+        return Ok(None);
+    };
     if row.is_none_or(|row| row.path != path || !pending.declared.judged(row.generation)) {
+        pending.settle_content()?;
         if let Some(row) = row.filter(|row| row.path != path) {
             pending.push(Change::FileDeath {
                 path: row.path.clone(),
@@ -2844,7 +2849,7 @@ fn merge_file(
             pending.misses.created += 1;
         }
     }
-    Some(path.as_str().to_string())
+    Ok(Some(path.as_str().to_string()))
 }
 
 fn counts_rolling_write(account: &Account, stat: &norn_fs::FileStat) -> bool {
@@ -3017,6 +3022,20 @@ fn scoped_increment_links(
     progress: &Healing<'_, ProductionAttachment>,
     exclusions: &[PathBuf],
 ) -> Result<SkippedLinks, JobFailure> {
+    scoped_increment_closed(store, root, dirty, policy, progress, exclusions)
+        .map(|account| account.links)
+}
+
+/// Run the scoped increment and close its job, answering the closed account:
+/// a construction requeue carries what it filed into the step it runs in.
+fn scoped_increment_closed(
+    store: &mut Store,
+    root: &Path,
+    dirty: &std::collections::BTreeSet<norn_fs::NormalizedPath>,
+    policy: ProductionPolicy,
+    progress: &Healing<'_, ProductionAttachment>,
+    exclusions: &[PathBuf],
+) -> Result<Account, JobFailure> {
     let vault = norn_fs::Vault::open(root, exclusions).map_err(effect)?;
     let sensitivity = vault.case_sensitivity();
     let mut account = Account::default();
@@ -3341,7 +3360,7 @@ fn scoped_increment_links(
                     stored_path_order(sensitivity),
                 )
                 .map_err(store_effect)?;
-            merge_file(&mut pending, path, standing.first(), false);
+            merge_file(&mut pending, path, standing.first(), false)?;
             continue;
         }
         if pending.names {
@@ -3416,7 +3435,7 @@ fn scoped_increment_links(
     }
     pending.flush()?;
     close_job(store, root, exclusions, policy, &mut account)?;
-    Ok(account.links)
+    Ok(account)
 }
 
 /// One path a plan's publication left, and what the applier knows it holds:
@@ -4178,6 +4197,20 @@ impl Account {
         }
     }
 
+    /// Carry what a construction requeue filed and saw into the step whose
+    /// walk this account is.
+    ///
+    /// **A requeue closes its own job, and the step's job closes later.** The
+    /// step registered the whole vault, so its prune takes every finding at a
+    /// place it did not file itself. A requeue that derives a document the
+    /// step had not reached files that document's quarantine in its own
+    /// account, and the step's content pass no longer reaches it to file it
+    /// again; the places the requeue filed are this walk's places filed too.
+    fn absorb_requeue(&mut self, requeue: Account, order: StoredPathOrder) {
+        self.filed.absorb(requeue.filed);
+        self.links.merge(requeue.links, order);
+    }
+
     /// Whether a walk of `walked` concluded anything at all about `subject`.
     ///
     /// Two things put a place outside what a walk enumerated, and the caller has
@@ -4252,6 +4285,13 @@ impl Filed {
         self.places
             .get(subject)
             .is_some_and(|sides| sides.contains(&decided))
+    }
+
+    /// Take every place another job filed at as filed by this one.
+    fn absorb(&mut self, other: Filed) {
+        for (subject, sides) in other.places {
+            self.places.entry(subject).or_default().extend(sides);
+        }
     }
 }
 
@@ -4745,11 +4785,16 @@ impl<'s> Pending<'s> {
     }
 
     /// Keep a respelling's death and replacement together even at a chunk bound.
+    ///
+    /// It settles the content step's queue first, so the death and the change
+    /// its caller queues next for `path` both land after what that step
+    /// already filed — a refused spelling's finding the same walk met earlier.
     fn retire_respelling(
         &mut self,
         path: &DocumentPath,
         standing: Option<&DocumentPath>,
     ) -> Result<(), JobFailure> {
+        self.settle_content()?;
         if let Some(old) = standing.filter(|old| *old != path) {
             if self.changes.len() + 2 > self.bound {
                 self.flush()?;
@@ -12366,6 +12411,295 @@ mod tests {
         ops.detach(&name, attachment);
     }
 
+    /// What a fact injected at one loading boundary touches: a rewrite of the
+    /// file with the same bytes, or a metadata change at its folder.
+    #[cfg(feature = "induced-failure")]
+    #[derive(Clone, Copy, Debug)]
+    enum Touch {
+        File,
+        Folder,
+    }
+
+    /// Makes one watcher fact at `file` or its folder when the build first
+    /// reaches `at`, and holds the build until the watcher has accepted it, so
+    /// the build's next requeue takes it.
+    #[cfg(feature = "induced-failure")]
+    struct FactAt {
+        at: crate::LoadingBoundary,
+        file: PathBuf,
+        touch: Touch,
+        fired: std::sync::atomic::AtomicBool,
+        account: Arc<crate::JobEvidence>,
+    }
+
+    #[cfg(feature = "induced-failure")]
+    impl crate::LoadingProbe for FactAt {
+        fn at(&self, boundary: crate::LoadingBoundary) {
+            if boundary != self.at || self.fired.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
+            let before = self.account.read().build_facts_recorded;
+            match self.touch {
+                Touch::File => fs::write(&self.file, fs::read(&self.file).unwrap()).unwrap(),
+                Touch::Folder => {
+                    let folder = self.file.parent().unwrap();
+                    fs::set_permissions(folder, fs::metadata(folder).unwrap().permissions())
+                        .unwrap();
+                }
+            }
+            let budget = Budget::new(Duration::from_secs(20), Duration::from_millis(10));
+            wait_until("the injected build fact", budget, || {
+                if self.account.read().build_facts_recorded > before {
+                    Observed::Met(())
+                } else {
+                    Observed::pending("not yet accepted")
+                }
+            })
+            .unwrap();
+        }
+    }
+
+    /// Removes `file` and touches its folder's metadata when the build first
+    /// reaches `at`, then holds the build until the watcher has accepted both.
+    #[cfg(feature = "induced-failure")]
+    struct RemoveAt {
+        at: crate::LoadingBoundary,
+        file: PathBuf,
+        fired: std::sync::atomic::AtomicBool,
+        account: Arc<crate::JobEvidence>,
+    }
+
+    #[cfg(feature = "induced-failure")]
+    impl crate::LoadingProbe for RemoveAt {
+        fn at(&self, boundary: crate::LoadingBoundary) {
+            if boundary != self.at || self.fired.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
+            let before = self.account.read().build_facts_recorded;
+            fs::remove_file(&self.file).unwrap();
+            let folder = self.file.parent().unwrap();
+            fs::set_permissions(folder, fs::metadata(folder).unwrap().permissions()).unwrap();
+            let budget = Budget::new(Duration::from_secs(20), Duration::from_millis(10));
+            wait_until("the injected build facts", budget, || {
+                if self.account.read().build_facts_recorded > before {
+                    Observed::Met(())
+                } else {
+                    Observed::pending("not yet accepted")
+                }
+            })
+            .unwrap();
+        }
+    }
+
+    /// **A content-step requeue settles a refused spelling's finding before a
+    /// row's death.** A folder fact taken in the content step walks the folder
+    /// again; its refused spelling files a finding, and the next row in merge
+    /// order is a document whose file left, so its death must not share the
+    /// finding's flush. The build equals a from-scratch derivation.
+    #[cfg(feature = "induced-failure")]
+    #[test]
+    fn a_content_step_requeue_settles_a_refused_spelling_before_a_rows_death() {
+        let f = Fixture::new("requeue-death-after-refused");
+        fs::create_dir(f.vault().join("notes")).unwrap();
+        fs::write(f.vault().join("notes/..md"), "refused spelling").unwrap();
+        fs::write(f.vault().join("notes/a.md"), "# A\n").unwrap();
+        fs::write(f.vault().join("kept.md"), "# Kept\n").unwrap();
+        norn_fs::watch::settle_prior_changes(f.root.root(), lifecycle_budget().work()).unwrap();
+        let (ops, name) = f.ops(2);
+        let probe = RemoveAt {
+            at: crate::LoadingBoundary::StepComplete(norn_store::Step::Names),
+            file: f.vault().join("notes/a.md"),
+            fired: Default::default(),
+            account: ops.account(),
+        };
+        let ops = ops.with_loading_probe(Arc::new(probe));
+        let mut attachment = ops
+            .attach(&f.registration(), &ProgressReporter::disconnected())
+            .unwrap();
+        assert!(
+            ops.evidence.read().requeued_roots >= 1,
+            "the build takes the facts"
+        );
+        let mut scratch = scratch_store(
+            &f,
+            "requeue-death-after-refused-oracle",
+            ProductionPolicy::new(2, 2).unwrap(),
+        );
+        assert_eq!(
+            derived_vault(&mut attachment.store, &f.vault()),
+            derived_vault(&mut scratch, &f.vault())
+        );
+        assert_eq!(
+            finding_total(&mut attachment.store),
+            finding_total(&mut scratch)
+        );
+        ops.detach(&name, attachment);
+    }
+
+    /// Writes a non-Markdown vault file and touches its folder's metadata when
+    /// the build first reaches `at`, then holds the build until the watcher has
+    /// accepted the facts.
+    #[cfg(feature = "induced-failure")]
+    struct CreateAt {
+        at: crate::LoadingBoundary,
+        file: PathBuf,
+        fired: std::sync::atomic::AtomicBool,
+        account: Arc<crate::JobEvidence>,
+    }
+
+    #[cfg(feature = "induced-failure")]
+    impl crate::LoadingProbe for CreateAt {
+        fn at(&self, boundary: crate::LoadingBoundary) {
+            if boundary != self.at || self.fired.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
+            let before = self.account.read().build_facts_recorded;
+            fs::write(&self.file, b"png").unwrap();
+            let folder = self.file.parent().unwrap();
+            fs::set_permissions(folder, fs::metadata(folder).unwrap().permissions()).unwrap();
+            let budget = Budget::new(Duration::from_secs(20), Duration::from_millis(10));
+            wait_until("the injected build facts", budget, || {
+                if self.account.read().build_facts_recorded > before {
+                    Observed::Met(())
+                } else {
+                    Observed::pending("not yet accepted")
+                }
+            })
+            .unwrap();
+        }
+    }
+
+    /// **A content-step requeue settles a refused spelling's finding before a
+    /// vault file's birth**, as before a row's death: the new file's name must
+    /// not share the finding's flush. The build equals a from-scratch derivation.
+    #[cfg(feature = "induced-failure")]
+    #[test]
+    fn a_content_step_requeue_settles_a_refused_spelling_before_a_vault_files_birth() {
+        let f = Fixture::new("verifier-requeue-birth-after-refused");
+        fs::create_dir(f.vault().join("notes")).unwrap();
+        fs::write(f.vault().join("notes/..md"), "refused spelling").unwrap();
+        fs::write(f.vault().join("notes/c.md"), "# C\n").unwrap();
+        fs::write(f.vault().join("kept.md"), "# Kept\n").unwrap();
+        norn_fs::watch::settle_prior_changes(f.root.root(), lifecycle_budget().work()).unwrap();
+        let (ops, name) = f.ops(2);
+        let probe = CreateAt {
+            at: crate::LoadingBoundary::StepComplete(norn_store::Step::Names),
+            file: f.vault().join("notes/b.png"),
+            fired: Default::default(),
+            account: ops.account(),
+        };
+        let ops = ops.with_loading_probe(Arc::new(probe));
+        let mut attachment = ops
+            .attach(&f.registration(), &ProgressReporter::disconnected())
+            .unwrap();
+        assert!(
+            ops.evidence.read().requeued_roots >= 1,
+            "the build takes the facts"
+        );
+        let mut scratch = scratch_store(
+            &f,
+            "verifier-requeue-birth-after-refused-oracle",
+            ProductionPolicy::new(2, 2).unwrap(),
+        );
+        assert_eq!(
+            derived_vault(&mut attachment.store, &f.vault()),
+            derived_vault(&mut scratch, &f.vault())
+        );
+        assert_eq!(
+            finding_total(&mut attachment.store),
+            finding_total(&mut scratch)
+        );
+        ops.detach(&name, attachment);
+    }
+
+    /// **A requeued quarantine files its finding however late its fact comes.**
+    /// A fact at an undecodable document, at its folder, or at a refused
+    /// spelling beside it, taken in any of the build's document steps, runs
+    /// those paths through again; the build still holds every finding a
+    /// from-scratch derivation files.
+    #[cfg(feature = "induced-failure")]
+    #[test]
+    fn a_requeued_quarantine_keeps_its_finding_in_every_step() {
+        use norn_store::Step;
+        for at in [
+            crate::LoadingBoundary::CanonicalPage,
+            crate::LoadingBoundary::StepComplete(Step::Names),
+            crate::LoadingBoundary::StepComplete(Step::Content),
+        ] {
+            for (file, touch) in [
+                ("notes/bad.md", Touch::File),
+                ("notes/bad.md", Touch::Folder),
+                ("notes/..md", Touch::File),
+            ] {
+                let f = Fixture::new("quarantine-requeued");
+                fs::create_dir(f.vault().join("notes")).unwrap();
+                fs::create_dir(f.vault().join("other")).unwrap();
+                fs::write(f.vault().join("notes/bad.md"), UNDECODABLE).unwrap();
+                fs::write(f.vault().join("other/bad.md"), UNDECODABLE).unwrap();
+                fs::write(f.vault().join("notes/..md"), "refused spelling").unwrap();
+                fs::write(
+                    f.vault().join("notes/good.md"),
+                    "---\nbad: [\n---\n# Good\n",
+                )
+                .unwrap();
+                norn_fs::watch::settle_prior_changes(f.root.root(), lifecycle_budget().work())
+                    .unwrap();
+                let (ops, name) = f.ops(2);
+                let probe = FactAt {
+                    at,
+                    file: f.vault().join(file),
+                    touch,
+                    fired: Default::default(),
+                    account: ops.account(),
+                };
+                let ops = ops.with_loading_probe(Arc::new(probe));
+                let mut attachment = ops
+                    .attach(&f.registration(), &ProgressReporter::disconnected())
+                    .unwrap();
+                let case = format!("{touch:?} fact for {file} at {at:?}");
+                assert!(
+                    ops.evidence.read().requeued_roots >= 1,
+                    "{case}: the build takes the fact"
+                );
+                let mut scratch = scratch_store(
+                    &f,
+                    "quarantine-requeued-oracle",
+                    ProductionPolicy::new(2, 2).unwrap(),
+                );
+                assert_eq!(
+                    derived_vault(&mut attachment.store, &f.vault()),
+                    derived_vault(&mut scratch, &f.vault()),
+                    "{case}"
+                );
+                // The comparison above reads findings directly under the vault.
+                let refused = DocumentPath::rendered(Path::new("notes/..md"));
+                for path in [
+                    "notes/bad.md",
+                    "other/bad.md",
+                    "notes/good.md",
+                    refused.as_str(),
+                ] {
+                    assert_eq!(
+                        sorted_kinds(&mut attachment.store, path),
+                        sorted_kinds(&mut scratch, path),
+                        "{case}: {path}"
+                    );
+                }
+                assert_eq!(
+                    finding_total(&mut attachment.store),
+                    finding_total(&mut scratch),
+                    "{case}"
+                );
+                assert_eq!(
+                    findings_at(&mut attachment.store, "notes/bad.md").len(),
+                    1,
+                    "{case}"
+                );
+                ops.detach(&name, attachment);
+            }
+        }
+    }
+
     /// **The path the deletion itself names is a scope too.** A watcher reports
     /// the path an event happened at, and a document that left is a path the
     /// filesystem answers is not there — an answer about that path and
@@ -14953,6 +15287,10 @@ mod tests {
             ("asset.png", b"asset"),
         ] { fs::write(f.vault().join(path), bytes).unwrap(); }
         std::os::unix::fs::symlink("a.md", f.vault().join("alias.md")).unwrap();
+        // FSEvents can deliver the fixture's own writes after the watch's
+        // history marker; the build would take them as facts and requeue
+        // their documents, which these write-once counters do not count.
+        norn_fs::watch::settle_prior_changes(f.root.root(), lifecycle_budget().work()).unwrap();
         let (ops, name) = f.ops(2);
         let mut attachment = ops
             .attach(&f.registration(), &ProgressReporter::disconnected())
@@ -16886,6 +17224,13 @@ mod tests {
     /// stopped agreeing with a from-scratch derivation would have to disagree
     /// with this.
     fn from_scratch(f: &Fixture, label: &str, policy: ProductionPolicy) -> DerivedVault {
+        let mut store = scratch_store(f, label, policy);
+        derived_vault(&mut store, f.registration().root.as_path())
+    }
+
+    /// The store [`from_scratch`] derives, for a case reading findings below
+    /// the vault's top level.
+    fn scratch_store(f: &Fixture, label: &str, policy: ProductionPolicy) -> Store {
         let mut store = Store::open(
             f.root.join(format!("{label}.sqlite3")),
             proven_order(f),
@@ -16912,7 +17257,7 @@ mod tests {
             &progress.healing(),
         )
         .unwrap();
-        derived_vault(&mut store, registration.root.as_path())
+        store
     }
 
     /// Overwrite the root page of the `documents` table, leaving the store
@@ -21103,6 +21448,54 @@ mod tests {
                     "{step:?}"
                 );
             }
+        }
+    }
+
+    /// A content-step walk that filed a refused spelling's finding and then
+    /// meets a folded respelling lands that finding before the respelling's
+    /// death and replacement name are queued together.
+    #[cfg(unix)]
+    #[test]
+    fn a_content_step_respelling_after_a_refused_spelling_settles_the_finding_first() {
+        let f = Fixture::watcherless("content-step-respelling-after-refusal");
+        let root = f.vault();
+        let mut store = Store::open(
+            f.root.join("folded.sqlite3"),
+            StoredPathOrder::AsciiCaseInsensitive,
+            crate::DERIVATION_VERSION,
+        )
+        .unwrap();
+        ProductionEntryOps::pin_schema(&mut store, &f.registration()).unwrap();
+        store.defer_link_health().unwrap();
+        store.begin_steps().unwrap();
+        store.finish_step(norn_store::Step::Names).unwrap();
+        if !write_or_report(&root.join("\u{1}.md"), b"body") {
+            return;
+        }
+        fs::write(root.join("note.md"), "# Note\n").unwrap();
+        let progress = ProgressReporter::<ProductionAttachment>::disconnected();
+        for renamed in [false, true] {
+            if renamed {
+                fs::rename(root.join("note.md"), root.join("Note.md")).unwrap();
+            }
+            let mut account = Account::default();
+            merge_walk(
+                &mut store,
+                &root,
+                &[],
+                walk(&root, &[]).unwrap(),
+                norn_fs::CaseSensitivity::Insensitive,
+                HealScope::Vault,
+                ProductionPolicy::new(2, 1).unwrap(),
+                &progress.healing(),
+                &mut account,
+            )
+            .unwrap();
+            assert_eq!(
+                stored_paths(&mut store),
+                vec![if renamed { "Note.md" } else { "note.md" }]
+            );
+            assert_eq!(finding_total(&mut store), 1, "renamed={renamed}");
         }
     }
 

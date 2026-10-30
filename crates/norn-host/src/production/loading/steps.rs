@@ -49,7 +49,7 @@ pub(super) fn documents(
         publisher,
         subscription,
         false,
-        &mut account.links,
+        &mut account,
     )?;
     store.finish_step(Step::Names).map_err(store_effect)?;
     boundary(ops, publisher, Step::Names);
@@ -77,7 +77,7 @@ pub(super) fn documents(
                 publisher,
                 subscription,
                 true,
-                &mut pending.account.links,
+                pending.account,
             )?;
             drain(ops, publisher, &mut Scope::Content(&mut pending, &source))?;
         }
@@ -114,7 +114,7 @@ pub(super) fn documents(
                 publisher,
                 subscription,
                 true,
-                &mut pending.account.links,
+                pending.account,
             )?;
             drain(ops, publisher, &mut Scope::Content(&mut pending, &source))?;
         }
@@ -128,7 +128,7 @@ pub(super) fn documents(
             publisher,
             subscription,
             true,
-            &mut pending.account.links,
+            pending.account,
         )?;
         drop(pending);
         group.commit().map_err(store_effect)?;
@@ -181,7 +181,7 @@ pub(super) fn documents(
         publisher,
         subscription,
         false,
-        &mut account.links,
+        &mut account,
     )?;
     store.finish_step(Step::Content).map_err(store_effect)?;
     boundary(ops, publisher, Step::Content);
@@ -201,7 +201,7 @@ pub(super) fn documents(
                 publisher,
                 subscription,
                 true,
-                &mut account.links,
+                &mut account,
             )?;
             drain(
                 ops,
@@ -230,7 +230,7 @@ pub(super) fn documents(
                 publisher,
                 subscription,
                 true,
-                &mut account.links,
+                &mut account,
             )?;
             drain(
                 ops,
@@ -247,7 +247,7 @@ pub(super) fn documents(
             publisher,
             subscription,
             true,
-            &mut account.links,
+            &mut account,
         )?;
         group.commit().map_err(store_effect)?;
         if count == 0 {
@@ -267,7 +267,7 @@ pub(super) fn documents(
         publisher,
         subscription,
         false,
-        &mut account.links,
+        &mut account,
     )?;
     store.finish_step(Step::Structure).map_err(store_effect)?;
     boundary(ops, publisher, Step::Structure);
@@ -286,7 +286,7 @@ fn requeue(
     publisher: &Publisher<'_>,
     subscription: Option<&Subscription>,
     grouped: bool,
-    links: &mut SkippedLinks,
+    walk: &mut Account,
 ) -> Result<(), JobFailure> {
     let Some(subscription) = subscription else {
         return Ok(());
@@ -304,7 +304,7 @@ fn requeue(
         }
         if grouped || store.construction_step() == Some(Step::Names) {
             requeue_taken(
-                ops, store, root, exclusions, progress, publisher, &taken, links,
+                ops, store, root, exclusions, progress, publisher, &taken, walk,
             )?;
         } else {
             let mut group = store.step_group().map_err(store_effect)?;
@@ -316,7 +316,7 @@ fn requeue(
                 progress,
                 publisher,
                 &taken,
-                links,
+                walk,
             )?;
             group.commit().map_err(store_effect)?;
         }
@@ -325,6 +325,10 @@ fn requeue(
 }
 
 /// Finish one taken set, using the caller's document-step group when needed.
+///
+/// The requeue's walk and its content close jobs of their own, and the step's
+/// walk account (`walk`) takes what they filed, so the step's own job end
+/// does not prune a finding the requeue filed again.
 #[allow(clippy::too_many_arguments)]
 fn requeue_taken(
     ops: &ProductionEntryOps,
@@ -334,7 +338,7 @@ fn requeue_taken(
     progress: &Healing<'_, ProductionAttachment>,
     publisher: &Publisher<'_>,
     taken: &norn_fs::watch::TakenRoots,
-    links: &mut SkippedLinks,
+    walk: &mut Account,
 ) -> Result<(), JobFailure> {
     #[cfg(feature = "induced-failure")]
     ops.loading_boundary(LoadingBoundary::RequeueStarted);
@@ -344,8 +348,8 @@ fn requeue_taken(
         if store.construction_step() != Some(Step::Names) {
             store.commit_step_group().map_err(store_effect)?;
         }
-        links.merge(
-            scoped_increment_links(store, root, &taken.roots, ops.policy, progress, exclusions)?,
+        walk.absorb_requeue(
+            scoped_increment_closed(store, root, &taken.roots, ops.policy, progress, exclusions)?,
             store.path_order(),
         );
         let mut documents = 0;
@@ -403,7 +407,7 @@ fn requeue_taken(
                 pending.store.commit_step_group().map_err(store_effect)?;
             }
             close_job(store, root, exclusions, ops.policy, &mut account)?;
-            links.merge(account.links, store.path_order());
+            walk.absorb_requeue(account, store.path_order());
         }
         if store.construction_step() != Some(Step::Names) {
             store.commit_step_group().map_err(store_effect)?;
