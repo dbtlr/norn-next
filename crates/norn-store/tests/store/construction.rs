@@ -1205,3 +1205,22 @@ fn target_candidates_bound_and_total() {
     group.commit().unwrap();
     assert!(store.commit_step_group().is_err());
 }
+
+#[test]
+fn named_resets_a_document_in_any_document_step() {
+    use crate::common::path;
+    use norn_store::{Change, ContentModel, IncrementProvenance, Step};
+    for step in [Step::Content, Step::Structure] {
+        let scratch = Scratch::new("construction-requeue-reset");
+        let mut store = scratch.open();
+        store.defer_link_health().unwrap();
+        store.begin_steps().unwrap();
+        store.finish_step(Step::Names).unwrap();
+        if step == Step::Structure {
+            store.finish_step(Step::Content).unwrap();
+        }
+        store.begin_request().apply_increment(IncrementProvenance::Derived,
+            [Change::Named { path: path("new.md") }], &[], &ContentModel::none()).unwrap();
+        assert!(store.finish_step(step).is_err());
+    }
+}

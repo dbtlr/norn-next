@@ -3234,3 +3234,29 @@ fn a_get_refuses_a_target_fact_newer_than_its_meeting() {
     });
     ready(&host);
 }
+
+#[test]
+fn a_requeued_edit_answers_its_new_bytes_before_ready() {
+    let fixture = Fixture::new("early-requeued-edit");
+    let probe = Probe::new([
+        LoadingBoundary::StepComplete(Step::Content),
+        LoadingBoundary::StepComplete(Step::Structure),
+    ]);
+    let ops = fixture.ops(probe.clone());
+    let account = ops.account();
+    let host = fixture.host_over(ops, norn_host::READ_SETTLE_BOUND);
+    let _release = Release(&probe);
+    let _demand = host.demand(&name()).unwrap();
+    probe.wait(LoadingBoundary::StepComplete(Step::Content));
+    std::fs::write(fixture.root.join("late.md"), "---\nrank: 40\n---\n# Requeued\n").unwrap();
+    fact_recorded(&account, 0);
+    probe.release();
+    probe.wait(LoadingBoundary::StepComplete(Step::Structure));
+    assert!(host.find(&ranked("40")).is_ok(), "the build must derive the accepted fact before Ready");
+    assert!(host.get(&get("late")).is_ok());
+    probe.release();
+    ready(&host);
+    drop(host);
+    project(&fixture.store_path(), &fixture.root).assert_equivalent(
+        &from_scratch(&fixture, "reference"), "requeue");
+}

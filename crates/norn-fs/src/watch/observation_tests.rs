@@ -612,3 +612,44 @@ fn a_heal_merge_that_widens_withdraws_live_build_authority() {
     assert!(batch.rescans().contains(&RescanScope::Vault));
     assert!(!proof.held_is_current());
 }
+
+#[test]
+fn take_build_roots_takes_the_window_and_leaves_rescans() {
+    let (_lease, _scratch, watch) = fixture();
+    assert!(watch.take_build_roots().is_none());
+    watch.begin_heal();
+    let authority = watch.capture_build_authority(&[]).unwrap();
+    ingest(&watch.state, Ok(Event::new(EventKind::Create(CreateKind::File))
+        .add_path(watch.covered_root().join("fresh.md"))));
+    let taken = watch.take_build_roots().unwrap();
+    assert_eq!(taken.roots.len(), 1);
+    assert_eq!(taken.through, authority.sequence());
+    assert!(watch.finish_heal().unwrap().is_empty());
+    watch.begin_heal();
+    watch.state.lock().unwrap().rescan(RescanScope::Vault);
+    assert!(watch.take_build_roots().is_none());
+    assert!(!watch.finish_heal().unwrap().is_empty());
+}
+
+#[test]
+fn mark_derived_satisfies_only_facts_through_its_sequence() {
+    let (_lease, _scratch, watch) = fixture();
+    watch.begin_heal();
+    let authority = watch.capture_build_authority(&[]).unwrap();
+    let event = || Event::new(EventKind::Create(CreateKind::File))
+        .add_path(watch.covered_root().join("fresh.md"));
+    ingest(&watch.state, Ok(event()));
+    let taken = watch.take_build_roots().unwrap();
+    ingest(&watch.state, Ok(event()));
+    authority.mark_derived(&taken.roots, taken.through);
+    authority.visit_roots(|_, mut roots| {
+        let (_, reported, underived, _) = roots.next().unwrap();
+        assert!(reported > taken.through);
+        assert_eq!(underived, Some(taken.through + 1));
+    });
+    let taken = watch.take_build_roots().unwrap();
+    authority.mark_derived(&taken.roots, taken.through);
+    authority.visit_roots(|_, mut roots| assert!(Iterator::all(&mut roots, |(_, _, owed, _)| owed.is_none())));
+    ingest(&watch.state, Ok(event()));
+    authority.visit_roots(|_, mut roots| assert!(Iterator::all(&mut roots, |(_, reported, owed, _)| owed == Some(reported))));
+}
