@@ -7479,15 +7479,14 @@ fn a_requeued_edit_costs_the_same_at_both_scales() {
                 norn_host::LoadingBoundary::RequeueStarted => {
                     norn_store::induced_failure::statements_begun();
                     let spent = self.account.lock().unwrap().as_ref().unwrap().read();
-                    self.read_steps.lock().unwrap().0 =
-                        spent.changeset_read_steps + spent.requeue_read_steps;
+                    self.read_steps.lock().unwrap().0 = spent.requeue_read_steps;
                 }
                 norn_host::LoadingBoundary::Requeued => {
                     *self.statements.lock().unwrap() +=
                         norn_store::induced_failure::statements_begun().len();
                     let spent = self.account.lock().unwrap().as_ref().unwrap().read();
                     let mut work = self.read_steps.lock().unwrap();
-                    work.1 += spent.changeset_read_steps + spent.requeue_read_steps - work.0;
+                    work.1 += spent.requeue_read_steps - work.0;
                 }
                 _ => {}
             }
@@ -7564,5 +7563,8 @@ fn a_requeued_edit_costs_the_same_at_both_scales() {
     let large = measure(10_000);
     eprintln!("requeue work at 2k: {small:?}; at 10k: {large:?}");
     assert_eq!(small, large);
-    assert!(small.3 > 128, "a requeue must include increment reads, not only queue paging: {small:?}");
+    assert!(
+        small.3 > 128,
+        "a requeue must include increment reads, not only queue paging: {small:?}"
+    );
 }

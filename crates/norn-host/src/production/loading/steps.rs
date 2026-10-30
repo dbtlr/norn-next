@@ -49,6 +49,7 @@ pub(super) fn documents(
         publisher,
         subscription,
         false,
+        &mut account.links,
     )?;
     store.finish_step(Step::Names).map_err(store_effect)?;
     boundary(ops, publisher, Step::Names);
@@ -76,6 +77,7 @@ pub(super) fn documents(
                 publisher,
                 subscription,
                 true,
+                &mut pending.account.links,
             )?;
             drain(ops, publisher, &mut Scope::Content(&mut pending, &source))?;
         }
@@ -112,6 +114,7 @@ pub(super) fn documents(
                 publisher,
                 subscription,
                 true,
+                &mut pending.account.links,
             )?;
             drain(ops, publisher, &mut Scope::Content(&mut pending, &source))?;
         }
@@ -125,6 +128,7 @@ pub(super) fn documents(
             publisher,
             subscription,
             true,
+            &mut pending.account.links,
         )?;
         drop(pending);
         group.commit().map_err(store_effect)?;
@@ -177,6 +181,7 @@ pub(super) fn documents(
         publisher,
         subscription,
         false,
+        &mut account.links,
     )?;
     store.finish_step(Step::Content).map_err(store_effect)?;
     boundary(ops, publisher, Step::Content);
@@ -196,6 +201,7 @@ pub(super) fn documents(
                 publisher,
                 subscription,
                 true,
+                &mut account.links,
             )?;
             drain(
                 ops,
@@ -224,6 +230,7 @@ pub(super) fn documents(
                 publisher,
                 subscription,
                 true,
+                &mut account.links,
             )?;
             drain(
                 ops,
@@ -240,6 +247,7 @@ pub(super) fn documents(
             publisher,
             subscription,
             true,
+            &mut account.links,
         )?;
         group.commit().map_err(store_effect)?;
         if count == 0 {
@@ -259,6 +267,7 @@ pub(super) fn documents(
         publisher,
         subscription,
         false,
+        &mut account.links,
     )?;
     store.finish_step(Step::Structure).map_err(store_effect)?;
     boundary(ops, publisher, Step::Structure);
@@ -277,6 +286,7 @@ fn requeue(
     publisher: &Publisher<'_>,
     subscription: Option<&Subscription>,
     grouped: bool,
+    links: &mut SkippedLinks,
 ) -> Result<(), JobFailure> {
     let Some(subscription) = subscription else {
         return Ok(());
@@ -293,7 +303,9 @@ fn requeue(
             break;
         }
         if grouped || store.construction_step() == Some(Step::Names) {
-            requeue_taken(ops, store, root, exclusions, progress, publisher, &taken)?;
+            requeue_taken(
+                ops, store, root, exclusions, progress, publisher, &taken, links,
+            )?;
         } else {
             let mut group = store.step_group().map_err(store_effect)?;
             requeue_taken(
@@ -304,6 +316,7 @@ fn requeue(
                 progress,
                 publisher,
                 &taken,
+                links,
             )?;
             group.commit().map_err(store_effect)?;
         }
@@ -321,82 +334,94 @@ fn requeue_taken(
     progress: &Healing<'_, ProductionAttachment>,
     publisher: &Publisher<'_>,
     taken: &norn_fs::watch::TakenRoots,
+    links: &mut SkippedLinks,
 ) -> Result<(), JobFailure> {
     #[cfg(feature = "induced-failure")]
     ops.loading_boundary(LoadingBoundary::RequeueStarted);
-    let began = std::time::Instant::now();
-    let commits = store.construction_write_commits();
-    if store.construction_step() != Some(Step::Names) {
-        store.commit_step_group().map_err(store_effect)?;
-    }
-    scoped_increment(store, root, &taken.roots, ops.policy, progress, exclusions)?;
-    let mut documents = 0;
-    if store.construction_step() != Some(Step::Names) {
-        let source = norn_fs::Vault::open(root, exclusions).map_err(effect)?;
-        let mut account = Account::default();
-        loop {
-            let paths = {
-                let mut request = store.begin_request();
-                let paths = request
-                    .requeued_page(ops.policy.changeset_size)
+    let (result, steps) = store.measure_read_steps(|store| {
+        let began = std::time::Instant::now();
+        let commits = store.construction_write_commits();
+        if store.construction_step() != Some(Step::Names) {
+            store.commit_step_group().map_err(store_effect)?;
+        }
+        links.merge(scoped_increment_links(
+            store,
+            root,
+            &taken.roots,
+            ops.policy,
+            progress,
+            exclusions,
+        )?);
+        let mut documents = 0;
+        if store.construction_step() != Some(Step::Names) {
+            let source = norn_fs::Vault::open(root, exclusions).map_err(effect)?;
+            let mut account = Account::default();
+            loop {
+                let paths = {
+                    let mut request = store.begin_request();
+                    request
+                        .requeued_page(ops.policy.changeset_size)
+                        .map_err(store_effect)?
+                };
+                if paths.is_empty() {
+                    break;
+                }
+                store
+                    .begin_request()
+                    .dequeue_requeued(&paths)
                     .map_err(store_effect)?;
-                ops.evidence.count_requeue_read_steps(request.read_steps());
-                paths
-            };
-            if paths.is_empty() {
-                break;
-            }
-            store
-                .begin_request()
-                .dequeue_requeued(&paths)
-                .map_err(store_effect)?;
-            let stage = store.construction_step();
-            let mut pending = Pending::new(
-                store,
-                ops.policy.changeset_size,
-                root,
-                exclusions,
-                &mut account,
-            )?;
-            let content: Vec<_> = paths
-                .iter()
-                .filter_map(
-                    |path| match pending.store.begin_request().content_owed(path) {
-                        Ok(true) => Some(Ok(path.clone())),
-                        Ok(false) => None,
-                        Err(error) => Some(Err(store_effect(error))),
-                    },
-                )
-                .collect::<Result<_, _>>()?;
-            documents += content.len() as u64;
-            content_chunk(ops, &mut pending, &source, &content)?;
-            pending.flush()?;
-            pending.store.commit_step_group().map_err(store_effect)?;
-            if stage == Some(Step::Structure) {
-                for path in paths {
-                    let row = pending
-                        .store
-                        .begin_request()
-                        .structure_document(&path)
-                        .map_err(store_effect)?;
-                    if let Some(row) = row {
-                        structure_chunk(pending.store, vec![row], &pending.declared.model)?;
+                let stage = store.construction_step();
+                let mut pending = Pending::new(
+                    store,
+                    ops.policy.changeset_size,
+                    root,
+                    exclusions,
+                    &mut account,
+                )?;
+                let content: Vec<_> = paths
+                    .iter()
+                    .filter_map(
+                        |path| match pending.store.begin_request().content_owed(path) {
+                            Ok(true) => Some(Ok(path.clone())),
+                            Ok(false) => None,
+                            Err(error) => Some(Err(store_effect(error))),
+                        },
+                    )
+                    .collect::<Result<_, _>>()?;
+                documents += content.len() as u64;
+                content_chunk(ops, &mut pending, &source, &content)?;
+                pending.flush()?;
+                pending.store.commit_step_group().map_err(store_effect)?;
+                if stage == Some(Step::Structure) {
+                    for path in paths {
+                        let row = pending
+                            .store
+                            .begin_request()
+                            .structure_document(&path)
+                            .map_err(store_effect)?;
+                        if let Some(row) = row {
+                            structure_chunk(pending.store, vec![row], &pending.declared.model)?;
+                        }
                     }
                 }
+                pending.store.commit_step_group().map_err(store_effect)?;
             }
-            pending.store.commit_step_group().map_err(store_effect)?;
+            close_job(store, root, exclusions, ops.policy, &mut account)?;
+            links.merge(account.links);
         }
-        close_job(store, root, exclusions, ops.policy, &mut account)?;
-    }
-    if store.construction_step() != Some(Step::Names) {
-        store.commit_step_group().map_err(store_effect)?;
-    }
-    ops.evidence.count_requeue(
-        taken.roots.len() as u64,
-        documents,
-        store.construction_write_commits() - commits,
-        began.elapsed(),
-    );
+        if store.construction_step() != Some(Step::Names) {
+            store.commit_step_group().map_err(store_effect)?;
+        }
+        ops.evidence.count_requeue(
+            taken.roots.len() as u64,
+            documents,
+            store.construction_write_commits() - commits,
+            began.elapsed(),
+        );
+        Ok::<_, JobFailure>(())
+    });
+    ops.evidence.count_requeue_read_steps(steps);
+    result?;
     publisher.publish_requeued(taken);
     #[cfg(feature = "induced-failure")]
     ops.loading_boundary(LoadingBoundary::Requeued);

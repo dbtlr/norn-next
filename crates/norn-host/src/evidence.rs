@@ -114,7 +114,7 @@ pub struct JobEvidence {
     requeue_commits: AtomicU64,
     /// Elapsed nanoseconds spent in construction requeue drains.
     requeue_ns: AtomicU64,
-    /// SQLite VM steps spent selecting construction requeue pages.
+    /// SQLite VM steps spent by every multi-row request read in construction requeues.
     requeue_read_steps: AtomicU64,
     build_fact_withdrawals: AtomicU64,
     construction_checkpoint_busy: AtomicU64,
@@ -265,7 +265,7 @@ pub struct EvidenceReading {
     pub requeue_commits: u64,
     /// Elapsed nanoseconds spent in construction requeue drains.
     pub requeue_ns: u64,
-    /// SQLite VM steps spent selecting construction requeue pages.
+    /// SQLite VM steps spent by every multi-row request read in construction requeues.
     pub requeue_read_steps: u64,
     /// Constructions whose coverage or fact bound withdrew all capabilities.
     pub build_fact_withdrawals: u64,

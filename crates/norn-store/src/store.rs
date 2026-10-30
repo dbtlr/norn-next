@@ -1032,10 +1032,27 @@ pub struct Store {
     under_construction: bool,
     pub(crate) link_health_deferred: bool,
     pub(crate) steps: Option<crate::construction::Steps>,
+    pub(crate) read_step_measurement: Option<Arc<std::sync::atomic::AtomicU64>>,
     torn_down: bool,
 }
 
 impl Store {
+    /// Measure all multi-row request reads performed by one writer operation.
+    ///
+    /// This includes requests whose caller never reads their local counters.
+    /// Ordinary requests have no active measurement and update no shared tally.
+    pub fn measure_read_steps<T>(&mut self, operation: impl FnOnce(&mut Self) -> T) -> (T, u64) {
+        assert!(
+            self.read_step_measurement.is_none(),
+            "nested read-step measurement"
+        );
+        let steps = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        self.read_step_measurement = Some(Arc::clone(&steps));
+        let result = operation(self);
+        self.read_step_measurement = None;
+        (result, steps.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
     /// This canonical store's fairness identity.
     pub fn read_group(&self) -> crate::ReadGroup {
         crate::ReadGroup(self.database.path().to_path_buf())
@@ -1135,6 +1152,7 @@ impl Store {
             under_construction,
             link_health_deferred: false,
             steps: None,
+            read_step_measurement: None,
             torn_down: false,
         })
     }

@@ -3580,7 +3580,6 @@ fn an_overflow_mid_requeue_stops_taking_and_converges() {
     );
 }
 
-
 #[test]
 fn a_symbolic_link_met_on_requeue_keeps_its_advisory() {
     let fixture = Fixture::new("requeue-link-advisory");
@@ -3596,11 +3595,18 @@ fn a_symbolic_link_met_on_requeue_keeps_its_advisory() {
     probe.release();
     ready(&host);
     let advisories = host.inspect(&name()).unwrap().advisories;
-    assert!(advisories.iter().any(|advisory| matches!(
-        advisory, norn_host::AttachmentAdvisory::SymlinkSkipped { path } if path == "link.md"
-    )), "{advisories:?}");
+    assert!(
+        advisories.iter().any(|advisory| matches!(
+            advisory, norn_host::AttachmentAdvisory::SymlinkSkipped { path } if path == "link.md"
+        )),
+        "{advisories:?}"
+    );
     drop(host);
-    let dirs = ConfigDirs::new(fixture.scratch.join("reference-config"), fixture.scratch.join("reference-data")).unwrap();
+    let dirs = ConfigDirs::new(
+        fixture.scratch.join("reference-config"),
+        fixture.scratch.join("reference-data"),
+    )
+    .unwrap();
     let reference = fixture.host_over(
         ProductionEntryOps::new(dirs, ProductionPolicy::new(2, 2).unwrap()),
         norn_host::READ_SETTLE_BOUND,
@@ -3615,13 +3621,21 @@ fn a_case_respelling_during_each_document_step_equals_from_scratch() {
     use norn_testkit::churn::{folding, runs_where_the_volume_folds};
     for step in [Step::Names, Step::Content, Step::Structure] {
         let fixture = Fixture::new("requeue-folded-respelling");
-        if !runs_where_the_volume_folds(folding(&fixture.root).unwrap(), "construction respelling") {
+        if !runs_where_the_volume_folds(folding(&fixture.root).unwrap(), "construction respelling")
+        {
             return;
         }
         fixture.add("a-folder/note.md", "# Respelling\n");
         let mut points = vec![LoadingBoundary::CanonicalPage];
         if step != Step::Names {
-            points.insert(0, LoadingBoundary::StepComplete(if step == Step::Content { Step::Names } else { Step::Content }));
+            points.insert(
+                0,
+                LoadingBoundary::StepComplete(if step == Step::Content {
+                    Step::Names
+                } else {
+                    Step::Content
+                }),
+            );
         }
         let probe = Probe::new(points.clone());
         let ops = fixture.ops(probe.clone());

@@ -1797,6 +1797,14 @@ impl SkippedLinks {
         }
     }
 
+    /// Combine scoped observations in the whole walk's path order.
+    fn merge(&mut self, other: Self) {
+        self.0.extend(other.0);
+        self.0.sort();
+        self.0.dedup();
+        self.0.truncate(SKIPPED_LINKS_RETAINED);
+    }
+
     /// The links recorded, in the order they were seen.
     fn links(&self) -> impl Iterator<Item = &Path> {
         self.0.iter().map(PathBuf::as_path)
@@ -2636,7 +2644,10 @@ where
                     let path = file.path().as_path().to_owned();
                     files.next();
                     match document_path(&path) {
-                        Ok(path) => pending.push(Change::Named { path }),
+                        Ok(path) => {
+                            pending.retire_respelling(&path, row.map(|row| &row.path))?;
+                            pending.push(Change::Named { path });
+                        }
                         Err(quarantine) => pending.quarantine(&path, quarantine)?,
                     }
                 }
@@ -2856,14 +2867,10 @@ fn merge_read(
             let canonical = if spelling != row.path.as_str() {
                 // Retire and derive one respelling atomically. The pair is
                 // irreducible even when the changeset target is one change.
-                if pending.changes.len() + 2 > pending.bound {
-                    pending.flush()?;
-                }
-                pending.push(Change::Death {
-                    path: row.path.clone(),
-                    provenance: Provenance::HealPrune,
-                });
-                Some(DocumentPath::new(spelling).expect("case preserves the document grammar"))
+                let path =
+                    DocumentPath::new(spelling).expect("case preserves the document grammar");
+                pending.retire_respelling(&path, Some(&row.path))?;
+                Some(path)
             } else {
                 None
             };
@@ -2994,6 +3001,17 @@ fn scoped_increment(
     progress: &Healing<'_, ProductionAttachment>,
     exclusions: &[PathBuf],
 ) -> Result<(), JobFailure> {
+    scoped_increment_links(store, root, dirty, policy, progress, exclusions).map(|_| ())
+}
+
+fn scoped_increment_links(
+    store: &mut Store,
+    root: &Path,
+    dirty: &std::collections::BTreeSet<norn_fs::NormalizedPath>,
+    policy: ProductionPolicy,
+    progress: &Healing<'_, ProductionAttachment>,
+    exclusions: &[PathBuf],
+) -> Result<SkippedLinks, JobFailure> {
     let vault = norn_fs::Vault::open(root, exclusions).map_err(effect)?;
     let sensitivity = vault.case_sensitivity();
     let mut account = Account::default();
@@ -3083,6 +3101,9 @@ fn scoped_increment(
         };
         let (kind, rendered) = match reached {
             norn_fs::Reach::Refused(skip) => {
+                if pending.names {
+                    pending.passed_over(skip.path().as_path(), skip.reason());
+                }
                 pending.flush()?;
                 prune_refused_root(
                     pending.store,
@@ -3169,6 +3190,19 @@ fn scoped_increment(
             // prefix admits does not: such a spelling poisons every path beneath
             // it, so the range would be empty and none is opened.
             norn_fs::PathKind::Missing | norn_fs::PathKind::Other => {
+                if pending.names && kind == norn_fs::PathKind::Other {
+                    // Reach groups links with special entries; the scoped walk
+                    // supplies the canonical skip reason without following either.
+                    if let Some(norn_fs::WalkFact::Skipped(skip)) =
+                        walk_subtree(root, path, exclusions)
+                            .map_err(effect)?
+                            .next()
+                            .transpose()
+                            .map_err(effect)?
+                    {
+                        pending.passed_over(skip.path().as_path(), skip.reason());
+                    }
+                }
                 pending.flush()?;
                 if let Some(scope) = scope {
                     prune_subtree_ordered(
@@ -3362,7 +3396,8 @@ fn scoped_increment(
         progress.report((index + 1) as u64, Some(dirty.len() as u64));
     }
     pending.flush()?;
-    close_job(store, root, exclusions, policy, &mut account)
+    close_job(store, root, exclusions, policy, &mut account)?;
+    Ok(account.links)
 }
 
 /// One path a plan's publication left, and what the applier knows it holds:
@@ -4688,6 +4723,21 @@ impl<'s> Pending<'s> {
             provenance: IncrementProvenance::Derived,
             counters: norn_store::DerivationCounters::default(),
         })
+    }
+
+    /// Keep a respelling's death and replacement together even at a chunk bound.
+    fn retire_respelling(
+        &mut self,
+        path: &DocumentPath,
+        standing: Option<&DocumentPath>,
+    ) -> Result<(), JobFailure> {
+        if let Some(old) = standing.filter(|old| *old != path) {
+            if self.changes.len() + 2 > self.bound {
+                self.flush()?;
+            }
+            self.push(target_death(old.clone(), Provenance::HealPrune));
+        }
+        Ok(())
     }
 
     fn push(&mut self, change: Change) {
@@ -20871,15 +20921,55 @@ mod tests {
     }
 
     #[test]
+    fn an_operation_counts_reads_from_every_request_without_consuming_their_counters() {
+        let f = Fixture::watcherless("operation-read-steps");
+        let mut store = Store::open(
+            f.root.join("meter.sqlite3"),
+            StoredPathOrder::Sensitive,
+            crate::DERIVATION_VERSION,
+        )
+        .unwrap();
+        let read = |store: &mut Store| {
+            let request = store.begin_request();
+            request
+                .stored_targets_in_range_after_ordered(
+                    SubjectScope::Vault,
+                    None,
+                    2,
+                    StoredPathOrder::Sensitive,
+                )
+                .unwrap();
+            request.read_steps()
+        };
+        let outside = read(&mut store);
+        let (local, measured) = store.measure_read_steps(|store| read(store) + read(store));
+        assert!(outside > 0);
+        assert_eq!(measured, local);
+        assert_eq!(measured, outside * 2);
+        let (result, measured) = store.measure_read_steps(|store| {
+            read(store);
+            Err::<(), _>("operation failed")
+        });
+        assert_eq!(result, Err("operation failed"));
+        assert_eq!(measured, outside);
+        assert_eq!(read(&mut store), outside);
+    }
+
+    #[test]
     fn construction_names_retire_a_folded_respelling_in_every_document_step() {
-        for step in [norn_store::Step::Names, norn_store::Step::Content, norn_store::Step::Structure] {
+        for step in [
+            norn_store::Step::Names,
+            norn_store::Step::Content,
+            norn_store::Step::Structure,
+        ] {
             let f = Fixture::watcherless("construction-folded-respelling");
             let root = f.vault();
             let mut store = Store::open(
                 f.root.join("folded.sqlite3"),
                 StoredPathOrder::AsciiCaseInsensitive,
                 crate::DERIVATION_VERSION,
-            ).unwrap();
+            )
+            .unwrap();
             ProductionEntryOps::pin_schema(&mut store, &f.registration()).unwrap();
             store.defer_link_health().unwrap();
             store.begin_steps().unwrap();
@@ -20897,11 +20987,22 @@ mod tests {
                 }
                 let mut account = Account::default();
                 merge_walk(
-                    &mut store, &root, &[], walk(&root, &[]).unwrap(),
-                    norn_fs::CaseSensitivity::Insensitive, HealScope::Vault,
-                    ProductionPolicy::new(2, 1).unwrap(), &progress.healing(), &mut account,
-                ).unwrap();
-                assert_eq!(stored_paths(&mut store), vec![if renamed { "Note.md" } else { "note.md" }], "{step:?}");
+                    &mut store,
+                    &root,
+                    &[],
+                    walk(&root, &[]).unwrap(),
+                    norn_fs::CaseSensitivity::Insensitive,
+                    HealScope::Vault,
+                    ProductionPolicy::new(2, 1).unwrap(),
+                    &progress.healing(),
+                    &mut account,
+                )
+                .unwrap();
+                assert_eq!(
+                    stored_paths(&mut store),
+                    vec![if renamed { "Note.md" } else { "note.md" }],
+                    "{step:?}"
+                );
             }
         }
     }
