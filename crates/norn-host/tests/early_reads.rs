@@ -1723,6 +1723,90 @@ fn a_rebuild_under_a_damage_verdict_serves_early_reads_once_its_construction_beg
     );
 }
 
+/// Contract item 13: a fact during a damage rebuild holds only touched Gets;
+/// untouched Gets also keep answering across its pre-Ready reconcile (C7).
+#[test]
+fn a_fact_during_a_damage_rebuild_withdraws_only_what_it_touches() {
+    let fixture = Fixture::new("early-rebuild-path-fact");
+    let probe = Probe::new([]);
+    let ops = fixture.ops(probe.clone());
+    let account = ops.account();
+    let host = fixture.host_over(ops, norn_host::READ_SETTLE_BOUND);
+    let _demand = host.demand(&name()).unwrap();
+    ready(&host);
+    {
+        let mut state = probe.state.lock().unwrap();
+        state.seen.clear();
+        state.next = [
+            LoadingBoundary::StepComplete(Step::Names),
+            LoadingBoundary::Published(Step::Structure),
+            LoadingBoundary::Reconciling,
+        ]
+        .into_iter()
+        .collect();
+    }
+    damage_every_table(&fixture.store_path());
+    let (early, reconciling, changed) = std::thread::scope(|scope| {
+        let _release = Release(&probe);
+        wait_until(
+            "a read meets the damage and the rebuild begins",
+            BUDGET,
+            || {
+                let _ = host.count(&CountParams::new(address()));
+                if probe.state.lock().unwrap().current.is_some() {
+                    Observed::Met(())
+                } else {
+                    Observed::pending("no rebuild yet")
+                }
+            },
+        )
+        .unwrap();
+        probe.wait(LoadingBoundary::StepComplete(Step::Names));
+        assert!(warming(&host.state(&name()).unwrap()));
+        probe.release();
+        // Both targets have completed their own step 3 before the fact.
+        probe.wait(LoadingBoundary::Published(Step::Structure));
+        assert!(host.get(&get("/doc00")).is_ok());
+        let before = account.read().build_facts_recorded;
+        std::fs::write(fixture.root.join("doc00.md"), "# Changed\n[[first]]\n").unwrap();
+        fact_recorded(&account, before);
+        let start = host.read_evidence().settle_waits;
+        let waiting = spawn_get(scope, &host, get("/doc00"));
+        waits(&host, start + 1);
+        let early = host.get(&get("/first")).unwrap();
+        assert!(warming(&early.answer.reading.trust));
+        assert!(waiting.try_recv().is_err());
+        probe.release();
+        probe.wait(LoadingBoundary::Reconciling);
+        let reconciling = host.get(&get("/first")).unwrap();
+        assert!(warming(&reconciling.answer.reading.trust));
+        assert!(waiting.try_recv().is_err());
+        probe.release();
+        let changed = waiting.recv_timeout(BUDGET.work()).unwrap().unwrap();
+        (early, reconciling, changed)
+    });
+    ready(&host);
+    let ready_get = host.get(&get("/first")).unwrap();
+    assert_eq!(
+        json!(&early.answer.report),
+        relations_loading(json!(&ready_get.answer.report))
+    );
+    assert_eq!(
+        json!(&reconciling.answer.report),
+        json!(&early.answer.report)
+    );
+    assert_eq!(
+        json!(&changed.answer.report),
+        json!(&host.get(&get("/doc00")).unwrap().answer.report)
+    );
+    assert_eq!(account.read().from_zero_builds, 2);
+    drop(host);
+    project(&fixture.store_path(), &fixture.root).assert_equivalent(
+        &from_scratch(&fixture, "reference"),
+        "a damage rebuild with a path fact derives the final tree",
+    );
+}
+
 /// Contract items 8 and 20: damage an early read meets on a damage rebuild's
 /// own construction is handed to another rebuild, as on a first build, so the
 /// first `Ready` is never published over the store the read found damaged.

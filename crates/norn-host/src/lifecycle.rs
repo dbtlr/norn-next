@@ -20564,13 +20564,14 @@ mod tests {
         let begin = || {
             progress
                 .begin_construction(Some(loading::Begun {
+                    evidence: Default::default(),
                     pool: FakeReader {
                         ledger: Arc::clone(&ops.readers),
                         free: Mutex::new(true),
                         returned: Condvar::new(),
                     },
                     model: Arc::new(ContentModel::none()),
-                    authority: subscription.capture_build_authority().unwrap(),
+                    authority: subscription.capture_build_authority(&[]).unwrap(),
                     store_epoch: "fake-epoch".into(),
                 }))
                 .expect("the claim begins its construction")
