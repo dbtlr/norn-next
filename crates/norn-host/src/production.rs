@@ -3017,6 +3017,20 @@ fn scoped_increment_links(
     progress: &Healing<'_, ProductionAttachment>,
     exclusions: &[PathBuf],
 ) -> Result<SkippedLinks, JobFailure> {
+    scoped_increment_closed(store, root, dirty, policy, progress, exclusions)
+        .map(|account| account.links)
+}
+
+/// Run the scoped increment and close its job, answering the closed account:
+/// a construction requeue carries what it filed into the step it runs in.
+fn scoped_increment_closed(
+    store: &mut Store,
+    root: &Path,
+    dirty: &std::collections::BTreeSet<norn_fs::NormalizedPath>,
+    policy: ProductionPolicy,
+    progress: &Healing<'_, ProductionAttachment>,
+    exclusions: &[PathBuf],
+) -> Result<Account, JobFailure> {
     let vault = norn_fs::Vault::open(root, exclusions).map_err(effect)?;
     let sensitivity = vault.case_sensitivity();
     let mut account = Account::default();
@@ -3416,7 +3430,7 @@ fn scoped_increment_links(
     }
     pending.flush()?;
     close_job(store, root, exclusions, policy, &mut account)?;
-    Ok(account.links)
+    Ok(account)
 }
 
 /// One path a plan's publication left, and what the applier knows it holds:
@@ -4178,6 +4192,20 @@ impl Account {
         }
     }
 
+    /// Carry what a construction requeue filed and saw into the step whose
+    /// walk this account is.
+    ///
+    /// **A requeue closes its own job, and the step's job closes later.** The
+    /// step registered the whole vault, so its prune takes every finding at a
+    /// place it did not file itself. A requeue that derives a document the
+    /// step had not reached files that document's quarantine in its own
+    /// account, and the step's content pass no longer reaches it to file it
+    /// again; the places the requeue filed are this walk's places filed too.
+    fn absorb_requeue(&mut self, requeue: Account, order: StoredPathOrder) {
+        self.filed.absorb(requeue.filed);
+        self.links.merge(requeue.links, order);
+    }
+
     /// Whether a walk of `walked` concluded anything at all about `subject`.
     ///
     /// Two things put a place outside what a walk enumerated, and the caller has
@@ -4252,6 +4280,13 @@ impl Filed {
         self.places
             .get(subject)
             .is_some_and(|sides| sides.contains(&decided))
+    }
+
+    /// Take every place another job filed at as filed by this one.
+    fn absorb(&mut self, other: Filed) {
+        for (subject, sides) in other.places {
+            self.places.entry(subject).or_default().extend(sides);
+        }
     }
 }
 
