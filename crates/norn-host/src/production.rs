@@ -21106,6 +21106,54 @@ mod tests {
         }
     }
 
+    /// A content-step walk that filed a refused spelling's finding and then
+    /// meets a folded respelling lands that finding before the respelling's
+    /// death and replacement name are queued together.
+    #[cfg(unix)]
+    #[test]
+    fn a_content_step_respelling_after_a_refused_spelling_settles_the_finding_first() {
+        let f = Fixture::watcherless("content-step-respelling-after-refusal");
+        let root = f.vault();
+        let mut store = Store::open(
+            f.root.join("folded.sqlite3"),
+            StoredPathOrder::AsciiCaseInsensitive,
+            crate::DERIVATION_VERSION,
+        )
+        .unwrap();
+        ProductionEntryOps::pin_schema(&mut store, &f.registration()).unwrap();
+        store.defer_link_health().unwrap();
+        store.begin_steps().unwrap();
+        store.finish_step(norn_store::Step::Names).unwrap();
+        if !write_or_report(&root.join("\u{1}.md"), b"body") {
+            return;
+        }
+        fs::write(root.join("note.md"), "# Note\n").unwrap();
+        let progress = ProgressReporter::<ProductionAttachment>::disconnected();
+        for renamed in [false, true] {
+            if renamed {
+                fs::rename(root.join("note.md"), root.join("Note.md")).unwrap();
+            }
+            let mut account = Account::default();
+            merge_walk(
+                &mut store,
+                &root,
+                &[],
+                walk(&root, &[]).unwrap(),
+                norn_fs::CaseSensitivity::Insensitive,
+                HealScope::Vault,
+                ProductionPolicy::new(2, 1).unwrap(),
+                &progress.healing(),
+                &mut account,
+            )
+            .unwrap();
+            assert_eq!(
+                stored_paths(&mut store),
+                vec![if renamed { "Note.md" } else { "note.md" }]
+            );
+            assert_eq!(finding_total(&mut store), 1, "renamed={renamed}");
+        }
+    }
+
     /// A heal indexes no file under a dot-led folder, as Obsidian resolves no
     /// link to one; a file beside them outside such a folder is indexed.
     #[test]
