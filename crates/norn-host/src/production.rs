@@ -5153,7 +5153,16 @@ impl<'s> Pending<'s> {
         }
     }
 
-    fn file_spellings(&mut self, spellings: Vec<places::Spelling>) -> Result<(), JobFailure> {
+    fn file_spellings(&mut self, mut spellings: Vec<places::Spelling>) -> Result<(), JobFailure> {
+        // A listing yields names in no particular order; a from-scratch build
+        // files a place's spellings in byte order, and the findings read back
+        // in the order they were filed.
+        spellings.sort_by(|a, b| {
+            a.path
+                .as_os_str()
+                .as_encoded_bytes()
+                .cmp(b.path.as_os_str().as_encoded_bytes())
+        });
         // A place can hold more spellings than one flush may, and a flush keeps
         // what this scope has replaced, so the rest of them append.
         for spelling in spellings {
@@ -12758,6 +12767,16 @@ mod tests {
                 fs::write(f.vault().join("links.md"), "[x](missing.md)\n").unwrap();
                 if !write_or_report(&f.vault().join("bad\\name.md"), b"body") {
                     return;
+                }
+                // Two more spellings of the same place, so the order the place's
+                // findings are filed in is compared too: a from-scratch build
+                // files them in byte order, whatever order a listing yields.
+                for spelling in [&b"bad\x01name.md"[..], &b"bad\xffname.md"[..]] {
+                    use std::os::unix::ffi::OsStrExt;
+                    let path = f.vault().join(std::ffi::OsStr::from_bytes(spelling));
+                    if !write_or_report(&path, b"body") {
+                        return;
+                    }
                 }
                 norn_fs::watch::settle_prior_changes(f.root.root(), lifecycle_budget().work())
                     .unwrap();
