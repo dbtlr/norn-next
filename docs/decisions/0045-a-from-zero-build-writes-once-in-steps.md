@@ -466,7 +466,8 @@ touches, until its path is derived again:
   step 4 ends, as ADR 0044 rules. From step 5 on nothing is requeued: the fact waits for
   the reconcile that precedes `Ready`.
 - **A Get of that document waits** until its path is derived again. Other Gets are
-  unaffected.
+  unaffected. After Relations, an unaffected Get answers with link resolution, link
+  health and findings rendered loading while any fact is outstanding at its admission.
 - **Every vault-wide capability waits for it** — field Find, the step-3 shapes, link health
   and search — until every requeued path has run again, and from step 5 on until the
   reconcile.

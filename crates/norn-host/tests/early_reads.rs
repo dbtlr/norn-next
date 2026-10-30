@@ -237,6 +237,14 @@ impl Fixture {
     ) -> Host<ProductionEntryOps> {
         // FSEvents can deliver the fixture's writes after the host attaches.
         norn_fs::watch::settle_prior_changes(self.scratch.root(), BUDGET.work()).unwrap();
+        self.host_unsettled(ops, bound, tick)
+    }
+    fn host_unsettled(
+        &self,
+        ops: ProductionEntryOps,
+        bound: Duration,
+        tick: Duration,
+    ) -> Host<ProductionEntryOps> {
         Host::new(
             RegistryRead::from_entries([Registration::new(
                 name(),
@@ -290,6 +298,17 @@ fn waits(host: &Host<ProductionEntryOps>, at_least: u64) {
             Observed::Met(())
         } else {
             Observed::pending(format!("{seen} < {at_least}"))
+        }
+    })
+    .unwrap();
+}
+fn fact_recorded(account: &norn_host::JobEvidence, after: u64) {
+    wait_until("build fact accepted", BUDGET, || {
+        let seen = account.read().build_facts_recorded;
+        if seen > after {
+            Observed::Met(())
+        } else {
+            Observed::pending("watcher has not accepted the fact")
         }
     })
     .unwrap();
@@ -986,52 +1005,32 @@ fn refusal_names_still_being_indexed_and_shares_one_deadline() {
 /// Contract item 18: one accepted fact withdraws every capability, waiters
 /// refuse at once, the build reaches Ready and the store equals a from-scratch one.
 #[test]
-fn any_fact_withdraws_every_early_capability_and_the_build_still_converges() {
-    let fixture = Fixture::new("early-fact-withdraws");
+fn a_fact_holds_vault_wide_capabilities_until_it_is_derived() {
+    let fixture = Fixture::new("early-fact-holds");
     let probe = Probe::new([LoadingBoundary::StepComplete(Step::Content)]);
-    let host = fixture.host(probe.clone());
+    let ops = fixture.ops(probe.clone());
+    let account = ops.account();
+    let host = fixture.host_over(ops, norn_host::READ_SETTLE_BOUND);
     std::thread::scope(|scope| {
         let _release = Release(&probe);
         let _demand = host.demand(&name()).unwrap();
         probe.wait(LoadingBoundary::StepComplete(Step::Content));
         assert!(host.find(&ranked("5")).is_ok());
-        let start = host.read_evidence().settle_waits;
-        let expiries = host.read_evidence().settle_expiries;
-        let waiting = spawn_find(
-            scope,
-            &host,
-            find().with_predicates([Predicate::tag("group0")]),
-        );
-        waits(&host, start + 1);
-        let began = Instant::now();
         std::fs::write(fixture.root.join("late.md"), "---\nrank: 40\n---\n# Late\n").unwrap();
-        let refused = waiting.recv_timeout(BUDGET.work()).unwrap().unwrap_err();
-        assert_eq!(refused.code(), &ReasonCode::HostEntryNotReady);
-        assert!(began.elapsed() < norn_host::READ_SETTLE_BOUND);
-        assert_eq!(host.read_evidence().settle_expiries, expiries);
-        let began = Instant::now();
-        assert_eq!(
-            host.find(&ranked("5")).unwrap_err().code(),
-            &ReasonCode::HostEntryNotReady
-        );
-        assert!(
-            began.elapsed() < Duration::from_secs(2),
-            "withdrawn refuses at once"
-        );
+        fact_recorded(&account, 0);
+        // The public read observes acceptance before construction resumes.
+        let start = host.read_evidence().settle_waits;
+        let waiting = spawn_find(scope, &host, ranked("40"));
+        waits(&host, start + 1);
+        assert!(waiting.try_recv().is_err());
         probe.release();
+        assert!(waiting.recv_timeout(BUDGET.work()).unwrap().is_ok());
     });
     ready(&host);
-    wait_until("the late document is served", BUDGET, || {
-        match host.find(&ranked("40")) {
-            Ok(found) if found.answer.report.page.rows.len() == 1 => Observed::Met(()),
-            other => Observed::pending(format!("{other:?}")),
-        }
-    })
-    .unwrap();
     drop(host);
     project(&fixture.store_path(), &fixture.root).assert_equivalent(
         &from_scratch(&fixture, "reference"),
-        "a build whose early reads were withdrawn derives the final tree",
+        "accepted build facts reconcile",
     );
 }
 
@@ -1095,18 +1094,21 @@ impl LoadingProbe for FirstReadProbe {
 /// Contract item 18: a Get target the build pulled ahead and published ready
 /// is withdrawn by a fact that arrives while a live interest holds it.
 #[test]
-fn a_fact_withdraws_a_pulled_ahead_ready_target() {
+fn a_fact_at_a_ready_target_withdraws_it_and_one_elsewhere_does_not() {
     let fixture = Fixture::new("early-fact-withdraws-ready-target");
     let construction = Probe::new([
         LoadingBoundary::StepComplete(Step::Names),
         LoadingBoundary::CanonicalPage,
         LoadingBoundary::TargetReady,
+        LoadingBoundary::StepComplete(Step::Content),
     ]);
     let first = Arc::new(FirstRead::default());
-    let host = fixture.host(Arc::new(FirstReadProbe {
+    let ops = fixture.ops(Arc::new(FirstReadProbe {
         construction: construction.clone(),
         read: first.clone(),
     }));
+    let account = ops.account();
+    let host = fixture.host_over(ops, norn_host::READ_SETTLE_BOUND);
     std::thread::scope(|scope| {
         let _release = Release(&construction);
         let _release_read = ReleaseFirstRead(&first);
@@ -1114,42 +1116,36 @@ fn a_fact_withdraws_a_pulled_ahead_ready_target() {
         construction.wait(LoadingBoundary::StepComplete(Step::Names));
         construction.release();
         construction.wait(LoadingBoundary::CanonicalPage);
-        let held = spawn_get(scope, &host, get("first"));
+        let held = spawn_get(scope, &host, get("/first"));
         waits(&host, 1);
         construction.release();
         // The build holds after publishing the target ready, and the read it
         // admitted holds its interest in that target at its snapshot.
         construction.wait(LoadingBoundary::TargetReady);
         first.wait();
-        let admitted = host.get(&get("first")).unwrap();
+        let admitted = host.get(&get("/first")).unwrap();
         assert!(
             warming(&admitted.answer.reading.trust),
             "the ready target admits a Get before the content step ends"
         );
         std::fs::write(fixture.root.join("late.md"), "---\nrank: 40\n---\n# Late\n").unwrap();
-        wait_until(
-            "the fact withdraws the ready target",
-            BUDGET,
-            || match host.get(&get("first")) {
-                Err(refused) if refused.code() == &ReasonCode::HostEntryNotReady => {
-                    Observed::Met(())
-                }
-                other => Observed::pending(format!("{other:?}")),
-            },
-        )
-        .unwrap();
-        let began = Instant::now();
-        assert_eq!(
-            host.get(&get("first")).unwrap_err().code(),
-            &ReasonCode::HostEntryNotReady
-        );
-        assert!(
-            began.elapsed() < Duration::from_secs(2),
-            "withdrawn refuses at once"
-        );
-        first.release();
-        held.recv_timeout(BUDGET.work()).unwrap().ok();
+        fact_recorded(&account, 0);
+        // Rooted reads stay independent even when a backend reports a broad fact.
+        assert!(host.get(&get("/first")).is_ok());
         construction.release();
+        construction.wait(LoadingBoundary::StepComplete(Step::Content));
+        assert!(host.get(&get("/first")).is_ok());
+        let before = account.read().build_facts_recorded;
+        std::fs::write(fixture.root.join("first.md"), "# Changed\n").unwrap();
+        fact_recorded(&account, before);
+        let start = host.read_evidence().settle_waits;
+        let waiting = spawn_get(scope, &host, get("/first"));
+        waits(&host, start + 1);
+        first.release();
+        // A fact touching the established target rejects its stale result.
+        assert_still_indexing(&held.recv_timeout(BUDGET.work()).unwrap().unwrap_err());
+        construction.release();
+        assert!(waiting.recv_timeout(BUDGET.work()).unwrap().is_ok());
     });
     ready(&host);
     wait_until("the late document is served", BUDGET, || {
@@ -1724,6 +1720,90 @@ fn a_rebuild_under_a_damage_verdict_serves_early_reads_once_its_construction_beg
     project(&fixture.store_path(), &fixture.root).assert_equivalent(
         &from_scratch(&fixture, "reference"),
         "a rebuild that served early reads derives the same store",
+    );
+}
+
+/// Contract item 13: a fact during a damage rebuild holds only touched Gets;
+/// untouched Gets also keep answering across its pre-Ready reconcile (C7).
+#[test]
+fn a_fact_during_a_damage_rebuild_withdraws_only_what_it_touches() {
+    let fixture = Fixture::new("early-rebuild-path-fact");
+    let probe = Probe::new([]);
+    let ops = fixture.ops(probe.clone());
+    let account = ops.account();
+    let host = fixture.host_over(ops, norn_host::READ_SETTLE_BOUND);
+    let _demand = host.demand(&name()).unwrap();
+    ready(&host);
+    {
+        let mut state = probe.state.lock().unwrap();
+        state.seen.clear();
+        state.next = [
+            LoadingBoundary::StepComplete(Step::Names),
+            LoadingBoundary::Published(Step::Structure),
+            LoadingBoundary::Reconciling,
+        ]
+        .into_iter()
+        .collect();
+    }
+    damage_every_table(&fixture.store_path());
+    let (early, reconciling, changed) = std::thread::scope(|scope| {
+        let _release = Release(&probe);
+        wait_until(
+            "a read meets the damage and the rebuild begins",
+            BUDGET,
+            || {
+                let _ = host.count(&CountParams::new(address()));
+                if probe.state.lock().unwrap().current.is_some() {
+                    Observed::Met(())
+                } else {
+                    Observed::pending("no rebuild yet")
+                }
+            },
+        )
+        .unwrap();
+        probe.wait(LoadingBoundary::StepComplete(Step::Names));
+        assert!(warming(&host.state(&name()).unwrap()));
+        probe.release();
+        // Both targets have completed their own step 3 before the fact.
+        probe.wait(LoadingBoundary::Published(Step::Structure));
+        assert!(host.get(&get("/doc00")).is_ok());
+        let before = account.read().build_facts_recorded;
+        std::fs::write(fixture.root.join("doc00.md"), "# Changed\n[[first]]\n").unwrap();
+        fact_recorded(&account, before);
+        let start = host.read_evidence().settle_waits;
+        let waiting = spawn_get(scope, &host, get("/doc00"));
+        waits(&host, start + 1);
+        let early = host.get(&get("/first")).unwrap();
+        assert!(warming(&early.answer.reading.trust));
+        assert!(waiting.try_recv().is_err());
+        probe.release();
+        probe.wait(LoadingBoundary::Reconciling);
+        let reconciling = host.get(&get("/first")).unwrap();
+        assert!(warming(&reconciling.answer.reading.trust));
+        assert!(waiting.try_recv().is_err());
+        probe.release();
+        let changed = waiting.recv_timeout(BUDGET.work()).unwrap().unwrap();
+        (early, reconciling, changed)
+    });
+    ready(&host);
+    let ready_get = host.get(&get("/first")).unwrap();
+    assert_eq!(
+        json!(&early.answer.report),
+        relations_loading(json!(&ready_get.answer.report))
+    );
+    assert_eq!(
+        json!(&reconciling.answer.report),
+        json!(&early.answer.report)
+    );
+    assert_eq!(
+        json!(&changed.answer.report),
+        json!(&host.get(&get("/doc00")).unwrap().answer.report)
+    );
+    assert_eq!(account.read().from_zero_builds, 2);
+    drop(host);
+    project(&fixture.store_path(), &fixture.root).assert_equivalent(
+        &from_scratch(&fixture, "reference"),
+        "a damage rebuild with a path fact derives the final tree",
     );
 }
 
@@ -2773,4 +2853,384 @@ fn a_pulled_ahead_build_equals_an_ordinary_build() {
     );
     assert_eq!(semantic(&fixture.store_path()), semantic(&reference));
     assert_eq!(path_ids(&fixture.store_path()), path_ids(&reference));
+}
+
+#[test]
+fn an_untouched_get_keeps_answering_under_a_fact_elsewhere() {
+    untouched_gets_at(&[Step::Structure]);
+}
+
+#[test]
+fn a_get_after_relations_reads_link_health_loading_while_a_fact_stands() {
+    untouched_gets_at(&[Step::Relations]);
+}
+
+fn untouched_gets_at(steps: &[Step]) {
+    for &step in steps {
+        let fixture = Fixture::new("untouched-build-get");
+        let probe = Probe::new([LoadingBoundary::Published(step)]);
+        let ops = fixture.ops(probe.clone());
+        let account = ops.account();
+        let host = fixture.host_over(ops, norn_host::READ_SETTLE_BOUND);
+        std::thread::scope(|scope| {
+            let _release = Release(&probe);
+            let _demand = host.demand(&name()).unwrap();
+            probe.wait(LoadingBoundary::Published(step));
+            std::fs::write(fixture.root.join("late.md"), "# Late\n").unwrap();
+            fact_recorded(&account, 0);
+            let start = host.read_evidence().settle_waits;
+            let waiting = spawn_find(scope, &host, find());
+            waits(&host, start + 1);
+            let answer = host.get(&get("/first")).unwrap();
+            assert!(warming(&answer.answer.reading.trust));
+            let report = serde_json::to_value(answer.answer.report).unwrap();
+            assert_eq!(report, relations_loading(report.clone()));
+            #[cfg(target_os = "linux")]
+            assert!(host.get(&get("first")).is_ok());
+            probe.release();
+            assert!(waiting.recv_timeout(BUDGET.work()).unwrap().is_ok());
+        });
+        ready(&host);
+    }
+}
+
+#[test]
+fn a_get_whose_target_a_fact_touches_waits() {
+    let fixture = Fixture::new("touched-build-get");
+    let probe = Probe::new([LoadingBoundary::StepComplete(Step::Structure)]);
+    let ops = fixture.ops(probe.clone());
+    let account = ops.account();
+    let host = fixture.host_over(ops, norn_host::READ_SETTLE_BOUND);
+    std::thread::scope(|scope| {
+        let _release = Release(&probe);
+        let _demand = host.demand(&name()).unwrap();
+        probe.wait(LoadingBoundary::StepComplete(Step::Structure));
+        std::fs::write(fixture.root.join("first.md"), "# Changed\n").unwrap();
+        fact_recorded(&account, 0);
+        let start = host.read_evidence().settle_waits;
+        let waiting = spawn_get(scope, &host, get("/first"));
+        waits(&host, start + 1);
+        assert!(waiting.try_recv().is_err());
+        probe.release();
+        assert!(waiting.recv_timeout(BUDGET.work()).unwrap().is_ok());
+    });
+    ready(&host);
+}
+
+#[test]
+fn untouched_gets_answer_through_the_pre_ready_reconcile() {
+    let fixture = Fixture::new("reconcile-build-get");
+    let probe = Probe::new([
+        LoadingBoundary::StepComplete(Step::Structure),
+        LoadingBoundary::Reconciling,
+    ]);
+    let ops = fixture.ops(probe.clone());
+    let account = ops.account();
+    let host = fixture.host_over(ops, norn_host::READ_SETTLE_BOUND);
+    std::thread::scope(|scope| {
+        let _release = Release(&probe);
+        let _demand = host.demand(&name()).unwrap();
+        probe.wait(LoadingBoundary::StepComplete(Step::Structure));
+        std::fs::write(fixture.root.join("late.md"), "# Late\n").unwrap();
+        fact_recorded(&account, 0);
+        let start = host.read_evidence().settle_waits;
+        let waiting = spawn_find(scope, &host, find());
+        waits(&host, start + 1);
+        probe.release();
+        probe.wait(LoadingBoundary::Reconciling);
+        assert!(host.get(&get("/first")).is_ok());
+        assert!(waiting.try_recv().is_err());
+        probe.release();
+        assert!(waiting.recv_timeout(BUDGET.work()).unwrap().is_ok());
+    });
+    ready(&host);
+}
+
+#[test]
+fn facts_at_every_step_converge_to_from_scratch() {
+    for point in [
+        LoadingBoundary::StepComplete(Step::Names),
+        LoadingBoundary::StepComplete(Step::Content),
+        LoadingBoundary::StepComplete(Step::Structure),
+        LoadingBoundary::LinkHealthChunk,
+        LoadingBoundary::FullTextBatch,
+    ] {
+        let fixture = Fixture::new("build-fact-convergence");
+        let probe = Probe::new([point]);
+        let host = fixture.host(probe.clone());
+        {
+            let _release = Release(&probe);
+            let _demand = host.demand(&name()).unwrap();
+            probe.wait(point);
+            std::fs::write(fixture.root.join("first.md"), "# Changed\n[[late]]\n").unwrap();
+            std::fs::write(fixture.root.join("late.md"), "# Late\n").unwrap();
+            std::fs::create_dir(fixture.root.join("new-folder")).unwrap();
+            std::fs::rename(
+                fixture.root.join("late.md"),
+                fixture.root.join("new-folder/renamed.md"),
+            )
+            .unwrap();
+            std::fs::write(fixture.root.join("deleted.md"), "# Removed\n").unwrap();
+            std::fs::remove_file(fixture.root.join("deleted.md")).unwrap();
+            norn_fs::watch::settle_prior_changes(fixture.scratch.root(), BUDGET.work()).unwrap();
+            probe.release();
+            ready(&host);
+            wait_until("the renamed document is served", BUDGET, || {
+                match host.get(&get("/new-folder/renamed")) {
+                    Ok(_) => Observed::Met(()),
+                    other => Observed::pending(format!("{other:?}")),
+                }
+            })
+            .unwrap();
+            ready(&host);
+        }
+        drop(host);
+        project(&fixture.store_path(), &fixture.root).assert_equivalent(
+            &from_scratch(&fixture, "reference"),
+            &format!("fact convergence at {point:?}"),
+        );
+    }
+}
+
+#[test]
+fn an_attach_right_after_edits_keeps_early_reads_for_untouched_paths() {
+    let fixture = Fixture::new("attach-after-edits");
+    norn_fs::watch::settle_prior_changes(fixture.scratch.root(), BUDGET.work()).unwrap();
+    std::fs::write(fixture.root.join("recent.md"), "# Recent\n").unwrap();
+    let probe = Probe::new([LoadingBoundary::StepComplete(Step::Structure)]);
+    let host = fixture.host_unsettled(
+        fixture.ops(probe.clone()),
+        norn_host::READ_SETTLE_BOUND,
+        Duration::from_millis(25),
+    );
+    {
+        let _release = Release(&probe);
+        let _demand = host.demand(&name()).unwrap();
+        probe.wait(LoadingBoundary::StepComplete(Step::Structure));
+        assert!(host.get(&get("/first")).is_ok());
+        probe.release();
+        ready(&host);
+    }
+    drop(host);
+    project(&fixture.store_path(), &fixture.root).assert_equivalent(
+        &from_scratch(&fixture, "reference"),
+        "attach immediately after edits",
+    );
+}
+
+#[test]
+fn a_later_fact_fails_the_final_check_only_for_what_it_touches() {
+    for (touched, known_relations) in [(false, false), (true, false), (false, true)] {
+        let fixture = Fixture::new("build-final-fact");
+        let point = LoadingBoundary::Published(if known_relations {
+            Step::Relations
+        } else {
+            Step::Structure
+        });
+        let construction = Probe::new([point]);
+        let first = Arc::new(FirstRead::default());
+        let ops = fixture.ops(Arc::new(FirstReadProbe {
+            construction: construction.clone(),
+            read: first.clone(),
+        }));
+        let account = ops.account();
+        let host = fixture.host_over(ops, norn_host::READ_SETTLE_BOUND);
+        std::thread::scope(|scope| {
+            let _release = Release(&construction);
+            let _release_read = ReleaseFirstRead(&first);
+            let _demand = host.demand(&name()).unwrap();
+            construction.wait(point);
+            let held = spawn_get(scope, &host, get("/first"));
+            first.wait();
+            std::fs::write(
+                fixture
+                    .root
+                    .join(if touched { "first.md" } else { "late.md" }),
+                "# Changed\n",
+            )
+            .unwrap();
+            fact_recorded(&account, 0);
+            first.release();
+            let result = held.recv_timeout(BUDGET.work()).unwrap();
+            if touched || known_relations {
+                assert_still_indexing(&result.unwrap_err());
+            } else {
+                assert!(result.is_ok());
+            }
+            construction.release();
+        });
+        ready(&host);
+    }
+}
+
+#[test]
+fn a_request_waits_only_for_facts_it_met() {
+    let fixture = Fixture::new("fixed-build-requirement");
+    let probe = Probe::new([
+        LoadingBoundary::StepComplete(Step::Names),
+        LoadingBoundary::StepComplete(Step::Content),
+    ]);
+    let ops = fixture.ops(probe.clone());
+    let account = ops.account();
+    let host = fixture.host_over(ops, norn_host::READ_SETTLE_BOUND);
+    std::thread::scope(|scope| {
+        let _release = Release(&probe);
+        let _demand = host.demand(&name()).unwrap();
+        probe.wait(LoadingBoundary::StepComplete(Step::Names));
+        let start = host.read_evidence().settle_waits;
+        let waiting = spawn_find(scope, &host, find());
+        waits(&host, start + 1);
+        std::fs::write(fixture.root.join("late.md"), "# Later\n").unwrap();
+        fact_recorded(&account, 0);
+        probe.release();
+        probe.wait(LoadingBoundary::StepComplete(Step::Content));
+        assert_eq!(
+            waiting
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap()
+                .unwrap_err()
+                .code(),
+            &ReasonCode::HostEntryNotReady
+        );
+        probe.release();
+    });
+    ready(&host);
+}
+
+#[test]
+fn a_directory_fact_holds_suffix_gets_and_rooted_gets_beneath_it() {
+    let fixture = Fixture::new("directory-build-requirement");
+    let probe = Probe::new([LoadingBoundary::StepComplete(Step::Structure)]);
+    let ops = fixture.ops(probe.clone());
+    let account = ops.account();
+    let host = fixture.host_over(ops, norn_host::READ_SETTLE_BOUND);
+    std::thread::scope(|scope| {
+        let _release = Release(&probe);
+        let _demand = host.demand(&name()).unwrap();
+        probe.wait(LoadingBoundary::StepComplete(Step::Structure));
+        std::fs::create_dir(fixture.root.join("new-folder")).unwrap();
+        fact_recorded(&account, 0);
+        let start = host.read_evidence().settle_waits;
+        let suffix = spawn_get(scope, &host, get("first"));
+        let rooted = spawn_get(scope, &host, get("/new-folder/note"));
+        waits(&host, start + 2);
+        assert!(suffix.try_recv().is_err());
+        assert!(rooted.try_recv().is_err());
+        assert!(host.get(&get("/first")).is_ok());
+        probe.release();
+        assert!(suffix.recv_timeout(BUDGET.work()).unwrap().is_ok());
+        let _ = rooted.recv_timeout(BUDGET.work()).unwrap();
+    });
+    ready(&host);
+}
+
+#[test]
+fn a_schema_or_control_fact_withdraws_everything() {
+    for path in [".norn/schema.yaml", norn_config::IN_VAULT_CONFIG_PATH] {
+        let fixture = Fixture::new("control-build-withdrawal");
+        let probe = Probe::new([LoadingBoundary::StepComplete(Step::Structure)]);
+        let ops = fixture.ops(probe.clone());
+        let account = ops.account();
+        let host = fixture.host_over(ops, norn_host::READ_SETTLE_BOUND);
+        {
+            let _release = Release(&probe);
+            let _demand = host.demand(&name()).unwrap();
+            probe.wait(LoadingBoundary::StepComplete(Step::Structure));
+            let bytes = if path.ends_with(".yaml") {
+                "version: 1
+fields:
+  rank: { type: number }
+"
+            } else {
+                ""
+            };
+            std::fs::write(fixture.root.join(path), bytes).unwrap();
+            wait_until("control fact withdraws construction", BUDGET, || {
+                if account.read().build_fact_withdrawals > 0 {
+                    Observed::Met(())
+                } else {
+                    Observed::pending("control not accepted")
+                }
+            })
+            .unwrap();
+            assert_eq!(
+                host.get(&get("/first")).unwrap_err().code(),
+                &ReasonCode::HostEntryNotReady
+            );
+            probe.release();
+            ready(&host);
+        }
+    }
+}
+
+#[test]
+fn facts_between_meeting_and_admission_refuse_a_mixed_find() {
+    let fixture = Fixture::new("meeting-admission-facts");
+    let probe = Probe::new([
+        LoadingBoundary::StepComplete(Step::Names),
+        LoadingBoundary::TargetReady,
+        LoadingBoundary::StepComplete(Step::Content),
+    ]);
+    let ops = fixture.ops(probe.clone());
+    let account = ops.account();
+    let host = fixture.host_over(ops, norn_host::READ_SETTLE_BOUND);
+    std::thread::scope(|scope| {
+        let _release = Release(&probe);
+        let _demand = host.demand(&name()).unwrap();
+        probe.wait(LoadingBoundary::StepComplete(Step::Names));
+        let start = host.read_evidence().settle_waits;
+        let getting = spawn_get(scope, &host, get("/doc00"));
+        let finding = spawn_find(scope, &host, find());
+        waits(&host, start + 2);
+        probe.release();
+        probe.wait(LoadingBoundary::TargetReady);
+        fixture.add("doc00.md", "---\nrank: 100\n---\n# Changed zero\n");
+        fact_recorded(&account, 0);
+        let before = account.read().build_facts_recorded;
+        fixture.add("doc05.md", "---\nrank: 500\n---\n# Changed five\n");
+        fact_recorded(&account, before);
+        probe.release();
+        probe.wait(LoadingBoundary::StepComplete(Step::Content));
+        let get_answer = getting.recv_timeout(Duration::from_secs(2)).unwrap();
+        let find_answer = finding.recv_timeout(Duration::from_secs(2)).unwrap();
+        let _ = get_answer;
+        assert_eq!(
+            find_answer.unwrap_err().code(),
+            &ReasonCode::HostEntryNotReady
+        );
+        probe.release();
+    });
+    ready(&host);
+}
+
+#[test]
+fn a_get_refuses_a_target_fact_newer_than_its_meeting() {
+    let fixture = Fixture::new("get-meeting-admission");
+    let probe = Probe::new([
+        LoadingBoundary::StepComplete(Step::Names),
+        LoadingBoundary::StepComplete(Step::Content),
+    ]);
+    let ops = fixture.ops(probe.clone());
+    let account = ops.account();
+    let host = fixture.host_over(ops, norn_host::READ_SETTLE_BOUND);
+    std::thread::scope(|scope| {
+        let _release = Release(&probe);
+        let _demand = host.demand(&name()).unwrap();
+        probe.wait(LoadingBoundary::StepComplete(Step::Names));
+        let start = host.read_evidence().settle_waits;
+        let getting = spawn_get(scope, &host, get("/doc00"));
+        waits(&host, start + 1);
+        fixture.add("doc00.md", "---\nrank: 100\n---\n# Changed\n");
+        fact_recorded(&account, 0);
+        probe.release();
+        probe.wait(LoadingBoundary::StepComplete(Step::Content));
+        assert_still_indexing(
+            &getting
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap()
+                .unwrap_err(),
+        );
+        probe.release();
+    });
+    ready(&host);
 }

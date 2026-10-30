@@ -1825,6 +1825,11 @@ fn maintainership_key(dirs: &ConfigDirs, name: &VaultName) -> MaintainershipKey 
 
 impl EntryOps for ProductionEntryOps {
     #[cfg(feature = "induced-failure")]
+    fn loading_reconcile_boundary(&self) {
+        self.loading_boundary(loading::LoadingBoundary::Reconciling);
+    }
+
+    #[cfg(feature = "induced-failure")]
     fn loading_read_boundary(&self, completed: bool) {
         self.loading_boundary(if completed {
             loading::LoadingBoundary::QueryBuilt

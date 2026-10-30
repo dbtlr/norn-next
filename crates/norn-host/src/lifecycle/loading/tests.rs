@@ -150,6 +150,16 @@ fn an_established_early_hold_survives_host_destruction_without_retaining_coverag
 
 #[test]
 fn watcher_withdrawal_moves_the_host_signal_without_a_dispatcher_or_gate_retake() {
+    watcher_signal(false);
+}
+
+#[test]
+fn a_recorded_fact_wakes_nothing_and_withdrawal_does() {
+    watcher_signal(true);
+}
+
+#[allow(clippy::disallowed_methods)] // The test owns the vault fixture.
+fn watcher_signal(record_first: bool) {
     let scratch = Scratch::new("construction-watcher-signal-binding");
     let _watcher = isolation::Lease::hold(
         isolation::REAL_WATCHER,
@@ -179,6 +189,20 @@ fn watcher_withdrawal_moves_the_host_signal_without_a_dispatcher_or_gate_retake(
         };
         let seen = entry.gate.stance_generation();
         let takes = entry.gate.times_taken();
+        if record_first {
+            let sequence = building.authority.sequence();
+            std::fs::write(scratch.join("vault/late.md"), "# Late\n").unwrap();
+            wait_until("accepted fact without the entry gate", BUDGET, || {
+                if building.authority.sequence() > sequence {
+                    Observed::Met(())
+                } else {
+                    Observed::pending("fact not accepted")
+                }
+            })
+            .unwrap();
+            assert_eq!(entry.gate.stance_generation(), seen);
+            assert!(building.authority.admits());
+        }
         // Invalidate the actual bound authority while the gate is unavailable.
         // A watcher wake must touch only the signal and cannot rely on end_hold.
         building.authority.invalidate();
@@ -266,9 +290,10 @@ fn begin(
 ) -> BuildToken {
     progress
         .begin_construction(Some(Begun {
+            evidence: Default::default(),
             pool: store.reader_pool(budget),
             model: Arc::new(ContentModel::none()),
-            authority: subscription.capture_build_authority().unwrap(),
+            authority: subscription.capture_build_authority(&[]).unwrap(),
             store_epoch: store.epoch().to_owned(),
         }))
         .expect("a standing claim begins its construction")
@@ -332,9 +357,10 @@ fn stale_publication_is_refused() {
         assert!(
             progress
                 .begin_construction(Some(Begun {
+                    evidence: Default::default(),
                     pool: store.reader_pool(&budget),
                     model: Arc::new(ContentModel::none()),
-                    authority: subscription.capture_build_authority().unwrap(),
+                    authority: subscription.capture_build_authority(&[]).unwrap(),
                     store_epoch: epoch.clone(),
                 }))
                 .is_none(),
@@ -347,7 +373,7 @@ fn stale_publication_is_refused() {
     assert!(!progress.publish_step(token, &epoch, Step::Content));
     assert!(progress.publish_step(successor, &epoch, Step::Names));
     // A withdrawn authority publishes nothing more.
-    subscription.capture_build_authority().unwrap();
+    subscription.capture_build_authority(&[]).unwrap();
     assert!(!progress.publish_step(successor, &epoch, Step::Content));
     // A changed claim publishes nothing.
     let successor = begin(&progress, &subscription, &store, &budget);
@@ -392,4 +418,108 @@ fn counters_never_wake_a_waiter_and_publication_does() {
         "publication wakes waiters"
     );
     entry.gate.lock().unwrap().close_construction();
+}
+
+#[test]
+#[allow(clippy::disallowed_methods)] // This test owns its vault fixture.
+fn a_replacement_construction_takes_a_fresh_meeting() {
+    let scratch = Scratch::new("replacement-construction-meeting");
+    let _watcher = isolation::Lease::hold(
+        isolation::REAL_WATCHER,
+        isolation::acquisition_budget(BUDGET),
+    );
+    let (subscription, store, budget) = begun(&scratch);
+    subscription.begin_heal();
+    let entry = entry_at(3);
+    let progress = reporter(&entry, 3);
+    begin(&progress, &subscription, &store, &budget);
+    std::fs::write(scratch.join("vault/changed.md"), "# Changed\n").unwrap();
+    wait_until("construction records fact", BUDGET, || {
+        let state = entry.gate.lock().unwrap();
+        match &state.construction {
+            Some(Construction::Building(building)) if building.authority.sequence() > 0 => {
+                Observed::Met(())
+            }
+            _ => Observed::pending("no fact yet"),
+        }
+    })
+    .unwrap();
+    let params = norn_wire::FindParams::new(norn_wire::VaultAddress::name(
+        VaultName::new("notes").unwrap(),
+    ));
+    let mut meeting = None;
+    {
+        let state = entry.gate.lock().unwrap();
+        assert!(matches!(
+            state.early(Request::Find(&params), &mut meeting),
+            Early::Waits
+        ));
+        assert!(meeting.as_ref().unwrap().sequence > 0);
+    }
+    let first = meeting.as_ref().unwrap().token;
+    let replacement = begin(&progress, &subscription, &store, &budget);
+    {
+        let state = entry.gate.lock().unwrap();
+        assert!(matches!(
+            state.early(Request::Find(&params), &mut meeting),
+            Early::Waits
+        ));
+        let Some(Construction::Building(building)) = &state.construction else {
+            panic!("the replacement construction stands");
+        };
+        // Late reports of the earlier write may reach the new authority, so the
+        // fresh meeting is judged against that authority, never against zero.
+        let meeting = meeting.as_ref().unwrap();
+        assert_ne!(meeting.token, first);
+        assert_eq!(meeting.token, replacement);
+        assert_eq!(meeting.sequence, building.authority.sequence());
+    }
+    subscription.finish_heal().unwrap();
+}
+
+#[test]
+#[allow(clippy::disallowed_methods)] // This test owns its vault fixture.
+fn a_get_meeting_before_a_fact_admits_with_relations_loading() {
+    let scratch = Scratch::new("relations-at-admission");
+    let _watcher = isolation::Lease::hold(
+        isolation::REAL_WATCHER,
+        isolation::acquisition_budget(BUDGET),
+    );
+    let (subscription, store, budget) = begun(&scratch);
+    subscription.begin_heal();
+    let entry = entry_at(3);
+    let progress = reporter(&entry, 3);
+    let token = begin(&progress, &subscription, &store, &budget);
+    let params = norn_wire::GetParams::new(
+        norn_wire::VaultAddress::name(VaultName::new("notes").unwrap()),
+        norn_wire::ResolutionTarget::new("/subject").unwrap(),
+    );
+    let mut meeting = None;
+    assert!(matches!(
+        entry
+            .gate
+            .lock()
+            .unwrap()
+            .early(Request::Get(&params), &mut meeting),
+        Early::Waits
+    ));
+    std::fs::write(scratch.join("vault/elsewhere.md"), "# Elsewhere\n").unwrap();
+    wait_until("construction records fact", BUDGET, || {
+        let state = entry.gate.lock().unwrap();
+        match &state.construction {
+            Some(Construction::Building(building)) if building.authority.sequence() > 0 => {
+                Observed::Met(())
+            }
+            _ => Observed::pending("no fact yet"),
+        }
+    })
+    .unwrap();
+    assert!(progress.publish_step(token, store.epoch(), Step::Relations));
+    let state = entry.gate.lock().unwrap();
+    let Early::Admitted(admitted) = state.early(Request::Get(&params), &mut meeting) else {
+        panic!("an unrelated fact does not refuse this rooted Get");
+    };
+    assert!(admitted.relations_loading);
+    drop(state);
+    subscription.finish_heal().unwrap();
 }

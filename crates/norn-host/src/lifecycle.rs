@@ -296,6 +296,10 @@ pub trait EntryOps: Send + Sync + 'static {
     #[cfg(feature = "induced-failure")]
     fn loading_read_boundary(&self, _completed: bool) {}
 
+    /// Harness timing before a reconcile takes coverage.
+    #[cfg(feature = "induced-failure")]
+    fn loading_reconcile_boundary(&self) {}
+
     /// Background release of idle read resources, outside every entry gate.
     fn trim_readers(&self, _now: Instant) {}
     type Attachment: SnapshotSource;
@@ -5896,13 +5900,14 @@ impl<O: EntryOps> Host<O> {
         // is taking in: recorded under the first hold that finds the entry
         // settling, before any wait, and never moved after.
         let mut met_at = None;
+        let mut build_met = None;
         // Whether this read was counted past its build's pull-ahead bound.
         let mut past_bound = false;
         let (turn, reader, early) = loop {
             // A construction is read only where the canonical stance refuses:
             // a serving or settling entry answers from its own reader.
             let (selected, early_wait) = match stance {
-                ReadStance::Refuse => match state.early(request) {
+                ReadStance::Refuse => match state.early(request, &mut build_met) {
                     loading::Early::Admitted(mut admitted) => {
                         // A Get admitted through its pulled-ahead target keeps
                         // that target's slot under its own lease, so the read
@@ -5944,6 +5949,9 @@ impl<O: EntryOps> Host<O> {
                                 .loading_interest = interest;
                         }
                         (None, true)
+                    }
+                    loading::Early::Withdrawn => {
+                        return Err(ReadRefusal::StillIndexing(state.published_demand()));
                     }
                     loading::Early::Refused => (None, false),
                 },
@@ -7288,9 +7296,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                         state.trust = TrustState::Ready;
                     } else {
                         state.publish_pending_reconcile();
-                        let next = state
-                            .claim
-                            .hand_on(|epoch| Job::Reconcile(name.clone(), epoch));
+                        let next = state.hand_on_reconcile(&name);
                         drop(state);
                         drop(attach_claims);
                         dispatch_handoff(shared, entry, epoch, next);
@@ -7512,11 +7518,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     } else if state.pending.is_empty() && !handoff_saturated {
                         state.trust = TrustState::Ready;
                     } else {
-                        next = Some(
-                            state
-                                .claim
-                                .hand_on(|epoch| Job::Reconcile(name.clone(), epoch)),
-                        );
+                        next = Some(state.hand_on_reconcile(&name));
                     }
                 }
                 Err(JobFailure::LostMaintainership) => {
@@ -7705,11 +7707,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                         if state.detach_due {
                             schedule_due_detach(&mut state, &name)
                         } else if handoff_saturated || !state.pending.is_empty() {
-                            Some(
-                                state
-                                    .claim
-                                    .hand_on(|epoch| Job::Reconcile(name.clone(), epoch)),
-                            )
+                            Some(state.hand_on_reconcile(&name))
                         } else {
                             None
                         }
@@ -7734,6 +7732,18 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
             None
         }
         Job::Reconcile(name, epoch) => loop {
+            // The probe reports a reconcile turn only when one will run: a stale
+            // claim or a queued apply ends the job before it takes coverage.
+            #[cfg(feature = "induced-failure")]
+            {
+                let live = {
+                    let state = entry.gate.lock().expect("entry gate poisoned");
+                    state.claim.stands_at(epoch) && !state.applies_waiting()
+                };
+                if live {
+                    shared.ops.loading_reconcile_boundary();
+                }
+            }
             let (mut attachment, work, through) = {
                 let mut state = entry.gate.lock().expect("entry gate poisoned");
                 if !state.claim.stands_at(epoch) {
@@ -7855,9 +7865,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                         dispatch_handoff(shared, entry, epoch, next);
                         break None;
                     } else if handoff_saturated {
-                        let next = state
-                            .claim
-                            .hand_on(|epoch| Job::Reconcile(name.clone(), epoch));
+                        let next = state.hand_on_reconcile(&name);
                         drop(state);
                         dispatch_handoff(shared, entry, epoch, next);
                         break None;
@@ -20492,9 +20500,10 @@ mod tests {
         };
         let token = progress
             .begin_construction(Some(loading::Begun {
+                evidence: Default::default(),
                 pool,
                 model: Arc::new(ContentModel::none()),
-                authority: subscription.capture_build_authority().unwrap(),
+                authority: subscription.capture_build_authority(&[]).unwrap(),
                 store_epoch: "fake-epoch".into(),
             }))
             .expect("the attach's claim begins its construction");
@@ -20568,13 +20577,14 @@ mod tests {
         let begin = || {
             progress
                 .begin_construction(Some(loading::Begun {
+                    evidence: Default::default(),
                     pool: FakeReader {
                         ledger: Arc::clone(&ops.readers),
                         free: Mutex::new(true),
                         returned: Condvar::new(),
                     },
                     model: Arc::new(ContentModel::none()),
-                    authority: subscription.capture_build_authority().unwrap(),
+                    authority: subscription.capture_build_authority(&[]).unwrap(),
                     store_epoch: "fake-epoch".into(),
                 }))
                 .expect("the claim begins its construction")
@@ -20640,13 +20650,14 @@ mod tests {
         let progress = reporter(&entry, entry.gate.lock().unwrap().claim.epoch());
         let token = progress
             .begin_construction(Some(loading::Begun {
+                evidence: Default::default(),
                 pool: FakeReader {
                     ledger: Arc::clone(&ops.readers),
                     free: Mutex::new(true),
                     returned: Condvar::new(),
                 },
                 model: Arc::new(ContentModel::none()),
-                authority: subscription.capture_build_authority().unwrap(),
+                authority: subscription.capture_build_authority(&[]).unwrap(),
                 store_epoch: "fake-epoch".into(),
             }))
             .expect("the attach's claim begins its construction");
@@ -20664,7 +20675,7 @@ mod tests {
         assert!(progress.publish_targets(token, "fake-epoch", &["subject".to_owned()]));
         // The pool's one connection is out, so the admitted read leaves the
         // gate for its acquisition.
-        let busy = match entry.gate.lock().unwrap().early(request) {
+        let busy = match entry.gate.lock().unwrap().early(request, &mut None) {
             loading::Early::Admitted(admitted) => admitted.pool.try_take().unwrap(),
             _ => panic!("the ready target admits its Get"),
         };
@@ -20691,7 +20702,7 @@ mod tests {
         });
         assert!(
             matches!(
-                entry.gate.lock().unwrap().early(request),
+                entry.gate.lock().unwrap().early(request, &mut None),
                 loading::Early::Waits
             ),
             "the target's slot outlived every read that held it"

@@ -23,6 +23,7 @@ pub enum LoadingBoundary {
     LinkHealthChunk,
     FullTextBatch,
     CanonicalComplete,
+    Reconciling,
     QueryEstablished,
     QueryBuilt,
 }
@@ -202,16 +203,35 @@ impl ProductionEntryOps {
         attachment: &ProductionAttachment,
         progress: &'a ProgressReporter<ProductionAttachment>,
     ) -> Publisher<'a> {
+        let schema = Self::schema_path_at(&attachment.registration, &attachment.covered_root);
+        let control: Vec<_> = [
+            Some(Path::new(norn_config::IN_VAULT_CONFIG_PATH)),
+            schema.strip_prefix(&attachment.covered_root).ok(),
+        ]
+        .into_iter()
+        .flatten()
+        .filter_map(|path| {
+            attachment
+                .subscription
+                .as_ref()?
+                .normalize_build_control(path)
+                .ok()
+        })
+        .collect();
         let authority = attachment
             .subscription
             .as_ref()
-            .and_then(Subscription::capture_build_authority);
+            .and_then(|subscription| subscription.capture_build_authority(&control));
         #[cfg(feature = "induced-failure")]
         self.loading_boundary(LoadingBoundary::AuthorityCaptured);
+        if let Some(authority) = &authority {
+            authority.observe(self.evidence.clone());
+        }
         let store_epoch = attachment.store.epoch().to_owned();
         let begun = authority
             .filter(BuildAuthority::check_root)
             .map(|authority| Begun {
+                evidence: self.evidence.clone(),
                 pool: attachment.store.reader_pool(&self.readers),
                 model: Arc::clone(attachment.pinned.shared_content_model()),
                 authority,
