@@ -91,6 +91,7 @@ impl Store {
              DROP TRIGGER documents_fts_update;
              CREATE TEMP TABLE construction_progress(document INTEGER PRIMARY KEY, stage INTEGER NOT NULL, body_line INTEGER, body_column INTEGER, frontmatter_links INTEGER, frontmatter_tags INTEGER);
              CREATE INDEX temp.construction_progress_stage ON construction_progress(stage, document);
+             CREATE TEMP TABLE construction_requeue(document INTEGER PRIMARY KEY);
              CREATE TEMP TABLE construction_spellings(path BLOB PRIMARY KEY) WITHOUT ROWID",
             )
             .map_err(|e| error::sql("deferring full-text triggers", e))?;
@@ -465,6 +466,17 @@ impl crate::Request<'_> {
         )
     }
 
+    /// Select only touched documents still owing this construction's current step.
+    /// The small TEMP table drives the lookup, never the vault's document queue.
+    pub fn requeued_page(&mut self, limit: usize) -> Result<Vec<crate::DocumentPath>, StoreError> {
+        check_limit(limit)?;
+        let stage = if self.store.construction_step() == Some(Step::Structure) { 2 } else { 1 };
+        Self::read_all_on(self.store.connection(), &self.read_work,
+            "SELECT d.path FROM temp.construction_requeue r JOIN temp.construction_progress p ON p.document = r.document JOIN documents d ON d.id = r.document WHERE p.stage <= ?1 ORDER BY p.stage, r.document LIMIT ?2",
+            (stage, limit as i64), |row| { let path: String = row.get(0)?; Ok(crate::DocumentPath::new(&path)) },
+            "reading requeued documents")
+    }
+
     /// Read one chunk's stored bodies. Frontmatter tags are loaded for just
     /// the document about to be scanned, through [`Self::load_structure_tags`].
     pub fn structure_page(&mut self, limit: usize) -> Result<Vec<StructureInput>, StoreError> {
@@ -525,10 +537,10 @@ impl crate::Request<'_> {
         rows: &[ContentWrite],
         findings: &[crate::DerivedFinding<'_>],
         declared: &crate::ContentModel,
-    ) -> Result<(), StoreError> {
+    ) -> Result<usize, StoreError> {
         #[cfg(feature = "induced-failure")]
         let _timing = norn_db::profiling::span("store.step.content");
-        require_step(self.store, Step::Content)?;
+        require_document_step(self.store)?;
         crate::increment::check_derived_findings(findings)?;
         ensure_group(self.store, rows.len())?;
         let connection = self.store.connection();
@@ -629,13 +641,13 @@ impl crate::Request<'_> {
             crate::counters::Counter::FindingsWritten,
             findings.len() as u64,
         );
-        Ok(())
+        Ok(skipped.len())
     }
 
     /// Withdraw a vanished or byte-quarantined provisional row and its queue
     /// entry. It never represented a readable document, so it owns no death.
     pub fn withdraw_content(&mut self, path: &crate::DocumentPath) -> Result<(), StoreError> {
-        require_step(self.store, Step::Content)?;
+        require_document_step(self.store)?;
         ensure_group(self.store, 1)?;
         let connection = self.store.connection();
         if let Some(id) = content_id(connection, path, 1)? {
@@ -658,7 +670,7 @@ impl crate::Request<'_> {
         rows: &[StructureInput],
         findings: &[crate::DerivedFinding<'_>],
         declared: &crate::ContentModel,
-    ) -> Result<(), StoreError> {
+    ) -> Result<usize, StoreError> {
         #[cfg(feature = "induced-failure")]
         let _timing = norn_db::profiling::span("store.step.structure");
         if !matches!(
@@ -752,7 +764,7 @@ impl crate::Request<'_> {
             crate::counters::Counter::FindingsWritten,
             findings.len() as u64,
         );
-        Ok(())
+        Ok(skipped.len())
     }
 }
 
@@ -774,6 +786,14 @@ fn owed_findings<'f, 'a>(
         .collect()
 }
 
+/// Content may be owed again during the structure pass.
+fn require_document_step(store: &Store) -> Result<(), StoreError> {
+    if matches!(store.construction_step(), Some(Step::Content | Step::Structure)) {
+        Ok(())
+    } else {
+        Err(refused(store, "writing construction content", "document step required"))
+    }
+}
 /// Reject a writer invoked outside its construction phase.
 fn require_step(store: &Store, step: Step) -> Result<(), StoreError> {
     if store.construction_step() == Some(step) {
@@ -1008,7 +1028,7 @@ const STRUCTURE_PROGRESS_SQL: &str =
     "UPDATE temp.construction_progress SET stage = 3 WHERE document = ?1";
 
 const EXHAUSTED_SQL: &str =
-    "SELECT EXISTS(SELECT 1 FROM temp.construction_progress WHERE stage = ?1)";
+    "SELECT EXISTS(SELECT 1 FROM temp.construction_progress WHERE stage <= ?1)";
 
 #[cfg(test)]
 mod plan_tests {
