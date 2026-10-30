@@ -18183,6 +18183,68 @@ mod tests {
         ops.detach(&name, attachment);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_construction_requeue_beneath_a_link_keeps_the_refused_root_advisory() {
+        let f = Fixture::watcherless("construction-refused-link");
+        let root = f.vault();
+        let order = proven_order(&f);
+        let mut store = Store::open(
+            f.root.join("construction.sqlite3"),
+            order,
+            crate::DERIVATION_VERSION,
+        )
+        .unwrap();
+        store.defer_link_health().unwrap();
+        store.begin_steps().unwrap();
+        // A report names a child through a newly installed link. Reach
+        // refuses at the ancestor rather than inspecting the final name.
+        fs::create_dir_all(root.join("real/sub")).unwrap();
+        fs::write(root.join("real/sub/doc.md"), "# Document\n").unwrap();
+        std::os::unix::fs::symlink("real", root.join("link")).unwrap();
+        let progress = ProgressReporter::disconnected();
+        let policy = ProductionPolicy::new(2, 2).unwrap();
+        let exclusions = [PathBuf::from(".norn")];
+        let links = scoped_increment_links(
+            &mut store,
+            &root,
+            &dirty_path(&root, "link/sub/doc.md"),
+            policy,
+            &progress.healing(),
+            &exclusions,
+        )
+        .unwrap();
+        let mut reference = Store::open(
+            f.root.join("reference.sqlite3"),
+            order,
+            crate::DERIVATION_VERSION,
+        )
+        .unwrap();
+        let expected = heal_documents(
+            &mut reference,
+            &root,
+            &exclusions,
+            policy,
+            &progress.healing(),
+        )
+        .unwrap();
+        let advisories = |links: &SkippedLinks| {
+            links
+                .links()
+                .map(|path| AttachmentAdvisory::SymlinkSkipped {
+                    path: path.to_string_lossy().into_owned(),
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            advisories(&expected),
+            [AttachmentAdvisory::SymlinkSkipped {
+                path: "link".into()
+            }]
+        );
+        assert_eq!(advisories(&links), advisories(&expected));
+    }
+
     /// **The bar on the schema open.** The schema is read through the same
     /// contained open documents are, so a name that is not a regular file is
     /// refused rather than waited on. A FIFO holds an ordinary `open` until
