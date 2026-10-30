@@ -117,6 +117,7 @@ pub struct JobEvidence {
     /// SQLite VM steps spent by every multi-row request read in construction requeues.
     /// Single-row reads (`read_one`) are not counted.
     requeue_read_steps: AtomicU64,
+    requeue_links_rejudged: AtomicU64,
     build_fact_withdrawals: AtomicU64,
     construction_checkpoint_busy: AtomicU64,
     content_step_commits: AtomicU64,
@@ -269,6 +270,8 @@ pub struct EvidenceReading {
     /// SQLite VM steps spent by every multi-row request read in construction requeues.
     /// Single-row reads (`read_one`) are not counted.
     pub requeue_read_steps: u64,
+    /// Links judged again for facts accepted during Relations.
+    pub requeue_links_rejudged: u64,
     /// Constructions whose coverage or fact bound withdrew all capabilities.
     pub build_fact_withdrawals: u64,
     /// Construction checkpoints a reader prevented from truncating the WAL.
@@ -456,6 +459,9 @@ impl EvidenceReading {
             build_fact_withdrawals_capacity: self
                 .build_fact_withdrawals_capacity
                 .saturating_sub(earlier.build_fact_withdrawals_capacity),
+            requeue_links_rejudged: self
+                .requeue_links_rejudged
+                .saturating_sub(earlier.requeue_links_rejudged),
             requeue_drains: self.requeue_drains.saturating_sub(earlier.requeue_drains),
             requeued_roots: self.requeued_roots.saturating_sub(earlier.requeued_roots),
             requeued_documents: self
@@ -624,6 +630,7 @@ impl JobEvidence {
             build_fact_withdrawals_coverage: get(&self.build_fact_withdrawals_coverage),
             build_fact_withdrawals_control: get(&self.build_fact_withdrawals_control),
             build_fact_withdrawals_capacity: get(&self.build_fact_withdrawals_capacity),
+            requeue_links_rejudged: get(&self.requeue_links_rejudged),
             requeue_drains: get(&self.requeue_drains),
             requeued_roots: get(&self.requeued_roots),
             requeued_documents: get(&self.requeued_documents),
@@ -2546,6 +2553,11 @@ impl JobEvidence {
         self.early_reads_held_by_fact
             .fetch_add(1, Ordering::Relaxed);
     }
+    pub(crate) fn count_requeue_links_rejudged(&self, links: u64) {
+        self.requeue_links_rejudged
+            .fetch_add(links, Ordering::Relaxed);
+    }
+
     pub(crate) fn count_requeue_read_steps(&self, steps: u64) {
         self.requeue_read_steps.fetch_add(steps, Ordering::Relaxed);
     }

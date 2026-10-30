@@ -22,6 +22,16 @@ pub(crate) struct Steps {
     /// Construction transactions committed, every closing path counted.
     group_commits: u64,
     pub(crate) increment_commits: u64,
+    pub(crate) reach: RejudgeReach,
+}
+
+/// Only the reach changed after the complete judgment, never the vault queue.
+#[derive(Debug, Default)]
+pub(crate) struct RejudgeReach {
+    pub(crate) documents: std::collections::BTreeSet<crate::DocumentPath>,
+    pub(crate) classes: std::collections::BTreeSet<crate::ClassKey>,
+    pub(crate) paths: std::collections::BTreeSet<crate::PathKey>,
+    pub(crate) directories: std::collections::BTreeSet<crate::DirectoryPrefix>,
 }
 
 /// Construction completeness boundaries, held in memory rather than persisted.
@@ -113,6 +123,7 @@ impl Store {
             group_documents: 0,
             group_commits: 0,
             increment_commits: 0,
+            reach: RejudgeReach::default(),
         });
         self.connection()
             .pragma_update(None, "wal_autocheckpoint", 10_000)
@@ -345,7 +356,7 @@ impl Store {
     pub fn step_group(&mut self) -> Result<StepGroup<'_>, StoreError> {
         if !matches!(
             self.construction_step(),
-            Some(Step::Content | Step::Structure)
+            Some(Step::Content | Step::Structure | Step::Relations)
         ) || self.steps.as_ref().is_some_and(|s| s.group_guard)
         {
             return Err(refused(
@@ -481,7 +492,10 @@ impl crate::Request<'_> {
     /// The caller runs each page's owed content before its owed structure.
     pub fn requeued_page(&mut self, limit: usize) -> Result<Vec<crate::DocumentPath>, StoreError> {
         check_limit(limit)?;
-        let stage = if self.store.construction_step() == Some(Step::Structure) {
+        let stage = if matches!(
+            self.store.construction_step(),
+            Some(Step::Structure | Step::Relations)
+        ) {
             2
         } else {
             1
@@ -563,9 +577,8 @@ impl crate::Request<'_> {
     /// Fill content once for an arbitrary set of at most one host chunk. This
     /// is also NORN-468's pull-ahead carrier and NORN-469's requeue carrier:
     /// their path selection uses this same writer, with no second derivation
-    /// path. Its findings pass a default directory set, which is safe only
-    /// while link health stays deferred to step 4. Returns the number of rows
-    /// skipped because they no longer owe content.
+    /// path. Directory changes are retained for the step-4 re-judgment. Returns
+    /// the number of rows skipped because they no longer owe content.
     pub fn write_content(
         &mut self,
         rows: &[ContentWrite],
@@ -666,11 +679,15 @@ impl crate::Request<'_> {
             );
         }
         let findings = owed_findings(findings, &skipped);
-        let discarded = crate::increment::write_derived_findings(
-            connection,
-            &findings,
-            &mut Default::default(),
-        )?;
+        let mut directories = Default::default();
+        let discarded =
+            crate::increment::write_derived_findings(connection, &findings, &mut directories)?;
+        drop(statements);
+        if let Some(steps) = self.store.steps.as_mut()
+            && steps.step == Step::Relations
+        {
+            steps.reach.directories.extend(directories);
+        }
         self.counters
             .add(crate::counters::Counter::FindingsDiscarded, discarded);
         self.counters.add(
@@ -712,7 +729,7 @@ impl crate::Request<'_> {
         let _timing = norn_db::profiling::span("store.step.structure");
         if !matches!(
             self.store.construction_step(),
-            Some(Step::Content | Step::Structure)
+            Some(Step::Content | Step::Structure | Step::Relations)
         ) {
             return Err(refused(
                 self.store,
@@ -792,11 +809,15 @@ impl crate::Request<'_> {
             );
         }
         let findings = owed_findings(findings, &skipped);
-        let discarded = crate::increment::write_derived_findings(
-            connection,
-            &findings,
-            &mut Default::default(),
-        )?;
+        let mut directories = Default::default();
+        let discarded =
+            crate::increment::write_derived_findings(connection, &findings, &mut directories)?;
+        drop(statements);
+        if let Some(steps) = self.store.steps.as_mut()
+            && steps.step == Step::Relations
+        {
+            steps.reach.directories.extend(directories);
+        }
         self.counters
             .add(crate::counters::Counter::FindingsDiscarded, discarded);
         self.counters.add(
@@ -825,11 +846,11 @@ fn owed_findings<'f, 'a>(
         .collect()
 }
 
-/// Content may be owed again during the structure pass.
+/// Content may be owed again during Structure or Relations.
 fn require_document_step(store: &Store) -> Result<(), StoreError> {
     if matches!(
         store.construction_step(),
-        Some(Step::Content | Step::Structure)
+        Some(Step::Content | Step::Structure | Step::Relations)
     ) {
         Ok(())
     } else {

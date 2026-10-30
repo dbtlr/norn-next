@@ -1416,3 +1416,131 @@ fn requeued_page_work_is_independent_of_the_vault_queue() {
     eprintln!("requeued page work: 2k={small:?}, 10k={large:?}");
     assert_eq!(small, large);
 }
+
+#[test]
+fn requeued_step_writers_retain_directory_marks_for_rejudgment() {
+    use crate::common::{document, path};
+    use norn_store::{
+        Change, ContentModel, ContentWrite, DerivedFinding, DiscardScope, IncrementProvenance,
+        Span, Step,
+    };
+    for content in [true, false] {
+        let scratch = Scratch::new("requeue-directory-findings");
+        let mut store = scratch.open();
+        store.defer_link_health().unwrap();
+        store.begin_steps().unwrap();
+        let model = ContentModel::none();
+        store
+            .begin_request()
+            .apply_increment(
+                IncrementProvenance::Derived,
+                [Change::Named {
+                    path: path("ref.md"),
+                }],
+                &[],
+                &model,
+            )
+            .unwrap();
+        store.finish_step(Step::Names).unwrap();
+        let mut group = store.step_group().unwrap();
+        group
+            .begin_request()
+            .write_content(
+                &[ContentWrite {
+                    facts: document("ref.md", "ref", "[x](/locked/gone.md)\n"),
+                    origin: Span {
+                        line: 1,
+                        column: 1,
+                        byte_offset: 0,
+                    },
+                }],
+                &[],
+                &model,
+            )
+            .unwrap();
+        let mut rows = group.begin_request().structure_page(8).unwrap();
+        rows[0].facts.links = crate::health::derived("ref.md", "[x](/locked/gone.md)\n").links;
+        group
+            .begin_request()
+            .write_structure(&rows, &[], &model)
+            .unwrap();
+        group.commit().unwrap();
+        store.finish_step(Step::Content).unwrap();
+        store.finish_step(Step::Structure).unwrap();
+        store
+            .begin_request()
+            .judge_link_health_deferred(&model, &mut || {})
+            .unwrap();
+        assert_eq!(
+            store
+                .begin_request()
+                .stored_findings(&path("ref.md"))
+                .unwrap()
+                .len(),
+            1
+        );
+        store
+            .begin_request()
+            .apply_increment(
+                IncrementProvenance::Derived,
+                [Change::Named {
+                    path: path("writer.md"),
+                }],
+                &[],
+                &model,
+            )
+            .unwrap();
+        let mark = [DerivedFinding {
+            facts: crate::health::directory_mark("locked"),
+            replaces: None,
+            bytes_hash: None,
+        }];
+        let mut group = store.step_group().unwrap();
+        group
+            .begin_request()
+            .write_content(
+                &[ContentWrite {
+                    facts: document("writer.md", "writer", "body"),
+                    origin: Span {
+                        line: 1,
+                        column: 1,
+                        byte_offset: 0,
+                    },
+                }],
+                if content { &mark } else { &[] },
+                &model,
+            )
+            .unwrap();
+        let rows = group.begin_request().structure_page(8).unwrap();
+        group
+            .begin_request()
+            .write_structure(&rows, if content { &[] } else { &mark }, &model)
+            .unwrap();
+        group.commit().unwrap();
+        store.begin_request().rejudge_reach(&model).unwrap();
+        assert!(
+            store
+                .begin_request()
+                .stored_findings(&path("ref.md"))
+                .unwrap()
+                .is_empty()
+        );
+        store
+            .begin_request()
+            .discard_findings_about(
+                &path("locked"),
+                DiscardScope::Kinds(&[norn_wire::FindingKind::UnreadableDirectory]),
+            )
+            .unwrap();
+        store.begin_request().rejudge_reach(&model).unwrap();
+        assert_eq!(
+            store
+                .begin_request()
+                .stored_findings(&path("ref.md"))
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(store.link_health_deferred());
+    }
+}

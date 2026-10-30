@@ -275,9 +275,9 @@ pub(super) fn documents(
 }
 
 /// Take accepted roots ahead of the ordinary queue, finish their owed steps,
-/// commit, then publish their derivation. Nothing calls this from Relations on.
+/// commit, then publish their derivation. Nothing calls this from FullText on.
 #[allow(clippy::too_many_arguments)]
-fn requeue(
+pub(super) fn requeue(
     ops: &ProductionEntryOps,
     store: &mut Store,
     root: &Path,
@@ -392,7 +392,7 @@ fn requeue_taken(
                 content_chunk(ops, &mut pending, &source, &content)?;
                 pending.flush()?;
                 pending.store.commit_step_group().map_err(store_effect)?;
-                if stage == Some(Step::Structure) {
+                if matches!(stage, Some(Step::Structure | Step::Relations)) {
                     for path in paths {
                         let row = pending
                             .store
@@ -411,6 +411,16 @@ fn requeue_taken(
         }
         if store.construction_step() != Some(Step::Names) {
             store.commit_step_group().map_err(store_effect)?;
+        }
+        if store.construction_step() == Some(Step::Relations) {
+            let declared = Declaration::read(store)?;
+            let mut request = store.begin_request();
+            let links = request
+                .rejudge_reach(declared.model.content_model())
+                .map_err(store_effect)?;
+            let steps = request.read_steps();
+            count_increment_work(&request.finish(), steps);
+            ops.evidence.count_requeue_links_rejudged(links);
         }
         ops.evidence.count_requeue(
             taken.roots.len() as u64,

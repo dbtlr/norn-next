@@ -322,13 +322,26 @@ impl ProductionEntryOps {
         )?;
         let declared = Declaration::read(&mut attachment.store)?;
         let mut request = attachment.store.begin_request();
-        let result = request.judge_link_health_once(declared.model.content_model(), &mut || {
-            #[cfg(feature = "induced-failure")]
-            self.loading_boundary(LoadingBoundary::LinkHealthChunk);
-        });
+        let result =
+            request.judge_link_health_deferred(declared.model.content_model(), &mut || {
+                #[cfg(feature = "induced-failure")]
+                self.loading_boundary(LoadingBoundary::LinkHealthChunk);
+            });
         let steps = request.read_steps();
         crate::evidence::count_increment_work(&request.finish(), steps);
         result.map_err(store_effect)?;
+        steps::requeue(
+            self,
+            &mut attachment.store,
+            &attachment.covered_root,
+            &exclusions,
+            &healing,
+            publisher,
+            attachment.subscription.as_ref(),
+            false,
+            &mut attachment.skipped_links,
+        )?;
+        attachment.store.begin_request().end_link_health_deferral();
         publisher.publish(Step::Relations);
         loop {
             let mut request = attachment.store.begin_request();

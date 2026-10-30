@@ -4687,7 +4687,7 @@ fn rows_the_changeset_leaves(changes: &[Change]) -> BTreeMap<&DocumentPath, bool
 /// discard clears the finding with no second mechanism.
 struct Pending<'s> {
     /// Construction walks write names only, including requeues during Content
-    /// and Structure. Only the initial Names step defers refused spellings.
+    /// through Relations. Only the initial Names step defers refused spellings.
     names: bool,
     content: Vec<norn_store::ContentWrite>,
     misses: norn_wire::WatcherMisses,
@@ -4759,7 +4759,12 @@ impl<'s> Pending<'s> {
         let declared = Declaration::read(store)?;
         let names = matches!(
             store.construction_step(),
-            Some(norn_store::Step::Names | norn_store::Step::Content | norn_store::Step::Structure)
+            Some(
+                norn_store::Step::Names
+                    | norn_store::Step::Content
+                    | norn_store::Step::Structure
+                    | norn_store::Step::Relations
+            )
         );
         let bound = if names {
             bound.saturating_mul(16).min(2048)
