@@ -326,7 +326,8 @@ pub enum UntrustedReason {
     /// its pages are corrupt, or it holds values no reader will accept. The
     /// vault is sound and the derivation over it is not, so the entry discards
     /// the database and derives it again from the vault. The entry holds that
-    /// database and rebuilds it on its own.
+    /// database and rebuilds it on its own, and publishes warming once the
+    /// rebuild's construction begins.
     #[non_exhaustive]
     StoreDamagedRebuilding {
         /// The damage in words, for a person reading a message or a log.

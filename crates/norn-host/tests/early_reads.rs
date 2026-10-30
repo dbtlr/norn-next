@@ -1648,37 +1648,32 @@ fn an_inline_rung_three_publishes_under_its_own_epoch() {
 }
 
 /// Contract item 8, the rebuild leg: a damage-triggered rebuild of a served
-/// vault publishes its damage verdict rather than warming while it runs, and
-/// no answer carries an untrusted reading, so its reads refuse at once with
-/// that verdict rather than waiting for a step.
+/// vault publishes warming once its construction begins and admits reads as a
+/// first build does, so a Get issued mid-content is pulled ahead and answers
+/// before the content step ends, and the rebuilt store equals one built from
+/// scratch.
 #[test]
-fn a_rebuild_under_a_damage_verdict_refuses_its_reads_at_once() {
+fn a_rebuild_under_a_damage_verdict_serves_early_reads_once_its_construction_begins() {
     let fixture = Fixture::new("early-rebuild-leg");
-    let probe = Probe::new([
-        LoadingBoundary::StepComplete(Step::Names),
-        LoadingBoundary::StepComplete(Step::Structure),
-    ]);
+    let probe = Probe::new([]);
     let ops = fixture.ops(probe.clone());
     let account = ops.account();
     let host = fixture.host_over(ops, norn_host::READ_SETTLE_BOUND);
     let _demand = host.demand(&name()).unwrap();
-    // The first build passes both points before the rebuild is armed.
-    {
-        let _release = Release(&probe);
-        probe.finish();
-        ready(&host);
-    }
-    let probe_points = [
-        LoadingBoundary::StepComplete(Step::Names),
-        LoadingBoundary::StepComplete(Step::Structure),
-    ];
+    ready(&host);
     {
         let mut state = probe.state.lock().unwrap();
-        state.stop = false;
-        state.next = probe_points.into_iter().collect();
+        state.seen.clear();
+        state.next = [
+            LoadingBoundary::StepComplete(Step::Names),
+            LoadingBoundary::CanonicalPage,
+            LoadingBoundary::RequestsDrained,
+        ]
+        .into_iter()
+        .collect();
     }
     damage_every_table(&fixture.store_path());
-    std::thread::scope(|_| {
+    let early = std::thread::scope(|scope| {
         let _release = Release(&probe);
         wait_until(
             "a read meets the damage and the rebuild begins",
@@ -1693,25 +1688,43 @@ fn a_rebuild_under_a_damage_verdict_refuses_its_reads_at_once() {
             },
         )
         .unwrap();
-        for point in probe_points {
-            probe.wait(point);
-            let began = Instant::now();
-            let refused = host.find(&ranked("2")).unwrap_err();
-            assert_eq!(
-                refused.code(),
-                &ReasonCode::HostEntryUntrusted,
-                "{refused:?}"
-            );
-            assert!(
-                began.elapsed() < Duration::from_secs(2),
-                "it refused at once"
-            );
-            probe.release();
-        }
+        probe.wait(LoadingBoundary::StepComplete(Step::Names));
+        assert!(
+            warming(&host.state(&name()).unwrap()),
+            "the rebuild publishes warming once its construction begins"
+        );
+        probe.release();
+        // The first content chunk is written; `first.md` is still a name.
+        probe.wait(LoadingBoundary::CanonicalPage);
+        let settled = host.read_evidence().settle_waits;
+        let answer = spawn_get(scope, &host, get("first"));
+        waits(&host, settled + 1);
+        probe.release();
+        probe.wait(LoadingBoundary::RequestsDrained);
+        let early = answer.recv_timeout(BUDGET.work()).unwrap().unwrap();
+        assert!(
+            !probe
+                .seen()
+                .contains(&LoadingBoundary::Published(Step::Content)),
+            "answered after the content step"
+        );
+        assert!(probe.seen().contains(&LoadingBoundary::TargetReady));
+        probe.release();
+        early
     });
     ready(&host);
-    assert!(host.get(&get("first")).is_ok());
+    assert!(warming(&early.answer.reading.trust));
+    let ready_get = host.get(&get("first")).unwrap();
+    assert_eq!(
+        json!(&early.answer.report),
+        relations_loading(json!(&ready_get.answer.report))
+    );
     assert_eq!(account.read().from_zero_builds, 2);
+    drop(host);
+    project(&fixture.store_path(), &fixture.root).assert_equivalent(
+        &from_scratch(&fixture, "reference"),
+        "a rebuild that served early reads derives the same store",
+    );
 }
 
 /// Contract item 20: an early read's environmental failure is not damage.

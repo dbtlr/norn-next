@@ -2474,8 +2474,9 @@ replacement observe the canonical store name outside entry gates: a vault with n
 there is provisional, so a read meeting its first attach waits for the build to begin, and
 the end of a claim that began none closes it. An attach over existing storage — reused,
 foreign, linked or unreadable — refuses at once, and one that rebuilds from zero refuses
-until its build begins and waits after. A rebuild under a damage verdict publishes that
-verdict, and its reads refuse with it.
+until its build begins and waits after. A rebuild under a damage verdict refuses with that
+verdict until its construction begins, then publishes warming and admits reads as a first
+build does.
 
 Any fact the build's authority accepts, an overflow, a lost root or a backend failure
 withdraws every early capability, published targets included; construction continues, and
