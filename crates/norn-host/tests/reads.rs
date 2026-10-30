@@ -2070,7 +2070,8 @@ fn rewrite_a_cafe_row(database: &Path, table: &str, set: &str) {
 }
 
 /// Assert `read` is refused over the damage it meets, and answers once the
-/// entry rebuilds — never failing as a read on the way.
+/// entry rebuilds — never failing as a read on the way — then wait for the
+/// rebuild to reach `Ready`.
 ///
 /// The first refusal is either of the two the host designs for read-met
 /// damage. A read that takes its entry's gate over a free entry publishes the
@@ -2081,8 +2082,14 @@ fn rewrite_a_cafe_row(database: &Path, table: &str, set: &str) {
 /// publishes `Ready` before it ends, so the attach or the previous case's
 /// rebuild can still hold the entry when the read meets the damage, and this
 /// suite cannot wait for a leg to end.
+///
+/// A rebuild serves early reads once its construction begins, so the read can
+/// answer before the rebuild ends. The wait for `Ready` keeps a caller's next
+/// damage off the store that rebuild is still writing.
 fn assert_untrusted_until_rebuilt<T>(
     what: &str,
+    host: &attach::ServingHost,
+    vault: &VaultName,
     read: impl Fn() -> Result<T, norn_wire::ErrorEnvelope>,
 ) {
     let Err(refused) = read() else {
@@ -2108,6 +2115,15 @@ fn assert_untrusted_until_rebuilt<T>(
         },
     )
     .unwrap_or_else(|failure| panic!("{failure}"));
+    wait_until(
+        "the rebuild to reach Ready",
+        attach::read_budget(attach::READY_LIMIT),
+        || match host.state(vault) {
+            Ok(TrustState::Ready) => Observed::Met(()),
+            reading => Observed::pending(format!("{reading:?}")),
+        },
+    )
+    .unwrap_or_else(|failure| panic!("{failure}"));
 }
 
 /// **A validate that meets a finding's stored position below zero is refused
@@ -2129,7 +2145,9 @@ fn a_validate_that_meets_a_finding_position_below_zero_is_untrusted_and_the_entr
          WHERE path = ?1",
         "zz-broken/zz-unclosed.md",
     );
-    assert_untrusted_until_rebuilt("a finding below zero", || host.validate(&params));
+    assert_untrusted_until_rebuilt("a finding below zero", &host, vault.name(), || {
+        host.validate(&params)
+    });
 }
 
 /// **A get that meets a stored offset its body cannot hold is refused as an
@@ -2195,6 +2213,8 @@ fn a_get_that_meets_an_offset_its_body_cannot_hold_is_untrusted_and_the_entry_re
     ];
     for (table, set, params, what) in cases {
         rewrite_a_cafe_row(&vault.database(), table, set);
-        assert_untrusted_until_rebuilt(&format!("{table} {what}"), || host.get(params));
+        assert_untrusted_until_rebuilt(&format!("{table} {what}"), &host, vault.name(), || {
+            host.get(params)
+        });
     }
 }
