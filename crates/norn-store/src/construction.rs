@@ -28,7 +28,7 @@ pub(crate) struct Steps {
 /// Only the reach changed after the complete judgment, never the vault queue.
 #[derive(Debug, Default)]
 pub(crate) struct RejudgeReach {
-    pub(crate) documents: std::collections::BTreeSet<crate::DocumentPath>,
+    pub(crate) generations: std::collections::BTreeSet<i64>,
     pub(crate) classes: std::collections::BTreeSet<crate::ClassKey>,
     pub(crate) paths: std::collections::BTreeSet<crate::PathKey>,
     pub(crate) directories: std::collections::BTreeSet<crate::DirectoryPrefix>,
@@ -686,6 +686,7 @@ impl crate::Request<'_> {
         if let Some(steps) = self.store.steps.as_mut()
             && steps.step == Step::Relations
         {
+            steps.reach.generations.insert(stamp);
             steps.reach.directories.extend(directories);
         }
         self.counters

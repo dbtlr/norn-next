@@ -352,9 +352,6 @@ pub(crate) fn apply(
                 continue;
             }
             let subject = subject(&change);
-            if step == Some(crate::Step::Relations) {
-                tally.documents.insert(subject.clone());
-            }
             if matches!(&change, Change::FileBirth { path } if !path.is_vault_file()) {
                 continue;
             }
@@ -540,7 +537,7 @@ pub(crate) fn apply(
     if let Some(steps) = store.steps.as_mut() {
         steps.increment_commits += 1;
         if steps.step == crate::Step::Relations {
-            steps.reach.documents.extend(tally.documents);
+            steps.reach.generations.extend(generation);
             steps
                 .reach
                 .classes
@@ -595,7 +592,6 @@ pub(crate) fn apply(
 /// the path set one key per distinct changed path.
 #[derive(Default)]
 struct Tally {
-    documents: BTreeSet<DocumentPath>,
     documents_named: u64,
     documents_upserted: u64,
     documents_deleted: u64,

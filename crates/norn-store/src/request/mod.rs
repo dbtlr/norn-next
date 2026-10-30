@@ -481,7 +481,6 @@ impl<'a> Request<'a> {
             .database
             .immediate_transaction("rejudging construction reach")?;
         let stamp = norn_db::meta::next_generation(&transaction)?;
-        let documents: Vec<_> = reach.documents.into_iter().collect();
         let result = health::redecide_reach(
             &transaction,
             &self.read_work,
@@ -490,7 +489,7 @@ impl<'a> Request<'a> {
             &reach.classes,
             &reach.paths,
             &reach.directories,
-            &documents,
+            &reach.generations,
         )?;
         transaction
             .commit()

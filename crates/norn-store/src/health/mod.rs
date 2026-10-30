@@ -679,7 +679,7 @@ pub(crate) fn redecide(
         classes,
         paths,
         directories,
-        &[],
+        &BTreeSet::new(),
     )
 }
 
@@ -693,7 +693,7 @@ pub(crate) fn redecide_reach(
     classes: &BTreeSet<ClassKey>,
     paths: &BTreeSet<PathKey>,
     directories: &BTreeSet<DirectoryPrefix>,
-    documents: &[DocumentPath],
+    generations: &BTreeSet<i64>,
 ) -> Result<Redecided, StoreError> {
     let key = SuffixKey::Comparison;
     let writer = OnWriter {
@@ -701,7 +701,6 @@ pub(crate) fn redecide_reach(
         work,
     };
     let stamp = generation.unwrap_or(-1);
-    let rewritten: BTreeSet<_> = documents.iter().map(DocumentPath::as_str).collect();
     let mut range_discarded = 0;
     for prefix in directories {
         let (lower, upper) = statement::directory_bounds(prefix);
@@ -737,11 +736,13 @@ pub(crate) fn redecide_reach(
         Ok(())
     };
 
-    for chunk in documents.chunks(LINK_HEALTH_CHUNK) {
-        let paths: Vec<_> = chunk.iter().map(DocumentPath::as_str).collect();
-        let values = statement::documents_parameters(&paths)?;
-        let (links, _) = read_links(&writer, key, Selected::Documents, values)?;
-        file(links, &mut summaries)?;
+    // Each requeue write has its own generation. Reading those generations
+    // retains the ordinary bounded link pages across all the requeue's commits.
+    for generation in generations {
+        let mut written = Pages::written(*generation);
+        while let Some(links) = written.next(&writer, key)? {
+            file(links, &mut summaries)?;
+        }
     }
     if let Some(generation) = generation {
         let mut written = Pages::written(generation);
@@ -807,7 +808,7 @@ pub(crate) fn redecide_reach(
             while let Some(mut links) = pages.next(&writer, key)? {
                 links.retain(|held| {
                     held.generation != stamp
-                        && !rewritten.contains(held.holder.as_str())
+                        && !generations.contains(&held.generation)
                         && !held.keys.iter().any(|(text, segments, _)| {
                             segments.is_some()
                                 && class_of(text).is_some_and(|other| {
@@ -827,7 +828,7 @@ pub(crate) fn redecide_reach(
             while let Some(mut links) = pages.next(&writer, key)? {
                 links.retain(|held| {
                     held.generation != stamp
-                        && !rewritten.contains(held.holder.as_str())
+                        && !generations.contains(&held.generation)
                         && !held.keys.iter().any(|(text, segments, _)| {
                             segments.is_none()
                                 && text.as_str() < path.as_str()
@@ -843,7 +844,7 @@ pub(crate) fn redecide_reach(
         while let Some(mut links) = pages.next(&writer, key)? {
             links.retain(|held| {
                 held.generation != stamp
-                    && !rewritten.contains(held.holder.as_str())
+                    && !generations.contains(&held.generation)
                     && !reached_by_a_class(held, classes)
                     && !held.keys.iter().any(|(text, segments, _)| {
                         segments.is_none()
