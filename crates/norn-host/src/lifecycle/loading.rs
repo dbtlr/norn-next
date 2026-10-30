@@ -474,7 +474,9 @@ impl<A: SnapshotSource> ProgressReporter<A> {
                 let touch =
                     norn_store::early::Touch::of(&slot.target, building.model.ambiguity_ignore());
                 if covered.iter().any(|(root, beneath)| {
-                    root.as_path().to_str().is_none_or(|root| touch.touches(root, *beneath))
+                    root.as_path()
+                        .to_str()
+                        .is_none_or(|root| touch.touches(root, *beneath))
                 }) {
                     slot.ready = false;
                 }

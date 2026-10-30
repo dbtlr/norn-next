@@ -204,7 +204,11 @@ impl BuildAuthority {
     /// Satisfy reports covered by the committed subtree requeue, including child
     /// reports absorbed by its batch. Retain every report newer than the take.
     /// Return the covered roots and their descendant flags for target publication.
-    pub fn mark_derived(&self, roots: &BTreeSet<NormalizedPath>, through: u64) -> Vec<(NormalizedPath, bool)> {
+    pub fn mark_derived(
+        &self,
+        roots: &BTreeSet<NormalizedPath>,
+        through: u64,
+    ) -> Vec<(NormalizedPath, bool)> {
         let mut facts = self
             .proof
             .facts
