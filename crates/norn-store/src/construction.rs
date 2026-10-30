@@ -28,6 +28,7 @@ pub(crate) struct Steps {
 /// Only the reach changed after the complete judgment, never the vault queue.
 #[derive(Debug, Default)]
 pub(crate) struct RejudgeReach {
+    // Unique writes retain outgoing-link reach across commits and queue dequeues.
     pub(crate) generations: std::collections::BTreeSet<i64>,
     pub(crate) classes: std::collections::BTreeSet<crate::ClassKey>,
     pub(crate) paths: std::collections::BTreeSet<crate::PathKey>,
@@ -362,7 +363,7 @@ impl Store {
             return Err(refused(
                 self,
                 "opening a construction group",
-                "content or structure required",
+                "content, structure or relations required",
             ));
         }
         self.steps.as_mut().expect("steps").group_guard = true;
@@ -735,7 +736,7 @@ impl crate::Request<'_> {
             return Err(refused(
                 self.store,
                 "writing construction structure",
-                "content or structure required",
+                "content, structure or relations required",
             ));
         }
         crate::increment::check_derived_findings(findings)?;
