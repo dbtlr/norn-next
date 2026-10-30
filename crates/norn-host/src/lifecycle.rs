@@ -1303,7 +1303,9 @@ struct EntryState<A: SnapshotSource> {
     /// It is a rebuild owed rather than one already published, so it goes
     /// where a rebuild requirement goes: [`EntryState::clear_rebuild`] clears
     /// it, because the store it names is gone once a rebuild has run or the
-    /// coverage has gone back.
+    /// coverage has gone back. A build that installs the store an early read
+    /// met damage on — an attach's or a rebuild's own construction — takes it
+    /// first and carries it past that clearing.
     damage_met_under_a_claim: Option<String>,
     /// The live demand leases asking for the recovery the entry currently owes.
     recovery_demands: usize,
@@ -1712,7 +1714,9 @@ impl<A: SnapshotSource> EntryState<A> {
     /// Owe no rebuild. Called where the derived state the entry holds is one a
     /// build from the vault has just produced, or where the entry no longer
     /// holds the store a requirement was raised against. Damage a read met
-    /// under a claim names that same store, so it clears with the requirement.
+    /// under a claim names that same store, so it clears with the requirement;
+    /// a leg installing the store its own construction's reads met damage on
+    /// takes that damage before calling this.
     fn clear_rebuild(&mut self) {
         self.rebuild_required = false;
         self.damage_met_under_a_claim = None;
@@ -2523,11 +2527,12 @@ impl DemandedWork {
     /// facts standing in the entry — an overflow until the rescan among them is
     /// reread, and the document side of the ladder otherwise.
     ///
-    /// A rebuild publishes nothing of its own, and that is the honest reading:
-    /// the entry said its derived state was damaged, and it is damaged until
-    /// the rung that resolves it has. Warming over the verdict would retire the
-    /// reason before anything addressed it, and leave a caller unable to tell a
-    /// vault being derived again from one that never lost its store.
+    /// A rebuild publishes nothing of its own while it is scheduled, and that
+    /// is the honest reading: the entry said its derived state was damaged, and
+    /// it is damaged until the rung that resolves it has begun. The rebuild's
+    /// construction publishes warming over the verdict as it begins, because
+    /// from then on the entry is deriving its store again and answers early
+    /// reads from it.
     fn publish_scheduled<A: SnapshotSource>(self, state: &mut EntryState<A>) {
         match self {
             Self::Attach | Self::Recover => {
@@ -2648,8 +2653,10 @@ struct DamageVerdict {
 ///
 /// **The verdict is the entry's where the entry still reads the store the
 /// read ran on**: its reader is `ran_on`, it owes no rebuild already, and no
-/// park stands over it. The read and the hold that judges can be apart: a read
-/// that found the gate held leaves this for the next hold, and that hold
+/// park stands over it. A read on the pool of the entry's own construction is
+/// judged against that construction, whether or not a rebuild is owed. The
+/// read and the hold that judges can be apart: a read that found the gate
+/// held leaves this for the next hold, and that hold
 /// judges the entry as it finds it, so an entry that has moved to another
 /// handle, or rebuilt, or parked since the read ran publishes nothing. The
 /// refusal is the read's answer only where the read took this hold itself.
@@ -2667,9 +2674,11 @@ fn judge_damage_a_read_met<A: SnapshotSource>(
     // Damage an early read met on a build's own store withdraws that build's
     // capabilities at once; the build goes on, and the claim's end publishes
     // the damage and owes rung 3, as for damage a read meets under any claim.
+    // A rebuild already owed does not cover it: the store under construction
+    // is the one that rebuild is writing, so it is recorded all the same.
     if state.reads_construction(ran_on) {
         state.close_construction();
-        if state.rebuild_required || state.stands_parked() {
+        if state.stands_parked() {
             return refused(ReadRefusal::NotServing(published));
         }
         if state.damage_met_under_a_claim.is_none() {
@@ -7641,6 +7650,10 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
             match rebuilt {
                 Ok(attachment) => {
                     state.claim.release();
+                    // Damage an early read met under this claim was met on the
+                    // store this rebuild built, which is installed below, so it
+                    // outlives the requirement the rebuild clears.
+                    let damage_this_build_met = state.damage_met_under_a_claim.take();
                     let took_in_a_fact = !observed.is_empty() || handoff_saturated;
                     state.pending.merge(observed);
                     record_active_declaration(&mut state, &*shared.ops, &name, &attachment);
@@ -7663,7 +7676,18 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                         // publishes over one: the reason, and the recovery
                         // that reads the declaration again owed beside it.
                         state.withhold_trust_until_the_vault_changes(reason, took_in_a_fact);
+                        // Damage an early read met still names the store just
+                        // installed, so it stands for the claim's end to
+                        // publish, the rebuild it owes dominating the recovery.
+                        state.damage_met_under_a_claim = damage_this_build_met;
                         schedule_due_detach(&mut state, &name)
+                    } else if damage_this_build_met.is_some() {
+                        // The store this rebuild installs is one an early read
+                        // found damaged: the damage is published in place of
+                        // `Ready`, and the claim goes on to the rebuild it
+                        // owes, which the facts standing in `pending` follow.
+                        state.damage_met_under_a_claim = damage_this_build_met;
+                        hand_on_carried_damage(&mut state, &name)
                     } else {
                         // A rebuild's drain can merge facts behind a pending
                         // batch this leg never touched, so what is left to
@@ -20505,6 +20529,79 @@ mod tests {
                 "the read was refused with a closed construction's open failure: {refusal:?}"
             );
         });
+        ops.attach_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &name, TrustState::Ready);
+    }
+
+    /// **A construction that begins over a damage verdict publishes warming,
+    /// and over any other untrusted reason leaves it standing.** Only a
+    /// rebuild owed under the store-damaged-rebuilding verdict admits early
+    /// reads by beginning its construction (ADR 0045); another reason stays
+    /// the entry's answer, even beside an owed rebuild.
+    #[cfg(unix)]
+    #[test]
+    fn a_construction_publishes_warming_over_a_damage_verdict_only() {
+        let _watcher_lease = norn_testkit::isolation::Lease::hold(
+            norn_testkit::isolation::REAL_WATCHER,
+            norn_testkit::isolation::acquisition_budget(lifecycle_wait_budget()),
+        );
+        let scratch = temp_base("construction-over-a-damage-verdict");
+        let root = scratch.join("vault");
+        std::fs::create_dir_all(root.join(".norn")).unwrap();
+        std::fs::write(root.join(".norn/schema.yaml"), "version: 1\n").unwrap();
+        norn_fs::watch::settle_prior_changes(scratch.root(), lifecycle_wait_budget().work())
+            .unwrap();
+        let (subscription, _own) =
+            norn_fs::watch::watch(&root, &root.join(".norn/schema.yaml")).unwrap();
+        subscription
+            .synchronize(lifecycle_wait_budget().work())
+            .unwrap();
+
+        let ops = Arc::new(FakeOps::default());
+        ops.block_attach.store(true, Ordering::SeqCst);
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
+        let _lease = host.demand(&name).unwrap();
+        wait_for_flag("attach_started", &ops.attach_started);
+        let entry = host.shared.entries.get(&name).unwrap().clone();
+        let progress = reporter(&entry, entry.gate.lock().unwrap().claim.epoch());
+        let begin = || {
+            progress
+                .begin_construction(Some(loading::Begun {
+                    pool: FakeReader {
+                        ledger: Arc::clone(&ops.readers),
+                        free: Mutex::new(true),
+                        returned: Condvar::new(),
+                    },
+                    model: Arc::new(ContentModel::none()),
+                    authority: subscription.capture_build_authority().unwrap(),
+                    store_epoch: "fake-epoch".into(),
+                }))
+                .expect("the claim begins its construction")
+        };
+
+        let lost = TrustState::untrusted(UntrustedReason::environmental_refusal("refused"));
+        {
+            let mut state = entry.gate.lock().unwrap();
+            state.trust = lost.clone();
+            state.rebuild_required = true;
+        }
+        begin();
+        assert_eq!(entry.gate.lock().unwrap().trust, lost);
+
+        entry.gate.lock().unwrap().trust =
+            TrustState::untrusted(UntrustedReason::store_damaged_rebuilding("damaged"));
+        begin();
+        {
+            let mut state = entry.gate.lock().unwrap();
+            assert!(
+                matches!(state.trust, TrustState::Warming { .. }),
+                "{:?}",
+                state.trust
+            );
+            assert!(state.rebuild_required, "the rebuild stays owed");
+            state.rebuild_required = false;
+        }
         ops.attach_release.store(true, Ordering::SeqCst);
         wait_for_state(&host, &name, TrustState::Ready);
     }

@@ -330,6 +330,7 @@ impl<A: SnapshotSource> ProgressReporter<A> {
             published: None,
             requests: Requests::default(),
         }));
+        state.publish_warming_over_a_damage_rebuild();
         Some(token)
     }
 
@@ -428,6 +429,26 @@ impl<A: SnapshotSource> EntryState<A> {
             && self.damage_met_under_a_claim.is_none()
     }
 
+    /// Publish warming over the damage verdict of a rebuild whose construction
+    /// has just begun, so its reads follow first-build admission (ADR 0045).
+    ///
+    /// The rebuild is still owed until it lands, so ordinary reads and applies
+    /// keep refusing or waiting; only early admission changes. From here the
+    /// entry's status no longer names the damage.
+    fn publish_warming_over_a_damage_rebuild(&mut self) {
+        if self.rebuild_required
+            && matches!(
+                self.trust,
+                TrustState::Untrusted {
+                    reason: UntrustedReason::StoreDamagedRebuilding { .. },
+                    ..
+                }
+            )
+        {
+            self.trust = TrustState::warming(WarmingPhase::Healing, 0, None);
+        }
+    }
+
     /// Close construction, retiring its pool outside the gate and waking every waiter.
     pub(super) fn close_construction(&mut self) {
         if let Some(construction) = self.construction.take() {
@@ -485,8 +506,9 @@ impl<A: SnapshotSource> EntryState<A> {
         let Some(boundary) = request.boundary() else {
             return Early::Refused;
         };
-        // A rebuild under a damage verdict publishes that verdict, not warming,
-        // and no answer carries an untrusted reading: it refuses at once.
+        // No answer carries an untrusted reading, so an untrusted entry refuses
+        // at once. A rebuild under a damage verdict stops being one when its
+        // construction begins, which publishes warming over the verdict.
         if matches!(self.trust, TrustState::Untrusted { .. }) {
             return Early::Refused;
         }
