@@ -15129,6 +15129,10 @@ mod tests {
             ("asset.png", b"asset"),
         ] { fs::write(f.vault().join(path), bytes).unwrap(); }
         std::os::unix::fs::symlink("a.md", f.vault().join("alias.md")).unwrap();
+        // FSEvents can deliver the fixture's own writes after the watch's
+        // history marker; the build would take them as facts and requeue
+        // their documents, which these write-once counters do not count.
+        norn_fs::watch::settle_prior_changes(f.root.root(), lifecycle_budget().work()).unwrap();
         let (ops, name) = f.ops(2);
         let mut attachment = ops
             .attach(&f.registration(), &ProgressReporter::disconnected())
