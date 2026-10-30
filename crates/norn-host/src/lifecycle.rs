@@ -4353,7 +4353,7 @@ impl HoldReading {
 /// warming state of that attach. The second is the demand an entry taking in
 /// a change published when the read's settle bound ran out. The third is an
 /// entry serving every surface but this one, or a read another holder kept
-/// from the entry past its bound. First-index availability expiry carries the
+/// from the entry past its bound. A from-zero build's availability expiry carries the
 /// current warming demand separately from an ordinary settle expiry.
 ///
 /// **No wire rendering is written here.** A demand renders through
