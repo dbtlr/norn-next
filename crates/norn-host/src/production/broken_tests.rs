@@ -905,6 +905,10 @@ fn an_unlistable_directory_is_withheld_and_marked_at_first_build() {
     fs::create_dir(f.vault().join("locked")).unwrap();
     fs::write(f.vault().join("locked/inside.md"), "# Held\n").unwrap();
     fs::write(f.vault().join("kept.md"), "kept\n").unwrap();
+    // FSEvents can deliver the fixture's writes after the build captures its
+    // authority; a late fact at `locked` would relist it once the one-shot arm
+    // is spent, which is a different case from the first build's mark.
+    norn_fs::watch::settle_prior_changes(f.root.root(), Duration::from_secs(10)).unwrap();
     let (ops, name) = f.ops(8);
     let progress = ProgressReporter::disconnected();
     let mut attachment = ops

@@ -3099,6 +3099,20 @@ fn scoped_increment_links(
                 continue;
             }
         };
+        // **A construction requeue derives nothing beneath a standing mark.**
+        // A from-zero build over this tree never lists the marked directory,
+        // so it holds no row and no finding beneath it; reaching one name below
+        // is not a listing of the directory and does not end its mark (ADR
+        // 0046). A root at the directory itself, or above it, is a listing
+        // and takes the ordinary arms below, whose job-end prune ends the
+        // mark when the directory lists again.
+        let reached_at = match &reached {
+            norn_fs::Reach::Refused(skip) => skip.path(),
+            norn_fs::Reach::Stands { at, .. } => at,
+        };
+        if pending.names && pending.beneath_a_mark(reached_at.as_path())? {
+            continue;
+        }
         let (kind, rendered) = match reached {
             norn_fs::Reach::Refused(skip) => {
                 if pending.names {
@@ -4827,17 +4841,7 @@ impl<'s> Pending<'s> {
         self.account.withheld.absorb(path);
         let subject = DocumentPath::rendered(path);
         self.account.filed.insert(&subject, Decided::ByBytes);
-        if self.queued.iter().any(|queued| {
-            queued.cause == Cause::UnreadableDirectory && queued.finding.path == subject
-        }) {
-            return Ok(());
-        }
-        let marked = self
-            .store
-            .begin_request()
-            .unreadable_directory_stands(&subject)
-            .map_err(store_effect)?;
-        if marked {
+        if self.marked(&subject)? {
             return Ok(());
         }
         if let Some(spelling) = addressed_range(path) {
@@ -4847,6 +4851,34 @@ impl<'s> Pending<'s> {
         }
         self.file(plan_unreadable_directory(path, cause), None);
         Ok(())
+    }
+
+    /// Whether an unreadable-directory finding stands at `subject`, committed
+    /// or queued in this scope.
+    fn marked(&mut self, subject: &DocumentPath) -> Result<bool, JobFailure> {
+        if self.queued.iter().any(|queued| {
+            queued.cause == Cause::UnreadableDirectory && queued.finding.path == *subject
+        }) {
+            return Ok(true);
+        }
+        self.store
+            .begin_request()
+            .unreadable_directory_stands(subject)
+            .map_err(store_effect)
+    }
+
+    /// Whether a directory above `path` stands marked unlistable: one probe
+    /// per ancestor, so the cost follows the path's depth, never the vault.
+    fn beneath_a_mark(&mut self, path: &Path) -> Result<bool, JobFailure> {
+        for directory in path.ancestors().skip(1) {
+            if directory.as_os_str().is_empty() {
+                break;
+            }
+            if self.marked(&DocumentPath::rendered(directory))? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Apply the posture the walk's kind evidence licenses, returning whether it is a directory.

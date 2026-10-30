@@ -2493,6 +2493,8 @@ the replacement model. A touched Get and every vault-wide capability wait for ou
 sequence. During Names, Content and Structure, the build takes roots from its own
 open heal window ahead of the ordinary queue. The scoped walk resets touched names;
 the same content and structure routines run them through the current step.
+A taken root beneath a directory marked unlistable derives nothing, as a from-zero
+build never lists there; a root at the directory itself lists it again.
 Each step drains until no roots remain before it ends. Committed derivation
 satisfies the taken sequence and clears touched targets' ready flags, waking
 waiters to resolve candidates again. Facts accepted during or after Relations
