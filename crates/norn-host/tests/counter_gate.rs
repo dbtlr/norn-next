@@ -7560,5 +7560,9 @@ fn a_requeued_edit_costs_the_same_at_both_scales() {
             read_steps,
         )
     };
-    assert_eq!(measure(2_000), measure(10_000));
+    let small = measure(2_000);
+    let large = measure(10_000);
+    eprintln!("requeue work at 2k: {small:?}; at 10k: {large:?}");
+    assert_eq!(small, large);
+    assert!(small.3 > 128, "a requeue must include increment reads, not only queue paging: {small:?}");
 }

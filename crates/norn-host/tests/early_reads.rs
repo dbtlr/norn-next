@@ -3579,3 +3579,67 @@ fn an_overflow_mid_requeue_stops_taking_and_converges() {
         "overflow during requeue",
     );
 }
+
+
+#[test]
+fn a_symbolic_link_met_on_requeue_keeps_its_advisory() {
+    let fixture = Fixture::new("requeue-link-advisory");
+    let probe = Probe::new([LoadingBoundary::StepComplete(Step::Content)]);
+    let ops = fixture.ops(probe.clone());
+    let account = ops.account();
+    let host = fixture.host_over(ops, norn_host::READ_SETTLE_BOUND);
+    let _release = Release(&probe);
+    let _demand = host.demand(&name()).unwrap();
+    probe.wait(LoadingBoundary::StepComplete(Step::Content));
+    std::os::unix::fs::symlink("doc00.md", fixture.root.join("link.md")).unwrap();
+    fact_recorded(&account, 0);
+    probe.release();
+    ready(&host);
+    let advisories = host.inspect(&name()).unwrap().advisories;
+    assert!(advisories.iter().any(|advisory| matches!(
+        advisory, norn_host::AttachmentAdvisory::SymlinkSkipped { path } if path == "link.md"
+    )), "{advisories:?}");
+    drop(host);
+    let dirs = ConfigDirs::new(fixture.scratch.join("reference-config"), fixture.scratch.join("reference-data")).unwrap();
+    let reference = fixture.host_over(
+        ProductionEntryOps::new(dirs, ProductionPolicy::new(2, 2).unwrap()),
+        norn_host::READ_SETTLE_BOUND,
+    );
+    let _demand = reference.demand(&name()).unwrap();
+    ready(&reference);
+    assert_eq!(advisories, reference.inspect(&name()).unwrap().advisories);
+}
+
+#[test]
+fn a_case_respelling_during_each_document_step_equals_from_scratch() {
+    use norn_testkit::churn::{folding, runs_where_the_volume_folds};
+    for step in [Step::Names, Step::Content, Step::Structure] {
+        let fixture = Fixture::new("requeue-folded-respelling");
+        if !runs_where_the_volume_folds(folding(&fixture.root).unwrap(), "construction respelling") {
+            return;
+        }
+        fixture.add("a-folder/note.md", "# Respelling\n");
+        let mut points = vec![LoadingBoundary::CanonicalPage];
+        if step != Step::Names {
+            points.insert(0, LoadingBoundary::StepComplete(if step == Step::Content { Step::Names } else { Step::Content }));
+        }
+        let probe = Probe::new(points.clone());
+        let ops = fixture.ops(probe.clone());
+        let account = ops.account();
+        let host = fixture.host_over(ops, norn_host::READ_SETTLE_BOUND);
+        let _release = Release(&probe);
+        let _demand = host.demand(&name()).unwrap();
+        if points.len() > 1 {
+            probe.wait(points[0]);
+            probe.release();
+        }
+        probe.wait(LoadingBoundary::CanonicalPage);
+        std::fs::rename(fixture.root.join("a-folder"), fixture.root.join("A-FOLDER")).unwrap();
+        fact_recorded(&account, 0);
+        probe.release();
+        ready(&host);
+        drop(host);
+        project(&fixture.store_path(), &fixture.root)
+            .assert_equivalent(&from_scratch(&fixture, "reference"), "folded respelling");
+    }
+}

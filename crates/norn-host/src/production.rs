@@ -20870,6 +20870,42 @@ mod tests {
         }
     }
 
+    #[test]
+    fn construction_names_retire_a_folded_respelling_in_every_document_step() {
+        for step in [norn_store::Step::Names, norn_store::Step::Content, norn_store::Step::Structure] {
+            let f = Fixture::watcherless("construction-folded-respelling");
+            let root = f.vault();
+            let mut store = Store::open(
+                f.root.join("folded.sqlite3"),
+                StoredPathOrder::AsciiCaseInsensitive,
+                crate::DERIVATION_VERSION,
+            ).unwrap();
+            ProductionEntryOps::pin_schema(&mut store, &f.registration()).unwrap();
+            store.defer_link_health().unwrap();
+            store.begin_steps().unwrap();
+            if step != norn_store::Step::Names {
+                store.finish_step(norn_store::Step::Names).unwrap();
+            }
+            if step == norn_store::Step::Structure {
+                store.finish_step(norn_store::Step::Content).unwrap();
+            }
+            fs::write(root.join("note.md"), "# Note\n").unwrap();
+            let progress = ProgressReporter::<ProductionAttachment>::disconnected();
+            for renamed in [false, true] {
+                if renamed {
+                    fs::rename(root.join("note.md"), root.join("Note.md")).unwrap();
+                }
+                let mut account = Account::default();
+                merge_walk(
+                    &mut store, &root, &[], walk(&root, &[]).unwrap(),
+                    norn_fs::CaseSensitivity::Insensitive, HealScope::Vault,
+                    ProductionPolicy::new(2, 1).unwrap(), &progress.healing(), &mut account,
+                ).unwrap();
+                assert_eq!(stored_paths(&mut store), vec![if renamed { "Note.md" } else { "note.md" }], "{step:?}");
+            }
+        }
+    }
+
     /// A heal indexes no file under a dot-led folder, as Obsidian resolves no
     /// link to one; a file beside them outside such a folder is indexed.
     #[test]
