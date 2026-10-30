@@ -321,8 +321,13 @@ pub(crate) fn apply(
         generation = Some(stamp);
         let mut statements = Statements::prepare(&transaction)?;
         for (index, change) in std::iter::once(first).chain(entries).enumerate() {
-            if (matches!(change, Change::Named { .. }) && step != Some(crate::Step::Names))
-                || (step.is_some() && matches!(change, Change::Upsert(_) | Change::Death { .. }))
+            if (matches!(change, Change::Named { .. })
+                && !matches!(
+                    step,
+                    Some(crate::Step::Names | crate::Step::Content | crate::Step::Structure)
+                ))
+                || (step.is_some() && matches!(change, Change::Upsert(_)))
+                || (matches!(change, Change::Death { .. }) && step == Some(crate::Step::Relations))
             {
                 return Err(StoreError::Lifecycle {
                     operation: "applying an increment",
@@ -381,8 +386,12 @@ pub(crate) fn apply(
                 Change::Named { path } => {
                     unreadable(&mut statements, stamp, recorded_at, path,
                         declared.ambiguity_ignore().admitting_segments(path.as_str()), &mut tally)?;
-                    transaction.execute("INSERT INTO temp.construction_progress(document, stage) SELECT id, 1 FROM documents WHERE path = ?1", [path.as_str()])
+                    transaction.execute("INSERT INTO temp.construction_progress(document, stage) SELECT id, 1 FROM documents WHERE path = ?1 ON CONFLICT(document) DO UPDATE SET stage = 1, body_line = NULL, body_column = NULL, frontmatter_links = NULL, frontmatter_tags = NULL", [path.as_str()])
                         .map_err(|e| error::sql("recording a provisional name", e))?;
+                    if step != Some(crate::Step::Names) {
+                        transaction.execute("INSERT OR IGNORE INTO temp.construction_requeue SELECT id FROM documents WHERE path = ?1", [path.as_str()])
+                            .map_err(|e| error::sql("recording requeued document", e))?;
+                    }
                     tally.documents_named += 1;
                     Ok(())
                 }
@@ -419,6 +428,16 @@ pub(crate) fn apply(
                 Change::Vacated { .. } => unreachable!("a vacated place is handled above"),
                 // The death's own provenance, which is a different thing from
                 // the changeset's mark this function was called with.
+                Change::Death { path, .. } if step.is_some() => {
+                    transaction.execute("DELETE FROM temp.construction_requeue WHERE document = (SELECT id FROM documents WHERE path = ?1)", [path.as_str()])
+                        .map_err(|e| error::sql("ending requeue progress", e))?;
+                    transaction.execute("DELETE FROM temp.construction_progress WHERE document = (SELECT id FROM documents WHERE path = ?1)", [path.as_str()])
+                        .map_err(|e| error::sql("ending construction progress", e))?;
+                    let removed = statements.delete_document.query_row([path.as_str()], |_| Ok(())).optional()
+                        .map_err(|e| error::sql("deleting a construction document", e))?;
+                    tally.documents_deleted += u64::from(removed.is_some());
+                    Ok(())
+                }
                 Change::Death { path, provenance } => record_death(
                     &mut statements,
                     stamp,
@@ -438,6 +457,8 @@ pub(crate) fn apply(
             if step.is_some()
                 && let Change::Unreadable { path } = &change
             {
+                transaction.execute("DELETE FROM temp.construction_requeue WHERE document = (SELECT id FROM documents WHERE path = ?1)", [path.as_str()])
+                        .map_err(|e| error::sql("ending requeue progress", e))?;
                 transaction.execute("DELETE FROM temp.construction_progress WHERE document = (SELECT id FROM documents WHERE path = ?1)", [path.as_str()]).map_err(|e| error::sql("ending broken progress", e))?;
             }
             tally.findings_discarded +=
@@ -509,6 +530,9 @@ pub(crate) fn apply(
 
     // Counters record what happened, so they move after the commit that made it
     // happen.
+    if let Some(steps) = store.steps.as_mut() {
+        steps.increment_commits += 1;
+    }
     counters.add(Counter::DocumentsNamed, tally.documents_named);
     counters.add(Counter::DocumentsUpserted, tally.documents_upserted);
     counters.add(Counter::DocumentsDeleted, tally.documents_deleted);

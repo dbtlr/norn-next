@@ -57,6 +57,7 @@ impl BuildProof {
             beneath,
         });
         record.reported = sequence;
+        record.underived_from.get_or_insert(sequence);
         record.beneath |= beneath;
         if let Some(observer) = &facts.observer {
             observer.recorded(1);
@@ -200,6 +201,29 @@ impl BuildAuthority {
         visit(facts.sequence, &mut roots)
     }
 
+    /// Satisfy reports covered by the committed subtree requeue, including child
+    /// reports absorbed by its batch. Retain every report newer than the take.
+    /// Return the covered roots and their descendant flags for target publication.
+    pub fn mark_derived(
+        &self,
+        roots: &BTreeSet<NormalizedPath>,
+        through: u64,
+    ) -> Vec<(NormalizedPath, bool)> {
+        let mut facts = self
+            .proof
+            .facts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let mut covered = Vec::new();
+        for (path, record) in &mut facts.roots {
+            if roots.iter().any(|root| path.starts_with(root)) {
+                covered.push((path.clone(), record.beneath));
+                record.underived_from = (record.reported > through).then_some(through + 1);
+            }
+        }
+        covered
+    }
+
     /// The latest accepted root report in this construction.
     pub fn sequence(&self) -> u64 {
         self.visit_roots(|sequence, _| sequence)
@@ -293,7 +317,58 @@ impl BuildAuthority {
     }
 }
 
+/// Roots taken from the build's open heal window, bounded by acceptance sequence.
+pub struct TakenRoots {
+    /// Roots remaining after own-write suppression.
+    pub roots: BTreeSet<NormalizedPath>,
+    /// Reports through this sequence belong to the take.
+    pub through: u64,
+}
+
 impl Subscription {
+    /// Take only this open window's known roots. Coverage loss or a pending
+    /// control-file root refuses the whole take, leaving the batch for the
+    /// ordinary reconcile. Suppression runs outside watcher State.
+    pub fn take_build_roots(&self) -> Option<TakenRoots> {
+        let (root, ledger, batch, through) = {
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            if !state.healing || state.build_authority.invalid.load(Ordering::SeqCst) {
+                return None;
+            }
+            let pending = state.pending.as_ref()?;
+            if pending.batch.schema_dirty || !pending.batch.rescans.is_empty() {
+                return None;
+            }
+            let through = {
+                let facts = state
+                    .build_authority
+                    .facts
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                if pending.batch.vault_roots.iter().any(|root| {
+                    facts
+                        .control
+                        .iter()
+                        .any(|control| control.starts_with(root))
+                }) {
+                    return None;
+                }
+                facts.sequence
+            };
+            (
+                state.root.clone(),
+                state.ledger.clone(),
+                state.pending.take()?.into_batch(),
+                through,
+            )
+        };
+        let batch = suppress(&root, &ledger, batch);
+        Some(TakenRoots {
+            roots: batch.vault_roots,
+            through,
+        })
+    }
+
     /// Normalize a build control path under the coverage's already proven case behavior.
     pub fn normalize_build_control(&self, path: &Path) -> Result<NormalizedPath, crate::PathError> {
         self.state

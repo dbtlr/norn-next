@@ -180,6 +180,7 @@ pub struct Request<'a> {
 pub(crate) struct ReadWork {
     steps: Cell<u64>,
     statements: Cell<u64>,
+    measurement: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
 }
 
 impl ReadWork {
@@ -189,15 +190,22 @@ impl ReadWork {
         self.steps
             .set(self.steps.get().saturating_add(stepped.max(0) as u64));
         self.statements.set(self.statements.get().saturating_add(1));
+        if let Some(measurement) = &self.measurement {
+            measurement.fetch_add(stepped.max(0) as u64, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 }
 
 impl<'a> Request<'a> {
     pub(crate) fn new(store: &'a mut Store) -> Self {
+        let read_work = ReadWork {
+            measurement: store.read_step_measurement.clone(),
+            ..ReadWork::default()
+        };
         Request {
             store,
             counters: DerivationCounters::default(),
-            read_work: ReadWork::default(),
+            read_work,
         }
     }
 

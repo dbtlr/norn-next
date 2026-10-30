@@ -21,6 +21,7 @@ pub(crate) struct Steps {
     group_documents: usize,
     /// Construction transactions committed, every closing path counted.
     group_commits: u64,
+    pub(crate) increment_commits: u64,
 }
 
 /// Construction completeness boundaries, held in memory rather than persisted.
@@ -91,6 +92,7 @@ impl Store {
              DROP TRIGGER documents_fts_update;
              CREATE TEMP TABLE construction_progress(document INTEGER PRIMARY KEY, stage INTEGER NOT NULL, body_line INTEGER, body_column INTEGER, frontmatter_links INTEGER, frontmatter_tags INTEGER);
              CREATE INDEX temp.construction_progress_stage ON construction_progress(stage, document);
+             CREATE TEMP TABLE construction_requeue(document INTEGER PRIMARY KEY);
              CREATE TEMP TABLE construction_spellings(path BLOB PRIMARY KEY) WITHOUT ROWID",
             )
             .map_err(|e| error::sql("deferring full-text triggers", e))?;
@@ -110,6 +112,7 @@ impl Store {
             group_guard: false,
             group_documents: 0,
             group_commits: 0,
+            increment_commits: 0,
         });
         self.connection()
             .pragma_update(None, "wal_autocheckpoint", 10_000)
@@ -386,6 +389,13 @@ impl Store {
             .map_or(0, |s| 2048usize.saturating_sub(s.group_documents))
     }
 
+    /// All document-step commits, including scoped names and findings increments.
+    pub fn construction_write_commits(&self) -> u64 {
+        self.steps
+            .as_ref()
+            .map_or(0, |s| s.group_commits + s.increment_commits)
+    }
+
     /// Construction transactions committed so far, including those a rare
     /// ordinary increment closed; zero outside construction.
     pub fn construction_group_commits(&self) -> u64 {
@@ -449,7 +459,7 @@ impl crate::Request<'_> {
     /// Read the next bounded set of names owing content. The vault pass selects
     /// by stage; NORN-468 pull-ahead supplies a requested target's candidates
     /// ([`Self::target_candidates`]) to the same content writer instead, and
-    /// NORN-469 PR B requeue will supply individual paths there too.
+    /// requeue supplies touched paths there too.
     pub fn content_page(&mut self, limit: usize) -> Result<Vec<crate::DocumentPath>, StoreError> {
         check_limit(limit)?;
         Self::read_all_on(
@@ -463,6 +473,41 @@ impl crate::Request<'_> {
             },
             "reading a content page",
         )
+    }
+
+    /// Select only touched documents still owing this construction's current step.
+    /// CROSS JOIN keeps the small TEMP table outermost; progress and documents
+    /// are probed by identity, without scanning or sorting the vault's queue.
+    /// The caller runs each page's owed content before its owed structure.
+    pub fn requeued_page(&mut self, limit: usize) -> Result<Vec<crate::DocumentPath>, StoreError> {
+        check_limit(limit)?;
+        let stage = if self.store.construction_step() == Some(Step::Structure) {
+            2
+        } else {
+            1
+        };
+        Self::read_all_on(
+            self.store.connection(),
+            &self.read_work,
+            "SELECT d.path FROM temp.construction_requeue r CROSS JOIN temp.construction_progress p ON p.document = r.document CROSS JOIN documents d ON d.id = r.document WHERE p.stage <= ?1 ORDER BY r.document LIMIT ?2",
+            (stage, limit as i64),
+            |row| {
+                let path: String = row.get(0)?;
+                Ok(crate::DocumentPath::new(&path))
+            },
+            "reading requeued documents",
+        )
+    }
+
+    /// Remove a selected requeue page before running its owed routines. A
+    /// failure still abandons the marked construction; it never resumes a queue.
+    pub fn dequeue_requeued(&mut self, paths: &[crate::DocumentPath]) -> Result<(), StoreError> {
+        for path in paths {
+            self.store.connection().execute(
+                "DELETE FROM temp.construction_requeue WHERE document = (SELECT id FROM documents WHERE path = ?1)",
+                [path.as_str()]).map_err(|e| error::sql("taking a requeue page", e))?;
+        }
+        Ok(())
     }
 
     /// Read one chunk's stored bodies. Frontmatter tags are loaded for just
@@ -481,7 +526,7 @@ impl crate::Request<'_> {
 
     /// Fetch one arbitrary document owing structure, without walking the queue.
     /// NORN-468 pull-ahead selects a requested target's resolved document here,
-    /// and NORN-469 PR B requeue will select single paths too; the ordinary pass
+    /// and requeue selects touched paths too; the ordinary pass
     /// keeps stage selection in [`Self::structure_page`].
     pub fn structure_document(
         &mut self,
@@ -519,16 +564,17 @@ impl crate::Request<'_> {
     /// is also NORN-468's pull-ahead carrier and NORN-469's requeue carrier:
     /// their path selection uses this same writer, with no second derivation
     /// path. Its findings pass a default directory set, which is safe only
-    /// while link health stays deferred to step 4.
+    /// while link health stays deferred to step 4. Returns the number of rows
+    /// skipped because they no longer owe content.
     pub fn write_content(
         &mut self,
         rows: &[ContentWrite],
         findings: &[crate::DerivedFinding<'_>],
         declared: &crate::ContentModel,
-    ) -> Result<(), StoreError> {
+    ) -> Result<usize, StoreError> {
         #[cfg(feature = "induced-failure")]
         let _timing = norn_db::profiling::span("store.step.content");
-        require_step(self.store, Step::Content)?;
+        require_document_step(self.store)?;
         crate::increment::check_derived_findings(findings)?;
         ensure_group(self.store, rows.len())?;
         let connection = self.store.connection();
@@ -538,6 +584,7 @@ impl crate::Request<'_> {
         let stamp = norn_db::meta::next_generation(connection)?;
         let mut statements = crate::increment::Statements::prepare(connection)?;
         let mut skipped = std::collections::BTreeSet::new();
+        let mut skipped_rows = 0;
         for ContentWrite { facts, origin } in rows {
             crate::increment::refuse_a_document_that_does_not_add_up(facts)?;
             crate::increment::refuse_typed_values_the_pin_does_not_derive(
@@ -550,6 +597,7 @@ impl crate::Request<'_> {
                 .transpose()?;
             let id = content_id(connection, &facts.path, 1)?;
             let Some(id) = id else {
+                skipped_rows += 1;
                 skipped.insert(facts.path.as_str());
                 continue;
             };
@@ -629,13 +677,13 @@ impl crate::Request<'_> {
             crate::counters::Counter::FindingsWritten,
             findings.len() as u64,
         );
-        Ok(())
+        Ok(skipped_rows)
     }
 
     /// Withdraw a vanished or byte-quarantined provisional row and its queue
     /// entry. It never represented a readable document, so it owns no death.
     pub fn withdraw_content(&mut self, path: &crate::DocumentPath) -> Result<(), StoreError> {
-        require_step(self.store, Step::Content)?;
+        require_document_step(self.store)?;
         ensure_group(self.store, 1)?;
         let connection = self.store.connection();
         if let Some(id) = content_id(connection, path, 1)? {
@@ -651,14 +699,15 @@ impl crate::Request<'_> {
 
     /// Append structure once, with body ordinals after the frontmatter counts
     /// recorded by content. The vault pass and NORN-468 pull-ahead share this
-    /// arbitrary-set seam, and NORN-469 PR B requeue will too; pull-ahead may call
-    /// it during the content step for a requested document.
+    /// arbitrary-set seam with requeue; pull-ahead may call
+    /// it during the content step for a requested document. Returns the number
+    /// of rows skipped because they no longer owe structure.
     pub fn write_structure(
         &mut self,
         rows: &[StructureInput],
         findings: &[crate::DerivedFinding<'_>],
         declared: &crate::ContentModel,
-    ) -> Result<(), StoreError> {
+    ) -> Result<usize, StoreError> {
         #[cfg(feature = "induced-failure")]
         let _timing = norn_db::profiling::span("store.step.structure");
         if !matches!(
@@ -679,8 +728,10 @@ impl crate::Request<'_> {
         crate::increment::refuse_a_declaration_the_store_does_not_pin(declared, pinned.as_deref())?;
         let mut statements = crate::increment::Statements::prepare(connection)?;
         let mut skipped = std::collections::BTreeSet::new();
+        let mut skipped_rows = 0;
         for input in rows {
             let Some(id) = content_id(connection, &input.facts.path, 2)? else {
+                skipped_rows += 1;
                 skipped.insert(input.facts.path.as_str());
                 continue;
             };
@@ -752,7 +803,7 @@ impl crate::Request<'_> {
             crate::counters::Counter::FindingsWritten,
             findings.len() as u64,
         );
-        Ok(())
+        Ok(skipped_rows)
     }
 }
 
@@ -774,6 +825,21 @@ fn owed_findings<'f, 'a>(
         .collect()
 }
 
+/// Content may be owed again during the structure pass.
+fn require_document_step(store: &Store) -> Result<(), StoreError> {
+    if matches!(
+        store.construction_step(),
+        Some(Step::Content | Step::Structure)
+    ) {
+        Ok(())
+    } else {
+        Err(refused(
+            store,
+            "writing construction content",
+            "document step required",
+        ))
+    }
+}
 /// Reject a writer invoked outside its construction phase.
 fn require_step(store: &Store, step: Step) -> Result<(), StoreError> {
     if store.construction_step() == Some(step) {
@@ -1008,7 +1074,7 @@ const STRUCTURE_PROGRESS_SQL: &str =
     "UPDATE temp.construction_progress SET stage = 3 WHERE document = ?1";
 
 const EXHAUSTED_SQL: &str =
-    "SELECT EXISTS(SELECT 1 FROM temp.construction_progress WHERE stage = ?1)";
+    "SELECT EXISTS(SELECT 1 FROM temp.construction_progress WHERE stage <= ?1)";
 
 #[cfg(test)]
 mod plan_tests {

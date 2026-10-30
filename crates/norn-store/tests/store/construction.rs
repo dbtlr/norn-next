@@ -504,22 +504,17 @@ fn named_and_rich_writes_are_refused_outside_their_step() {
         ),
         Err(StoreError::Lifecycle { .. })
     ));
-    assert!(matches!(
-        apply(
-            &mut store,
-            vec![Change::Death {
-                path: path("a.md"),
-                provenance: norn_store::Provenance::HealPrune
-            }]
-        ),
-        Err(StoreError::Lifecycle { .. })
-    ));
+    apply(
+        &mut store,
+        vec![Change::Death {
+            path: path("a.md"),
+            provenance: norn_store::Provenance::HealPrune,
+        }],
+    )
+    .unwrap();
     apply(&mut store, vec![Change::Named { path: path("a.md") }]).unwrap();
     store.finish_step(Step::Names).unwrap();
-    assert!(matches!(
-        apply(&mut store, vec![Change::Named { path: path("b.md") }]),
-        Err(StoreError::Lifecycle { .. })
-    ));
+    apply(&mut store, vec![Change::Named { path: path("b.md") }]).unwrap();
 }
 
 /// Withdrawal removes provisional identity and progress, without inventing a death.
@@ -1204,4 +1199,220 @@ fn target_candidates_bound_and_total() {
     assert_eq!(group.store().construction_group_room(), 2047);
     group.commit().unwrap();
     assert!(store.commit_step_group().is_err());
+}
+
+#[test]
+fn named_resets_a_document_in_any_document_step() {
+    use crate::common::{document, path};
+    use norn_store::{Change, ContentModel, IncrementProvenance, Step};
+    for step in [Step::Content, Step::Structure] {
+        let scratch = Scratch::new("construction-requeue-reset");
+        let mut store = scratch.open();
+        store.defer_link_health().unwrap();
+        store.begin_steps().unwrap();
+        store
+            .begin_request()
+            .apply_increment(
+                IncrementProvenance::Derived,
+                [Change::Named {
+                    path: path("new.md"),
+                }],
+                &[],
+                &ContentModel::none(),
+            )
+            .unwrap();
+        store.finish_step(Step::Names).unwrap();
+        let mut group = store.step_group().unwrap();
+        group
+            .begin_request()
+            .write_content(
+                &[norn_store::ContentWrite {
+                    facts: document("new.md", "old", "old body"),
+                    origin: norn_store::Span {
+                        line: 1,
+                        column: 1,
+                        byte_offset: 0,
+                    },
+                }],
+                &[],
+                &ContentModel::none(),
+            )
+            .unwrap();
+        let rows = group.begin_request().structure_page(8).unwrap();
+        group
+            .begin_request()
+            .write_structure(&rows, &[], &ContentModel::none())
+            .unwrap();
+        group.commit().unwrap();
+        if step == Step::Structure {
+            store.finish_step(Step::Content).unwrap();
+        }
+        store
+            .begin_request()
+            .apply_increment(
+                IncrementProvenance::Derived,
+                [Change::Named {
+                    path: path("new.md"),
+                }],
+                &[],
+                &ContentModel::none(),
+            )
+            .unwrap();
+        assert!(store.finish_step(step).is_err());
+        assert!(store.begin_request().content_owed(&path("new.md")).unwrap());
+        let facts = store
+            .begin_request()
+            .stored_facts(&path("new.md"))
+            .unwrap()
+            .unwrap();
+        assert!(facts.body.is_none() && facts.fields.is_empty() && facts.links.is_empty());
+    }
+}
+
+#[test]
+fn requeued_documents_page_first_and_death_writes_no_tombstone() {
+    use crate::common::{document, path};
+    use norn_store::{Change, ContentModel, IncrementProvenance, Provenance, Step};
+    let scratch = Scratch::new("requeue-front-content");
+    let mut store = scratch.open();
+    store.defer_link_health().unwrap();
+    store.begin_steps().unwrap();
+    store
+        .begin_request()
+        .apply_increment(
+            IncrementProvenance::Derived,
+            [
+                Change::Named { path: path("a.md") },
+                Change::Named { path: path("z.md") },
+            ],
+            &[],
+            &ContentModel::none(),
+        )
+        .unwrap();
+    store.finish_step(Step::Names).unwrap();
+    store
+        .begin_request()
+        .apply_increment(
+            IncrementProvenance::Derived,
+            [Change::Named { path: path("z.md") }],
+            &[],
+            &ContentModel::none(),
+        )
+        .unwrap();
+    assert_eq!(
+        store.begin_request().requeued_page(8).unwrap(),
+        [path("z.md")]
+    );
+    let mut group = store.step_group().unwrap();
+    let row = norn_store::ContentWrite {
+        facts: document("z.md", "z", "new body"),
+        origin: norn_store::Span {
+            line: 1,
+            column: 1,
+            byte_offset: 0,
+        },
+    };
+    assert_eq!(
+        group
+            .begin_request()
+            .write_content(std::slice::from_ref(&row), &[], &ContentModel::none())
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        group
+            .begin_request()
+            .write_content(&[row], &[], &ContentModel::none())
+            .unwrap(),
+        1
+    );
+    group.commit().unwrap();
+    store
+        .begin_request()
+        .apply_increment(
+            IncrementProvenance::Derived,
+            [
+                Change::Death {
+                    path: path("z.md"),
+                    provenance: Provenance::WatcherRemoval,
+                },
+                Change::Death {
+                    path: path("a.md"),
+                    provenance: Provenance::WatcherRemoval,
+                },
+            ],
+            &[],
+            &ContentModel::none(),
+        )
+        .unwrap();
+    assert!(
+        store
+            .begin_request()
+            .stored_tombstone(&path("z.md"))
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .begin_request()
+            .stored_document(&path("z.md"))
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .begin_request()
+            .stored_tombstone(&path("a.md"))
+            .unwrap()
+            .is_none()
+    );
+    assert!(store.begin_request().content_page(8).unwrap().is_empty());
+    store.finish_step(Step::Content).unwrap();
+}
+
+#[test]
+fn requeued_page_work_is_independent_of_the_vault_queue() {
+    use crate::common::path;
+    use norn_store::{Change, ContentModel, IncrementProvenance, Step};
+    let measure = |documents| {
+        let scratch = Scratch::new("requeue-page-work");
+        let mut store = scratch.open();
+        store.defer_link_health().unwrap();
+        store.begin_steps().unwrap();
+        store
+            .begin_request()
+            .apply_increment(
+                IncrementProvenance::Derived,
+                (0..documents).map(|n| Change::Named {
+                    path: path(&format!("doc{n:05}.md")),
+                }),
+                &[],
+                &ContentModel::none(),
+            )
+            .unwrap();
+        store.finish_step(Step::Names).unwrap();
+        store
+            .begin_request()
+            .apply_increment(
+                IncrementProvenance::Derived,
+                [Change::Named {
+                    path: path("doc00000.md"),
+                }],
+                &[],
+                &ContentModel::none(),
+            )
+            .unwrap();
+        let mut request = store.begin_request();
+        let page = request.requeued_page(128).unwrap();
+        assert_eq!(page, [path("doc00000.md")]);
+        let populated = request.read_steps();
+        request.dequeue_requeued(&page).unwrap();
+        let before = request.read_steps();
+        assert!(request.requeued_page(128).unwrap().is_empty());
+        (populated, request.read_steps() - before)
+    };
+    let small = measure(2_000);
+    let large = measure(10_000);
+    eprintln!("requeued page work: 2k={small:?}, 10k={large:?}");
+    assert_eq!(small, large);
 }

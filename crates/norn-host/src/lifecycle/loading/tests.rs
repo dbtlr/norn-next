@@ -520,6 +520,77 @@ fn a_get_meeting_before_a_fact_admits_with_relations_loading() {
         panic!("an unrelated fact does not refuse this rooted Get");
     };
     assert!(admitted.relations_loading);
+    let params = norn_wire::FindParams::new(norn_wire::VaultAddress::name(
+        VaultName::new("notes").unwrap(),
+    ));
+    let mut stale_meeting = Some(Meeting {
+        token,
+        sequence: 0,
+        touch: None,
+        held_by_fact: false,
+    });
+    assert!(matches!(
+        state.early(Request::Find(&params), &mut stale_meeting),
+        Early::Withdrawn
+    ));
+    let Some(Construction::Building(building)) = &state.construction else {
+        panic!("building");
+    };
+    assert_eq!(
+        building.evidence.read().early_final_checks_refused_by_fact,
+        1
+    );
+
     drop(state);
+    subscription.finish_heal().unwrap();
+}
+
+#[test]
+#[allow(clippy::disallowed_methods)]
+fn a_report_after_admission_refuses_even_after_derivation() {
+    let scratch = Scratch::new("derived-after-admission");
+    let _watcher = isolation::Lease::hold(
+        isolation::REAL_WATCHER,
+        isolation::acquisition_budget(BUDGET),
+    );
+    let (subscription, store, budget) = begun(&scratch);
+    subscription.begin_heal();
+    let entry = entry_at(3);
+    let progress = reporter(&entry, 3);
+    let token = begin(&progress, &subscription, &store, &budget);
+    assert!(progress.publish_step(token, store.epoch(), Step::Structure));
+    let params = norn_wire::GetParams::new(
+        norn_wire::VaultAddress::name(VaultName::new("notes").unwrap()),
+        norn_wire::ResolutionTarget::new("/subject").unwrap(),
+    );
+    let Early::Admitted(admitted) = entry
+        .gate
+        .lock()
+        .unwrap()
+        .early(Request::Get(&params), &mut None)
+    else {
+        panic!("structure admits the target");
+    };
+    std::fs::write(scratch.join("vault/subject.md"), "# New\n").unwrap();
+    wait_until("accepted report after admission", BUDGET, || {
+        if admitted.authority.sequence() > admitted.admitted_at {
+            Observed::Met(())
+        } else {
+            Observed::pending("no report")
+        }
+    })
+    .unwrap();
+    // Retirement freezes acceptance history as Ready does, while an established
+    // hold keeps that history. Later backend reports cannot mask this predicate.
+    admitted.authority.retire();
+    let taken = subscription.take_build_roots().unwrap();
+    admitted.authority.mark_derived(&taken.roots, taken.through);
+    admitted.authority.visit_roots(|_, mut roots| {
+        assert!(Iterator::all(&mut roots, |(_, _, owed, _)| owed.is_none()));
+    });
+    assert!(
+        !admitted.facts_current(),
+        "the held snapshot predates even a derived report"
+    );
     subscription.finish_heal().unwrap();
 }

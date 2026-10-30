@@ -905,6 +905,10 @@ fn an_unlistable_directory_is_withheld_and_marked_at_first_build() {
     fs::create_dir(f.vault().join("locked")).unwrap();
     fs::write(f.vault().join("locked/inside.md"), "# Held\n").unwrap();
     fs::write(f.vault().join("kept.md"), "kept\n").unwrap();
+    // FSEvents can deliver the fixture's writes after the build captures its
+    // authority; a late fact at `locked` would relist it once the one-shot arm
+    // is spent, which is a different case from the first build's mark.
+    norn_fs::watch::settle_prior_changes(f.root.root(), Duration::from_secs(10)).unwrap();
     let (ops, name) = f.ops(8);
     let progress = ProgressReporter::disconnected();
     let mut attachment = ops
@@ -915,6 +919,84 @@ fn an_unlistable_directory_is_withheld_and_marked_at_first_build() {
         findings_at(&mut attachment.store, "locked")[0].kind,
         "directory/unreadable"
     );
+    assert_eq!(stored_paths(&mut attachment.store), ["kept.md"]);
+    ops.detach(&name, attachment);
+}
+
+/// Writes a file beneath the directory step 1 marked, and holds the build until
+/// the watcher has accepted that fact, so a later chunk boundary takes it.
+#[cfg(feature = "induced-failure")]
+struct WriteBeneathAfterNames {
+    file: PathBuf,
+    account: Arc<crate::JobEvidence>,
+}
+
+#[cfg(feature = "induced-failure")]
+impl crate::LoadingProbe for WriteBeneathAfterNames {
+    fn at(&self, boundary: crate::LoadingBoundary) {
+        if boundary != crate::LoadingBoundary::StepComplete(norn_store::Step::Names) {
+            return;
+        }
+        let before = self.account.read().build_facts_recorded;
+        fs::write(&self.file, "# Rewritten beneath the mark\n").unwrap();
+        norn_testkit::wait::wait_until(
+            "the fact beneath the marked directory",
+            lease_budget(),
+            || {
+                if self.account.read().build_facts_recorded > before {
+                    norn_testkit::wait::Observed::Met(())
+                } else {
+                    norn_testkit::wait::Observed::pending("not yet accepted")
+                }
+            },
+        )
+        .unwrap();
+    }
+}
+
+/// A from-zero build over this tree under the same denial holds no row beneath
+/// the marked directory, so a requeued file beneath it derives nothing while
+/// the mark stands: no listing of the directory took place.
+#[cfg(feature = "induced-failure")]
+#[test]
+fn a_requeued_file_beneath_a_directory_marked_at_first_build_derives_nothing() {
+    const CHILD: &str = "NORN_469_BENEATH_MARK_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = crate::child_gate::output_of_test_binary(std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "production::tests::broken_documents::a_requeued_file_beneath_a_directory_marked_at_first_build_derives_nothing", "--nocapture"])
+            .env(CHILD, "1").env("NORN_FS_WALK_ARMED_STAGES", "list=denied")
+            .env("NORN_FS_WALK_LIST_AT", "locked")).unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let f = Fixture::new("directory-mark-requeue");
+    fs::create_dir(f.vault().join("locked")).unwrap();
+    fs::write(f.vault().join("locked/inside.md"), "# Held\n").unwrap();
+    fs::write(f.vault().join("kept.md"), "kept\n").unwrap();
+    norn_fs::watch::settle_prior_changes(f.root.root(), Duration::from_secs(10)).unwrap();
+    let (ops, name) = f.ops(8);
+    let probe = WriteBeneathAfterNames {
+        file: f.vault().join("locked/inside.md"),
+        account: ops.account(),
+    };
+    let ops = ops.with_loading_probe(Arc::new(probe));
+    let mut attachment = ops
+        .attach(&f.registration(), &ProgressReporter::disconnected())
+        .expect("an unlistable directory does not refuse attach");
+    assert_eq!(
+        ops.evidence.read().requeued_roots,
+        1,
+        "the build takes the fact"
+    );
+    let findings = findings_at(&mut attachment.store, "locked");
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert_eq!(findings[0].kind, "directory/unreadable");
+    assert!(findings_at(&mut attachment.store, "locked/inside.md").is_empty());
     assert_eq!(stored_paths(&mut attachment.store), ["kept.md"]);
     ops.detach(&name, attachment);
 }
@@ -1166,4 +1248,18 @@ fn a_named_document_turned_unlistable_directory_leaves_the_content_step() {
     assert!(store.begin_request().stored_facts(&paths[0]).unwrap().is_none(), "the withdrawn name still stands");
     assert!(store.begin_request().stored_tombstone(&paths[0]).unwrap().is_none());
     assert!(store.begin_request().unreadable_directory_stands(&paths[0]).unwrap());
+}
+
+#[test]
+fn a_findings_only_flush_outside_a_group_takes_the_increment_path() {
+    let f = Fixture::watcherless("findings-only-construction");
+    let mut store = Store::open(f.root.join("steps.sqlite3"), proven_order(&f), crate::DERIVATION_VERSION).unwrap();
+    store.defer_link_health().unwrap();
+    store.begin_steps().unwrap();
+    store.finish_step(norn_store::Step::Names).unwrap();
+    let root = f.vault();
+    let mut account = Account::default();
+    let mut pending = Pending::new(&mut store, 2, &root, &[], &mut account).unwrap();
+    pending.file(plan_quarantine(Path::new("..md"), document_path(Path::new("..md")).unwrap_err()), None);
+    pending.flush().unwrap();
 }

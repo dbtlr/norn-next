@@ -1797,6 +1797,19 @@ impl SkippedLinks {
         }
     }
 
+    /// Combine scoped observations by the walk's full-path byte key, folded
+    /// according to the volume's stored path order, before retaining the bound.
+    fn merge(&mut self, other: Self, order: StoredPathOrder) {
+        if other.0.is_empty() {
+            return;
+        }
+        self.0.extend(other.0);
+        self.0
+            .sort_by_cached_key(|path| path_key(path.as_os_str().as_encoded_bytes(), order));
+        self.0.dedup();
+        self.0.truncate(SKIPPED_LINKS_RETAINED);
+    }
+
     /// The links recorded, in the order they were seen.
     fn links(&self) -> impl Iterator<Item = &Path> {
         self.0.iter().map(PathBuf::as_path)
@@ -2636,7 +2649,10 @@ where
                     let path = file.path().as_path().to_owned();
                     files.next();
                     match document_path(&path) {
-                        Ok(path) => pending.push(Change::Named { path }),
+                        Ok(path) => {
+                            pending.retire_respelling(&path, row.map(|row| &row.path))?;
+                            pending.push(Change::Named { path });
+                        }
                         Err(quarantine) => pending.quarantine(&path, quarantine)?,
                     }
                 }
@@ -2856,14 +2872,10 @@ fn merge_read(
             let canonical = if spelling != row.path.as_str() {
                 // Retire and derive one respelling atomically. The pair is
                 // irreducible even when the changeset target is one change.
-                if pending.changes.len() + 2 > pending.bound {
-                    pending.flush()?;
-                }
-                pending.push(Change::Death {
-                    path: row.path.clone(),
-                    provenance: Provenance::HealPrune,
-                });
-                Some(DocumentPath::new(spelling).expect("case preserves the document grammar"))
+                let path =
+                    DocumentPath::new(spelling).expect("case preserves the document grammar");
+                pending.retire_respelling(&path, Some(&row.path))?;
+                Some(path)
             } else {
                 None
             };
@@ -2994,6 +3006,17 @@ fn scoped_increment(
     progress: &Healing<'_, ProductionAttachment>,
     exclusions: &[PathBuf],
 ) -> Result<(), JobFailure> {
+    scoped_increment_links(store, root, dirty, policy, progress, exclusions).map(|_| ())
+}
+
+fn scoped_increment_links(
+    store: &mut Store,
+    root: &Path,
+    dirty: &std::collections::BTreeSet<norn_fs::NormalizedPath>,
+    policy: ProductionPolicy,
+    progress: &Healing<'_, ProductionAttachment>,
+    exclusions: &[PathBuf],
+) -> Result<SkippedLinks, JobFailure> {
     let vault = norn_fs::Vault::open(root, exclusions).map_err(effect)?;
     let sensitivity = vault.case_sensitivity();
     let mut account = Account::default();
@@ -3081,8 +3104,25 @@ fn scoped_increment(
                 continue;
             }
         };
+        // **A construction requeue derives nothing beneath a standing mark.**
+        // A from-zero build over this tree never lists the marked directory,
+        // so it holds no row and no finding beneath it; reaching one name below
+        // is not a listing of the directory and does not end its mark (ADR
+        // 0046). A root at the directory itself, or above it, is a listing
+        // and takes the ordinary arms below, whose job-end prune ends the
+        // mark when the directory lists again.
+        let reached_at = match &reached {
+            norn_fs::Reach::Refused(skip) => skip.path(),
+            norn_fs::Reach::Stands { at, .. } => at,
+        };
+        if pending.names && pending.beneath_a_mark(reached_at.as_path())? {
+            continue;
+        }
         let (kind, rendered) = match reached {
             norn_fs::Reach::Refused(skip) => {
+                if pending.names {
+                    pending.passed_over(skip.path().as_path(), skip.reason());
+                }
                 pending.flush()?;
                 prune_refused_root(
                     pending.store,
@@ -3169,6 +3209,19 @@ fn scoped_increment(
             // prefix admits does not: such a spelling poisons every path beneath
             // it, so the range would be empty and none is opened.
             norn_fs::PathKind::Missing | norn_fs::PathKind::Other => {
+                if pending.names && kind == norn_fs::PathKind::Other {
+                    // Reach groups links with special entries; the scoped walk
+                    // supplies the canonical skip reason without following either.
+                    if let Some(norn_fs::WalkFact::Skipped(skip)) =
+                        walk_subtree(root, path, exclusions)
+                            .map_err(effect)?
+                            .next()
+                            .transpose()
+                            .map_err(effect)?
+                    {
+                        pending.passed_over(skip.path().as_path(), skip.reason());
+                    }
+                }
                 pending.flush()?;
                 if let Some(scope) = scope {
                     prune_subtree_ordered(
@@ -3291,6 +3344,13 @@ fn scoped_increment(
             merge_file(&mut pending, path, standing.first(), false);
             continue;
         }
+        if pending.names {
+            pending.push(Change::Named {
+                path: document_path,
+            });
+            pending.flush()?;
+            continue;
+        }
         // Read from the vault root down, so a dirty path reaches the same file
         // the vault walk reaches under that spelling or reaches nothing. A
         // watcher backend that resolved a link reports paths through one, and
@@ -3355,7 +3415,8 @@ fn scoped_increment(
         progress.report((index + 1) as u64, Some(dirty.len() as u64));
     }
     pending.flush()?;
-    close_job(store, root, exclusions, policy, &mut account)
+    close_job(store, root, exclusions, policy, &mut account)?;
+    Ok(account.links)
 }
 
 /// One path a plan's publication left, and what the applier knows it holds:
@@ -4585,8 +4646,8 @@ fn rows_the_changeset_leaves(changes: &[Change]) -> BTreeMap<&DocumentPath, bool
 /// it concluded second. A document that reads again is a plain upsert whose own
 /// discard clears the finding with no second mechanism.
 struct Pending<'s> {
-    /// Whether this scope writes step 1 of a from-zero build: names only,
-    /// with refused spellings deferred to the end of step 2.
+    /// Construction walks write names only, including requeues during Content
+    /// and Structure. Only the initial Names step defers refused spellings.
     names: bool,
     content: Vec<norn_store::ContentWrite>,
     misses: norn_wire::WatcherMisses,
@@ -4656,7 +4717,10 @@ impl<'s> Pending<'s> {
         account: &'s mut Account,
     ) -> Result<Self, JobFailure> {
         let declared = Declaration::read(store)?;
-        let names = store.construction_step() == Some(norn_store::Step::Names);
+        let names = matches!(
+            store.construction_step(),
+            Some(norn_store::Step::Names | norn_store::Step::Content | norn_store::Step::Structure)
+        );
         let bound = if names {
             bound.saturating_mul(16).min(2048)
         } else {
@@ -4678,6 +4742,21 @@ impl<'s> Pending<'s> {
             provenance: IncrementProvenance::Derived,
             counters: norn_store::DerivationCounters::default(),
         })
+    }
+
+    /// Keep a respelling's death and replacement together even at a chunk bound.
+    fn retire_respelling(
+        &mut self,
+        path: &DocumentPath,
+        standing: Option<&DocumentPath>,
+    ) -> Result<(), JobFailure> {
+        if let Some(old) = standing.filter(|old| *old != path) {
+            if self.changes.len() + 2 > self.bound {
+                self.flush()?;
+            }
+            self.push(target_death(old.clone(), Provenance::HealPrune));
+        }
+        Ok(())
     }
 
     fn push(&mut self, change: Change) {
@@ -4767,17 +4846,7 @@ impl<'s> Pending<'s> {
         self.account.withheld.absorb(path);
         let subject = DocumentPath::rendered(path);
         self.account.filed.insert(&subject, Decided::ByBytes);
-        if self.queued.iter().any(|queued| {
-            queued.cause == Cause::UnreadableDirectory && queued.finding.path == subject
-        }) {
-            return Ok(());
-        }
-        let marked = self
-            .store
-            .begin_request()
-            .unreadable_directory_stands(&subject)
-            .map_err(store_effect)?;
-        if marked {
+        if self.marked(&subject)? {
             return Ok(());
         }
         if let Some(spelling) = addressed_range(path) {
@@ -4787,6 +4856,34 @@ impl<'s> Pending<'s> {
         }
         self.file(plan_unreadable_directory(path, cause), None);
         Ok(())
+    }
+
+    /// Whether an unreadable-directory finding stands at `subject`, committed
+    /// or queued in this scope.
+    fn marked(&mut self, subject: &DocumentPath) -> Result<bool, JobFailure> {
+        if self.queued.iter().any(|queued| {
+            queued.cause == Cause::UnreadableDirectory && queued.finding.path == *subject
+        }) {
+            return Ok(true);
+        }
+        self.store
+            .begin_request()
+            .unreadable_directory_stands(subject)
+            .map_err(store_effect)
+    }
+
+    /// Whether a directory above `path` stands marked unlistable: one probe
+    /// per ancestor, so the cost follows the path's depth, never the vault.
+    fn beneath_a_mark(&mut self, path: &Path) -> Result<bool, JobFailure> {
+        for directory in path.ancestors().skip(1) {
+            if directory.as_os_str().is_empty() {
+                break;
+            }
+            if self.marked(&DocumentPath::rendered(directory))? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Apply the posture the walk's kind evidence licenses, returning whether it is a directory.
@@ -4942,7 +5039,7 @@ impl<'s> Pending<'s> {
 
     /// File the finding that says why a path contributes no facts.
     fn quarantine(&mut self, path: &Path, quarantine: Quarantine) -> Result<(), JobFailure> {
-        if self.names {
+        if self.store.construction_step() == Some(norn_store::Step::Names) {
             self.store
                 .begin_request()
                 .defer_construction_spelling(path.as_os_str().as_encoded_bytes())
@@ -5131,9 +5228,7 @@ impl<'s> Pending<'s> {
         }
         // The content step's rows never share a flush with a change: every
         // change in that step settles them first ([`Self::settle_content`]).
-        if self.store.construction_step() == Some(norn_store::Step::Content)
-            && self.changes.is_empty()
-        {
+        if !self.content.is_empty() && self.changes.is_empty() {
             let mut request = self.store.begin_request();
             request
                 .write_content(
@@ -15354,7 +15449,7 @@ mod tests {
         assert!(probe.edited.load(std::sync::atomic::Ordering::SeqCst));
         let spent = host.ops().evidence.read();
         assert!(spent.links_judged > 0);
-        assert!(spent.links_redecided > 0);
+        assert!(spent.requeued_documents > 0 || spent.links_redecided > 0);
         drop(demand);
         drop(host);
         let mut store = Store::open(
@@ -18086,6 +18181,68 @@ mod tests {
             "a death was recorded at a spelling that never held a document"
         );
         ops.detach(&name, attachment);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_construction_requeue_beneath_a_link_keeps_the_refused_root_advisory() {
+        let f = Fixture::watcherless("construction-refused-link");
+        let root = f.vault();
+        let order = proven_order(&f);
+        let mut store = Store::open(
+            f.root.join("construction.sqlite3"),
+            order,
+            crate::DERIVATION_VERSION,
+        )
+        .unwrap();
+        store.defer_link_health().unwrap();
+        store.begin_steps().unwrap();
+        // A report names a child through a newly installed link. Reach
+        // refuses at the ancestor rather than inspecting the final name.
+        fs::create_dir_all(root.join("real/sub")).unwrap();
+        fs::write(root.join("real/sub/doc.md"), "# Document\n").unwrap();
+        std::os::unix::fs::symlink("real", root.join("link")).unwrap();
+        let progress = ProgressReporter::disconnected();
+        let policy = ProductionPolicy::new(2, 2).unwrap();
+        let exclusions = [PathBuf::from(".norn")];
+        let links = scoped_increment_links(
+            &mut store,
+            &root,
+            &dirty_path(&root, "link/sub/doc.md"),
+            policy,
+            &progress.healing(),
+            &exclusions,
+        )
+        .unwrap();
+        let mut reference = Store::open(
+            f.root.join("reference.sqlite3"),
+            order,
+            crate::DERIVATION_VERSION,
+        )
+        .unwrap();
+        let expected = heal_documents(
+            &mut reference,
+            &root,
+            &exclusions,
+            policy,
+            &progress.healing(),
+        )
+        .unwrap();
+        let advisories = |links: &SkippedLinks| {
+            links
+                .links()
+                .map(|path| AttachmentAdvisory::SymlinkSkipped {
+                    path: path.to_string_lossy().into_owned(),
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            advisories(&expected),
+            [AttachmentAdvisory::SymlinkSkipped {
+                path: "link".into()
+            }]
+        );
+        assert_eq!(advisories(&links), advisories(&expected));
     }
 
     /// **The bar on the schema open.** The schema is read through the same
@@ -20857,6 +21014,93 @@ mod tests {
                     stored_paths(&mut store),
                     expected,
                     "{from} -> {to}, renamed={renamed}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_operation_counts_reads_from_every_request_without_consuming_their_counters() {
+        let f = Fixture::watcherless("operation-read-steps");
+        let mut store = Store::open(
+            f.root.join("meter.sqlite3"),
+            StoredPathOrder::Sensitive,
+            crate::DERIVATION_VERSION,
+        )
+        .unwrap();
+        let read = |store: &mut Store| {
+            let request = store.begin_request();
+            request
+                .stored_targets_in_range_after_ordered(
+                    SubjectScope::Vault,
+                    None,
+                    2,
+                    StoredPathOrder::Sensitive,
+                )
+                .unwrap();
+            request.read_steps()
+        };
+        let outside = read(&mut store);
+        let (local, measured) = store.measure_read_steps(|store| read(store) + read(store));
+        assert!(outside > 0);
+        assert_eq!(measured, local);
+        assert_eq!(measured, outside * 2);
+        let (result, measured) = store.measure_read_steps(|store| {
+            read(store);
+            Err::<(), _>("operation failed")
+        });
+        assert_eq!(result, Err("operation failed"));
+        assert_eq!(measured, outside);
+        assert_eq!(read(&mut store), outside);
+    }
+
+    #[test]
+    fn construction_names_retire_a_folded_respelling_in_every_document_step() {
+        for step in [
+            norn_store::Step::Names,
+            norn_store::Step::Content,
+            norn_store::Step::Structure,
+        ] {
+            let f = Fixture::watcherless("construction-folded-respelling");
+            let root = f.vault();
+            let mut store = Store::open(
+                f.root.join("folded.sqlite3"),
+                StoredPathOrder::AsciiCaseInsensitive,
+                crate::DERIVATION_VERSION,
+            )
+            .unwrap();
+            ProductionEntryOps::pin_schema(&mut store, &f.registration()).unwrap();
+            store.defer_link_health().unwrap();
+            store.begin_steps().unwrap();
+            if step != norn_store::Step::Names {
+                store.finish_step(norn_store::Step::Names).unwrap();
+            }
+            if step == norn_store::Step::Structure {
+                store.finish_step(norn_store::Step::Content).unwrap();
+            }
+            fs::write(root.join("note.md"), "# Note\n").unwrap();
+            let progress = ProgressReporter::<ProductionAttachment>::disconnected();
+            for renamed in [false, true] {
+                if renamed {
+                    fs::rename(root.join("note.md"), root.join("Note.md")).unwrap();
+                }
+                let mut account = Account::default();
+                merge_walk(
+                    &mut store,
+                    &root,
+                    &[],
+                    walk(&root, &[]).unwrap(),
+                    norn_fs::CaseSensitivity::Insensitive,
+                    HealScope::Vault,
+                    ProductionPolicy::new(2, 1).unwrap(),
+                    &progress.healing(),
+                    &mut account,
+                )
+                .unwrap();
+                assert_eq!(
+                    stored_paths(&mut store),
+                    vec![if renamed { "Note.md" } else { "note.md" }],
+                    "{step:?}"
                 );
             }
         }

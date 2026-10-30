@@ -28,7 +28,9 @@ use crate::{Identity, PostState, path_identity};
 mod build_authority;
 mod faults;
 use build_authority::BuildProof;
-pub use build_authority::{BUILD_FACT_CAP, BuildAuthority, BuildObserver, BuildWithdrawal};
+pub use build_authority::{
+    BUILD_FACT_CAP, BuildAuthority, BuildObserver, BuildWithdrawal, TakenRoots,
+};
 
 use faults::{Boundary, HealWindow, WatchFaults};
 
