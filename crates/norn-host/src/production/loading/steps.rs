@@ -335,10 +335,14 @@ fn requeue_taken(
         let source = norn_fs::Vault::open(root, exclusions).map_err(effect)?;
         let mut account = Account::default();
         loop {
-            let mut request = store.begin_request();
-            let paths = request.requeued_page(ops.policy.changeset_size).map_err(store_effect)?;
-            ops.evidence.count_requeue_read_steps(request.read_steps());
-            drop(request);
+            let paths = {
+                let mut request = store.begin_request();
+                let paths = request
+                    .requeued_page(ops.policy.changeset_size)
+                    .map_err(store_effect)?;
+                ops.evidence.count_requeue_read_steps(request.read_steps());
+                paths
+            };
             if paths.is_empty() {
                 break;
             }

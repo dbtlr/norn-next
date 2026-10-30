@@ -104,11 +104,17 @@ pub struct JobEvidence {
     build_fact_withdrawals_control: AtomicU64,
     build_fact_withdrawals_capacity: AtomicU64,
     build_facts_recorded: AtomicU64,
+    /// Completed construction requeue drains.
     requeue_drains: AtomicU64,
+    /// Filesystem roots taken by construction requeue drains.
     requeued_roots: AtomicU64,
+    /// Documents re-derived by construction requeue drains.
     requeued_documents: AtomicU64,
+    /// Store commits made during construction requeue drains.
     requeue_commits: AtomicU64,
+    /// Elapsed nanoseconds spent in construction requeue drains.
     requeue_ns: AtomicU64,
+    /// SQLite VM steps spent selecting construction requeue pages.
     requeue_read_steps: AtomicU64,
     build_fact_withdrawals: AtomicU64,
     construction_checkpoint_busy: AtomicU64,
@@ -455,7 +461,9 @@ impl EvidenceReading {
                 .saturating_sub(earlier.requeued_documents),
             requeue_commits: self.requeue_commits.saturating_sub(earlier.requeue_commits),
             requeue_ns: self.requeue_ns.saturating_sub(earlier.requeue_ns),
-            requeue_read_steps: self.requeue_read_steps.saturating_sub(earlier.requeue_read_steps),
+            requeue_read_steps: self
+                .requeue_read_steps
+                .saturating_sub(earlier.requeue_read_steps),
             build_facts_recorded: self
                 .build_facts_recorded
                 .saturating_sub(earlier.build_facts_recorded),

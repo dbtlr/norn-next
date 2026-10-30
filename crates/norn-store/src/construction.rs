@@ -476,7 +476,9 @@ impl crate::Request<'_> {
     }
 
     /// Select only touched documents still owing this construction's current step.
-    /// The small TEMP table drives the lookup, never the vault's document queue.
+    /// CROSS JOIN keeps the small TEMP table outermost; progress and documents
+    /// are probed by identity, without scanning or sorting the vault's queue.
+    /// The caller runs each page's owed content before its owed structure.
     pub fn requeued_page(&mut self, limit: usize) -> Result<Vec<crate::DocumentPath>, StoreError> {
         check_limit(limit)?;
         let stage = if self.store.construction_step() == Some(Step::Structure) {
@@ -487,7 +489,7 @@ impl crate::Request<'_> {
         Self::read_all_on(
             self.store.connection(),
             &self.read_work,
-            "SELECT d.path FROM temp.construction_requeue r JOIN temp.construction_progress p ON p.document = r.document JOIN documents d ON d.id = r.document WHERE p.stage <= ?1 ORDER BY p.stage, r.document LIMIT ?2",
+            "SELECT d.path FROM temp.construction_requeue r CROSS JOIN temp.construction_progress p ON p.document = r.document CROSS JOIN documents d ON d.id = r.document WHERE p.stage <= ?1 ORDER BY r.document LIMIT ?2",
             (stage, limit as i64),
             |row| {
                 let path: String = row.get(0)?;

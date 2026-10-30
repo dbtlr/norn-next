@@ -326,8 +326,9 @@ pub struct TakenRoots {
 }
 
 impl Subscription {
-    /// Take only this open window's known roots. Coverage loss leaves all work
-    /// for the ordinary reconcile. Suppression runs outside watcher State.
+    /// Take only this open window's known roots. Coverage loss or a pending
+    /// control-file root refuses the whole take, leaving the batch for the
+    /// ordinary reconcile. Suppression runs outside watcher State.
     pub fn take_build_roots(&self) -> Option<TakenRoots> {
         let (root, ledger, batch, through) = {
             let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
