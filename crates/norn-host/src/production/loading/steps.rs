@@ -18,6 +18,7 @@ pub(super) fn documents(
     exclusions: &[PathBuf],
     progress: &Healing<'_, ProductionAttachment>,
     publisher: &Publisher<'_>,
+    subscription: Option<&Subscription>,
 ) -> Result<SkippedLinks, JobFailure> {
     let mut checkpoint = || {
         #[cfg(feature = "induced-failure")]
@@ -39,6 +40,16 @@ pub(super) fn documents(
         &mut account,
         Some(&mut checkpoint),
     )?;
+    requeue(
+        ops,
+        store,
+        root,
+        exclusions,
+        progress,
+        publisher,
+        subscription,
+        false,
+    )?;
     store.finish_step(Step::Names).map_err(store_effect)?;
     boundary(ops, publisher, Step::Names);
     let source = norn_fs::Vault::open(root, exclusions).map_err(effect)?;
@@ -55,6 +66,17 @@ pub(super) fn documents(
             &mut account,
         )?;
         if std::mem::take(&mut opening) {
+            pending.flush()?;
+            requeue(
+                ops,
+                pending.store,
+                root,
+                exclusions,
+                progress,
+                publisher,
+                subscription,
+                true,
+            )?;
             drain(ops, publisher, &mut Scope::Content(&mut pending, &source))?;
         }
         let mut previous: Option<DocumentPath> = None;
@@ -81,8 +103,29 @@ pub(super) fn documents(
             content_chunk(ops, &mut pending, &source, &paths)?;
             pending.flush()?;
             checkpoint();
+            requeue(
+                ops,
+                pending.store,
+                root,
+                exclusions,
+                progress,
+                publisher,
+                subscription,
+                true,
+            )?;
             drain(ops, publisher, &mut Scope::Content(&mut pending, &source))?;
         }
+        pending.flush()?;
+        requeue(
+            ops,
+            pending.store,
+            root,
+            exclusions,
+            progress,
+            publisher,
+            subscription,
+            true,
+        )?;
         drop(pending);
         group.commit().map_err(store_effect)?;
         if count == 0 {
@@ -125,6 +168,16 @@ pub(super) fn documents(
     }
     drop(pending);
     close_job(store, root, exclusions, policy, &mut account)?;
+    requeue(
+        ops,
+        store,
+        root,
+        exclusions,
+        progress,
+        publisher,
+        subscription,
+        false,
+    )?;
     store.finish_step(Step::Content).map_err(store_effect)?;
     boundary(ops, publisher, Step::Content);
     let declared = Declaration::read(store)?;
@@ -134,6 +187,16 @@ pub(super) fn documents(
         let mut group = store.step_group().map_err(store_effect)?;
         let mut count = 0;
         if std::mem::take(&mut opening) {
+            requeue(
+                ops,
+                group.store(),
+                root,
+                exclusions,
+                progress,
+                publisher,
+                subscription,
+                true,
+            )?;
             drain(
                 ops,
                 publisher,
@@ -152,12 +215,32 @@ pub(super) fn documents(
             count += rows.len();
             structure_chunk(group.store(), rows, &declared.model)?;
             checkpoint();
+            requeue(
+                ops,
+                group.store(),
+                root,
+                exclusions,
+                progress,
+                publisher,
+                subscription,
+                true,
+            )?;
             drain(
                 ops,
                 publisher,
                 &mut Scope::Structure(group.store(), &declared.model),
             )?;
         }
+        requeue(
+            ops,
+            group.store(),
+            root,
+            exclusions,
+            progress,
+            publisher,
+            subscription,
+            true,
+        )?;
         group.commit().map_err(store_effect)?;
         if count == 0 {
             break;
@@ -167,9 +250,153 @@ pub(super) fn documents(
         Step::Structure,
         store.construction_group_commits() - commits,
     );
+    requeue(
+        ops,
+        store,
+        root,
+        exclusions,
+        progress,
+        publisher,
+        subscription,
+        false,
+    )?;
     store.finish_step(Step::Structure).map_err(store_effect)?;
     boundary(ops, publisher, Step::Structure);
     Ok(account.links)
+}
+
+/// Take accepted roots ahead of the ordinary queue, finish their owed steps,
+/// commit, then publish their derivation. Nothing calls this from Relations on.
+#[allow(clippy::too_many_arguments)]
+fn requeue(
+    ops: &ProductionEntryOps,
+    store: &mut Store,
+    root: &Path,
+    exclusions: &[PathBuf],
+    progress: &Healing<'_, ProductionAttachment>,
+    publisher: &Publisher<'_>,
+    subscription: Option<&Subscription>,
+    grouped: bool,
+) -> Result<(), JobFailure> {
+    let Some(subscription) = subscription else {
+        return Ok(());
+    };
+    if publisher
+        .authority
+        .as_ref()
+        .is_none_or(|authority| !authority.admits())
+    {
+        return Ok(());
+    }
+    while let Some(taken) = subscription.take_build_roots() {
+        if taken.roots.is_empty() {
+            break;
+        }
+        if grouped || store.construction_step() == Some(Step::Names) {
+            requeue_taken(ops, store, root, exclusions, progress, publisher, &taken)?;
+        } else {
+            let mut group = store.step_group().map_err(store_effect)?;
+            requeue_taken(
+                ops,
+                group.store(),
+                root,
+                exclusions,
+                progress,
+                publisher,
+                &taken,
+            )?;
+            group.commit().map_err(store_effect)?;
+        }
+    }
+    Ok(())
+}
+
+/// Finish one taken set, using the caller's document-step group when needed.
+#[allow(clippy::too_many_arguments)]
+fn requeue_taken(
+    ops: &ProductionEntryOps,
+    store: &mut Store,
+    root: &Path,
+    exclusions: &[PathBuf],
+    progress: &Healing<'_, ProductionAttachment>,
+    publisher: &Publisher<'_>,
+    taken: &norn_fs::watch::TakenRoots,
+) -> Result<(), JobFailure> {
+    #[cfg(feature = "induced-failure")]
+    ops.loading_boundary(LoadingBoundary::RequeueStarted);
+    let began = std::time::Instant::now();
+    let commits = store.construction_write_commits();
+    if store.construction_step() != Some(Step::Names) {
+        store.commit_step_group().map_err(store_effect)?;
+    }
+    scoped_increment(store, root, &taken.roots, ops.policy, progress, exclusions)?;
+    let mut documents = 0;
+    if store.construction_step() != Some(Step::Names) {
+        let source = norn_fs::Vault::open(root, exclusions).map_err(effect)?;
+        let mut account = Account::default();
+        loop {
+            let paths = store
+                .begin_request()
+                .requeued_page(ops.policy.changeset_size)
+                .map_err(store_effect)?;
+            if paths.is_empty() {
+                break;
+            }
+            store
+                .begin_request()
+                .dequeue_requeued(&paths)
+                .map_err(store_effect)?;
+            let stage = store.construction_step();
+            let mut pending = Pending::new(
+                store,
+                ops.policy.changeset_size,
+                root,
+                exclusions,
+                &mut account,
+            )?;
+            let content: Vec<_> = paths
+                .iter()
+                .filter_map(
+                    |path| match pending.store.begin_request().content_owed(path) {
+                        Ok(true) => Some(Ok(path.clone())),
+                        Ok(false) => None,
+                        Err(error) => Some(Err(store_effect(error))),
+                    },
+                )
+                .collect::<Result<_, _>>()?;
+            documents += content.len() as u64;
+            content_chunk(ops, &mut pending, &source, &content)?;
+            pending.flush()?;
+            pending.store.commit_step_group().map_err(store_effect)?;
+            if stage == Some(Step::Structure) {
+                for path in paths {
+                    let row = pending
+                        .store
+                        .begin_request()
+                        .structure_document(&path)
+                        .map_err(store_effect)?;
+                    if let Some(row) = row {
+                        structure_chunk(pending.store, vec![row], &pending.declared.model)?;
+                    }
+                }
+            }
+            pending.store.commit_step_group().map_err(store_effect)?;
+        }
+        close_job(store, root, exclusions, ops.policy, &mut account)?;
+    }
+    if store.construction_step() != Some(Step::Names) {
+        store.commit_step_group().map_err(store_effect)?;
+    }
+    ops.evidence.count_requeue(
+        taken.roots.len() as u64,
+        documents,
+        store.construction_write_commits() - commits,
+        began.elapsed(),
+    );
+    publisher.publish_requeued(taken);
+    #[cfg(feature = "induced-failure")]
+    ops.loading_boundary(LoadingBoundary::Requeued);
+    Ok(())
 }
 
 /// The step scope a drain writes through: the content pass's own pending scope
@@ -205,11 +432,8 @@ impl Scope<'_, '_> {
 /// snapshot sees its documents. A drain that wrote and readied nothing commits
 /// nothing, so a build with no request pending commits as the pass alone does.
 ///
-/// NORN-469 PR B notes stay true here: a drain runs only inside a step group during
-/// steps 2 and 3, so neither a changeless content flush nor a vacated revisit
-/// is asked of it outside one; [`content_chunk`] never fills `account.freed`;
-/// and the content writer's default directory set is safe only while link
-/// health stays deferred to step 4.
+/// Content findings alone use the increment path outside groups. Directory
+/// sets remain deferred to the Relations judgment.
 fn drain(
     ops: &ProductionEntryOps,
     publisher: &Publisher<'_>,
@@ -316,8 +540,7 @@ fn settle(
 
 /// Derive an arbitrary set of at most one host chunk, with no held-row input.
 /// The vault pass supplies the stage-1 queue a chunk at a time, and NORN-468
-/// pull-ahead ([`drain`]) the candidates of a requested target; NORN-469 PR B
-/// requeue will select single paths here too.
+/// pull-ahead ([`drain`]) and requeue select arbitrary touched paths here too.
 pub(in crate::production) fn content_chunk(
     ops: &ProductionEntryOps,
     pending: &mut Pending<'_>,
@@ -430,8 +653,7 @@ pub(in crate::production) fn content_chunk(
 
 /// Scan stored bytes one document at a time, then release that scan before the
 /// next. The vault pass supplies a page, and NORN-468 pull-ahead ([`drain`]) a
-/// requested target's resolved document; NORN-469 PR B requeue will supply single
-/// documents to this same seam.
+/// requested target's resolved document; requeue supplies touched documents here too.
 fn structure_chunk(
     store: &mut Store,
     mut rows: Vec<norn_store::StructureInput>,

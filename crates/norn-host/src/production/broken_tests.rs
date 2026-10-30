@@ -1167,3 +1167,17 @@ fn a_named_document_turned_unlistable_directory_leaves_the_content_step() {
     assert!(store.begin_request().stored_tombstone(&paths[0]).unwrap().is_none());
     assert!(store.begin_request().unreadable_directory_stands(&paths[0]).unwrap());
 }
+
+#[test]
+fn a_findings_only_flush_outside_a_group_takes_the_increment_path() {
+    let f = Fixture::watcherless("findings-only-construction");
+    let mut store = Store::open(f.root.join("steps.sqlite3"), proven_order(&f), crate::DERIVATION_VERSION).unwrap();
+    store.defer_link_health().unwrap();
+    store.begin_steps().unwrap();
+    store.finish_step(norn_store::Step::Names).unwrap();
+    let root = f.vault();
+    let mut account = Account::default();
+    let mut pending = Pending::new(&mut store, 2, &root, &[], &mut account).unwrap();
+    pending.file(plan_quarantine(Path::new("..md"), document_path(Path::new("..md")).unwrap_err()), None);
+    pending.flush().unwrap();
+}

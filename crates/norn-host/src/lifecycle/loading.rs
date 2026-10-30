@@ -446,6 +446,43 @@ impl<A: SnapshotSource> ProgressReporter<A> {
         .unwrap_or(false)
     }
 
+    /// Derivation publication shares the entry gate with admission. Watcher
+    /// callbacks never take this gate; the proof lock is strictly below it.
+    pub(crate) fn publish_requeued(
+        &self,
+        token: BuildToken,
+        epoch: &str,
+        roots: &std::collections::BTreeSet<norn_fs::NormalizedPath>,
+        through: u64,
+    ) {
+        self.with_claimed_state(|state| {
+            if !state.may_publish_construction() {
+                return;
+            }
+            let Some(Construction::Building(building)) = state.construction.as_mut() else {
+                return;
+            };
+            if building.claim != self.epoch
+                || building.token != token
+                || building.store_epoch != epoch
+                || !building.authority.admits()
+            {
+                return;
+            }
+            let covered = building.authority.mark_derived(roots, through);
+            for slot in &mut building.requests.slots {
+                let touch =
+                    norn_store::early::Touch::of(&slot.target, building.model.ambiguity_ignore());
+                if covered.iter().any(|(root, beneath)| {
+                    root.as_path().to_str().is_none_or(|root| touch.touches(root, *beneath))
+                }) {
+                    slot.ready = false;
+                }
+            }
+            state.construction_revision += 1;
+        });
+    }
+
     /// Close `token`'s construction: its build failed, and nothing it wrote is
     /// admitted again. A successor's construction stands.
     pub(crate) fn close_construction(&self, token: BuildToken) {
@@ -656,6 +693,7 @@ impl<A: SnapshotSource> EntryState<A> {
                     relations_loading,
                 };
                 if !admitted.facts_current() {
+                    admitted.evidence.count_fact_refusal();
                     return Early::Withdrawn;
                 }
                 Early::Admitted(admitted)

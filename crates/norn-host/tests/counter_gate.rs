@@ -7438,3 +7438,112 @@ mod early_census {
         plans
     }
 }
+
+#[cfg(feature = "induced-failure")]
+#[test]
+#[ignore = "counter-lane case: runs in dedicated full-regression counter steps"]
+fn a_requeued_edit_costs_the_same_at_both_scales() {
+    if !alone_in_a_child(
+        "a_requeued_edit_costs_the_same_at_both_scales",
+        "NORN_REQUEUE_COST_CHILD",
+    ) {
+        return;
+    }
+    use std::sync::{Arc, Mutex};
+    struct Edit {
+        path: std::path::PathBuf,
+        account: Mutex<Option<Arc<norn_host::JobEvidence>>>,
+        statements: Mutex<usize>,
+    }
+    impl norn_host::LoadingProbe for Edit {
+        fn at(&self, boundary: norn_host::LoadingBoundary) {
+            match boundary {
+                norn_host::LoadingBoundary::StepComplete(norn_store::Step::Content) => {
+                    let account = self.account.lock().unwrap().clone().unwrap();
+                    let before = account.read().build_facts_recorded;
+                    std::fs::write(&self.path, "# Changed\n").unwrap();
+                    wait_until(
+                        "requeue report",
+                        attach::state_budget(Duration::from_secs(120)),
+                        || {
+                            if account.read().build_facts_recorded > before {
+                                Observed::Met(())
+                            } else {
+                                Observed::pending("report not accepted")
+                            }
+                        },
+                    )
+                    .unwrap();
+                }
+                norn_host::LoadingBoundary::RequeueStarted => {
+                    norn_store::induced_failure::statements_begun();
+                }
+                norn_host::LoadingBoundary::Requeued => {
+                    *self.statements.lock().unwrap() +=
+                        norn_store::induced_failure::statements_begun().len();
+                }
+                _ => {}
+            }
+        }
+    }
+    let measure = |documents| {
+        let scratch = norn_testkit::scratch::Scratch::new("requeue-scale");
+        let root = scratch.join("vault");
+        std::fs::create_dir_all(root.join(".norn")).unwrap();
+        std::fs::write(root.join(".norn/schema.yaml"), "version: 1\n").unwrap();
+        for n in 0..documents {
+            std::fs::write(root.join(format!("doc{n:05}.md")), "# Original\n").unwrap();
+        }
+        norn_fs::watch::settle_prior_changes(scratch.root(), Duration::from_secs(10)).unwrap();
+        let probe = Arc::new(Edit {
+            path: root.join("doc00000.md"),
+            account: Mutex::new(None),
+            statements: Mutex::new(0),
+        });
+        let ops = norn_host::ProductionEntryOps::new(
+            norn_config::ConfigDirs::new(scratch.join("config"), scratch.join("data")).unwrap(),
+            norn_host::ProductionPolicy::new(128, 128).unwrap(),
+        )
+        .with_loading_probe(probe.clone());
+        let account = ops.account();
+        *probe.account.lock().unwrap() = Some(account.clone());
+        norn_store::induced_failure::record_statements_begun();
+        let name = VaultName::new("notes").unwrap();
+        let host = norn_host::Host::new(
+            norn_host::RegistryRead::from_entries([norn_host::Registration::new(
+                name.clone(),
+                norn_config::registry::VaultRoot::new(&root).unwrap(),
+            )]),
+            ops,
+            norn_host::LifecyclePolicy {
+                idle_after: Duration::from_secs(3600),
+                worker_slots: 1,
+                watch_poll_interval: Duration::from_millis(25),
+                read_settle_bound: norn_host::READ_SETTLE_BOUND,
+            },
+        )
+        .unwrap();
+        let _demand = host.demand(&name).unwrap();
+        wait_until(
+            "ready after requeue",
+            attach::state_budget(Duration::from_secs(120)),
+            || {
+                if matches!(host.state(&name).unwrap(), TrustState::Ready) {
+                    Observed::Met(())
+                } else {
+                    Observed::pending("building")
+                }
+            },
+        )
+        .unwrap();
+        let spent = account.read();
+        norn_store::induced_failure::stop_recording_statements();
+        assert_eq!(spent.requeued_documents, 1);
+        assert_eq!(spent.documents_read_by_build, documents + 1);
+        assert_eq!(spent.document_opens, documents + 2);
+        let statements = *probe.statements.lock().unwrap();
+        assert!(statements > 0);
+        (spent.requeued_documents, spent.requeue_commits, statements)
+    };
+    assert_eq!(measure(2_000), measure(10_000));
+}

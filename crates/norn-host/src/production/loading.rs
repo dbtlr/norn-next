@@ -24,6 +24,8 @@ pub enum LoadingBoundary {
     FullTextBatch,
     CanonicalComplete,
     Reconciling,
+    RequeueStarted,
+    Requeued,
     QueryEstablished,
     QueryBuilt,
 }
@@ -41,6 +43,7 @@ pub(super) struct Publisher<'a> {
     ops: &'a ProductionEntryOps,
     progress: &'a ProgressReporter<ProductionAttachment>,
     begun: Option<(BuildToken, String)>,
+    authority: Option<BuildAuthority>,
 }
 
 impl Publisher<'_> {
@@ -74,6 +77,14 @@ impl Publisher<'_> {
             self.ops.evidence.count_construction_publication();
             #[cfg(feature = "induced-failure")]
             self.ops.loading_boundary(LoadingBoundary::TargetReady);
+        }
+    }
+
+    /// Publish a committed requeue and invalidate ready candidate resolutions.
+    pub(super) fn publish_requeued(&self, taken: &norn_fs::watch::TakenRoots) {
+        if let Some((token, epoch)) = &self.begun {
+            self.progress
+                .publish_requeued(*token, epoch, &taken.roots, taken.through);
         }
     }
 
@@ -186,10 +197,19 @@ impl ProductionEntryOps {
         attachment.store.defer_link_health().map_err(store_effect)?;
         attachment.store.begin_steps().map_err(store_effect)?;
         self.evidence.count_from_zero_build();
-        let publisher = self.begin_construction(attachment, progress);
+        let mut publisher = None;
         let built = Self::under_coverage(attachment, |attachment| {
-            self.derive_into_empty(attachment, progress, &publisher)
+            let begun = self.begin_construction(attachment, progress);
+            let result = self.derive_into_empty(attachment, progress, &begun);
+            publisher = Some(begun);
+            result
         });
+        let publisher = publisher.ok_or_else(|| {
+            built
+                .clone()
+                .err()
+                .unwrap_or_else(|| environmental("construction did not begin under coverage"))
+        })?;
         if built.is_err() {
             publisher.close();
         }
@@ -228,6 +248,7 @@ impl ProductionEntryOps {
             authority.observe(self.evidence.clone());
         }
         let store_epoch = attachment.store.epoch().to_owned();
+        let publication_authority = authority.clone();
         let begun = authority
             .filter(BuildAuthority::check_root)
             .map(|authority| Begun {
@@ -242,6 +263,7 @@ impl ProductionEntryOps {
             ops: self,
             progress,
             begun: token.map(|token| (token, store_epoch)),
+            authority: publication_authority,
         }
     }
 
@@ -296,6 +318,7 @@ impl ProductionEntryOps {
             &exclusions,
             &healing,
             publisher,
+            attachment.subscription.as_ref(),
         )?;
         let declared = Declaration::read(&mut attachment.store)?;
         let mut request = attachment.store.begin_request();

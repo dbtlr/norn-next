@@ -3291,6 +3291,13 @@ fn scoped_increment(
             merge_file(&mut pending, path, standing.first(), false);
             continue;
         }
+        if pending.names {
+            pending.push(Change::Named {
+                path: document_path,
+            });
+            pending.flush()?;
+            continue;
+        }
         // Read from the vault root down, so a dirty path reaches the same file
         // the vault walk reaches under that spelling or reaches nothing. A
         // watcher backend that resolved a link reports paths through one, and
@@ -4585,8 +4592,8 @@ fn rows_the_changeset_leaves(changes: &[Change]) -> BTreeMap<&DocumentPath, bool
 /// it concluded second. A document that reads again is a plain upsert whose own
 /// discard clears the finding with no second mechanism.
 struct Pending<'s> {
-    /// Whether this scope writes step 1 of a from-zero build: names only,
-    /// with refused spellings deferred to the end of step 2.
+    /// Construction walks write names only, including requeues during Content
+    /// and Structure. Only the initial Names step defers refused spellings.
     names: bool,
     content: Vec<norn_store::ContentWrite>,
     misses: norn_wire::WatcherMisses,
@@ -4656,7 +4663,10 @@ impl<'s> Pending<'s> {
         account: &'s mut Account,
     ) -> Result<Self, JobFailure> {
         let declared = Declaration::read(store)?;
-        let names = store.construction_step() == Some(norn_store::Step::Names);
+        let names = matches!(
+            store.construction_step(),
+            Some(norn_store::Step::Names | norn_store::Step::Content | norn_store::Step::Structure)
+        );
         let bound = if names {
             bound.saturating_mul(16).min(2048)
         } else {
@@ -4942,7 +4952,7 @@ impl<'s> Pending<'s> {
 
     /// File the finding that says why a path contributes no facts.
     fn quarantine(&mut self, path: &Path, quarantine: Quarantine) -> Result<(), JobFailure> {
-        if self.names {
+        if self.store.construction_step() == Some(norn_store::Step::Names) {
             self.store
                 .begin_request()
                 .defer_construction_spelling(path.as_os_str().as_encoded_bytes())
@@ -5131,9 +5141,7 @@ impl<'s> Pending<'s> {
         }
         // The content step's rows never share a flush with a change: every
         // change in that step settles them first ([`Self::settle_content`]).
-        if self.store.construction_step() == Some(norn_store::Step::Content)
-            && self.changes.is_empty()
-        {
+        if !self.content.is_empty() && self.changes.is_empty() {
             let mut request = self.store.begin_request();
             request
                 .write_content(
@@ -15354,7 +15362,7 @@ mod tests {
         assert!(probe.edited.load(std::sync::atomic::Ordering::SeqCst));
         let spent = host.ops().evidence.read();
         assert!(spent.links_judged > 0);
-        assert!(spent.links_redecided > 0);
+        assert!(spent.requeued_documents > 0 || spent.links_redecided > 0);
         drop(demand);
         drop(host);
         let mut store = Store::open(

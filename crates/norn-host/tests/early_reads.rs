@@ -3084,13 +3084,11 @@ fn a_request_waits_only_for_facts_it_met() {
         fact_recorded(&account, 0);
         probe.release();
         probe.wait(LoadingBoundary::StepComplete(Step::Content));
-        assert_eq!(
+        assert!(
             waiting
                 .recv_timeout(Duration::from_secs(2))
                 .unwrap()
-                .unwrap_err()
-                .code(),
-            &ReasonCode::HostEntryNotReady
+                .is_ok()
         );
         probe.release();
     });
@@ -3164,7 +3162,7 @@ fields:
 }
 
 #[test]
-fn facts_between_meeting_and_admission_refuse_a_mixed_find() {
+fn facts_derived_between_meeting_and_admission_produce_a_current_find() {
     let fixture = Fixture::new("meeting-admission-facts");
     let probe = Probe::new([
         LoadingBoundary::StepComplete(Step::Names),
@@ -3194,17 +3192,17 @@ fn facts_between_meeting_and_admission_refuse_a_mixed_find() {
         let get_answer = getting.recv_timeout(Duration::from_secs(2)).unwrap();
         let find_answer = finding.recv_timeout(Duration::from_secs(2)).unwrap();
         let _ = get_answer;
-        assert_eq!(
-            find_answer.unwrap_err().code(),
-            &ReasonCode::HostEntryNotReady
-        );
+        let answer = find_answer.unwrap();
+        let rows = serde_json::to_value(&answer.answer.report).unwrap();
+        let rows = rows.to_string();
+        assert!(rows.contains("100") && rows.contains("500"), "{rows}");
         probe.release();
     });
     ready(&host);
 }
 
 #[test]
-fn a_get_refuses_a_target_fact_newer_than_its_meeting() {
+fn a_get_answers_a_target_fact_derived_after_its_meeting() {
     let fixture = Fixture::new("get-meeting-admission");
     let probe = Probe::new([
         LoadingBoundary::StepComplete(Step::Names),
@@ -3224,11 +3222,11 @@ fn a_get_refuses_a_target_fact_newer_than_its_meeting() {
         fact_recorded(&account, 0);
         probe.release();
         probe.wait(LoadingBoundary::StepComplete(Step::Content));
-        assert_still_indexing(
-            &getting
+        assert!(
+            getting
                 .recv_timeout(Duration::from_secs(2))
                 .unwrap()
-                .unwrap_err(),
+                .is_ok()
         );
         probe.release();
     });
@@ -3248,15 +3246,228 @@ fn a_requeued_edit_answers_its_new_bytes_before_ready() {
     let _release = Release(&probe);
     let _demand = host.demand(&name()).unwrap();
     probe.wait(LoadingBoundary::StepComplete(Step::Content));
-    std::fs::write(fixture.root.join("late.md"), "---\nrank: 40\n---\n# Requeued\n").unwrap();
+    std::fs::write(
+        fixture.root.join("doc05.md"),
+        "---\nrank: 40\n---\n# Requeued\n",
+    )
+    .unwrap();
     fact_recorded(&account, 0);
     probe.release();
     probe.wait(LoadingBoundary::StepComplete(Step::Structure));
-    assert!(host.find(&ranked("40")).is_ok(), "the build must derive the accepted fact before Ready");
-    assert!(host.get(&get("late")).is_ok());
+    assert!(
+        host.find(&ranked("40")).is_ok(),
+        "the build must derive the accepted fact before Ready"
+    );
+    assert!(host.get(&get("doc05")).is_ok());
+    assert_eq!(account.read().requeued_documents, 1);
+    probe.release();
+    ready(&host);
+    assert_eq!(account.read().documents_read_by_build, DOCUMENTS + 1);
+    assert_eq!(account.read().document_opens, DOCUMENTS + 2);
+    drop(host);
+    project(&fixture.store_path(), &fixture.root)
+        .assert_equivalent(&from_scratch(&fixture, "reference"), "requeue");
+}
+
+#[test]
+fn name_changes_land_before_ready_and_step_four_facts_wait_for_reconcile() {
+    let fixture = Fixture::new("requeue-names");
+    let probe = Probe::new([
+        LoadingBoundary::StepComplete(Step::Content),
+        LoadingBoundary::StepComplete(Step::Structure),
+        LoadingBoundary::Published(Step::Relations),
+    ]);
+    let ops = fixture.ops(probe.clone());
+    let account = ops.account();
+    let host = fixture.host_over(ops, norn_host::READ_SETTLE_BOUND);
+    let _release = Release(&probe);
+    let _demand = host.demand(&name()).unwrap();
+    probe.wait(LoadingBoundary::StepComplete(Step::Content));
+    fixture.add("created.md", "# Created\n");
+    std::fs::remove_file(fixture.root.join("doc01.md")).unwrap();
+    std::fs::rename(
+        fixture.root.join("doc02.md"),
+        fixture.root.join("renamed.md"),
+    )
+    .unwrap();
+    wait_until("name facts accepted", BUDGET, || {
+        if account.read().build_facts_recorded >= 4 {
+            Observed::Met(())
+        } else {
+            Observed::pending("waiting for name facts")
+        }
+    })
+    .unwrap();
+    probe.release();
+    probe.wait(LoadingBoundary::StepComplete(Step::Structure));
+    assert!(host.get(&get("/created")).is_ok());
+    assert!(host.get(&get("/renamed")).is_ok());
+    assert!(host.get(&get("/doc01")).is_err());
+    assert!(host.get(&get("/doc02")).is_err());
+    let requeued = account.read().requeued_roots;
+    let reports = account.read().build_facts_recorded;
+    fixture.add("later.md", "# Later\n");
+    fact_recorded(&account, reports);
+    probe.release();
+    probe.wait(LoadingBoundary::Published(Step::Relations));
+    assert_eq!(account.read().requeued_roots, requeued);
     probe.release();
     ready(&host);
     drop(host);
     project(&fixture.store_path(), &fixture.root).assert_equivalent(
-        &from_scratch(&fixture, "reference"), "requeue");
+        &from_scratch(&fixture, "reference"),
+        "taken and untaken facts",
+    );
+}
+
+/// Restore mode bits even if a boundary assertion fails.
+struct RestoreMode(PathBuf, u32);
+impl Drop for RestoreMode {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(self.1)).unwrap();
+    }
+}
+
+#[test]
+fn a_directory_relisted_during_construction_ends_its_mark_before_step_four() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new("construction-relist");
+    fixture.add("locked/inside.md", "# Restored\n[[doc00]]\n");
+    let directory = fixture.root.join("locked");
+    let restore = RestoreMode(directory.clone(), 0o755);
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o000)).unwrap();
+    assert!(std::fs::read_dir(&directory).is_err());
+    let probe = Probe::new([
+        LoadingBoundary::StepComplete(Step::Names),
+        LoadingBoundary::StepComplete(Step::Structure),
+    ]);
+    let ops = fixture.ops(probe.clone());
+    let account = ops.account();
+    let host = fixture.host_over(ops, norn_host::READ_SETTLE_BOUND);
+    let _release = Release(&probe);
+    let _demand = host.demand(&name()).unwrap();
+    probe.wait(LoadingBoundary::StepComplete(Step::Names));
+    drop(restore);
+    fact_recorded(&account, 0);
+    probe.release();
+    probe.wait(LoadingBoundary::StepComplete(Step::Structure));
+    let answer = host.get(&get("/locked/inside")).unwrap();
+    assert!(
+        serde_json::to_string(&answer.answer.report)
+            .unwrap()
+            .contains("Restored")
+    );
+    probe.release();
+    ready(&host);
+    drop(host);
+    project(&fixture.store_path(), &fixture.root).assert_equivalent(
+        &from_scratch(&fixture, "reference"),
+        "directory relisted before Relations",
+    );
+}
+
+#[test]
+fn a_document_breaking_on_requeue_becomes_names_only() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new("construction-requeue-broken");
+    let probe = Probe::new([
+        LoadingBoundary::StepComplete(Step::Content),
+        LoadingBoundary::StepComplete(Step::Structure),
+    ]);
+    let ops = fixture.ops(probe.clone());
+    let account = ops.account();
+    let host = fixture.host_over(ops, norn_host::READ_SETTLE_BOUND);
+    let _release = Release(&probe);
+    let _demand = host.demand(&name()).unwrap();
+    probe.wait(LoadingBoundary::StepComplete(Step::Content));
+    let path = fixture.root.join("doc05.md");
+    let restore = RestoreMode(path.clone(), 0o644);
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    assert!(std::fs::read(&path).is_err());
+    fact_recorded(&account, 0);
+    probe.release();
+    probe.wait(LoadingBoundary::StepComplete(Step::Structure));
+    let answer = host.get(&get("/doc05")).unwrap();
+    let report = serde_json::to_string(&answer.answer.report).unwrap();
+    assert!(
+        report.contains("unreadable") && report.contains("document/unreadable"),
+        "{report}"
+    );
+    probe.release();
+    ready(&host);
+    drop(host);
+    project(&fixture.store_path(), &fixture.root)
+        .assert_equivalent(&from_scratch(&fixture, "reference"), "broken requeue");
+    drop(restore);
+}
+
+#[test]
+fn requeued_documents_run_ahead_of_the_next_content_page() {
+    let fixture = Fixture::new("requeue-before-page");
+    let probe = Probe::new([
+        LoadingBoundary::StepComplete(Step::Names),
+        LoadingBoundary::CanonicalPage,
+        LoadingBoundary::Requeued,
+    ]);
+    let ops = fixture.ops(probe.clone());
+    let account = ops.account();
+    let host = fixture.host_over(ops, norn_host::READ_SETTLE_BOUND);
+    let _release = Release(&probe);
+    let _demand = host.demand(&name()).unwrap();
+    probe.wait(LoadingBoundary::StepComplete(Step::Names));
+    probe.release();
+    probe.wait(LoadingBoundary::CanonicalPage);
+    let opened = account.read().documents_read_by_build;
+    fixture.add("doc00.md", "# Ahead\n");
+    fact_recorded(&account, 0);
+    probe.release();
+    probe.wait(LoadingBoundary::Requeued);
+    assert_eq!(account.read().documents_read_by_build, opened + 1);
+    assert_eq!(account.read().requeued_documents, 1);
+    probe.release();
+    ready(&host);
+}
+
+#[test]
+fn an_overflow_mid_requeue_stops_taking_and_converges() {
+    let fixture = Fixture::new("overflow-mid-requeue");
+    std::fs::create_dir(fixture.root.join("overflow")).unwrap();
+    let probe = Probe::new([
+        LoadingBoundary::StepComplete(Step::Content),
+        LoadingBoundary::RequeueStarted,
+        LoadingBoundary::StepComplete(Step::Structure),
+    ]);
+    let ops = fixture.ops(probe.clone());
+    let account = ops.account();
+    let host = fixture.host_over(ops, norn_host::READ_SETTLE_BOUND);
+    let _release = Release(&probe);
+    let _demand = host.demand(&name()).unwrap();
+    probe.wait(LoadingBoundary::StepComplete(Step::Content));
+    fixture.add("doc00.md", "# Requeued\n");
+    fact_recorded(&account, 0);
+    probe.release();
+    probe.wait(LoadingBoundary::RequeueStarted);
+    for index in 0..=norn_fs::watch::DIRTY_ROOT_CAP {
+        fixture.add(&format!("overflow/file-{index:05}.txt"), "file");
+    }
+    wait_until("coverage withdrawn during requeue", BUDGET, || {
+        if account.read().build_fact_withdrawals > 0 {
+            Observed::Met(())
+        } else {
+            Observed::pending("authority stands")
+        }
+    })
+    .unwrap();
+    probe.release();
+    probe.wait(LoadingBoundary::StepComplete(Step::Structure));
+    assert_eq!(account.read().requeued_roots, 1);
+    assert!(host.get(&get("/first")).is_err());
+    probe.release();
+    ready(&host);
+    drop(host);
+    project(&fixture.store_path(), &fixture.root).assert_equivalent(
+        &from_scratch(&fixture, "reference"),
+        "overflow during requeue",
+    );
 }
