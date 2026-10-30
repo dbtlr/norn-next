@@ -1303,7 +1303,9 @@ struct EntryState<A: SnapshotSource> {
     /// It is a rebuild owed rather than one already published, so it goes
     /// where a rebuild requirement goes: [`EntryState::clear_rebuild`] clears
     /// it, because the store it names is gone once a rebuild has run or the
-    /// coverage has gone back.
+    /// coverage has gone back. A build that installs the store an early read
+    /// met damage on — an attach's or a rebuild's own construction — takes it
+    /// first and carries it past that clearing.
     damage_met_under_a_claim: Option<String>,
     /// The live demand leases asking for the recovery the entry currently owes.
     recovery_demands: usize,
@@ -1712,7 +1714,9 @@ impl<A: SnapshotSource> EntryState<A> {
     /// Owe no rebuild. Called where the derived state the entry holds is one a
     /// build from the vault has just produced, or where the entry no longer
     /// holds the store a requirement was raised against. Damage a read met
-    /// under a claim names that same store, so it clears with the requirement.
+    /// under a claim names that same store, so it clears with the requirement;
+    /// a leg installing the store its own construction's reads met damage on
+    /// takes that damage before calling this.
     fn clear_rebuild(&mut self) {
         self.rebuild_required = false;
         self.damage_met_under_a_claim = None;
@@ -2650,8 +2654,9 @@ struct DamageVerdict {
 /// **The verdict is the entry's where the entry still reads the store the
 /// read ran on**: its reader is `ran_on`, it owes no rebuild already, and no
 /// park stands over it. A read on the pool of the entry's own construction is
-/// judged against that construction, whether or not a rebuild is owed. The read and the hold that judges can be apart: a read
-/// that found the gate held leaves this for the next hold, and that hold
+/// judged against that construction, whether or not a rebuild is owed. The
+/// read and the hold that judges can be apart: a read that found the gate
+/// held leaves this for the next hold, and that hold
 /// judges the entry as it finds it, so an entry that has moved to another
 /// handle, or rebuilt, or parked since the read ran publishes nothing. The
 /// refusal is the read's answer only where the read took this hold itself.
