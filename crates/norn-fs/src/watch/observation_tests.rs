@@ -667,9 +667,14 @@ fn mark_derived_satisfies_only_facts_through_its_sequence() {
 fn a_pre_capture_control_root_stays_for_the_reconcile() {
     let (_lease, _scratch, watch) = fixture();
     watch.begin_heal();
-    let control = watch.normalize_build_control(Path::new("config.toml")).unwrap();
-    ingest(&watch.state, Ok(Event::new(EventKind::Create(CreateKind::File))
-        .add_path(watch.covered_root().join("config.toml"))));
+    let control = watch
+        .normalize_build_control(Path::new("config.toml"))
+        .unwrap();
+    ingest(
+        &watch.state,
+        Ok(Event::new(EventKind::Create(CreateKind::File))
+            .add_path(watch.covered_root().join("config.toml"))),
+    );
     let authority = watch.capture_build_authority(&[control]).unwrap();
     assert!(authority.admits());
     assert!(watch.take_build_roots().is_none());
@@ -685,7 +690,10 @@ fn deriving_a_taken_directory_satisfies_its_absorbed_child_reports() {
         ("folder", EventKind::Create(CreateKind::Folder)),
         ("folder/note.md", EventKind::Create(CreateKind::File)),
     ] {
-        ingest(&watch.state, Ok(Event::new(kind).add_path(watch.covered_root().join(path))));
+        ingest(
+            &watch.state,
+            Ok(Event::new(kind).add_path(watch.covered_root().join(path))),
+        );
     }
     let taken = watch.take_build_roots().unwrap();
     assert_eq!(taken.roots.len(), 1, "the batch absorbs the child");

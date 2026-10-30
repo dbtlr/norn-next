@@ -201,14 +201,23 @@ impl BuildAuthority {
         visit(facts.sequence, &mut roots)
     }
 
-    /// Satisfy only reports covered by the committed requeue, retaining newer reports.
-    pub fn mark_derived(&self, roots: &BTreeSet<NormalizedPath>, through: u64) {
-        let mut facts = self.proof.facts.lock().unwrap_or_else(PoisonError::into_inner);
-        for root in roots {
-            if let Some(record) = facts.roots.get_mut(root) {
+    /// Satisfy reports covered by the committed subtree requeue, including child
+    /// reports absorbed by its batch. Retain every report newer than the take.
+    /// Return the covered roots and their descendant flags for target publication.
+    pub fn mark_derived(&self, roots: &BTreeSet<NormalizedPath>, through: u64) -> Vec<(NormalizedPath, bool)> {
+        let mut facts = self
+            .proof
+            .facts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let mut covered = Vec::new();
+        for (path, record) in &mut facts.roots {
+            if roots.iter().any(|root| path.starts_with(root)) {
+                covered.push((path.clone(), record.beneath));
                 record.underived_from = (record.reported > through).then_some(through + 1);
             }
         }
+        covered
     }
 
     /// The latest accepted root report in this construction.
@@ -325,12 +334,34 @@ impl Subscription {
             if pending.batch.schema_dirty || !pending.batch.rescans.is_empty() {
                 return None;
             }
-            let through = state.build_authority.facts.lock()
-                .unwrap_or_else(PoisonError::into_inner).sequence;
-            (state.root.clone(), state.ledger.clone(), state.pending.take()?.into_batch(), through)
+            let through = {
+                let facts = state
+                    .build_authority
+                    .facts
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                if pending.batch.vault_roots.iter().any(|root| {
+                    facts
+                        .control
+                        .iter()
+                        .any(|control| control.starts_with(root))
+                }) {
+                    return None;
+                }
+                facts.sequence
+            };
+            (
+                state.root.clone(),
+                state.ledger.clone(),
+                state.pending.take()?.into_batch(),
+                through,
+            )
         };
         let batch = suppress(&root, &ledger, batch);
-        Some(TakenRoots { roots: batch.vault_roots, through })
+        Some(TakenRoots {
+            roots: batch.vault_roots,
+            through,
+        })
     }
 
     /// Normalize a build control path under the coverage's already proven case behavior.
