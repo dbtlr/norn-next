@@ -1145,7 +1145,7 @@ fn a_fact_at_a_ready_target_withdraws_it_and_one_elsewhere_does_not() {
         // A fact touching the established target rejects its stale result.
         assert_still_indexing(&held.recv_timeout(BUDGET.work()).unwrap().unwrap_err());
         construction.release();
-        assert!(waiting.recv_timeout(BUDGET.work()).unwrap().is_ok());
+        assert_changed_body_and_heading(waiting.recv_timeout(BUDGET.work()).unwrap());
     });
     ready(&host);
     wait_until("the late document is served", BUDGET, || {
@@ -1155,6 +1155,61 @@ fn a_fact_at_a_ready_target_withdraws_it_and_one_elsewhere_does_not() {
         }
     })
     .unwrap();
+}
+
+fn assert_changed_body_and_heading(answer: GetAnswer) {
+    let report = json!(&answer.unwrap().answer.report);
+    assert_eq!(report["document"]["body"]["value"]["text"], "# Changed\n", "{report}");
+    assert_eq!(report["document"]["headings"]["value"]["items"][0]["text"], "Changed", "{report}");
+}
+
+#[test]
+fn a_requeued_pulled_ahead_target_waits_for_its_new_structure() {
+    let fixture = Fixture::new("requeued-ready-target-structure");
+    let construction = Probe::new([
+        LoadingBoundary::StepComplete(Step::Names),
+        LoadingBoundary::CanonicalPage,
+        LoadingBoundary::TargetReady,
+        LoadingBoundary::Requeued,
+    ]);
+    let first = Arc::new(FirstRead::default());
+    let ops = fixture.ops(Arc::new(FirstReadProbe {
+        construction: construction.clone(),
+        read: first.clone(),
+    }));
+    let account = ops.account();
+    let host = fixture.host_over(ops, norn_host::READ_SETTLE_BOUND);
+    std::thread::scope(|scope| {
+        let _release = Release(&construction);
+        let _release_read = ReleaseFirstRead(&first);
+        let _demand = host.demand(&name()).unwrap();
+        construction.wait(LoadingBoundary::StepComplete(Step::Names));
+        construction.release();
+        construction.wait(LoadingBoundary::CanonicalPage);
+        let held = spawn_get(scope, &host, get("/first"));
+        waits(&host, 1);
+        construction.release();
+        construction.wait(LoadingBoundary::TargetReady);
+        first.wait();
+        std::fs::write(fixture.root.join("first.md"), "# Changed\n").unwrap();
+        fact_recorded(&account, 0);
+        construction.release();
+        construction.wait(LoadingBoundary::Requeued);
+        let second = spawn_get(scope, &host, get("/first"));
+        match second.recv_timeout(Duration::from_millis(200)) {
+            Ok(answer) => {
+                assert_changed_body_and_heading(answer);
+                panic!("the target still owes structure at the requeue boundary");
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(error) => panic!("second Get disconnected: {error}"),
+        }
+        construction.release();
+        assert_changed_body_and_heading(second.recv_timeout(BUDGET.work()).unwrap());
+        first.release();
+        assert_still_indexing(&held.recv_timeout(BUDGET.work()).unwrap().unwrap_err());
+    });
+    ready(&host);
 }
 
 /// Contract item 18: an overflow withdraws every capability, and Ready follows

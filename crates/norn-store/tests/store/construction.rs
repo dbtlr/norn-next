@@ -1369,3 +1369,38 @@ fn requeued_documents_page_first_and_death_writes_no_tombstone() {
     assert!(store.begin_request().content_page(8).unwrap().is_empty());
     store.finish_step(Step::Content).unwrap();
 }
+
+#[test]
+fn requeued_page_work_is_independent_of_the_vault_queue() {
+    use crate::common::path;
+    use norn_store::{Change, ContentModel, IncrementProvenance, Step};
+    let measure = |documents| {
+        let scratch = Scratch::new("requeue-page-work");
+        let mut store = scratch.open();
+        store.defer_link_health().unwrap();
+        store.begin_steps().unwrap();
+        store.begin_request().apply_increment(
+            IncrementProvenance::Derived,
+            (0..documents).map(|n| Change::Named { path: path(&format!("doc{n:05}.md")) }),
+            &[], &ContentModel::none(),
+        ).unwrap();
+        store.finish_step(Step::Names).unwrap();
+        store.begin_request().apply_increment(
+            IncrementProvenance::Derived,
+            [Change::Named { path: path("doc00000.md") }],
+            &[], &ContentModel::none(),
+        ).unwrap();
+        let mut request = store.begin_request();
+        let page = request.requeued_page(128).unwrap();
+        assert_eq!(page, [path("doc00000.md")]);
+        let populated = request.read_steps();
+        request.dequeue_requeued(&page).unwrap();
+        let before = request.read_steps();
+        assert!(request.requeued_page(128).unwrap().is_empty());
+        (populated, request.read_steps() - before)
+    };
+    let small = measure(2_000);
+    let large = measure(10_000);
+    eprintln!("requeued page work: 2k={small:?}, 10k={large:?}");
+    assert_eq!(small, large);
+}
