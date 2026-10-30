@@ -12536,6 +12536,82 @@ mod tests {
         ops.detach(&name, attachment);
     }
 
+    /// Writes a non-Markdown vault file and touches its folder's metadata when
+    /// the build first reaches `at`, then holds the build until the watcher has
+    /// accepted the facts.
+    #[cfg(feature = "induced-failure")]
+    struct CreateAt {
+        at: crate::LoadingBoundary,
+        file: PathBuf,
+        fired: std::sync::atomic::AtomicBool,
+        account: Arc<crate::JobEvidence>,
+    }
+
+    #[cfg(feature = "induced-failure")]
+    impl crate::LoadingProbe for CreateAt {
+        fn at(&self, boundary: crate::LoadingBoundary) {
+            if boundary != self.at || self.fired.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
+            let before = self.account.read().build_facts_recorded;
+            fs::write(&self.file, b"png").unwrap();
+            let folder = self.file.parent().unwrap();
+            fs::set_permissions(folder, fs::metadata(folder).unwrap().permissions()).unwrap();
+            let budget = Budget::new(Duration::from_secs(20), Duration::from_millis(10));
+            wait_until("the injected build facts", budget, || {
+                if self.account.read().build_facts_recorded > before {
+                    Observed::Met(())
+                } else {
+                    Observed::pending("not yet accepted")
+                }
+            })
+            .unwrap();
+        }
+    }
+
+    /// **A content-step requeue settles a refused spelling's finding before a
+    /// vault file's birth**, as before a row's death: the new file's name must
+    /// not share the finding's flush. The build equals a from-scratch derivation.
+    #[cfg(feature = "induced-failure")]
+    #[test]
+    fn a_content_step_requeue_settles_a_refused_spelling_before_a_vault_files_birth() {
+        let f = Fixture::new("verifier-requeue-birth-after-refused");
+        fs::create_dir(f.vault().join("notes")).unwrap();
+        fs::write(f.vault().join("notes/..md"), "refused spelling").unwrap();
+        fs::write(f.vault().join("notes/c.md"), "# C\n").unwrap();
+        fs::write(f.vault().join("kept.md"), "# Kept\n").unwrap();
+        norn_fs::watch::settle_prior_changes(f.root.root(), lifecycle_budget().work()).unwrap();
+        let (ops, name) = f.ops(2);
+        let probe = CreateAt {
+            at: crate::LoadingBoundary::StepComplete(norn_store::Step::Names),
+            file: f.vault().join("notes/b.png"),
+            fired: Default::default(),
+            account: ops.account(),
+        };
+        let ops = ops.with_loading_probe(Arc::new(probe));
+        let mut attachment = ops
+            .attach(&f.registration(), &ProgressReporter::disconnected())
+            .unwrap();
+        assert!(
+            ops.evidence.read().requeued_roots >= 1,
+            "the build takes the facts"
+        );
+        let mut scratch = scratch_store(
+            &f,
+            "verifier-requeue-birth-after-refused-oracle",
+            ProductionPolicy::new(2, 2).unwrap(),
+        );
+        assert_eq!(
+            derived_vault(&mut attachment.store, &f.vault()),
+            derived_vault(&mut scratch, &f.vault())
+        );
+        assert_eq!(
+            finding_total(&mut attachment.store),
+            finding_total(&mut scratch)
+        );
+        ops.detach(&name, attachment);
+    }
+
     /// **A requeued quarantine files its finding however late its fact comes.**
     /// A fact at an undecodable document, at its folder, or at a refused
     /// spelling beside it, taken in any of the build's document steps, runs
