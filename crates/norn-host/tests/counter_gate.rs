@@ -7561,6 +7561,9 @@ fn a_requeued_edit_costs_the_same_at_both_scales() {
         let spent = account.read();
         norn_store::induced_failure::stop_recording_statements();
         assert_eq!(spent.requeued_documents, 1);
+        if boundary == norn_host::LoadingBoundary::LinkHealthChunk {
+            assert_eq!(spent.requeue_links_rejudged, 1);
+        }
         assert_eq!(spent.documents_read_by_build, documents + 1);
         assert_eq!(spent.document_opens, documents + 2);
         let statements = *probe.statements.lock().unwrap();

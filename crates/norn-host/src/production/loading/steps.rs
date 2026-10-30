@@ -418,8 +418,8 @@ fn requeue_taken(
             let links = request
                 .rejudge_reach(declared.model.content_model())
                 .map_err(store_effect)?;
-            let steps = request.read_steps();
-            count_increment_work(&request.finish(), steps);
+            // The scoped requeue meter records these reads before publication.
+            count_increment_work(&request.finish(), 0);
             ops.evidence.count_requeue_links_rejudged(links);
         }
         ops.evidence.count_requeue(
