@@ -115,9 +115,8 @@ use crate::request::Request;
 ///
 /// The handle outlives the entry that minted it where a read is still running
 /// against it: the entry lets its own hold go at the teardown window, and the
-/// read goes on answering from the handle it took. Canonical throwaway teardown
-/// can unlink its file. A sealed loading source instead retains actual file
-/// ownership through every open connection and established snapshot.
+/// read goes on answering from the handle it took. A throwaway store's teardown
+/// can unlink its file.
 ///
 /// **The database file this handle reads is not reachable from it.** A handle
 /// is what a hold hands out, and a caller holding the file's path needs no
@@ -669,8 +668,8 @@ impl fmt::Debug for Snapshot {
 impl Snapshot {
     /// Withhold relation judgments until construction completes its relations step.
     ///
-    /// NORN-468 PR C (host early admission) consumes this mark on early holds;
-    /// the host does not establish such holds on the canonical store yet.
+    /// The host marks an early hold's snapshot this way where the hold is
+    /// established before the relations step has published.
     #[must_use]
     pub fn relations_loading(mut self) -> Self {
         self.relations_loading = true;
@@ -994,9 +993,8 @@ pub enum StoreMode {
     /// A registered vault's durable derived state. The file survives the
     /// process.
     Durable,
-    /// Disposable derivation. Ordinary throwaway stores unlink on close or drop.
-    /// Sealed first-index sources instead retain their file through every reader.
-    /// A registration's canonical derived state remains durable.
+    /// Disposable derivation for tests: the store unlinks its file on close or
+    /// drop. A registration's canonical derived state remains durable.
     Throwaway,
 }
 
@@ -1219,8 +1217,8 @@ impl Store {
 
     /// Defer link health until the from-zero build's complete judgment.
     ///
-    /// This in-memory deferral is independent of the construction mark: ordinary
-    /// stores and disposable early-read sources keep per-changeset judgment.
+    /// This in-memory deferral is independent of the construction mark: an
+    /// ordinary store keeps per-changeset judgment.
     /// Repeating it during a build is harmless; a finished store refuses it.
     pub fn defer_link_health(&mut self) -> Result<(), StoreError> {
         if !self.under_construction {
@@ -1249,7 +1247,7 @@ impl Store {
     /// not a failure. Neither synchronous nor cache size changes.
     ///
     /// Stores whose steps never began only delete the mark, as ordinary oracles
-    /// and disposable sources do. Neither epoch nor write generation moves.
+    /// do. Neither epoch nor write generation moves.
     pub fn finish_construction(&mut self) -> Result<crate::ConstructionFinish, StoreError> {
         #[cfg(feature = "induced-failure")]
         let _timing = norn_db::profiling::span("store.step.finish");

@@ -1,4 +1,4 @@
-//! Stem trigrams are a lane-1 projection under ADR 0027: their only input is
+//! Stem trigrams are a lane-1 projection under ADR 0044: their only input is
 //! the document path, a lane-1 pillar, so the inference firewall stands. The
 //! invalidation key is the derivation version; a change to derivation moves
 //! that version and rebuilds from zero. Storage is declared in indexed

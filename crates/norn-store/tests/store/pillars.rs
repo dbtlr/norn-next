@@ -105,8 +105,9 @@ fn a_full_text_index_that_drifted_from_its_column_is_damage() {
     );
     store.verify_integrity().expect("a store just written to");
 
-    // The triggers are the only thing that writes to the index, so dropping them
-    // is what makes a later body edit invisible to it.
+    // Outside a from-zero build's step 5 the triggers are the only thing that
+    // writes to the index, so dropping them is what makes a later body edit
+    // invisible to it.
     induced_failure::execute_out_of_band(
         &mut store,
         "DROP TRIGGER documents_fts_update;

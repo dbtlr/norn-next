@@ -339,12 +339,12 @@ impl VaultSchema {
     ///
     /// **A dormant carrier.** Its consuming layer is the host's heal after a
     /// pin, once the store re-decides link health over every link at the pin
-    /// itself ([ADR 0027]). A pin discards every link-health finding whatever
+    /// itself ([ADR 0044]). A pin discards every link-health finding whatever
     /// the schema declares, and today only the re-derivation of the document
     /// holding a link files its finding again, so the heal re-derives every
     /// row below the pin and asks nothing of this.
     ///
-    /// [ADR 0027]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0027-link-health-rides-the-changeset.md
+    /// [ADR 0044]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0044-a-from-zero-build-judges-link-health-once.md
     pub fn rederives_documents(&self) -> bool {
         self.tags.reports_undeclared() || !self.fields.is_empty() || !self.rules.is_empty()
     }

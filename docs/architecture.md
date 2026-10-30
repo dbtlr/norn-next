@@ -2840,6 +2840,10 @@ driving scoped `norn-store` increments; the heal ladder splits across the same t
 (see [the heal ladder](#2-the-heal-ladder)).
 
 Full-text search and the stem trigram index are maintained transactionally inside the increment.
+The full-text triggers are the index's only writer on a finished store; a from-zero build
+holds no triggers while it runs and fills the index in committed batches from the stored
+bodies in step 5, installing the triggers in the closing transaction that clears its mark ([ADR
+0045](decisions/0045-a-from-zero-build-writes-once-in-steps.md)).
 The trigram index is a lane-1 projection of the document path alone, invalidated by the
 derivation version. Embeddings are
 lane-2 engine state: eventually consistent, held in the engine's sidecar database rather

@@ -321,7 +321,7 @@ fn a_links_address_column_agrees_with_link_health_of_link() {
     store.verify_integrity().expect("a store just written to");
 }
 
-/// Links are held under normalized suffix or complete-path keys (ADR 0027,
+/// Links are held under normalized suffix or complete-path keys (ADR 0044,
 /// ADR 0040): an unprefixed target in either family by the classes it opens,
 /// a `./`, `../`, `/` or `vault://` target by the paths it names. Only `.md`
 /// opens two readings, of either kind; other extensions remain in the leaf.

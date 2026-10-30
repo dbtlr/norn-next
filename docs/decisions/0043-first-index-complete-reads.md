@@ -1,5 +1,6 @@
 ---
-status: accepted
+status: superseded
+superseded-by: 0045-a-from-zero-build-writes-once-in-steps.md
 date: 2026-10-25
 ---
 
