@@ -197,7 +197,7 @@ fn observation_rejects_overflow_control_loss_and_a_replaced_root() {
 #[test]
 fn an_established_build_authority_proof_survives_admin_close_but_records_late_contradictions() {
     let (_lease, _scratch, watch) = fixture();
-    let proof = watch.capture_build_authority().expect("unchanged coverage");
+    let proof = watch.capture_build_authority(&[]).expect("unchanged coverage");
     assert!(proof.check_root());
     assert!(proof.admits());
     let state = Arc::clone(&watch.state);
@@ -225,7 +225,7 @@ fn build_authority_checks_separate_root_io_from_admission_and_never_recover() {
     let (_lease, _scratch, mut watch) = fixture();
     watch.begin_heal();
     watch.watcher.take();
-    let proof = watch.capture_build_authority().unwrap();
+    let proof = watch.capture_build_authority(&[]).unwrap();
     let root = watch.covered_root().to_path_buf();
     let moved = root.with_file_name("moved-for-proof");
     // Admission reads bounded proof/control bookkeeping only, even if the big
@@ -245,7 +245,7 @@ fn build_authority_checks_separate_root_io_from_admission_and_never_recover() {
     std::fs::rename(&moved, &root).unwrap();
     assert!(!proof.check_root());
     assert!(!proof.held_is_current());
-    assert!(watch.capture_build_authority().is_none());
+    assert!(watch.capture_build_authority(&[]).is_none());
     assert!(matches!(
         watch.finish_heal(),
         Err(WatchError::CoverageLost(_))
@@ -253,26 +253,26 @@ fn build_authority_checks_separate_root_io_from_admission_and_never_recover() {
 }
 
 #[test]
-fn build_authority_proofs_observe_accepted_facts_before_delivery_and_notify_late_registration() {
+fn a_fact_after_capture_records_its_root_and_leaves_authority_admitting() {
     let (_lease, _scratch, watch) = fixture();
     watch.begin_heal();
-    let proof = watch.capture_build_authority().unwrap();
+    let proof = watch.capture_build_authority(&[]).unwrap();
     ingest(
         &watch.state,
         Ok(Event::new(EventKind::Create(CreateKind::File))
             .add_path(watch.covered_root().join("known-before-delivery.md"))),
     );
     assert!(!watch.holds_a_settled_batch());
-    assert!(!proof.admits());
-    assert!(!proof.held_is_current());
+    assert!(proof.admits());
+    assert!(proof.held_is_current());
     assert!(!watch.finish_heal().unwrap().is_empty());
-    assert!(watch.capture_build_authority().unwrap().admits());
+    assert!(watch.capture_build_authority(&[]).unwrap().admits());
 }
 
 #[test]
 fn build_authority_held_proof_owns_no_watcher_account_and_backend_failure_poison_survives_close() {
     let (lease, scratch, watch) = fixture();
-    let proof = watch.capture_build_authority().unwrap();
+    let proof = watch.capture_build_authority(&[]).unwrap();
     let weak = Arc::downgrade(&watch.state);
     drop(watch);
     assert!(
@@ -286,7 +286,7 @@ fn build_authority_held_proof_owns_no_watcher_account_and_backend_failure_poison
     drop(scratch);
     drop(lease);
     let (_lease2, _other, watch) = fixture();
-    let proof = watch.capture_build_authority().unwrap();
+    let proof = watch.capture_build_authority(&[]).unwrap();
     ingest(
         &watch.state,
         Err(notify::Error::generic("backend contradiction")),
@@ -311,7 +311,7 @@ fn build_authority_withdrawal_wakes_an_existing_condvar_and_racing_registration(
         }
     }
     let (_lease, _scratch, watch) = fixture();
-    let proof = watch.capture_build_authority().unwrap();
+    let proof = watch.capture_build_authority(&[]).unwrap();
     let signal = Arc::new(Signal {
         notified: Mutex::new(false),
         changed: Condvar::new(),
@@ -343,7 +343,7 @@ fn build_authority_withdrawal_wakes_an_existing_condvar_and_racing_registration(
     )
     .unwrap();
     second.synchronize(Duration::from_secs(5)).unwrap();
-    let racing = second.capture_build_authority().unwrap();
+    let racing = second.capture_build_authority(&[]).unwrap();
     *signal.notified.lock().unwrap() = false;
     let barrier = std::sync::Barrier::new(2);
     std::thread::scope(|scope| {
@@ -370,7 +370,7 @@ fn a_build_authority_is_captured_fresh_after_an_accepted_fact() {
     }
     let (_lease, _scratch, watch) = fixture();
     watch.begin_heal();
-    let first = watch.capture_build_authority().unwrap();
+    let first = watch.capture_build_authority(&[]).unwrap();
     let signal = Arc::new(Signal(std::sync::atomic::AtomicUsize::new(0)));
     first.register_waker(&std::task::Waker::from(Arc::clone(&signal)));
     ingest(
@@ -383,7 +383,7 @@ fn a_build_authority_is_captured_fresh_after_an_accepted_fact() {
     assert_eq!(signal.0.load(std::sync::atomic::Ordering::SeqCst), 1);
     assert!(!watch.finish_heal().unwrap().is_empty());
     let second = watch
-        .capture_build_authority()
+        .capture_build_authority(&[])
         .expect("a new build captures fresh authority");
     assert!(second.admits());
     assert!(!first.held_is_current());
@@ -401,20 +401,20 @@ fn a_build_authority_is_captured_fresh_after_an_accepted_fact() {
 #[test]
 fn capture_refuses_terminal_or_rootless_coverage() {
     let (_lease, _scratch, mut watch) = fixture();
-    let proof = watch.capture_build_authority().unwrap();
+    let proof = watch.capture_build_authority(&[]).unwrap();
     ingest(&watch.state, Err(notify::Error::generic("backend failure")));
     assert!(!proof.held_is_current());
-    assert!(watch.capture_build_authority().is_none());
+    assert!(watch.capture_build_authority(&[]).is_none());
     watch.close_owned().unwrap();
-    assert!(watch.capture_build_authority().is_none());
+    assert!(watch.capture_build_authority(&[]).is_none());
     drop(watch);
     drop(_scratch);
     drop(_lease);
 
     let (_lease, _scratch, mut watch) = fixture();
-    let proof = watch.capture_build_authority().unwrap();
+    let proof = watch.capture_build_authority(&[]).unwrap();
     watch.close_owned().unwrap();
-    assert!(watch.capture_build_authority().is_none());
+    assert!(watch.capture_build_authority(&[]).is_none());
     assert!(
         proof.held_is_current(),
         "administrative close preserves held reads"
@@ -429,9 +429,9 @@ fn capture_refuses_terminal_or_rootless_coverage() {
     let root = watch.covered_root().to_path_buf();
     let moved = root.with_file_name("moved-before-capture");
     std::fs::rename(&root, &moved).unwrap();
-    assert!(watch.capture_build_authority().is_none());
+    assert!(watch.capture_build_authority(&[]).is_none());
     std::fs::rename(&moved, &root).unwrap();
-    assert!(watch.capture_build_authority().is_none());
+    assert!(watch.capture_build_authority(&[]).is_none());
 }
 
 #[test]
@@ -439,14 +439,14 @@ fn capture_refuses_a_failure_taken_before_control_publishes_it() {
     let (_lease, _scratch, watch) = fixture();
     ingest(&watch.state, Err(notify::Error::generic("backend failure")));
     assert!(watch.state.lock().unwrap().take_terminal().is_some());
-    assert!(watch.capture_build_authority().is_none());
+    assert!(watch.capture_build_authority(&[]).is_none());
 }
 
 #[test]
 fn capture_refuses_a_dead_coalescer() {
     let (_lease, _scratch, watch) = fixture();
     watch.state.lock().unwrap().coalescer_died = true;
-    assert!(watch.capture_build_authority().is_none());
+    assert!(watch.capture_build_authority(&[]).is_none());
 }
 
 #[test]
@@ -458,10 +458,10 @@ fn a_new_capture_withdraws_and_wakes_the_previous_build_authority() {
         }
     }
     let (_lease, _scratch, watch) = fixture();
-    let first = watch.capture_build_authority().unwrap();
+    let first = watch.capture_build_authority(&[]).unwrap();
     let signal = Arc::new(Signal(std::sync::atomic::AtomicBool::new(false)));
     first.register_waker(&std::task::Waker::from(Arc::clone(&signal)));
-    let second = watch.capture_build_authority().unwrap();
+    let second = watch.capture_build_authority(&[]).unwrap();
     assert!(!first.admits());
     assert!(!first.held_is_current());
     assert!(signal.0.load(std::sync::atomic::Ordering::SeqCst));

@@ -265,3 +265,19 @@ fn every_shape_has_one_step() {
         Boundary::FullTextComplete
     );
 }
+
+#[cfg(test)]
+#[test]
+fn touch_compares_candidate_classes_and_ancestor_chains() {
+    use crate::AmbiguityIgnore;
+    let ignore = AmbiguityIgnore::none();
+    let suffix = Touch::of("Nóte", &ignore);
+    assert!(suffix.touches("folder/No\u{301}te.md", false));
+    assert!(suffix.touches("elsewhere", true));
+    assert!(!suffix.touches("other.md", false));
+    let rooted = Touch::of("/a/note", &ignore);
+    assert!(rooted.touches("a", true));
+    assert!(rooted.touches("a/note.md", false));
+    assert!(!rooted.touches("b", true));
+    assert!(Touch::of("../bad", &ignore).touches("anything", false));
+}
