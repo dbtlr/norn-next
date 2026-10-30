@@ -12371,6 +12371,142 @@ mod tests {
         ops.detach(&name, attachment);
     }
 
+    /// What a fact injected at one loading boundary touches: a rewrite of the
+    /// file with the same bytes, or a metadata change at its folder.
+    #[cfg(feature = "induced-failure")]
+    #[derive(Clone, Copy, Debug)]
+    enum Touch {
+        File,
+        Folder,
+    }
+
+    /// Makes one watcher fact at `file` or its folder when the build first
+    /// reaches `at`, and holds the build until the watcher has accepted it, so
+    /// the build's next requeue takes it.
+    #[cfg(feature = "induced-failure")]
+    struct FactAt {
+        at: crate::LoadingBoundary,
+        file: PathBuf,
+        touch: Touch,
+        fired: std::sync::atomic::AtomicBool,
+        account: Arc<crate::JobEvidence>,
+    }
+
+    #[cfg(feature = "induced-failure")]
+    impl crate::LoadingProbe for FactAt {
+        fn at(&self, boundary: crate::LoadingBoundary) {
+            if boundary != self.at || self.fired.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
+            let before = self.account.read().build_facts_recorded;
+            match self.touch {
+                Touch::File => fs::write(&self.file, fs::read(&self.file).unwrap()).unwrap(),
+                Touch::Folder => {
+                    let folder = self.file.parent().unwrap();
+                    fs::set_permissions(folder, fs::metadata(folder).unwrap().permissions())
+                        .unwrap();
+                }
+            }
+            let budget = Budget::new(Duration::from_secs(20), Duration::from_millis(10));
+            wait_until("the injected build fact", budget, || {
+                if self.account.read().build_facts_recorded > before {
+                    Observed::Met(())
+                } else {
+                    Observed::pending("not yet accepted")
+                }
+            })
+            .unwrap();
+        }
+    }
+
+    /// **A requeued quarantine files its finding however late its fact comes.**
+    /// A fact at an undecodable document, at its folder, or at a refused
+    /// spelling beside it, taken in any of the build's document steps, runs
+    /// those paths through again; the build still holds every finding a
+    /// from-scratch derivation files.
+    #[cfg(feature = "induced-failure")]
+    #[test]
+    fn a_requeued_quarantine_keeps_its_finding_in_every_step() {
+        use norn_store::Step;
+        for at in [
+            crate::LoadingBoundary::CanonicalPage,
+            crate::LoadingBoundary::StepComplete(Step::Names),
+            crate::LoadingBoundary::StepComplete(Step::Content),
+        ] {
+            for (file, touch) in [
+                ("notes/bad.md", Touch::File),
+                ("notes/bad.md", Touch::Folder),
+                ("notes/..md", Touch::File),
+            ] {
+                let f = Fixture::new("quarantine-requeued");
+                fs::create_dir(f.vault().join("notes")).unwrap();
+                fs::create_dir(f.vault().join("other")).unwrap();
+                fs::write(f.vault().join("notes/bad.md"), UNDECODABLE).unwrap();
+                fs::write(f.vault().join("other/bad.md"), UNDECODABLE).unwrap();
+                fs::write(f.vault().join("notes/..md"), "refused spelling").unwrap();
+                fs::write(
+                    f.vault().join("notes/good.md"),
+                    "---\nbad: [\n---\n# Good\n",
+                )
+                .unwrap();
+                norn_fs::watch::settle_prior_changes(f.root.root(), lifecycle_budget().work())
+                    .unwrap();
+                let (ops, name) = f.ops(2);
+                let probe = FactAt {
+                    at,
+                    file: f.vault().join(file),
+                    touch,
+                    fired: Default::default(),
+                    account: ops.account(),
+                };
+                let ops = ops.with_loading_probe(Arc::new(probe));
+                let mut attachment = ops
+                    .attach(&f.registration(), &ProgressReporter::disconnected())
+                    .unwrap();
+                let case = format!("{touch:?} fact for {file} at {at:?}");
+                assert!(
+                    ops.evidence.read().requeued_roots >= 1,
+                    "{case}: the build takes the fact"
+                );
+                let mut scratch = scratch_store(
+                    &f,
+                    "quarantine-requeued-oracle",
+                    ProductionPolicy::new(2, 2).unwrap(),
+                );
+                assert_eq!(
+                    derived_vault(&mut attachment.store, &f.vault()),
+                    derived_vault(&mut scratch, &f.vault()),
+                    "{case}"
+                );
+                // The comparison above reads findings directly under the vault.
+                let refused = DocumentPath::rendered(Path::new("notes/..md"));
+                for path in [
+                    "notes/bad.md",
+                    "other/bad.md",
+                    "notes/good.md",
+                    refused.as_str(),
+                ] {
+                    assert_eq!(
+                        sorted_kinds(&mut attachment.store, path),
+                        sorted_kinds(&mut scratch, path),
+                        "{case}: {path}"
+                    );
+                }
+                assert_eq!(
+                    finding_total(&mut attachment.store),
+                    finding_total(&mut scratch),
+                    "{case}"
+                );
+                assert_eq!(
+                    findings_at(&mut attachment.store, "notes/bad.md").len(),
+                    1,
+                    "{case}"
+                );
+                ops.detach(&name, attachment);
+            }
+        }
+    }
+
     /// **The path the deletion itself names is a scope too.** A watcher reports
     /// the path an event happened at, and a document that left is a path the
     /// filesystem answers is not there — an answer about that path and
@@ -16891,6 +17027,13 @@ mod tests {
     /// stopped agreeing with a from-scratch derivation would have to disagree
     /// with this.
     fn from_scratch(f: &Fixture, label: &str, policy: ProductionPolicy) -> DerivedVault {
+        let mut store = scratch_store(f, label, policy);
+        derived_vault(&mut store, f.registration().root.as_path())
+    }
+
+    /// The store [`from_scratch`] derives, for a case reading findings below
+    /// the vault's top level.
+    fn scratch_store(f: &Fixture, label: &str, policy: ProductionPolicy) -> Store {
         let mut store = Store::open(
             f.root.join(format!("{label}.sqlite3")),
             proven_order(f),
@@ -16917,7 +17060,7 @@ mod tests {
             &progress.healing(),
         )
         .unwrap();
-        derived_vault(&mut store, registration.root.as_path())
+        store
     }
 
     /// Overwrite the root page of the `documents` table, leaving the store
