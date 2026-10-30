@@ -391,6 +391,22 @@ fn requeue_taken(
                 documents += content.len() as u64;
                 content_chunk(ops, &mut pending, &source, &content)?;
                 pending.flush()?;
+                // Each reset ended every finding at its place, including the
+                // spellings that render there. Where content leaves no row,
+                // those spellings stand again, as the content step's spelling
+                // pass reads them once occupancy settles.
+                for path in &content {
+                    let stands = pending
+                        .store
+                        .begin_request()
+                        .stored_document(path)
+                        .map_err(store_effect)?
+                        .is_some();
+                    if !stands {
+                        pending.refile_reset_place(&source, path)?;
+                    }
+                }
+                pending.flush()?;
                 pending.store.commit_step_group().map_err(store_effect)?;
                 if matches!(stage, Some(Step::Structure | Step::Relations)) {
                     for path in paths {

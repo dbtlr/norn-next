@@ -5132,6 +5132,28 @@ impl<'s> Pending<'s> {
                 .map_err(store_effect)?;
             return Ok(());
         }
+        self.file_spellings(spellings)
+    }
+
+    /// Re-file the spellings at a place a construction reset emptied, which
+    /// content then left without a row. The reset ended every finding there,
+    /// so unlike [`Pending::read_place`] there is nothing to discard, and no
+    /// discard opens inside the build's step group.
+    fn refile_reset_place(
+        &mut self,
+        vault: &norn_fs::Vault,
+        place: &DocumentPath,
+    ) -> Result<(), JobFailure> {
+        if !self.account.places.first_reading(place) {
+            return Ok(());
+        }
+        match self.account.places.spellings(vault, place)? {
+            Some(spellings) => self.file_spellings(spellings),
+            None => Ok(()),
+        }
+    }
+
+    fn file_spellings(&mut self, spellings: Vec<places::Spelling>) -> Result<(), JobFailure> {
         // A place can hold more spellings than one flush may, and a flush keeps
         // what this scope has replaced, so the rest of them append.
         for spelling in spellings {
