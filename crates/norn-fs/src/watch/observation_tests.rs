@@ -460,14 +460,24 @@ fn a_new_capture_withdraws_and_wakes_the_previous_build_authority() {
             self.0.store(true, std::sync::atomic::Ordering::SeqCst);
         }
     }
+    struct Observer(std::sync::atomic::AtomicUsize);
+    impl BuildObserver for Observer {
+        fn recorded(&self, _: u64) {}
+        fn withdrawn(&self, _: BuildWithdrawal) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
     let (_lease, _scratch, watch) = fixture();
     let first = watch.capture_build_authority(&[]).unwrap();
+    let observer = Arc::new(Observer(std::sync::atomic::AtomicUsize::new(0)));
+    first.observe(observer.clone());
     let signal = Arc::new(Signal(std::sync::atomic::AtomicBool::new(false)));
     first.register_waker(&std::task::Waker::from(Arc::clone(&signal)));
     let second = watch.capture_build_authority(&[]).unwrap();
     assert!(!first.admits());
     assert!(!first.held_is_current());
     assert!(signal.0.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(observer.0.load(std::sync::atomic::Ordering::SeqCst), 0);
     assert!(second.admits());
     first.invalidate();
     assert!(second.held_is_current());
@@ -570,4 +580,35 @@ fn coverage_loss_schema_and_control_facts_withdraw_everything() {
     let proof = watch.capture_build_authority(&[]).unwrap();
     ingest(&watch.state, Err(notify::Error::generic("coverage lost")));
     assert!(!proof.admits());
+}
+
+#[test]
+fn a_heal_merge_that_widens_withdraws_live_build_authority() {
+    let (_lease, _scratch, watch) = fixture();
+    watch.begin_heal();
+    // A settled batch can predate capture while new reports accumulate in the window.
+    {
+        let mut state = watch.state.lock().unwrap();
+        let mut batch = Batch::default();
+        for index in 0..DIRTY_ROOT_CAP {
+            batch.note_vault_root(
+                state
+                    .normalizer
+                    .normalize(Path::new(&format!("old{index}.md")))
+                    .unwrap(),
+                Spelling::Rendered,
+            );
+        }
+        state.unplaced = Some(batch);
+    }
+    let proof = watch.capture_build_authority(&[]).unwrap();
+    ingest(
+        &watch.state,
+        Ok(Event::new(EventKind::Create(CreateKind::File))
+            .add_path(watch.covered_root().join("new.md"))),
+    );
+    assert!(proof.admits());
+    let batch = watch.finish_heal().unwrap();
+    assert!(batch.rescans().contains(&RescanScope::Vault));
+    assert!(!proof.held_is_current());
 }

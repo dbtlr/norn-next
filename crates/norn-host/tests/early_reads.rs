@@ -3084,7 +3084,14 @@ fn a_request_waits_only_for_facts_it_met() {
         fact_recorded(&account, 0);
         probe.release();
         probe.wait(LoadingBoundary::StepComplete(Step::Content));
-        assert!(waiting.recv_timeout(BUDGET.work()).unwrap().is_ok());
+        assert_eq!(
+            waiting
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap()
+                .unwrap_err()
+                .code(),
+            &ReasonCode::HostEntryNotReady
+        );
         probe.release();
     });
     ready(&host);
@@ -3154,4 +3161,76 @@ fields:
             ready(&host);
         }
     }
+}
+
+#[test]
+fn facts_between_meeting_and_admission_refuse_a_mixed_find() {
+    let fixture = Fixture::new("meeting-admission-facts");
+    let probe = Probe::new([
+        LoadingBoundary::StepComplete(Step::Names),
+        LoadingBoundary::TargetReady,
+        LoadingBoundary::StepComplete(Step::Content),
+    ]);
+    let ops = fixture.ops(probe.clone());
+    let account = ops.account();
+    let host = fixture.host_over(ops, norn_host::READ_SETTLE_BOUND);
+    std::thread::scope(|scope| {
+        let _release = Release(&probe);
+        let _demand = host.demand(&name()).unwrap();
+        probe.wait(LoadingBoundary::StepComplete(Step::Names));
+        let start = host.read_evidence().settle_waits;
+        let getting = spawn_get(scope, &host, get("/doc00"));
+        let finding = spawn_find(scope, &host, find());
+        waits(&host, start + 2);
+        probe.release();
+        probe.wait(LoadingBoundary::TargetReady);
+        fixture.add("doc00.md", "---\nrank: 100\n---\n# Changed zero\n");
+        fact_recorded(&account, 0);
+        let before = account.read().build_facts_recorded;
+        fixture.add("doc05.md", "---\nrank: 500\n---\n# Changed five\n");
+        fact_recorded(&account, before);
+        probe.release();
+        probe.wait(LoadingBoundary::StepComplete(Step::Content));
+        let get_answer = getting.recv_timeout(Duration::from_secs(2)).unwrap();
+        let find_answer = finding.recv_timeout(Duration::from_secs(2)).unwrap();
+        let _ = get_answer;
+        assert_eq!(
+            find_answer.unwrap_err().code(),
+            &ReasonCode::HostEntryNotReady
+        );
+        probe.release();
+    });
+    ready(&host);
+}
+
+#[test]
+fn a_get_refuses_a_target_fact_newer_than_its_meeting() {
+    let fixture = Fixture::new("get-meeting-admission");
+    let probe = Probe::new([
+        LoadingBoundary::StepComplete(Step::Names),
+        LoadingBoundary::StepComplete(Step::Content),
+    ]);
+    let ops = fixture.ops(probe.clone());
+    let account = ops.account();
+    let host = fixture.host_over(ops, norn_host::READ_SETTLE_BOUND);
+    std::thread::scope(|scope| {
+        let _release = Release(&probe);
+        let _demand = host.demand(&name()).unwrap();
+        probe.wait(LoadingBoundary::StepComplete(Step::Names));
+        let start = host.read_evidence().settle_waits;
+        let getting = spawn_get(scope, &host, get("/doc00"));
+        waits(&host, start + 1);
+        fixture.add("doc00.md", "---\nrank: 100\n---\n# Changed\n");
+        fact_recorded(&account, 0);
+        probe.release();
+        probe.wait(LoadingBoundary::StepComplete(Step::Content));
+        assert_still_indexing(
+            &getting
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap()
+                .unwrap_err(),
+        );
+        probe.release();
+    });
+    ready(&host);
 }

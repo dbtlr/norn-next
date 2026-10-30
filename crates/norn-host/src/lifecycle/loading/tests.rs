@@ -419,3 +419,98 @@ fn counters_never_wake_a_waiter_and_publication_does() {
     );
     entry.gate.lock().unwrap().close_construction();
 }
+
+#[test]
+#[allow(clippy::disallowed_methods)] // This test owns its vault fixture.
+fn a_replacement_construction_takes_a_fresh_meeting() {
+    let scratch = Scratch::new("replacement-construction-meeting");
+    let _watcher = isolation::Lease::hold(
+        isolation::REAL_WATCHER,
+        isolation::acquisition_budget(BUDGET),
+    );
+    let (subscription, store, budget) = begun(&scratch);
+    subscription.begin_heal();
+    let entry = entry_at(3);
+    let progress = reporter(&entry, 3);
+    begin(&progress, &subscription, &store, &budget);
+    std::fs::write(scratch.join("vault/changed.md"), "# Changed\n").unwrap();
+    wait_until("construction records fact", BUDGET, || {
+        let state = entry.gate.lock().unwrap();
+        match &state.construction {
+            Some(Construction::Building(building)) if building.authority.sequence() > 0 => {
+                Observed::Met(())
+            }
+            _ => Observed::pending("no fact yet"),
+        }
+    })
+    .unwrap();
+    let params = norn_wire::FindParams::new(norn_wire::VaultAddress::name(
+        VaultName::new("notes").unwrap(),
+    ));
+    let mut meeting = None;
+    {
+        let state = entry.gate.lock().unwrap();
+        assert!(matches!(
+            state.early(Request::Find(&params), &mut meeting),
+            Early::Waits
+        ));
+        assert!(meeting.as_ref().unwrap().sequence > 0);
+    }
+    begin(&progress, &subscription, &store, &budget);
+    {
+        let state = entry.gate.lock().unwrap();
+        assert!(matches!(
+            state.early(Request::Find(&params), &mut meeting),
+            Early::Waits
+        ));
+        assert_eq!(meeting.as_ref().unwrap().sequence, 0);
+    }
+    subscription.finish_heal().unwrap();
+}
+
+#[test]
+#[allow(clippy::disallowed_methods)] // This test owns its vault fixture.
+fn a_get_meeting_before_a_fact_admits_with_relations_loading() {
+    let scratch = Scratch::new("relations-at-admission");
+    let _watcher = isolation::Lease::hold(
+        isolation::REAL_WATCHER,
+        isolation::acquisition_budget(BUDGET),
+    );
+    let (subscription, store, budget) = begun(&scratch);
+    subscription.begin_heal();
+    let entry = entry_at(3);
+    let progress = reporter(&entry, 3);
+    let token = begin(&progress, &subscription, &store, &budget);
+    let params = norn_wire::GetParams::new(
+        norn_wire::VaultAddress::name(VaultName::new("notes").unwrap()),
+        norn_wire::ResolutionTarget::new("/subject").unwrap(),
+    );
+    let mut meeting = None;
+    assert!(matches!(
+        entry
+            .gate
+            .lock()
+            .unwrap()
+            .early(Request::Get(&params), &mut meeting),
+        Early::Waits
+    ));
+    std::fs::write(scratch.join("vault/elsewhere.md"), "# Elsewhere\n").unwrap();
+    wait_until("construction records fact", BUDGET, || {
+        let state = entry.gate.lock().unwrap();
+        match &state.construction {
+            Some(Construction::Building(building)) if building.authority.sequence() > 0 => {
+                Observed::Met(())
+            }
+            _ => Observed::pending("no fact yet"),
+        }
+    })
+    .unwrap();
+    assert!(progress.publish_step(token, store.epoch(), Step::Relations));
+    let state = entry.gate.lock().unwrap();
+    let Early::Admitted(admitted) = state.early(Request::Get(&params), &mut meeting) else {
+        panic!("an unrelated fact does not refuse this rooted Get");
+    };
+    assert!(admitted.relations_loading);
+    drop(state);
+    subscription.finish_heal().unwrap();
+}
