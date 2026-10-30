@@ -3476,6 +3476,48 @@ fn a_directory_relisted_during_construction_ends_its_mark_before_step_four() {
 }
 
 #[test]
+fn a_requeued_directory_that_still_denies_keeps_its_mark() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new("construction-still-denied");
+    fixture.add("locked/inside.md", "# Held\n[[doc00]]\n");
+    let directory = fixture.root.join("locked");
+    let _restore = RestoreMode(directory.clone(), 0o755);
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o000)).unwrap();
+    assert!(std::fs::read_dir(&directory).is_err());
+    let probe = Probe::new([LoadingBoundary::StepComplete(Step::Names)]);
+    let ops = fixture.ops(probe.clone());
+    let account = ops.account();
+    let host = fixture.host_over(ops, norn_host::READ_SETTLE_BOUND);
+    let _release = Release(&probe);
+    let _demand = host.demand(&name()).unwrap();
+    probe.wait(LoadingBoundary::StepComplete(Step::Names));
+    // The parent's watch reports the directory's attributes; it still denies.
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o000)).unwrap();
+    fact_recorded(&account, 0);
+    probe.release();
+    ready(&host);
+    assert!(
+        account.read().requeued_roots >= 1,
+        "the build takes the fact"
+    );
+    drop(host);
+    let built = project(&fixture.store_path(), &fixture.root);
+    assert_eq!(
+        built
+            .findings()
+            .iter()
+            .filter(|finding| finding.kind == "directory/unreadable")
+            .count(),
+        1
+    );
+    assert!(built.document("locked/inside.md").is_none());
+    built.assert_equivalent(
+        &from_scratch(&fixture, "reference"),
+        "a requeued directory that still denies",
+    );
+}
+
+#[test]
 fn a_document_breaking_on_requeue_becomes_names_only() {
     use std::os::unix::fs::PermissionsExt;
     let fixture = Fixture::new("construction-requeue-broken");
