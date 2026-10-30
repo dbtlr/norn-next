@@ -619,8 +619,11 @@ fn take_build_roots_takes_the_window_and_leaves_rescans() {
     assert!(watch.take_build_roots().is_none());
     watch.begin_heal();
     let authority = watch.capture_build_authority(&[]).unwrap();
-    ingest(&watch.state, Ok(Event::new(EventKind::Create(CreateKind::File))
-        .add_path(watch.covered_root().join("fresh.md"))));
+    ingest(
+        &watch.state,
+        Ok(Event::new(EventKind::Create(CreateKind::File))
+            .add_path(watch.covered_root().join("fresh.md"))),
+    );
     let taken = watch.take_build_roots().unwrap();
     assert_eq!(taken.roots.len(), 1);
     assert_eq!(taken.through, authority.sequence());
@@ -636,20 +639,58 @@ fn mark_derived_satisfies_only_facts_through_its_sequence() {
     let (_lease, _scratch, watch) = fixture();
     watch.begin_heal();
     let authority = watch.capture_build_authority(&[]).unwrap();
-    let event = || Event::new(EventKind::Create(CreateKind::File))
-        .add_path(watch.covered_root().join("fresh.md"));
+    let event = || {
+        Event::new(EventKind::Create(CreateKind::File))
+            .add_path(watch.covered_root().join("fresh.md"))
+    };
     ingest(&watch.state, Ok(event()));
     let taken = watch.take_build_roots().unwrap();
     ingest(&watch.state, Ok(event()));
     authority.mark_derived(&taken.roots, taken.through);
-    authority.visit_roots(|_, mut roots| {
+    authority.visit_roots(|_, roots| {
         let (_, reported, underived, _) = roots.next().unwrap();
         assert!(reported > taken.through);
         assert_eq!(underived, Some(taken.through + 1));
     });
     let taken = watch.take_build_roots().unwrap();
     authority.mark_derived(&taken.roots, taken.through);
-    authority.visit_roots(|_, mut roots| assert!(Iterator::all(&mut roots, |(_, _, owed, _)| owed.is_none())));
+    authority.visit_roots(|_, mut roots| {
+        assert!(Iterator::all(&mut roots, |(_, _, owed, _)| owed.is_none()))
+    });
     ingest(&watch.state, Ok(event()));
-    authority.visit_roots(|_, mut roots| assert!(Iterator::all(&mut roots, |(_, reported, owed, _)| owed == Some(reported))));
+    authority.visit_roots(|_, mut roots| {
+        assert!(Iterator::all(&mut roots, |(_, reported, owed, _)| owed == Some(reported)))
+    });
+}
+
+#[test]
+fn a_pre_capture_control_root_stays_for_the_reconcile() {
+    let (_lease, _scratch, watch) = fixture();
+    watch.begin_heal();
+    let control = watch.normalize_build_control(Path::new("config.toml")).unwrap();
+    ingest(&watch.state, Ok(Event::new(EventKind::Create(CreateKind::File))
+        .add_path(watch.covered_root().join("config.toml"))));
+    let authority = watch.capture_build_authority(&[control]).unwrap();
+    assert!(authority.admits());
+    assert!(watch.take_build_roots().is_none());
+    assert!(!watch.finish_heal().unwrap().is_empty());
+}
+
+#[test]
+fn deriving_a_taken_directory_satisfies_its_absorbed_child_reports() {
+    let (_lease, _scratch, watch) = fixture();
+    watch.begin_heal();
+    let authority = watch.capture_build_authority(&[]).unwrap();
+    for (path, kind) in [
+        ("folder", EventKind::Create(CreateKind::Folder)),
+        ("folder/note.md", EventKind::Create(CreateKind::File)),
+    ] {
+        ingest(&watch.state, Ok(Event::new(kind).add_path(watch.covered_root().join(path))));
+    }
+    let taken = watch.take_build_roots().unwrap();
+    assert_eq!(taken.roots.len(), 1, "the batch absorbs the child");
+    authority.mark_derived(&taken.roots, taken.through);
+    authority.visit_roots(|_, mut roots| {
+        assert!(Iterator::all(&mut roots, |(_, _, owed, _)| owed.is_none()));
+    });
 }
