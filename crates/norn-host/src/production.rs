@@ -4350,7 +4350,9 @@ impl Account {
     ///   spelling that renders onto it, and those spellings sit under the place's
     ///   deepest unrendered ancestor. A walk rooted below that ancestor read some
     ///   of them and never the rest, so it concludes nothing about the place; the
-    ///   vault walk is rooted at the ancestor of every place.
+    ///   vault walk is rooted at the ancestor of every place. The content
+    ///   finding there is the exception, and [`Account::read_spelling`] answers
+    ///   for it.
     /// - **A root the walk could not say what stands at.** A subtree the walk
     ///   withheld holds spellings nothing read, so the places they render onto
     ///   are outside what this walk enumerated. A root the walk *refuses* is not
@@ -4363,7 +4365,30 @@ impl Account {
             walked.order,
         ) && !self.withheld.covers(subject, walked.order)
     }
+
+    /// Whether a walk of `walked` read the one spelling `subject` is, which is
+    /// the whole account a **content finding** there needs.
+    ///
+    /// A content finding ([`norn_store::CONTENT_FINDING_KIND`]) is filed only
+    /// at a path the document grammar admits, and an admitted path renders onto
+    /// itself, so the finding is about the one file spelled as its place is and
+    /// about no other spelling rendering there. A walk whose scope reaches that
+    /// spelling and withheld nothing over it read the file or found it gone,
+    /// even where a marker-carrying name puts the place's unrendered ancestor
+    /// above the scope and [`Account::concluded`] refuses the place. The other
+    /// content-side kinds stay with that rule: an unlistable folder's finding
+    /// files at its rendered place, which a refused spelling can be.
+    fn read_spelling(&self, walked: &Walked, subject: &DocumentPath) -> bool {
+        folded_reaches(walked.scope.root(), subject.as_str(), walked.order)
+            && !self.withheld.covers(subject, walked.order)
+    }
 }
+
+/// What a walk that read a place's own spelling and not its unrendered ancestor
+/// takes there ([`Account::read_spelling`]): the content finding, and no
+/// finding another spelling rendering onto the place could state.
+const READ_SPELLING_DISCARD: norn_store::DiscardScope<'static> =
+    norn_store::DiscardScope::Kinds(&[norn_store::CONTENT_FINDING_KIND]);
 
 /// One scope a walk of this job enumerated cleanly, with the order its bounds
 /// are read in.
@@ -4647,6 +4672,12 @@ fn close_job(
 /// every side, because a producer that never walks a place is one whose findings
 /// no walk can conclude.
 ///
+/// **A walk that read a place's own spelling ends its content finding** even
+/// where it concludes nothing else there: a scope rooted at a deleted document
+/// whose name carries the rendering marker sits below the place's unrendered
+/// ancestor, and the finding its bytes left is about that one spelling
+/// ([`Account::read_spelling`]).
+///
 /// The page and the discard are both keyed by the subject, so a scope costs one
 /// ordered pass over the findings it holds plus one seek per side it takes — the
 /// findings table's size rather than the vault's, and smaller than the row page
@@ -4674,16 +4705,22 @@ fn prune_unaccounted(
             let Some(last) = page.last() else { break };
             after = Some(last.clone());
             for subject in &page {
-                if !account.concluded(walked, subject) {
-                    continue;
-                }
-                for side in SIDES {
-                    if account.filed.holds(subject, side) {
-                        continue;
+                if account.concluded(walked, subject) {
+                    for side in SIDES {
+                        if account.filed.holds(subject, side) {
+                            continue;
+                        }
+                        store
+                            .begin_request()
+                            .discard_findings_about(subject, side.rederives())
+                            .map_err(store_effect)?;
                     }
+                } else if account.read_spelling(walked, subject)
+                    && !account.filed.holds(subject, Decided::ByBytes)
+                {
                     store
                         .begin_request()
-                        .discard_findings_about(subject, side.rederives())
+                        .discard_findings_about(subject, READ_SPELLING_DISCARD)
                         .map_err(store_effect)?;
                 }
             }
@@ -12933,6 +12970,113 @@ mod tests {
         ops.detach(&name, attachment);
     }
 
+    /// **A heal scoped to the deleted document itself takes its content
+    /// finding, whatever its name carries.** The finding is about the one file
+    /// spelled as the place is, so the scope that read that spelling and found
+    /// nothing accounts for it — even where the name carries the rendering
+    /// marker U+FFFD, which puts the place's unrendered ancestor above the
+    /// scope.
+    #[test]
+    fn a_heal_scoped_to_a_deleted_quarantined_document_takes_its_finding() {
+        for (label, document) in [
+            ("plain", "notes/bad.md"),
+            ("marked-leaf", "notes/bad\u{fffd}.md"),
+            ("marked-top-leaf", "\u{fffd}bad.md"),
+            ("marked-folder", "notes\u{fffd}/bad.md"),
+        ] {
+            let f = Fixture::new(&format!("quarantine-deleted-file-scope-{label}"));
+            let path = f.vault().join(document);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, UNDECODABLE).unwrap();
+            fs::write(f.vault().join("kept.md"), "body").unwrap();
+            let (ops, name) = f.ops(2);
+            let progress = ProgressReporter::disconnected();
+            let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+            assert_eq!(
+                sorted_kinds(&mut attachment.store, document),
+                ["document/body-bytes-not-utf8"],
+                "{label}: the attach did not quarantine the document, so this proves nothing"
+            );
+
+            fs::remove_file(&path).unwrap();
+            scoped_increment(
+                &mut attachment.store,
+                f.vault().as_path(),
+                &dirty_path(f.vault().as_path(), document),
+                ProductionPolicy::new(2, 2).unwrap(),
+                &progress.healing(),
+                &exclusions(&attachment.registration, &attachment.shadows),
+            )
+            .unwrap();
+
+            assert!(
+                findings_at(&mut attachment.store, document).is_empty(),
+                "{label}: the heal of the deleted document kept its content finding"
+            );
+            assert_eq!(finding_total(&mut attachment.store), 0, "{label}");
+            ops.detach(&name, attachment);
+        }
+    }
+
+    /// **The content finding goes alone where a refused spelling renders onto
+    /// the same place.** A file whose name the grammar refuses renders onto the
+    /// place the deleted document was spelled as, and a heal scoped to the
+    /// deleted document read none of that file's spellings: the spelling
+    /// finding stands, and the store equals a build from zero over the tree
+    /// the deletion left.
+    #[cfg(unix)]
+    #[test]
+    fn a_heal_scoped_to_a_deleted_quarantined_document_keeps_a_colliding_spelling_finding() {
+        let f = Fixture::new("quarantine-deleted-file-scope-collision");
+        fs::create_dir(f.vault().join("notes")).unwrap();
+        fs::write(f.vault().join("notes/bad\u{fffd}.md"), UNDECODABLE).unwrap();
+        if !write_or_report(&f.vault().join("notes/bad\\.md"), b"body") {
+            return;
+        }
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        assert_eq!(
+            sorted_kinds(&mut attachment.store, "notes/bad\u{fffd}.md"),
+            [
+                "document/body-bytes-not-utf8",
+                "document/path-names-no-document"
+            ],
+            "the attach did not file both causes, so this proves nothing"
+        );
+
+        fs::remove_file(f.vault().join("notes/bad\u{fffd}.md")).unwrap();
+        scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            &dirty_path(f.vault().as_path(), "notes/bad\u{fffd}.md"),
+            ProductionPolicy::new(2, 2).unwrap(),
+            &progress.healing(),
+            &exclusions(&attachment.registration, &attachment.shadows),
+        )
+        .unwrap();
+
+        assert_eq!(
+            sorted_kinds(&mut attachment.store, "notes/bad\u{fffd}.md"),
+            ["document/path-names-no-document"],
+            "the heal of the deleted document took the wrong side of its place"
+        );
+        let mut scratch = scratch_store(
+            &f,
+            "quarantine-deleted-file-scope-collision-oracle",
+            ProductionPolicy::new(2, 2).unwrap(),
+        );
+        assert_eq!(
+            sorted_kinds(&mut attachment.store, "notes/bad\u{fffd}.md"),
+            sorted_kinds(&mut scratch, "notes/bad\u{fffd}.md")
+        );
+        assert_eq!(
+            finding_total(&mut attachment.store),
+            finding_total(&mut scratch)
+        );
+        ops.detach(&name, attachment);
+    }
+
     /// What a fact injected at one loading boundary touches: a rewrite of the
     /// file with the same bytes, or a metadata change at its folder.
     #[cfg(feature = "induced-failure")]
@@ -13484,6 +13628,70 @@ mod tests {
                 divergent.push(format!("{moment:?}: {built:?} against {oracle:?}"));
             }
             ops.detach(&name, attachment);
+        }
+        assert!(divergent.is_empty(), "{divergent:#?}");
+    }
+
+    /// **A quarantined document deleted during a document step leaves no
+    /// finding behind, whatever its name carries.** The requeue scoped to the
+    /// deleted document read its one spelling and found nothing, and that is
+    /// the account its content finding needs, even where a name carrying the
+    /// rendering marker U+FFFD puts the place's unrendered ancestor above the
+    /// scope. At any page or end of either step, the build equals a
+    /// from-scratch derivation over the final tree.
+    #[cfg(all(unix, feature = "induced-failure"))]
+    #[test]
+    fn a_quarantined_document_deleted_in_a_document_step_leaves_no_finding() {
+        let mut divergent = Vec::new();
+        for document in ["notes/bad.md", "notes/bad\u{fffd}.md"] {
+            for moment in [
+                DocumentMoment::NamesPage,
+                DocumentMoment::NamesComplete,
+                DocumentMoment::ContentPage,
+                DocumentMoment::ContentComplete,
+            ] {
+                let f = Fixture::new("quarantine-removed");
+                fs::create_dir(f.vault().join("notes")).unwrap();
+                fs::write(f.vault().join(document), UNDECODABLE).unwrap();
+                fs::write(f.vault().join("notes/a.md"), "# A\n").unwrap();
+                fs::write(f.vault().join("kept.md"), "[[notes/a]]\n").unwrap();
+                norn_fs::watch::settle_prior_changes(f.root.root(), lifecycle_budget().work())
+                    .unwrap();
+                let (ops, name) = f.ops(2);
+                let removed = f.vault().join(document);
+                let probe = ChangeAt::new(moment, ops.account(), move || {
+                    fs::remove_file(&removed).unwrap()
+                });
+                let ops = ops.with_loading_probe(Arc::new(probe));
+                let mut attachment = ops
+                    .attach(&f.registration(), &ProgressReporter::disconnected())
+                    .unwrap();
+                let case = format!("{document} at {moment:?}");
+                assert!(
+                    ops.evidence.read().requeued_roots >= 1,
+                    "{case}: the build takes the fact"
+                );
+                let mut scratch = scratch_store(
+                    &f,
+                    "quarantine-removed-oracle",
+                    ProductionPolicy::new(2, 2).unwrap(),
+                );
+                let built = (
+                    sorted_kinds(&mut attachment.store, document),
+                    finding_total(&mut attachment.store),
+                );
+                let oracle = (
+                    sorted_kinds(&mut scratch, document),
+                    finding_total(&mut scratch),
+                );
+                if built != oracle
+                    || derived_vault(&mut attachment.store, &f.vault())
+                        != derived_vault(&mut scratch, &f.vault())
+                {
+                    divergent.push(format!("{case}: {built:?} against {oracle:?}"));
+                }
+                ops.detach(&name, attachment);
+            }
         }
         assert!(divergent.is_empty(), "{divergent:#?}");
     }
