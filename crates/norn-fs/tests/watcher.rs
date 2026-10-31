@@ -194,6 +194,15 @@ impl Collector {
     /// The same start, over the backend `establish` selects.
     fn start_over(establish: Establish, vault: &Path, schema: &Path) -> Self {
         let lease = Lease::hold(isolation::REAL_WATCHER, lease_budget());
+        Self::start_holding(lease, establish, vault, schema)
+    }
+
+    /// The same start, under a real-watcher lease the case already holds.
+    ///
+    /// A case that settles its fixture before attaching runs a platform
+    /// watcher of its own to do it, so it takes the lease before settling and
+    /// hands the same lease over here: the lease is not reentrant.
+    fn start_holding(lease: Lease, establish: Establish, vault: &Path, schema: &Path) -> Self {
         let (subscription, _own_writes) =
             establish(vault, schema).expect("watch coverage is active");
         let mut collector = Self::adopt(subscription, lease);
@@ -340,6 +349,12 @@ fn an_editor_atomic_save_reports_the_destination_path() {
 /// The closing negative is bounded by a later change, not by a clock: a
 /// backend delivers in order, so once the vault's own later write is reported,
 /// a report of the earlier write behind the link would already have arrived.
+///
+/// The link's own creation is settled before attaching. FSEvents can deliver
+/// it after [`Collector::start`] has emptied coverage, and a `linked` root is
+/// at or above `linked/behind.md`, so a late report of the link would read as
+/// a report of the write behind it. Settling runs a platform watcher, so the
+/// real-watcher lease is taken first and held through the collection.
 #[cfg(unix)]
 #[test]
 fn a_change_behind_a_linked_folder_outside_the_vault_is_not_reported() {
@@ -348,7 +363,10 @@ fn a_change_behind_a_linked_folder_outside_the_vault_is_not_reported() {
     std::fs::create_dir_all(&outside).expect("a folder outside the vault");
     std::os::unix::fs::symlink(&outside, scratch.vault().join("linked"))
         .expect("an in-vault link to it");
-    let mut collector = Collector::start(&scratch.vault(), &scratch.schema());
+    let lease = Lease::hold(isolation::REAL_WATCHER, lease_budget());
+    norn_fs::watch::settle_prior_changes(scratch.tree.root(), budget().work())
+        .expect("the link's creation has passed through the backend");
+    let mut collector = Collector::start_holding(lease, watch, &scratch.vault(), &scratch.schema());
 
     std::fs::write(outside.join("behind.md"), b"behind\n").expect("a write behind the link");
     std::fs::write(scratch.vault().join("after.md"), b"after\n").expect("a later vault write");
