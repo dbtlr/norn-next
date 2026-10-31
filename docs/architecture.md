@@ -715,8 +715,8 @@ nothing, so the place keeps what it holds until the folder reads again. A walk r
 folder's own marker-carrying name puts above it still concludes nothing at the places there, and the
 next heal converges them. **The content finding is the exception**: it is filed only at a spelling the
 document grammar admits, which renders onto itself, so it is about the one file spelled as its place
-is. A walk whose scope reaches that spelling and withheld nothing over it ends the content finding
-there and no other, so a deleted document whose own name or folder carries the marker converges at
+is. A walk whose scope reaches that spelling, withheld nothing over it and filed no content finding
+there, because it found the document gone, ends the content finding there and no other, so a deleted document whose own name or folder carries the marker converges at
 the deletion's own scoped heal, during a from-zero build as after it. The collision is where the sides tell apart most
 clearly — the document whose bytes were refused can leave while a refused spelling still renders
 onto its place, and the walk that still reads that spelling ends the content findings there and
