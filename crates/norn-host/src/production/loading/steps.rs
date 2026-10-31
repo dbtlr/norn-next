@@ -141,12 +141,10 @@ pub(super) fn documents(
     // Spelling findings must see the content step's settled occupancy. An
     // undecodable provisional document no longer withholds a refused spelling.
     //
-    // **A deferred spelling is reached again before it is filed.** A fact
-    // since the names walk may have removed it, and the requeue that took the
-    // fact found no finding there to end, since none was filed yet. A spelling
-    // a folder now hides stays filed: an unlistable folder withholds the
-    // spelling-side findings beneath it (ADR 0046).
+    // Each deferred spelling's place is read again as the vault now spells
+    // it, once per place, rather than filed from the names walk's record.
     let mut pending = Pending::new(store, policy.changeset_size, root, exclusions, &mut account)?;
+    let mut readings = places::PlaceReadings::default();
     loop {
         let paths = pending
             .store
@@ -158,15 +156,7 @@ pub(super) fn documents(
         }
         for bytes in paths {
             let path = PathBuf::from(std::ffi::OsString::from_vec(bytes));
-            if matches!(
-                places::reach_spelling(&source, &path)?,
-                places::Reached::Absent
-            ) {
-                continue;
-            }
-            if let Err(quarantine) = document_path(&path) {
-                pending.quarantine(&path, quarantine)?;
-            }
+            pending.file_deferred_spelling(&source, &mut readings, &path)?;
         }
         // Findings alone use an ordinary transaction once the groups are closed.
         let findings = pending.recordable()?;

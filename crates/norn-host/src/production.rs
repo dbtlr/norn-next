@@ -5153,6 +5153,37 @@ impl<'s> Pending<'s> {
         }
     }
 
+    /// File a spelling the names walk deferred, once content has settled.
+    ///
+    /// **It files its whole place as the vault now spells it**, read once per
+    /// `readings`, rather than the deferred bytes alone: a fact since the names
+    /// walk may have removed the spelling, added another at its place or
+    /// respelled it, and the first finding this scope files at the place
+    /// replaces what a requeue filed there meanwhile. A spelling a folder now
+    /// hides is filed as the walk read it, since an unlistable folder withholds
+    /// the spelling-side findings beneath it (ADR 0046).
+    fn file_deferred_spelling(
+        &mut self,
+        vault: &norn_fs::Vault,
+        readings: &mut places::PlaceReadings,
+        path: &Path,
+    ) -> Result<(), JobFailure> {
+        if let places::Reached::Hidden = places::reach_spelling(vault, path)? {
+            if let Err(quarantine) = document_path(path) {
+                self.quarantine(path, quarantine)?;
+            }
+            return Ok(());
+        }
+        let place = DocumentPath::rendered(path);
+        if !readings.first_reading(&place) {
+            return Ok(());
+        }
+        match readings.spellings(vault, &place)? {
+            Some(spellings) => self.file_spellings(spellings),
+            None => Ok(()),
+        }
+    }
+
     fn file_spellings(&mut self, mut spellings: Vec<places::Spelling>) -> Result<(), JobFailure> {
         // A listing yields names in no particular order; a from-scratch build
         // files a place's spellings in byte order, and the findings read back
@@ -12736,7 +12767,7 @@ mod tests {
         }
     }
 
-    /// When in the names or content step a [`WithdrawAt`] probe acts.
+    /// When in the names or content step a [`ChangeAt`] probe acts.
     #[cfg(all(unix, feature = "induced-failure"))]
     #[derive(Clone, Copy, Debug)]
     enum DocumentMoment {
@@ -12746,34 +12777,39 @@ mod tests {
         ContentComplete,
     }
 
-    /// How a [`WithdrawAt`] probe takes a refused spelling out of the vault.
+    /// Makes `change` once at `moment` and holds the build until the watcher
+    /// has accepted a fact, so the build's next requeue takes it.
     #[cfg(all(unix, feature = "induced-failure"))]
-    #[derive(Clone, Copy, Debug)]
-    enum Withdrawal {
-        /// The spelling's file is removed.
-        Remove,
-        /// The spelling's folder becomes one the walk cannot list.
-        Lock,
-    }
-
-    /// Withdraws `file` once at `moment` and holds the build until the watcher
-    /// has accepted the fact, so the build's next requeue takes it.
-    #[cfg(all(unix, feature = "induced-failure"))]
-    struct WithdrawAt {
+    struct ChangeAt {
         moment: DocumentMoment,
-        withdrawal: Withdrawal,
-        file: PathBuf,
+        change: Box<dyn Fn() + Send + Sync>,
         names_done: std::sync::atomic::AtomicBool,
         fired: std::sync::atomic::AtomicBool,
         account: Arc<crate::JobEvidence>,
     }
 
     #[cfg(all(unix, feature = "induced-failure"))]
-    impl crate::LoadingProbe for WithdrawAt {
+    impl ChangeAt {
+        fn new(
+            moment: DocumentMoment,
+            account: Arc<crate::JobEvidence>,
+            change: impl Fn() + Send + Sync + 'static,
+        ) -> Self {
+            ChangeAt {
+                moment,
+                change: Box::new(change),
+                names_done: Default::default(),
+                fired: Default::default(),
+                account,
+            }
+        }
+    }
+
+    #[cfg(all(unix, feature = "induced-failure"))]
+    impl crate::LoadingProbe for ChangeAt {
         fn at(&self, boundary: crate::LoadingBoundary) {
             use crate::LoadingBoundary::{CanonicalPage, StepComplete};
             use norn_store::Step;
-            use std::os::unix::fs::PermissionsExt;
             use std::sync::atomic::Ordering::SeqCst;
             if boundary == StepComplete(Step::Names) {
                 self.names_done.store(true, SeqCst);
@@ -12792,14 +12828,7 @@ mod tests {
                 return;
             }
             let before = self.account.read().build_facts_recorded;
-            match self.withdrawal {
-                Withdrawal::Remove => fs::remove_file(&self.file).unwrap(),
-                Withdrawal::Lock => fs::set_permissions(
-                    self.file.parent().unwrap(),
-                    fs::Permissions::from_mode(0o000),
-                )
-                .unwrap(),
-            }
+            (self.change)();
             let budget = Budget::new(Duration::from_secs(20), Duration::from_millis(10));
             wait_until("the injected build fact", budget, || {
                 if self.account.read().build_facts_recorded > before {
@@ -12828,16 +12857,20 @@ mod tests {
         f
     }
 
-    /// The findings at `place`, the findings at `kept.md` and the store's
-    /// finding total: what a withdrawn spelling's case is judged by, beside the
-    /// whole derived vault.
+    /// Each finding at `place` by kind and detail, in the order filed — the
+    /// detail names the spelling it was read from — then the findings at
+    /// `kept.md` and the store's finding total: what a spelling case is judged
+    /// by, beside the whole derived vault, which reads no nested place.
     #[cfg(all(unix, feature = "induced-failure"))]
     fn spelling_outcome(
         store: &mut Store,
         place: &DocumentPath,
-    ) -> (Vec<String>, Vec<String>, u64) {
+    ) -> (Vec<(String, Option<String>)>, Vec<String>, u64) {
         (
-            sorted_kinds(store, place.as_str()),
+            findings_at(store, place.as_str())
+                .into_iter()
+                .map(|finding| (finding.kind, finding.detail))
+                .collect(),
             sorted_kinds(store, "kept.md"),
             finding_total(store),
         )
@@ -12860,14 +12893,10 @@ mod tests {
         ] {
             let f = refused_spellings_vault("refused-removed");
             let (ops, name) = f.ops(2);
-            let probe = WithdrawAt {
-                moment,
-                withdrawal: Withdrawal::Remove,
-                file: f.vault().join("notes/..md"),
-                names_done: Default::default(),
-                fired: Default::default(),
-                account: ops.account(),
-            };
+            let removed = f.vault().join("notes/..md");
+            let probe = ChangeAt::new(moment, ops.account(), move || {
+                fs::remove_file(&removed).unwrap()
+            });
             let ops = ops.with_loading_probe(Arc::new(probe));
             let mut attachment = ops
                 .attach(&f.registration(), &ProgressReporter::disconnected())
@@ -12914,14 +12943,10 @@ mod tests {
             let f = refused_spellings_vault("refused-locked");
             let locked = f.vault().join("locked");
             let (ops, name) = f.ops(2);
-            let probe = WithdrawAt {
-                moment,
-                withdrawal: Withdrawal::Lock,
-                file: locked.join("..md"),
-                names_done: Default::default(),
-                fired: Default::default(),
-                account: ops.account(),
-            };
+            let folder = locked.clone();
+            let probe = ChangeAt::new(moment, ops.account(), move || {
+                fs::set_permissions(&folder, fs::Permissions::from_mode(0o000)).unwrap()
+            });
             let ops = ops.with_loading_probe(Arc::new(probe));
             let mut attachment = ops
                 .attach(&f.registration(), &ProgressReporter::disconnected())
@@ -12961,6 +12986,71 @@ mod tests {
                 divergent.push(format!("{moment:?}: {built:?} against {oracle:?}"));
             }
             ops.detach(&name, attachment);
+        }
+        assert!(divergent.is_empty(), "{divergent:#?}");
+    }
+
+    /// **A place's spellings are filed as the vault spells them once content
+    /// settles.** Two spellings of one place stand at the names walk; during
+    /// the document steps another spelling of that place appears, alone or
+    /// in place of one of them. The requeue files the place as it then reads,
+    /// and the deferred spellings must not replace that: the build files every
+    /// spelling standing at the end, each naming its own spelling, as a
+    /// from-scratch derivation does.
+    #[cfg(all(unix, feature = "induced-failure"))]
+    #[test]
+    fn a_place_keeps_every_spelling_a_document_step_adds_beside_its_deferred_ones() {
+        use std::os::unix::ffi::OsStrExt;
+        let mut divergent = Vec::new();
+        for moment in [
+            DocumentMoment::NamesComplete,
+            DocumentMoment::ContentPage,
+            DocumentMoment::ContentComplete,
+        ] {
+            for replaces in [false, true] {
+                let f = Fixture::new("refused-place-grows");
+                let notes = f.vault().join("notes");
+                fs::create_dir(&notes).unwrap();
+                fs::write(notes.join("a.md"), "# A\n").unwrap();
+                fs::write(notes.join("b.md"), "# B\n").unwrap();
+                for spelling in [&b"bad\\name.md"[..], &b"bad\xffname.md"[..]] {
+                    if !write_or_report(&notes.join(std::ffi::OsStr::from_bytes(spelling)), b"body")
+                    {
+                        return;
+                    }
+                }
+                norn_fs::watch::settle_prior_changes(f.root.root(), lifecycle_budget().work())
+                    .unwrap();
+                let (ops, name) = f.ops(2);
+                let folder = notes.clone();
+                let probe = ChangeAt::new(moment, ops.account(), move || {
+                    if replaces {
+                        fs::remove_file(folder.join("bad\\name.md")).unwrap();
+                    }
+                    fs::write(folder.join("bad\u{1}name.md"), b"body").unwrap();
+                });
+                let ops = ops.with_loading_probe(Arc::new(probe));
+                let mut attachment = ops
+                    .attach(&f.registration(), &ProgressReporter::disconnected())
+                    .unwrap();
+                let case = format!("{moment:?}, replacing {replaces}");
+                assert!(
+                    ops.evidence.read().requeued_roots >= 1,
+                    "{case}: the build takes the fact"
+                );
+                let mut scratch = scratch_store(
+                    &f,
+                    "refused-place-grows-oracle",
+                    ProductionPolicy::new(2, 2).unwrap(),
+                );
+                let place = DocumentPath::rendered(Path::new("notes/bad\\name.md"));
+                let built = spelling_outcome(&mut attachment.store, &place);
+                let oracle = spelling_outcome(&mut scratch, &place);
+                if built != oracle {
+                    divergent.push(format!("{case}: {built:#?} against {oracle:#?}"));
+                }
+                ops.detach(&name, attachment);
+            }
         }
         assert!(divergent.is_empty(), "{divergent:#?}");
     }
