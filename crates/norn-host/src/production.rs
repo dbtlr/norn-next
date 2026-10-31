@@ -3167,10 +3167,11 @@ fn scoped_increment_closed(
         }
         // **Roots share changesets; a root reads its range landed.** What the
         // roots before this one queued stays queued unless it is about this
-        // root's range. The arms below whose readings reach past that range —
-        // a refusal, a directory, a refused spelling's places — land
-        // everything before them. A spelling no string holds addresses no
-        // range to test, so it lands.
+        // root's range. The arms below that prune or merge past that range — a
+        // refusal, a directory, a refused stem — land everything before them,
+        // and a missing path lands before it reads a refused spelling's
+        // places. A spelling no string holds addresses no range to test, so
+        // it lands.
         match path.to_str() {
             Some(spelling) => pending.land_before_reading(spelling)?,
             None => pending.flush()?,
