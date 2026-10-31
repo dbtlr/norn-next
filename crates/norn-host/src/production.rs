@@ -12736,6 +12736,235 @@ mod tests {
         }
     }
 
+    /// When in the names or content step a [`WithdrawAt`] probe acts.
+    #[cfg(all(unix, feature = "induced-failure"))]
+    #[derive(Clone, Copy, Debug)]
+    enum DocumentMoment {
+        NamesPage,
+        NamesComplete,
+        ContentPage,
+        ContentComplete,
+    }
+
+    /// How a [`WithdrawAt`] probe takes a refused spelling out of the vault.
+    #[cfg(all(unix, feature = "induced-failure"))]
+    #[derive(Clone, Copy, Debug)]
+    enum Withdrawal {
+        /// The spelling's file is removed.
+        Remove,
+        /// The spelling's folder becomes one the walk cannot list.
+        Lock,
+    }
+
+    /// Withdraws `file` once at `moment` and holds the build until the watcher
+    /// has accepted the fact, so the build's next requeue takes it.
+    #[cfg(all(unix, feature = "induced-failure"))]
+    struct WithdrawAt {
+        moment: DocumentMoment,
+        withdrawal: Withdrawal,
+        file: PathBuf,
+        names_done: std::sync::atomic::AtomicBool,
+        fired: std::sync::atomic::AtomicBool,
+        account: Arc<crate::JobEvidence>,
+    }
+
+    #[cfg(all(unix, feature = "induced-failure"))]
+    impl crate::LoadingProbe for WithdrawAt {
+        fn at(&self, boundary: crate::LoadingBoundary) {
+            use crate::LoadingBoundary::{CanonicalPage, StepComplete};
+            use norn_store::Step;
+            use std::os::unix::fs::PermissionsExt;
+            use std::sync::atomic::Ordering::SeqCst;
+            if boundary == StepComplete(Step::Names) {
+                self.names_done.store(true, SeqCst);
+            }
+            let due = match self.moment {
+                DocumentMoment::NamesPage => {
+                    boundary == CanonicalPage && !self.names_done.load(SeqCst)
+                }
+                DocumentMoment::NamesComplete => boundary == StepComplete(Step::Names),
+                DocumentMoment::ContentPage => {
+                    boundary == CanonicalPage && self.names_done.load(SeqCst)
+                }
+                DocumentMoment::ContentComplete => boundary == StepComplete(Step::Content),
+            };
+            if !due || self.fired.swap(true, SeqCst) {
+                return;
+            }
+            let before = self.account.read().build_facts_recorded;
+            match self.withdrawal {
+                Withdrawal::Remove => fs::remove_file(&self.file).unwrap(),
+                Withdrawal::Lock => fs::set_permissions(
+                    self.file.parent().unwrap(),
+                    fs::Permissions::from_mode(0o000),
+                )
+                .unwrap(),
+            }
+            let budget = Budget::new(Duration::from_secs(20), Duration::from_millis(10));
+            wait_until("the injected build fact", budget, || {
+                if self.account.read().build_facts_recorded > before {
+                    Observed::Met(())
+                } else {
+                    Observed::pending("not yet accepted")
+                }
+            })
+            .unwrap();
+        }
+    }
+
+    /// A vault holding a refused spelling in each of two folders, a document
+    /// beside each, and links into both folders.
+    #[cfg(all(unix, feature = "induced-failure"))]
+    fn refused_spellings_vault(label: &str) -> Fixture {
+        let f = Fixture::new(label);
+        for folder in ["notes", "locked"] {
+            fs::create_dir(f.vault().join(folder)).unwrap();
+            fs::write(f.vault().join(folder).join("..md"), "refused spelling").unwrap();
+        }
+        fs::write(f.vault().join("notes/a.md"), "# A\n").unwrap();
+        fs::write(f.vault().join("locked/inside.md"), "# Inside\n").unwrap();
+        fs::write(f.vault().join("kept.md"), "[[locked/inside]] [[notes/a]]\n").unwrap();
+        norn_fs::watch::settle_prior_changes(f.root.root(), lifecycle_budget().work()).unwrap();
+        f
+    }
+
+    /// The findings at `place`, the findings at `kept.md` and the store's
+    /// finding total: what a withdrawn spelling's case is judged by, beside the
+    /// whole derived vault.
+    #[cfg(all(unix, feature = "induced-failure"))]
+    fn spelling_outcome(
+        store: &mut Store,
+        place: &DocumentPath,
+    ) -> (Vec<String>, Vec<String>, u64) {
+        (
+            sorted_kinds(store, place.as_str()),
+            sorted_kinds(store, "kept.md"),
+            finding_total(store),
+        )
+    }
+
+    /// **A refused spelling removed during the names or content step leaves no
+    /// finding behind.** The names walk defers a refused spelling's finding to
+    /// the end of the content step, so a removal the build takes before then
+    /// finds nothing filed to end. At any page or end of either step, the
+    /// build equals a from-scratch derivation over the final tree.
+    #[cfg(all(unix, feature = "induced-failure"))]
+    #[test]
+    fn a_refused_spelling_removed_in_a_document_step_leaves_no_finding() {
+        let mut divergent = Vec::new();
+        for moment in [
+            DocumentMoment::NamesPage,
+            DocumentMoment::NamesComplete,
+            DocumentMoment::ContentPage,
+            DocumentMoment::ContentComplete,
+        ] {
+            let f = refused_spellings_vault("refused-removed");
+            let (ops, name) = f.ops(2);
+            let probe = WithdrawAt {
+                moment,
+                withdrawal: Withdrawal::Remove,
+                file: f.vault().join("notes/..md"),
+                names_done: Default::default(),
+                fired: Default::default(),
+                account: ops.account(),
+            };
+            let ops = ops.with_loading_probe(Arc::new(probe));
+            let mut attachment = ops
+                .attach(&f.registration(), &ProgressReporter::disconnected())
+                .unwrap();
+            assert!(
+                ops.evidence.read().requeued_roots >= 1,
+                "{moment:?}: the build takes the fact"
+            );
+            let mut scratch = scratch_store(
+                &f,
+                "refused-removed-oracle",
+                ProductionPolicy::new(2, 2).unwrap(),
+            );
+            let place = DocumentPath::rendered(Path::new("notes/..md"));
+            let built = spelling_outcome(&mut attachment.store, &place);
+            let oracle = spelling_outcome(&mut scratch, &place);
+            if built != oracle
+                || derived_vault(&mut attachment.store, &f.vault())
+                    != derived_vault(&mut scratch, &f.vault())
+            {
+                divergent.push(format!("{moment:?}: {built:?} against {oracle:?}"));
+            }
+            ops.detach(&name, attachment);
+        }
+        assert!(divergent.is_empty(), "{divergent:#?}");
+    }
+
+    /// **A refused spelling whose folder stops listing after the names walk
+    /// keeps its finding.** An unlistable folder withholds the names and the
+    /// spelling-side findings beneath it (ADR 0046), the deferred finding
+    /// included, so a link into it still resolves. At any later page or end of
+    /// the document steps, the build equals an ordinary build over the
+    /// readable tree healed once the folder is locked.
+    #[cfg(all(unix, feature = "induced-failure"))]
+    #[test]
+    fn a_refused_spelling_whose_folder_locks_after_the_names_walk_keeps_its_finding() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut divergent = Vec::new();
+        for moment in [
+            DocumentMoment::NamesComplete,
+            DocumentMoment::ContentPage,
+            DocumentMoment::ContentComplete,
+        ] {
+            let f = refused_spellings_vault("refused-locked");
+            let locked = f.vault().join("locked");
+            let (ops, name) = f.ops(2);
+            let probe = WithdrawAt {
+                moment,
+                withdrawal: Withdrawal::Lock,
+                file: locked.join("..md"),
+                names_done: Default::default(),
+                fired: Default::default(),
+                account: ops.account(),
+            };
+            let ops = ops.with_loading_probe(Arc::new(probe));
+            let mut attachment = ops
+                .attach(&f.registration(), &ProgressReporter::disconnected())
+                .unwrap();
+            let readable = fs::read_dir(&locked).is_ok();
+            fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+            if readable {
+                eprintln!("skipped: this account reads mode-000 directories");
+                ops.detach(&name, attachment);
+                return;
+            }
+            assert!(
+                ops.evidence.read().requeued_roots >= 1,
+                "{moment:?}: the build takes the fact"
+            );
+            let mut ordinary = scratch_store(
+                &f,
+                "refused-locked-oracle",
+                ProductionPolicy::new(2, 2).unwrap(),
+            );
+            fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+            let healed = heal_documents(
+                &mut ordinary,
+                &f.vault(),
+                &exclusions(&attachment.registration, &attachment.shadows),
+                ProductionPolicy::new(2, 2).unwrap(),
+                &ProgressReporter::disconnected().healing(),
+            );
+            let place = DocumentPath::rendered(Path::new("locked/..md"));
+            let built = spelling_outcome(&mut attachment.store, &place);
+            let oracle = spelling_outcome(&mut ordinary, &place);
+            let equal = derived_vault(&mut attachment.store, &f.vault())
+                == derived_vault(&mut ordinary, &f.vault());
+            fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+            healed.unwrap();
+            if built != oracle || !equal {
+                divergent.push(format!("{moment:?}: {built:?} against {oracle:?}"));
+            }
+            ops.detach(&name, attachment);
+        }
+        assert!(divergent.is_empty(), "{divergent:#?}");
+    }
+
     /// **A requeue keeps a refused spelling's finding at the place it shares
     /// with a quarantined document.** The vault holds a marker-named document
     /// whose bytes do not decode and a refused spelling that renders onto that

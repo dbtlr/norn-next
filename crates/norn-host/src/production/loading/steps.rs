@@ -140,6 +140,12 @@ pub(super) fn documents(
         .count_step_commits(Step::Content, store.construction_group_commits() - commits);
     // Spelling findings must see the content step's settled occupancy. An
     // undecodable provisional document no longer withholds a refused spelling.
+    //
+    // **A deferred spelling is reached again before it is filed.** A fact
+    // since the names walk may have removed it, and the requeue that took the
+    // fact found no finding there to end, since none was filed yet. A spelling
+    // a folder now hides stays filed: an unlistable folder withholds the
+    // spelling-side findings beneath it (ADR 0046).
     let mut pending = Pending::new(store, policy.changeset_size, root, exclusions, &mut account)?;
     loop {
         let paths = pending
@@ -152,6 +158,12 @@ pub(super) fn documents(
         }
         for bytes in paths {
             let path = PathBuf::from(std::ffi::OsString::from_vec(bytes));
+            if matches!(
+                places::reach_spelling(&source, &path)?,
+                places::Reached::Absent
+            ) {
+                continue;
+            }
             if let Err(quarantine) = document_path(&path) {
                 pending.quarantine(&path, quarantine)?;
             }
