@@ -13995,11 +13995,15 @@ mod tests {
     /// **A refused spelling that appears beside a quarantined document at its
     /// place is filed once that document's content settles.** `notes/..md`
     /// renders onto the place `notes/\u{fffd}..md`, where an undecodable
-    /// document stands. Created during the names or content step, the spelling
-    /// is taken by a requeue while that document's provisional row still
-    /// withholds it, and the content step then quarantines the document and
-    /// leaves no row. The build files both findings there, as a from-scratch
-    /// derivation does; which one is filed first is not compared.
+    /// document stands. Created after the names walk, the spelling is taken by
+    /// a requeue while that document's provisional row still withholds it —
+    /// at the end of the names step, or at a content page before the page that
+    /// derives the document, which the documents under `aaa/` put later — and
+    /// the content step then quarantines the document and leaves no row. It
+    /// is also created at a names page, and at the end of the content step,
+    /// whose requeue runs in the structure step. Each build files both findings
+    /// there, as a from-scratch derivation does; which one is filed first is
+    /// not compared.
     #[cfg(all(unix, feature = "induced-failure"))]
     #[test]
     fn a_refused_spelling_beside_a_quarantined_document_is_filed_once_content_settles() {
@@ -14011,6 +14015,11 @@ mod tests {
             DocumentMoment::ContentComplete,
         ] {
             let f = Fixture::new("refused-beside-quarantine");
+            let ahead = f.vault().join("aaa");
+            fs::create_dir(&ahead).unwrap();
+            for index in 0..4 {
+                fs::write(ahead.join(format!("{index}.md")), "# Ahead\n").unwrap();
+            }
             let notes = f.vault().join("notes");
             fs::create_dir(&notes).unwrap();
             fs::write(notes.join("\u{fffd}..md"), UNDECODABLE).unwrap();
