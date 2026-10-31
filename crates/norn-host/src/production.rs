@@ -13018,6 +13018,129 @@ mod tests {
         }
     }
 
+    /// **A heal scoped to a marker-carrying folder answers for each content
+    /// finding inside it by what it read there.** The folder's name puts the
+    /// unrendered ancestor of every place inside it above the scope, so only
+    /// the spelling read decides: a quarantined document the walk read again
+    /// keeps its finding, and one that left loses it.
+    #[test]
+    fn a_heal_scoped_to_a_marked_folder_keeps_the_quarantine_it_read_and_takes_the_one_that_left() {
+        let f = Fixture::new("quarantine-marked-folder-scope");
+        fs::create_dir(f.vault().join("notes\u{fffd}")).unwrap();
+        fs::write(f.vault().join("notes\u{fffd}/kept.md"), UNDECODABLE).unwrap();
+        fs::write(f.vault().join("notes\u{fffd}/left.md"), UNDECODABLE).unwrap();
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        assert_eq!(finding_total(&mut attachment.store), 2);
+
+        fs::remove_file(f.vault().join("notes\u{fffd}/left.md")).unwrap();
+        scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            &dirty_path(f.vault().as_path(), "notes\u{fffd}"),
+            ProductionPolicy::new(2, 2).unwrap(),
+            &progress.healing(),
+            &exclusions(&attachment.registration, &attachment.shadows),
+        )
+        .unwrap();
+
+        assert_eq!(
+            sorted_kinds(&mut attachment.store, "notes\u{fffd}/kept.md"),
+            ["document/body-bytes-not-utf8"],
+            "the heal took the finding of a quarantine it read standing"
+        );
+        assert!(
+            findings_at(&mut attachment.store, "notes\u{fffd}/left.md").is_empty(),
+            "the heal kept the finding of a quarantine that left"
+        );
+        ops.detach(&name, attachment);
+    }
+
+    /// **A heal that read a place's own spelling takes the content finding and
+    /// no other finding on the content side.** A folder the grammar refuses and
+    /// the account cannot list renders onto the place a deleted marker-named
+    /// folder was spelled as, and its finding is decided by bytes too — but it
+    /// is about a spelling the heal scoped to the deleted folder never read, so
+    /// it stands, as it does in a build from zero over the tree the deletion
+    /// left, while the deleted folder's quarantined document loses its finding.
+    #[cfg(unix)]
+    #[test]
+    fn a_heal_scoped_to_a_deleted_marked_folder_keeps_an_unlistable_folders_finding() {
+        use std::os::unix::fs::PermissionsExt;
+        let f = Fixture::new("quarantine-deleted-folder-scope-unlistable");
+        fs::create_dir_all(f.vault().join("notes/sub\u{fffd}")).unwrap();
+        fs::write(f.vault().join("notes/sub\u{fffd}/bad.md"), UNDECODABLE).unwrap();
+        let locked = f.vault().join("notes/sub\\");
+        if fs::create_dir(&locked).is_err() {
+            eprintln!("skipped: this filesystem does not create `sub\\`");
+            return;
+        }
+        fs::write(locked.join("inside.md"), "inside").unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read_dir(&locked).is_ok() {
+            fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+            eprintln!("skipped: this account reads mode-000 directories");
+            return;
+        }
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let place = DocumentPath::rendered(Path::new("notes/sub\\"));
+        let before = sorted_kinds(&mut attachment.store, place.as_str());
+        let quarantined = sorted_kinds(&mut attachment.store, "notes/sub\u{fffd}/bad.md");
+
+        fs::remove_dir_all(f.vault().join("notes/sub\u{fffd}")).unwrap();
+        scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            &dirty_path(f.vault().as_path(), "notes/sub\u{fffd}"),
+            ProductionPolicy::new(2, 2).unwrap(),
+            &progress.healing(),
+            &exclusions(&attachment.registration, &attachment.shadows),
+        )
+        .unwrap();
+        let healed = sorted_kinds(&mut attachment.store, place.as_str());
+        let left = findings_at(&mut attachment.store, "notes/sub\u{fffd}/bad.md");
+        let mut scratch = scratch_store(
+            &f,
+            "quarantine-deleted-folder-scope-unlistable-oracle",
+            ProductionPolicy::new(2, 2).unwrap(),
+        );
+        let oracle = sorted_kinds(&mut scratch, place.as_str());
+        let totals = (
+            finding_total(&mut attachment.store),
+            finding_total(&mut scratch),
+        );
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert_eq!(
+            place.as_str(),
+            "notes/sub\u{fffd}",
+            "the refused folder does not render onto the deleted folder's place"
+        );
+        assert_eq!(
+            quarantined,
+            ["document/body-bytes-not-utf8"],
+            "the attach did not quarantine the document, so this proves nothing"
+        );
+        assert!(
+            !before.is_empty() && before.iter().all(|kind| !kind.starts_with("document/body")),
+            "the attach filed no unlistable-folder finding at the place, so this proves nothing: {before:?}"
+        );
+        assert_eq!(
+            healed, oracle,
+            "the heal of the deleted folder took a finding about the unlistable one"
+        );
+        assert_eq!(healed, before);
+        assert!(
+            left.is_empty(),
+            "the deleted folder's quarantine kept its finding"
+        );
+        assert_eq!(totals.0, totals.1);
+        ops.detach(&name, attachment);
+    }
+
     /// **The content finding goes alone where a refused spelling renders onto
     /// the same place.** A file whose name the grammar refuses renders onto the
     /// place the deleted document was spelled as, and a heal scoped to the
@@ -15847,6 +15970,7 @@ mod tests {
         if !write_or_report(&f.vault().join("elsewhere\\name.md"), b"body") {
             return;
         }
+        fs::write(f.vault().join("elsewhere\u{fffd}bad.md"), UNDECODABLE).unwrap();
         fs::write(f.vault().join("steady.md"), "steady").unwrap();
         // A root whose own spelling the directory grammar refuses, sorted after
         // the file the staging below breaks on so the descent into it has not
@@ -15876,9 +16000,17 @@ mod tests {
             "the heal did not file the unrelated spelling, so this proves nothing"
         );
 
-        // The unrelated spelling leaves ahead of the enumeration, so nothing the
-        // walk below reads renders onto the place its finding stands at.
+        assert_eq!(
+            sorted_kinds(&mut store, "elsewhere\u{fffd}bad.md"),
+            ["document/body-bytes-not-utf8"],
+            "the heal did not quarantine the marker-named document, so this proves nothing"
+        );
+
+        // The unrelated spelling and the marker-named document leave ahead of
+        // the enumeration, so nothing the walk below reads renders onto the
+        // places their findings stand at.
         fs::remove_file(f.vault().join("elsewhere\\name.md")).unwrap();
+        fs::remove_file(f.vault().join("elsewhere\u{fffd}bad.md")).unwrap();
 
         // The walk yields the file that sorts ahead of the root, and the root
         // goes before the walk descends into it.
@@ -15916,6 +16048,13 @@ mod tests {
             findings_at(&mut store, "elsewhere\u{fffd}name.md").len(),
             1,
             "the walk took a rendered place the vanished root it read nothing at hid"
+        );
+        // The hold reaches the content finding at a place the walk read the
+        // own spelling of, as it reaches every marker-carrying place.
+        assert_eq!(
+            findings_at(&mut store, "elsewhere\u{fffd}bad.md").len(),
+            1,
+            "the walk took a content finding at a marker-carrying place the hold covers"
         );
         assert_eq!(stored_paths(&mut store), ["steady.md"]);
     }
