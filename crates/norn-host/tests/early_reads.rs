@@ -3829,6 +3829,24 @@ fn a_linked_folder_replaced_by_a_folder_advises_only_the_link_inside_it() {
 }
 
 #[test]
+fn a_link_inside_a_refused_folder_moved_in_on_requeue_keeps_its_advisory() {
+    let fixture = Fixture::new("requeue-refused-folder-link");
+    // A backslash refuses every path beneath the folder, so nothing under it
+    // derives; a whole-vault walk still passes over the link inside it.
+    let staging = fixture.scratch.join("staging");
+    std::fs::create_dir_all(&staging).unwrap();
+    std::os::unix::fs::symlink(fixture.root.join("doc00.md"), staging.join("l.md")).unwrap();
+    let (advisories, rewalks) = advisories_after_a_change_at(
+        &fixture,
+        LoadingBoundary::StepComplete(Step::Content),
+        |root| std::fs::rename(&staging, root.join("q\\y")).unwrap(),
+    );
+    assert!(advises_link(&advisories, "q\\y/l.md"), "{advisories:?}");
+    assert_eq!(rewalks, 0);
+    assert_eq!(advisories, reference_advisories(&fixture));
+}
+
+#[test]
 fn a_link_replaced_while_relations_judges_links_drops_its_advisory() {
     let fixture = Fixture::new("relations-requeue-link-replaced");
     std::os::unix::fs::symlink("doc00.md", fixture.root.join("link.md")).unwrap();

@@ -312,8 +312,10 @@ pub struct ProductionAttachment {
     /// data root. Whether the vault ignores the fallback is read when a
     /// status reports it, not here.
     shadow_advisory: Option<AttachmentAdvisory>,
-    /// The first symbolic links the last walk of the whole vault passed over,
-    /// in path order and at most [`SKIPPED_LINKS_RETAINED`] of them.
+    /// The first symbolic links the vault holds as of the last walk of the
+    /// whole vault, in path order and at most [`SKIPPED_LINKS_RETAINED`] of
+    /// them. A from-zero build's list is its walk with each requeue's reading
+    /// merged in, or a links-only walk where those merges left it inexact.
     skipped_links: SkippedLinks,
     last_shadow_sweep: Instant,
     /// When the store is next asked to answer for its own consistency.
@@ -1790,8 +1792,9 @@ fn placement_advisory(
 /// yields them in.
 ///
 /// **A list the bound cut knows where its knowledge ends.** `beyond` is the
-/// first link the bound left out: every link seen that orders before it is
-/// held, and none at or after it is. A construction requeue that read a root
+/// first link the bound left out: every link that orders before it, as of the
+/// latest reading of its place, is held, and none at or after it is — `beyond`
+/// itself may since have left the tree. A construction requeue that read a root
 /// whole replaces what the list held there ([`SkippedLinks::merge`]), so a link
 /// that left the tree mid-build leaves the list too. Where the bound had cut
 /// the list, the hole that leaves may be a dropped link's to fill, which only
@@ -6272,14 +6275,33 @@ mod tests {
     #[test]
     fn a_merge_is_cut_at_the_earlier_first_dropped_link() {
         let order = StoredPathOrder::Sensitive;
+        let folder = || seen((0..=SKIPPED_LINKS_RETAINED).map(|n| format!("m/{n:02}.md")));
         let mut step = seen(["a.md".into(), "z.md".into()]);
-        let mut requeue = seen((0..=SKIPPED_LINKS_RETAINED).map(|n| format!("m/{n:02}.md")));
+        let mut requeue = folder();
         requeue.read_whole(Path::new("m"));
         step.merge(requeue, order);
         assert_eq!(step.links().count(), SKIPPED_LINKS_RETAINED);
         assert_eq!(held(&step)[0], "a.md");
         assert!(!held(&step).contains(&"z.md".to_owned()));
         assert!(step.exact());
+
+        // A requeue list with a hole of its own: a later requeue took two of
+        // its links out. Merged beside `a.md`, it fills the bound only if
+        // `z.md` survives — and `z.md` orders after `m/16.md`, which this list
+        // knows is a link and does not hold.
+        let mut step = seen(["a.md".into(), "z.md".into()]);
+        let mut relations = SkippedLinks::default();
+        let mut requeue = folder();
+        requeue.read_whole(Path::new("m"));
+        relations.merge(requeue, order);
+        let mut later = SkippedLinks::default();
+        later.read_whole(Path::new("m/03.md"));
+        later.read_whole(Path::new("m/04.md"));
+        relations.merge(later, order);
+        step.merge(relations, order);
+        assert!(!held(&step).contains(&"z.md".to_owned()));
+        assert_eq!(step.links().count(), SKIPPED_LINKS_RETAINED - 1);
+        assert!(!step.exact());
     }
 
     /// **The bound keeps the first links in path order whatever order they
