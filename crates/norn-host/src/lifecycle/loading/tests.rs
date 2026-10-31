@@ -460,19 +460,28 @@ fn a_replacement_construction_takes_a_fresh_meeting() {
     let replacement = begin(&progress, &subscription, &store, &budget);
     {
         let state = entry.gate.lock().unwrap();
+        let Some(Construction::Building(building)) = &state.construction else {
+            panic!("the replacement construction stands");
+        };
+        // Late reports of the earlier write may reach the new authority at any
+        // moment: the watcher records them under the authority's own lock, not
+        // this gate. The fresh meeting is therefore judged against what that
+        // authority had accepted around the meeting, never against zero and
+        // never against a later reading.
+        let before = building.authority.sequence();
         assert!(matches!(
             state.early(Request::Find(&params), &mut meeting),
             Early::Waits
         ));
-        let Some(Construction::Building(building)) = &state.construction else {
-            panic!("the replacement construction stands");
-        };
-        // Late reports of the earlier write may reach the new authority, so the
-        // fresh meeting is judged against that authority, never against zero.
+        let after = building.authority.sequence();
         let meeting = meeting.as_ref().unwrap();
         assert_ne!(meeting.token, first);
         assert_eq!(meeting.token, replacement);
-        assert_eq!(meeting.sequence, building.authority.sequence());
+        assert!(
+            (before..=after).contains(&meeting.sequence),
+            "the meeting took sequence {} outside the replacement authority's {before}..={after}",
+            meeting.sequence
+        );
     }
     subscription.finish_heal().unwrap();
 }
