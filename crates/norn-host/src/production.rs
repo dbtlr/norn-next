@@ -17036,8 +17036,9 @@ mod tests {
         ops.maintain(&name, &mut attachment)
             .expect("a store nothing has damaged");
 
-        // The triggers are the only thing that writes the index, so a body edit
-        // behind their back is a disagreement nothing else notices.
+        // On a finished store the triggers are the only thing that writes the
+        // index, so a body edit behind their back is a disagreement nothing
+        // else notices.
         norn_store::induced_failure::execute_out_of_band(
             &mut attachment.store,
             "DROP TRIGGER documents_fts_update;

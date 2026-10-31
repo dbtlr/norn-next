@@ -14,9 +14,10 @@
 //! rows mean.
 //!
 //! Its verbs translate cleanly to SQL and carry no business logic beyond how a
-//! query is composed, save two exceptions. One is the rule [ADR 0027] rules
+//! query is composed, save two exceptions. One is the rule [ADR 0044] rules
 //! into it: link health, judged in SQL and filed inside every changeset
-//! ([`Request::apply_increment`]). The other is the similarity measure
+//! ([`Request::apply_increment`]), save a from-zero build's, which judges every
+//! stored link once after its facts have landed. The other is the similarity measure
 //! ([`similarity`]): the stem fold, the padded trigram set, the Jaccard score,
 //! its cutoff and the least shared count the cutoff implies, and the optimal
 //! string alignment distance. The stem trigram index is written by it, and the
@@ -25,7 +26,7 @@
 //! trigram is. The store takes **typed facts rather than documents**: parsing
 //! is orchestration's job, so nothing here reads document text.
 //!
-//! [ADR 0027]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0027-link-health-rides-the-changeset.md
+//! [ADR 0044]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0044-a-from-zero-build-judges-link-health-once.md
 //!
 //! # Where to start
 //!

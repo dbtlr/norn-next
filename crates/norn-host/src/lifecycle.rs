@@ -1027,6 +1027,11 @@ pub enum HostError {
     WorkerStopped,
 }
 
+/// How often [`Host::demand_until_ready`] re-reads an entry nothing woke it
+/// for: the latency, not the cost, of finding a build that ended short of
+/// `Ready`. `Ready` itself wakes the wait at once.
+const SERVING_RECHECK: Duration = Duration::from_millis(50);
+
 impl fmt::Display for HostError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -4348,7 +4353,7 @@ impl HoldReading {
 /// warming state of that attach. The second is the demand an entry taking in
 /// a change published when the read's settle bound ran out. The third is an
 /// entry serving every surface but this one, or a read another holder kept
-/// from the entry past its bound. First-index availability expiry carries the
+/// from the entry past its bound. A from-zero build's availability expiry carries the
 /// current warming demand separately from an ordinary settle expiry.
 ///
 /// **No wire rendering is written here.** A demand renders through
@@ -5677,6 +5682,57 @@ impl<O: EntryOps> Host<O> {
             }
         }
         self.demand(name)
+    }
+
+    /// Demand `name` and wait, with no bound, until its entry is `Ready`,
+    /// answering the lease that holds it there; or answer what the entry
+    /// publishes once it stands at anything else with no work under way.
+    ///
+    /// This is the foreground first build initializing a vault runs (ADR
+    /// 0045): a vault nothing has attached runs its from-zero build under the
+    /// demand made here, for as long as that build takes, where a read would
+    /// be refused as still indexing. An entry working — a claim held, its job
+    /// scheduled or running, or a release in flight that the lease re-arms —
+    /// is waited for; one that stands quiet short of `Ready` has ended its
+    /// work there: a failure of the vault as a whole publishes its cause as
+    /// the entry's trust, a park or an out-of-service entry its own answer.
+    /// A host coming down ends the wait with what the entry publishes then.
+    ///
+    /// **`Ready` wakes the wait at once; a failure is found by re-reading.**
+    /// Publishing `Ready` moves the entry's read stance, which wakes a waiter
+    /// on the gate's signal; an entry that warms and then stands untrusted
+    /// refuses reads throughout, so nothing wakes, and the wait re-reads the
+    /// entry every [`SERVING_RECHECK`] instead.
+    pub(crate) fn demand_until_ready(&self, name: &VaultName) -> Result<DemandLease<O>, Demand> {
+        let Some(entry) = self.shared.entries.get(name) else {
+            return Err(Demand::UnknownVault);
+        };
+        // The worker pool gone is the host coming down: nothing more runs
+        // against the entry, so what it publishes now is the answer.
+        let Ok(lease) = self.demand_entry(name, Arc::clone(&entry)) else {
+            let state = entry.gate.lock().expect("entry gate poisoned");
+            return Err(state.published_demand());
+        };
+        loop {
+            let state = entry.gate.lock().expect("entry gate poisoned");
+            let published = state.published_demand();
+            if published == Demand::State(TrustState::Ready) {
+                drop(state);
+                return Ok(lease);
+            }
+            let working = state.claim.is_held() || state.detach_in_flight;
+            if !working
+                || self.shared.shutting_down.load(Ordering::SeqCst)
+                || !matches!(published, Demand::State(_))
+            {
+                return Err(published);
+            }
+            let seen = entry.gate.stance_generation();
+            drop(state);
+            entry
+                .gate
+                .wait_for_the_stance_to_move(seen, Instant::now() + SERVING_RECHECK);
+        }
     }
 
     /// Take one read's hold on an entry: the handle its reads run on, the

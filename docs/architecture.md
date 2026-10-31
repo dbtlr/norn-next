@@ -2840,6 +2840,10 @@ driving scoped `norn-store` increments; the heal ladder splits across the same t
 (see [the heal ladder](#2-the-heal-ladder)).
 
 Full-text search and the stem trigram index are maintained transactionally inside the increment.
+The full-text triggers are the index's only writer on a finished store; a from-zero build
+holds no triggers while it runs and fills the index in committed batches from the stored
+bodies in step 5, installing the triggers in the closing transaction that clears its mark ([ADR
+0045](decisions/0045-a-from-zero-build-writes-once-in-steps.md)).
 The trigram index is a lane-1 projection of the document path alone, invalidated by the
 derivation version. Embeddings are
 lane-2 engine state: eventually consistent, held in the engine's sidecar database rather
@@ -3169,7 +3173,18 @@ builder's observed-field facets plus one count per observed key, on one held sna
 the reload's re-pin: the starter's fingerprint is not the empty schema's, so the schema-keyed
 rows are discarded and the whole vault is walked again. Unlike the other write verbs,
 `Host::init` answers synchronously rather than with a `PendingApply`, and a vault whose
-standing schema cannot be read answers the entry's untrusted refusal. **`repair` plans a batch
+standing schema cannot be read answers the entry's untrusted refusal. **Initializing a vault
+runs its first build in the foreground** ([ADR
+0045](decisions/0045-a-from-zero-build-writes-once-in-steps.md)): past the `schema_elsewhere`
+answer, `init` demands the vault and waits, with no bound, until it is `Ready`, holding that
+demand until it answers, so a vault nothing has attached runs its from-zero build inside the
+call rather than refusing as still indexing. A build that ends short of `Ready` — a failure of
+the vault as a whole published as the entry's trust, a park, the entry taken out of service or
+the host coming down — is what `init` answers, read as a read refusal reads it, and the
+registration stands; an unreadable document or directory never ends it (ADR 0046). `Ready`
+wakes the wait at once; a build that ends short of it is found by re-reading the entry every
+50 ms, since an entry warming and then untrusted refuses reads throughout and moves nothing a
+waiter is woken by. **`repair` plans a batch
 of findings into one resolved plan.** `Host::repair` reads the next batch of the findings its
 request selects — validate's predicates, kinds, severity and rule — as whole documents in path
 order (the builder's repair batch), under one read hold. `limit` is a soft target, and a batch

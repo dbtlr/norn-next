@@ -680,7 +680,7 @@ fn routes_declared(row: &FindingRow, repairing: &Repairing<'_>) -> bool {
 fn skipped(row: &FindingRow) -> SkippedFinding {
     if row.kind == FindingKind::Ambiguous {
         // A repair reads the finding at its own snapshot. Link health is
-        // re-decided inside every changeset (ADR 0027), so the head the row
+        // re-decided inside every changeset (ADR 0044), so the head the row
         // carries is the class at that snapshot.
         return skip(row, SkipReason::AmbiguousLink)
             .with_candidates(SkippedCandidates::documents(row.head.clone()));

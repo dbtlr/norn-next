@@ -7,7 +7,9 @@
 //! vault serves under it with its findings as they were; a vault whose schema
 //! stands is already set up; a registration reading its schema from a
 //! source is sent there; and a schema another writer creates after a preview
-//! refuses the previewed plan rather than being replaced.
+//! refuses the previewed plan rather than being replaced. An init on a vault
+//! nothing has attached waits for its first build and answers at `Ready`, or
+//! answers the failure that ended that build.
 #![cfg(unix)]
 #![allow(clippy::disallowed_methods)] // Harness scaffolding: this suite's own tree.
 
@@ -20,8 +22,8 @@ use norn_testkit::process::Sandbox;
 use norn_wire::{
     AppliedTarget, ApplyMode, ApplyParams, ApplyReport, ControlFile, DocumentPath, ErrorDetail,
     FileState, FindingKind, InitParams, InitReport, OperationKind, PlanDocument, ReasonCode,
-    RefusedCheck, ResolvedPlan, SchemaSource, TargetResult, ValidateParams, ValidateReport,
-    VaultAddress,
+    RefusedCheck, ResolvedPlan, SchemaSource, TargetResult, TrustState, UntrustedReason,
+    ValidateParams, ValidateReport, VaultAddress,
 };
 
 const SCHEMA: &str = ".norn/schema.yaml";
@@ -216,6 +218,122 @@ fn an_init_applied_lands_the_starter_and_the_vault_reloads_under_it_findings_unc
     assert!(status.advisories.is_empty(), "{:?}", status.advisories);
     assert_eq!(status.drift, norn_wire::Drift::current());
     assert_eq!(findings(&host, &vault), before);
+}
+
+/// **An init on a vault nothing has attached runs its first build in the
+/// foreground** (ADR 0045): it waits for the from-zero build its own demand
+/// starts, for as long as that build takes, and answers once the vault is
+/// `Ready` — a preview with the starter over every document, an apply with
+/// the landed write — rather than refusing the vault as still indexing.
+#[test]
+fn an_init_on_a_vault_never_attached_answers_once_its_first_build_reaches_ready() {
+    {
+        let (_sandbox, vault) = a_vault("host-init-cold-preview", FILES);
+        let host = vault.host();
+        let plan = previewed(
+            host.init(&params(&vault, ApplyMode::Preview))
+                .expect("an init preview on a vault never attached answers"),
+        );
+        assert!(starter_of(&plan).ends_with(OBSERVED), "{plan:?}");
+        assert_eq!(host.state(vault.name()), Ok(TrustState::Ready));
+    }
+    let (_sandbox, vault) = a_vault("host-init-cold-apply", FILES);
+    let host = vault.host();
+    let InitReport::Scaffolded {
+        report,
+        reload_refused,
+        ..
+    } = host
+        .init(&params(&vault, ApplyMode::Apply))
+        .expect("an init apply on a vault never attached answers")
+    else {
+        panic!("an init apply answered another outcome");
+    };
+    let ApplyReport::Applied { targets, .. } = *report else {
+        panic!("an init apply answered {report:?}");
+    };
+    assert_eq!(
+        targets,
+        vec![AppliedTarget::new(schema(), TargetResult::Wrote)]
+    );
+    assert_eq!(
+        attach::reload_refusal_once_settled(&host, vault.name(), reload_refused),
+        None
+    );
+}
+
+/// **An init whose first build fails answers the failure, and the vault
+/// stays registered**: a vault schema this build cannot read is a failure of
+/// the vault as a whole, so the build publishes it as the entry's trust and
+/// init answers that cause — not that the vault is still indexing — leaving
+/// the registration standing for the next use.
+#[test]
+fn an_init_whose_first_build_fails_answers_the_failure_and_the_vault_stays_registered() {
+    let (_sandbox, vault) = a_vault("host-init-cold-failure", FILES);
+    std::fs::create_dir_all(vault.path().join(".norn")).expect("the control folder");
+    std::fs::write(vault.path().join(SCHEMA), b"\tinvalid: yaml\n")
+        .expect("write an unreadable schema");
+    let host = vault.host();
+
+    let refused = host
+        .init(&params(&vault, ApplyMode::Preview))
+        .expect_err("an init over a vault whose first build fails is refused");
+    assert_eq!(
+        refused.code(),
+        &ReasonCode::HostEntryUntrusted,
+        "{refused:?}"
+    );
+    assert!(
+        matches!(
+            refused.detail(),
+            ErrorDetail::EntryUntrusted {
+                reason: UntrustedReason::SchemaUnreadable { .. },
+                ..
+            }
+        ),
+        "{refused:?}"
+    );
+    let standing = host
+        .state(vault.name())
+        .expect_err("the vault stands untrusted");
+    assert_eq!(
+        standing.code(),
+        &ReasonCode::HostEntryUntrusted,
+        "the failed init left the vault {standing:?}, not registered and untrusted"
+    );
+}
+
+/// **An init whose store will not open answers that refusal rather than
+/// waiting on it**: a directory standing where the vault's derived store is
+/// created fails the attach before any construction begins, an environmental
+/// refusal published as the entry's trust. The entry warms and then stands
+/// untrusted, refusing reads throughout, so nothing it publishes wakes init's
+/// wait; init finds the ending by re-reading the entry, and answers it.
+#[test]
+fn an_init_whose_store_will_not_open_answers_the_refusal() {
+    let (_sandbox, vault) = a_vault("host-init-store-refused", FILES);
+    let blocker = vault.database();
+    std::fs::create_dir_all(blocker.join("in-the-way")).expect("a directory where the store goes");
+    let host = vault.host();
+
+    let refused = host
+        .init(&params(&vault, ApplyMode::Preview))
+        .expect_err("an init over a store that will not open is refused");
+    assert_eq!(
+        refused.code(),
+        &ReasonCode::HostEntryUntrusted,
+        "{refused:?}"
+    );
+    assert!(
+        matches!(
+            refused.detail(),
+            ErrorDetail::EntryUntrusted {
+                reason: UntrustedReason::EnvironmentalRefusal { .. },
+                ..
+            }
+        ),
+        "{refused:?}"
+    );
 }
 
 /// **Run again over a vault whose schema stands, init is already set up**:

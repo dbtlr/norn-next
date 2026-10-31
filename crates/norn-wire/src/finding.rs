@@ -19,7 +19,7 @@
 //! the schema rules selecting the document, per ADR 0035; the field is the
 //! finding's `target`. `link/…` is a fact about one link a document holds —
 //! broken, ambiguous, missing the heading or block its target names, or
-//! resolving through a `vault://` scheme Obsidian cannot open — per ADR 0027
+//! resolving through a `vault://` scheme Obsidian cannot open — per ADR 0044
 //! and ADR 0040; the document it stands in still derives whole.
 //!
 //! **Rule judgment in derivation files the schema-judged kinds.** The nine
@@ -352,7 +352,7 @@ impl FindingKind {
     }
 
     /// The severity a producer files this kind at when it holds no severity of
-    /// its own to state: warning for every link-health kind, per ADR 0027;
+    /// its own to state: warning for every link-health kind, per ADR 0044;
     /// warning for every kind judged against the schema rules, which is the
     /// severity a rule stating none is reported at — a finding citing rules
     /// that state one is reported at the highest of theirs instead, per ADR

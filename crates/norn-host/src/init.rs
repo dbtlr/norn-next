@@ -34,6 +34,13 @@
 //! schema was deleted while attached, init's reload is what activates that
 //! deletion, and the deleted schema's findings go.
 //!
+//! **Init answers at `Ready`** (ADR 0045). Initializing a vault runs its
+//! first build in the foreground: past the `schema_elsewhere` answer, init
+//! demands the vault and waits, with no bound, until it is `Ready`, so a
+//! vault nothing has attached runs its from-zero build inside the call
+//! rather than refusing as still indexing. A build that ends short of
+//! `Ready` is what init answers, and the registration stands.
+//!
 //! **The starter is a pure function of the vault's observed field universe**
 //! ([`starter_schema`]), read through the Layer 3 builders in process on one
 //! snapshot ([`observed_fields`]): the describe builder's observed-field
@@ -64,7 +71,7 @@ use norn_wire::{
 };
 
 use crate::apply::{PlanGround, unreadable};
-use crate::lifecycle::{EntryOps, Host, ReadSource, SnapshotSource};
+use crate::lifecycle::{EntryOps, Host, ReadRefusal, ReadSource, SnapshotSource};
 use crate::planner::control::control_path;
 use crate::planner::view::{Entry, TreeView, VaultView, identity_of};
 use crate::read::{BuildRefused, Built};
@@ -250,6 +257,11 @@ where
     /// reported as a reload pending, and a host gone before the reload ran
     /// answers the landing alone, since the next attach reads it.
     ///
+    /// **Answered at `Ready`.** Init waits, with no bound, for the vault's
+    /// first build — or any work the entry has under way — to reach
+    /// `Ready`, and answers what the entry publishes where that work ends
+    /// short of it.
+    ///
     /// **Answered synchronously.** The other write verbs answer a
     /// [`PendingApply`](crate::PendingApply) a caller can stop waiting on;
     /// init waits inside the call for its apply and its reload, and answers
@@ -266,6 +278,12 @@ where
         {
             return Ok(InitReport::schema_elsewhere(source));
         }
+        // The vault's first build runs in the foreground: init answers once
+        // the vault is `Ready`, or with what ended that build short of it.
+        // The lease holds the vault attached until init has answered.
+        let _serving = self
+            .demand_until_ready(&name)
+            .map_err(|ended| ReadRefusal::NotServing(ended).answer(&name))?;
         let (plan, forecast) = match self.plan_starter(&name, &params.vault)? {
             Starter::AlreadySetUp(schema) => return Ok(InitReport::already_set_up(schema)),
             Starter::Planned(plan, forecast) => (*plan, forecast),
