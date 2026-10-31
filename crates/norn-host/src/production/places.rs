@@ -122,38 +122,13 @@ impl PlaceReadings {
         }
         let mut spellings = Vec::new();
         for candidate in candidates {
-            // The reach decides by spelling alone and opens nothing, which is
-            // all a spelling finding is concluded by: an excluded root, a shadow
-            // or a link on the way is a name the vault walk never yields, and a
-            // name that is not a regular file is no document either.
-            let at = match vault.reach_or_unreadable(&candidate).map_err(effect)? {
-                Ok(norn_fs::Reach::Stands {
-                    kind: norn_fs::PathKind::RegularFile,
-                    at,
-                }) => at,
-                Ok(_) => continue,
-                // A folder on the way that cannot be listed hides what is under
-                // it, as it does from the vault walk.
-                Err(unreadable) if unreadable.kind() == norn_fs::UnreadKind::Directory => {
+            let at = match reach_spelling(vault, &candidate)? {
+                Reached::Stands(at) => at,
+                Reached::Hidden => {
                     hidden = true;
                     continue;
                 }
-                // A name whose own stat failed is still a spelling standing
-                // there, which the vault walk's revisit files the same way —
-                // unless the walk cannot enter the folder holding it, which a
-                // folder that lists and refuses a search is: the walk marks
-                // that folder and reads no name beneath it.
-                Err(unreadable) => {
-                    let parent = candidate.parent().unwrap_or(Path::new(""));
-                    if !parent.as_os_str().is_empty()
-                        && let Ok(norn_fs::WalkFact::Unreadable(folder)) = vault.fact(parent)
-                        && folder.kind() == norn_fs::UnreadKind::Directory
-                    {
-                        hidden = true;
-                        continue;
-                    }
-                    unreadable.path().clone()
-                }
+                Reached::Absent => continue,
             };
             let path = at.as_path();
             if !is_markdown(path) {
@@ -204,6 +179,61 @@ impl PlaceReadings {
         }
         self.folders[folder].as_ref()
     }
+}
+
+/// The places a drain of deferred spellings has read, and those of them a
+/// folder hid every spelling of, whose deferred spellings stand as the walk
+/// read them.
+#[derive(Default)]
+pub(super) struct DeferredReadings {
+    pub(super) readings: PlaceReadings,
+    pub(super) withheld: BTreeSet<DocumentPath>,
+}
+
+/// What the vault holds at one spelling a reading names.
+pub(super) enum Reached {
+    /// A regular file stands there, at the spelling its folder lists.
+    Stands(norn_fs::NormalizedPath),
+    /// A folder on the way hides it, as it hides it from the vault walk.
+    Hidden,
+    /// No file the vault walk would yield stands there.
+    Absent,
+}
+
+/// Reach one spelling by its name alone, opening nothing, which is all a
+/// spelling finding is concluded by: an excluded root, a shadow or a link on
+/// the way is a name the vault walk never yields, and a name that is not a
+/// regular file is no document either.
+pub(super) fn reach_spelling(
+    vault: &norn_fs::Vault,
+    spelling: &Path,
+) -> Result<Reached, JobFailure> {
+    Ok(match vault.reach_or_unreadable(spelling).map_err(effect)? {
+        Ok(norn_fs::Reach::Stands {
+            kind: norn_fs::PathKind::RegularFile,
+            at,
+        }) => Reached::Stands(at),
+        Ok(_) => Reached::Absent,
+        // A folder on the way that cannot be listed hides what is under it, as
+        // it does from the vault walk.
+        Err(unreadable) if unreadable.kind() == norn_fs::UnreadKind::Directory => Reached::Hidden,
+        // A name whose own stat failed is still a spelling standing there,
+        // which the vault walk's revisit files the same way — unless the walk
+        // cannot enter the folder holding it, which a folder that lists and
+        // refuses a search is: the walk marks that folder and reads no name
+        // beneath it.
+        Err(unreadable) => {
+            let parent = spelling.parent().unwrap_or(Path::new(""));
+            if !parent.as_os_str().is_empty()
+                && let Ok(norn_fs::WalkFact::Unreadable(folder)) = vault.fact(parent)
+                && folder.kind() == norn_fs::UnreadKind::Directory
+            {
+                Reached::Hidden
+            } else {
+                Reached::Stands(unreadable.path().clone())
+            }
+        }
+    })
 }
 
 #[cfg(test)]
