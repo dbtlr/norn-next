@@ -862,12 +862,11 @@ fn require_document_step(store: &Store) -> Result<(), StoreError> {
         ))
     }
 }
-/// Reject a writer invoked outside its construction phase.
-fn require_step(store: &Store, step: Step) -> Result<(), StoreError> {
-    if store.construction_step() == Some(step) {
-        Ok(())
-    } else {
-        Err(refused(store, "writing construction facts", "wrong step"))
+/// Reject a writer invoked outside the construction steps it serves.
+fn require_step(store: &Store, steps: &[Step]) -> Result<(), StoreError> {
+    match store.construction_step() {
+        Some(step) if steps.contains(&step) => Ok(()),
+        _ => Err(refused(store, "writing construction facts", "wrong step")),
     }
 }
 /// Keep each host chunk within the shared page bound.
@@ -904,8 +903,12 @@ pub(crate) const CONTENT_WRITE_SQL: &str = "UPDATE documents SET content_hash = 
 impl crate::Request<'_> {
     /// Keep a refused spelling until content settles its rendered place. Raw
     /// path bytes preserve invalid UTF-8 without a vault-sized host queue.
+    ///
+    /// The names step defers every refused spelling it meets, and the content
+    /// step defers one whose place still owes content; the content step's
+    /// drain ([`crate::Request::construction_spellings`]) takes both.
     pub fn defer_construction_spelling(&mut self, path: &[u8]) -> Result<(), StoreError> {
-        require_step(self.store, Step::Names)?;
+        require_step(self.store, &[Step::Names, Step::Content])?;
         self.store
             .connection()
             .execute(
