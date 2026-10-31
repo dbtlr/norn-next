@@ -303,6 +303,39 @@ fn an_init_whose_first_build_fails_answers_the_failure_and_the_vault_stays_regis
     );
 }
 
+/// **An init whose store will not open answers that refusal rather than
+/// waiting on it**: a directory standing where the vault's derived store is
+/// created fails the attach before any construction begins, an environmental
+/// refusal published as the entry's trust. The entry warms and then stands
+/// untrusted, refusing reads throughout, so nothing it publishes wakes init's
+/// wait; init finds the ending by re-reading the entry, and answers it.
+#[test]
+fn an_init_whose_store_will_not_open_answers_the_refusal() {
+    let (_sandbox, vault) = a_vault("host-init-store-refused", FILES);
+    let blocker = vault.database();
+    std::fs::create_dir_all(blocker.join("in-the-way")).expect("a directory where the store goes");
+    let host = vault.host();
+
+    let refused = host
+        .init(&params(&vault, ApplyMode::Preview))
+        .expect_err("an init over a store that will not open is refused");
+    assert_eq!(
+        refused.code(),
+        &ReasonCode::HostEntryUntrusted,
+        "{refused:?}"
+    );
+    assert!(
+        matches!(
+            refused.detail(),
+            ErrorDetail::EntryUntrusted {
+                reason: UntrustedReason::EnvironmentalRefusal { .. },
+                ..
+            }
+        ),
+        "{refused:?}"
+    );
+}
+
 /// **Run again over a vault whose schema stands, init is already set up**:
 /// nothing is planned and nothing written, previewed or applied, whether the
 /// schema is the starter an init wrote or one the vault came with.
