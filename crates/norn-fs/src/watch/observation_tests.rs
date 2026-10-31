@@ -627,6 +627,8 @@ fn take_build_roots_takes_the_window_and_leaves_rescans() {
     let taken = watch.take_build_roots().unwrap();
     assert_eq!(taken.roots.len(), 1);
     assert_eq!(taken.through, authority.sequence());
+    // A take empties the window: a root comes back only on a fresh report.
+    assert!(watch.take_build_roots().is_none());
     assert!(watch.finish_heal().unwrap().is_empty());
     watch.begin_heal();
     watch.state.lock().unwrap().rescan(RescanScope::Vault);
