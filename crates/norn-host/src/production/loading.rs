@@ -346,6 +346,14 @@ impl ProductionEntryOps {
         )?;
         let order = attachment.store.path_order();
         attachment.skipped_links.merge(relations.links, order);
+        attachment.skipped_links.settle();
+        // A requeue that took a link out of a list the bound had cut may have
+        // left out a link the bound dropped, which only a walk names again.
+        if !attachment.skipped_links.exact() {
+            self.evidence.count_link_rewalk();
+            attachment.skipped_links =
+                walk_skipped_links(&attachment.covered_root, &exclusions, order)?;
+        }
         attachment.store.begin_request().end_link_health_deferral();
         publisher.publish(Step::Relations);
         loop {

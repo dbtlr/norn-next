@@ -1784,36 +1784,148 @@ fn placement_advisory(
     }
 }
 
-/// The first [`SKIPPED_LINKS_RETAINED`] symbolic links one walk passed over,
-/// vault-relative, in the order the walk yielded them — which is path order.
+/// The first [`SKIPPED_LINKS_RETAINED`] symbolic links one job's walks passed
+/// over, vault-relative, in the walk's full-path byte order folded as the
+/// volume's stored path order folds it — the order a walk of the whole vault
+/// yields them in.
+///
+/// **A list the bound cut knows where its knowledge ends.** `beyond` is the
+/// first link the bound left out: every link seen that orders before it is
+/// held, and none at or after it is. A construction requeue that read a root
+/// whole replaces what the list held there ([`SkippedLinks::merge`]), so a link
+/// that left the tree mid-build leaves the list too. Where the bound had cut
+/// the list, the hole that leaves may be a dropped link's to fill, which only
+/// another walk can name ([`SkippedLinks::exact`]).
 #[derive(Debug, Default)]
-struct SkippedLinks(Vec<PathBuf>);
+struct SkippedLinks {
+    links: Vec<PathBuf>,
+    beyond: Option<PathBuf>,
+    /// The roots construction requeues read whole, kept through each merge
+    /// until the list settles: the links this list holds there are all the
+    /// links standing at or beneath each, as of the latest reading.
+    read_whole: Vec<PathBuf>,
+}
 
 impl SkippedLinks {
-    /// Record `link`, where fewer than the bound are recorded already.
-    fn saw(&mut self, link: &Path) {
-        if self.0.len() < SKIPPED_LINKS_RETAINED {
-            self.0.push(link.to_owned());
-        }
-    }
-
-    /// Combine scoped observations by the walk's full-path byte key, folded
-    /// according to the volume's stored path order, before retaining the bound.
-    fn merge(&mut self, other: Self, order: StoredPathOrder) {
-        if other.0.is_empty() {
+    /// Record `link`, keeping only the first links in `order`.
+    fn saw(&mut self, link: &Path, order: StoredPathOrder) {
+        let key = link_key(link, order);
+        if self
+            .beyond
+            .as_deref()
+            .is_some_and(|beyond| key >= link_key(beyond, order))
+        {
             return;
         }
-        self.0.extend(other.0);
-        self.0
-            .sort_by_cached_key(|path| path_key(path.as_os_str().as_encoded_bytes(), order));
-        self.0.dedup();
-        self.0.truncate(SKIPPED_LINKS_RETAINED);
+        match self
+            .links
+            .binary_search_by(|held| link_key(held, order).cmp(&key))
+        {
+            Ok(_) => return,
+            Err(at) => self.links.insert(at, link.to_owned()),
+        }
+        // Every link held orders before `beyond`, so the one the bound now
+        // drops is the new first link left out.
+        if self.links.len() > SKIPPED_LINKS_RETAINED {
+            self.beyond = self.links.pop();
+        }
     }
 
-    /// The links recorded, in the order they were seen.
-    fn links(&self) -> impl Iterator<Item = &Path> {
-        self.0.iter().map(PathBuf::as_path)
+    /// Record that a requeue read `root` whole, so merging this list replaces
+    /// the links another held at and beneath it.
+    fn read_whole(&mut self, root: &Path) {
+        self.read_whole.push(root.to_owned());
     }
+
+    /// Take a requeue's links: what this list held at or beneath a root the
+    /// requeue read whole gives way to what the requeue saw there, and the
+    /// bound keeps the first of both.
+    ///
+    /// The merged list knows no further than either list did, so it is cut at
+    /// the earlier of their `beyond`s. It carries the requeue's roots on, so a
+    /// list a requeue was merged into replaces the same roots when it is merged
+    /// in turn, until [`SkippedLinks::settle`].
+    fn merge(&mut self, other: Self, order: StoredPathOrder) {
+        let roots: Vec<Vec<u8>> = other
+            .read_whole
+            .iter()
+            .map(|root| link_key(root, order))
+            .collect();
+        if !roots.is_empty() {
+            self.links.retain(|link| {
+                let link = link_key(link, order);
+                !roots.iter().any(|root| at_or_beneath(&link, root))
+            });
+        }
+        if let Some(beyond) = other.beyond {
+            let cut = link_key(&beyond, order);
+            if self
+                .beyond
+                .as_deref()
+                .is_none_or(|held| cut < link_key(held, order))
+            {
+                self.links.retain(|link| link_key(link, order) < cut);
+                self.beyond = Some(beyond);
+            }
+        }
+        for link in &other.links {
+            self.saw(link, order);
+        }
+        self.read_whole.extend(other.read_whole);
+    }
+
+    /// Forget the roots requeues read whole, once this is the list an
+    /// attachment keeps and nothing merges it anywhere again.
+    fn settle(&mut self) {
+        self.read_whole = Vec::new();
+    }
+
+    /// Whether the links held are the first the tree holds: the bound never
+    /// cut the list, or it holds the bound's worth. A cut list a requeue made a
+    /// hole in may leave out a link the bound dropped.
+    fn exact(&self) -> bool {
+        self.beyond.is_none() || self.links.len() == SKIPPED_LINKS_RETAINED
+    }
+
+    /// The links recorded, in path order.
+    fn links(&self) -> impl Iterator<Item = &Path> {
+        self.links.iter().map(PathBuf::as_path)
+    }
+}
+
+fn link_key(link: &Path, order: StoredPathOrder) -> Vec<u8> {
+    path_key(link.as_os_str().as_encoded_bytes(), order)
+}
+
+/// Whether the path keyed `path` is the root keyed `root` or a path beneath it.
+fn at_or_beneath(path: &[u8], root: &[u8]) -> bool {
+    path.strip_prefix(root)
+        .is_some_and(|rest| rest.is_empty() || rest.first() == Some(&b'/'))
+}
+
+/// The first symbolic links a walk of the whole vault passes over now, read
+/// for nothing else.
+///
+/// A from-zero build runs it once, before Relations publishes, when a requeue
+/// left a hole in a list the bound had cut. It stops at the first link the
+/// bound leaves out, because the walk yields in the order the list keeps.
+fn walk_skipped_links(
+    root: &Path,
+    exclusions: &[PathBuf],
+    order: StoredPathOrder,
+) -> Result<SkippedLinks, JobFailure> {
+    let mut links = SkippedLinks::default();
+    for fact in walk(root, exclusions).map_err(effect)? {
+        if let norn_fs::WalkFact::Skipped(skip) = fact.map_err(effect)?
+            && let norn_fs::SkipReason::SymbolicLink(_) = skip.reason()
+        {
+            links.saw(skip.path().as_path(), order);
+            if links.beyond.is_some() {
+                break;
+            }
+        }
+    }
+    Ok(links)
 }
 
 /// The key this entry's maintainer lock and shadow home are both taken under.
@@ -3137,6 +3249,14 @@ fn scoped_increment_closed(
         if pending.names && pending.beneath_a_mark(reached_at.as_path())? {
             continue;
         }
+        // **A construction requeue's reading of a root replaces the links a
+        // step's walk held there.** Every arm below reads what stands at the
+        // root and beneath it, and records each link it passes over, so a link
+        // that became a file or a folder, or left the tree, leaves the step's
+        // list when this account is absorbed.
+        if pending.names {
+            pending.account.links.read_whole(reached_at.as_path());
+        }
         let (kind, rendered) = match reached {
             norn_fs::Reach::Refused(skip) => {
                 if pending.names {
@@ -3683,7 +3803,12 @@ fn quarantine_subtree(
                 pending.unreadable_fact(&unreadable, None)?;
                 continue;
             }
-            norn_fs::WalkFact::Skipped(_) => continue,
+            // Nothing under this root derives, and a link here is still one a
+            // walk of the whole vault passes over and an attachment names.
+            norn_fs::WalkFact::Skipped(skip) => {
+                pending.saw_link(skip.path().as_path(), skip.reason());
+                continue;
+            }
         };
         let path = file.path().as_path().to_owned();
         if !is_markdown(&path) {
@@ -5261,13 +5386,20 @@ impl<'s> Pending<'s> {
     /// A link is recorded among the job's skipped links as well, which is what
     /// an attachment's advisories name.
     fn passed_over(&mut self, root: &Path, reason: norn_fs::SkipReason) {
-        if let norn_fs::SkipReason::SymbolicLink(_) = reason {
-            self.account.links.saw(root);
-        }
+        self.saw_link(root, reason);
         if reason.stands() {
             return;
         }
         self.account.withheld.absorb(root);
+    }
+
+    /// Record `root` among the job's skipped links where a link is why the walk
+    /// passed it over.
+    fn saw_link(&mut self, root: &Path, reason: norn_fs::SkipReason) {
+        if let norn_fs::SkipReason::SymbolicLink(_) = reason {
+            let order = self.store.path_order();
+            self.account.links.saw(root, order);
+        }
     }
 
     /// Record one name a walk of this scope enumerated and opened nothing at, so
@@ -6079,6 +6211,91 @@ mod tests {
             .map(|link| AttachmentAdvisory::SymlinkSkipped { path: link.clone() })
             .collect();
         assert_eq!(ops.advisories(&attachment), advised);
+    }
+
+    fn held(links: &SkippedLinks) -> Vec<String> {
+        links
+            .links()
+            .map(|link| link.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    fn seen(paths: impl IntoIterator<Item = String>) -> SkippedLinks {
+        let mut links = SkippedLinks::default();
+        for path in paths {
+            links.saw(Path::new(&path), StoredPathOrder::Sensitive);
+        }
+        links
+    }
+
+    /// **A requeue's reading of a root replaces what the list held there**: a
+    /// link that is gone leaves, a link beside the root's name stays, and the
+    /// requeue's own links join in path order. Below the bound the result is
+    /// exact.
+    #[test]
+    fn a_root_read_whole_replaces_the_links_held_beneath_it() {
+        let order = StoredPathOrder::Sensitive;
+        let mut step = seen(["a".into(), "a-b.md".into(), "a/x.md".into(), "z.md".into()]);
+        let mut requeue = seen(["a/y.md".into()]);
+        requeue.read_whole(Path::new("a"));
+        step.merge(requeue, order);
+        assert_eq!(held(&step), ["a-b.md", "a/y.md", "z.md"]);
+        assert!(step.exact());
+    }
+
+    /// **A hole in a list the bound cut is not exact**, because the link the
+    /// bound dropped may be the one that fills it; a link added to a cut list
+    /// stays exact, as the bound still holds its worth of the first links.
+    #[test]
+    fn a_hole_in_a_cut_list_is_inexact_and_an_addition_is_not() {
+        let order = StoredPathOrder::Sensitive;
+        let paths = (0..=SKIPPED_LINKS_RETAINED).map(|n| format!("x{n:02}.md"));
+        let mut step = seen(paths.clone());
+        assert_eq!(step.links().count(), SKIPPED_LINKS_RETAINED);
+        assert!(step.exact());
+
+        let mut added = seen(paths);
+        added.merge(seen(["a.md".into()]), order);
+        assert_eq!(held(&added)[0], "a.md");
+        assert!(added.exact());
+
+        let mut requeue = SkippedLinks::default();
+        requeue.read_whole(Path::new("x03.md"));
+        step.merge(requeue, order);
+        assert!(!held(&step).contains(&"x03.md".to_owned()));
+        assert!(!step.exact());
+    }
+
+    /// **A merged list knows no further than either list did.** A requeue
+    /// whose own list the bound cut says nothing past its first dropped link,
+    /// so the merge holds nothing there either.
+    #[test]
+    fn a_merge_is_cut_at_the_earlier_first_dropped_link() {
+        let order = StoredPathOrder::Sensitive;
+        let mut step = seen(["a.md".into(), "z.md".into()]);
+        let mut requeue = seen((0..=SKIPPED_LINKS_RETAINED).map(|n| format!("m/{n:02}.md")));
+        requeue.read_whole(Path::new("m"));
+        step.merge(requeue, order);
+        assert_eq!(step.links().count(), SKIPPED_LINKS_RETAINED);
+        assert_eq!(held(&step)[0], "a.md");
+        assert!(!held(&step).contains(&"z.md".to_owned()));
+        assert!(step.exact());
+    }
+
+    /// **The bound keeps the first links in path order whatever order they
+    /// are seen in**, which is what lets requeues seen in any order merge.
+    #[test]
+    fn the_bound_keeps_the_first_links_in_any_order_seen() {
+        let mut paths: Vec<String> = (0..=SKIPPED_LINKS_RETAINED)
+            .map(|n| format!("x{n:02}.md"))
+            .collect();
+        paths.reverse();
+        let links = seen(paths);
+        let expected: Vec<String> = (0..SKIPPED_LINKS_RETAINED)
+            .map(|n| format!("x{n:02}.md"))
+            .collect();
+        assert_eq!(held(&links), expected);
+        assert_eq!(links.beyond.as_deref(), Some(Path::new("x16.md")));
     }
 
     /// **The bar on what a walk is told about shadows.** A fallback home is

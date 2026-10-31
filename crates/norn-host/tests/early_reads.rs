@@ -3625,37 +3625,14 @@ fn an_overflow_mid_requeue_stops_taking_and_converges() {
 #[test]
 fn a_symbolic_link_met_on_requeue_keeps_its_advisory() {
     let fixture = Fixture::new("requeue-link-advisory");
-    let probe = Probe::new([LoadingBoundary::StepComplete(Step::Content)]);
-    let ops = fixture.ops(probe.clone());
-    let account = ops.account();
-    let host = fixture.host_over(ops, norn_host::READ_SETTLE_BOUND);
-    let _release = Release(&probe);
-    let _demand = host.demand(&name()).unwrap();
-    probe.wait(LoadingBoundary::StepComplete(Step::Content));
-    std::os::unix::fs::symlink("doc00.md", fixture.root.join("link.md")).unwrap();
-    fact_recorded(&account, 0);
-    probe.release();
-    ready(&host);
-    let advisories = host.inspect(&name()).unwrap().advisories;
-    assert!(
-        advisories.iter().any(|advisory| matches!(
-            advisory, norn_host::AttachmentAdvisory::SymlinkSkipped { path } if path == "link.md"
-        )),
-        "{advisories:?}"
+    let (advisories, rewalks) = advisories_after_a_change_at(
+        &fixture,
+        LoadingBoundary::StepComplete(Step::Content),
+        |root| std::os::unix::fs::symlink("doc00.md", root.join("link.md")).unwrap(),
     );
-    drop(host);
-    let dirs = ConfigDirs::new(
-        fixture.scratch.join("reference-config"),
-        fixture.scratch.join("reference-data"),
-    )
-    .unwrap();
-    let reference = fixture.host_over(
-        ProductionEntryOps::new(dirs, ProductionPolicy::new(2, 2).unwrap()),
-        norn_host::READ_SETTLE_BOUND,
-    );
-    let _demand = reference.demand(&name()).unwrap();
-    ready(&reference);
-    assert_eq!(advisories, reference.inspect(&name()).unwrap().advisories);
+    assert!(advises_link(&advisories, "link.md"), "{advisories:?}");
+    assert_eq!(rewalks, 0, "an added link never re-walks the vault");
+    assert_eq!(advisories, reference_advisories(&fixture));
 }
 
 #[test]
@@ -3665,37 +3642,14 @@ fn requeued_link_advisories_keep_the_whole_walk_order() {
     for path in ["a-b.md", "a/x.md"] {
         std::os::unix::fs::symlink(fixture.root.join("doc00.md"), fixture.root.join(path)).unwrap();
     }
-    let probe = Probe::new([LoadingBoundary::StepComplete(Step::Content)]);
-    let ops = fixture.ops(probe.clone());
-    let account = ops.account();
-    let host = fixture.host_over(ops, norn_host::READ_SETTLE_BOUND);
-    let _release = Release(&probe);
-    let _demand = host.demand(&name()).unwrap();
-    probe.wait(LoadingBoundary::StepComplete(Step::Content));
-    std::os::unix::fs::symlink("doc00.md", fixture.root.join("link.md")).unwrap();
-    fact_recorded(&account, 0);
-    probe.release();
-    ready(&host);
-    let advisories = host.inspect(&name()).unwrap().advisories;
-    assert!(
-        advisories.iter().any(|advisory| matches!(
-            advisory, norn_host::AttachmentAdvisory::SymlinkSkipped { path } if path == "link.md"
-        )),
-        "{advisories:?}"
+    let (advisories, rewalks) = advisories_after_a_change_at(
+        &fixture,
+        LoadingBoundary::StepComplete(Step::Content),
+        |root| std::os::unix::fs::symlink("doc00.md", root.join("link.md")).unwrap(),
     );
-    drop(host);
-    let dirs = ConfigDirs::new(
-        fixture.scratch.join("reference-config"),
-        fixture.scratch.join("reference-data"),
-    )
-    .unwrap();
-    let reference = fixture.host_over(
-        ProductionEntryOps::new(dirs, ProductionPolicy::new(2, 2).unwrap()),
-        norn_host::READ_SETTLE_BOUND,
-    );
-    let _demand = reference.demand(&name()).unwrap();
-    ready(&reference);
-    assert_eq!(advisories, reference.inspect(&name()).unwrap().advisories);
+    assert!(advises_link(&advisories, "link.md"), "{advisories:?}");
+    assert_eq!(rewalks, 0, "an added link never re-walks the vault");
+    assert_eq!(advisories, reference_advisories(&fixture));
 }
 
 #[test]
@@ -3707,37 +3661,14 @@ fn requeued_link_advisories_retain_the_whole_walk_first_sixteen() {
         std::os::unix::fs::symlink(fixture.root.join("doc00.md"), fixture.root.join(&path))
             .unwrap();
     }
-    let probe = Probe::new([LoadingBoundary::StepComplete(Step::Content)]);
-    let ops = fixture.ops(probe.clone());
-    let account = ops.account();
-    let host = fixture.host_over(ops, norn_host::READ_SETTLE_BOUND);
-    let _release = Release(&probe);
-    let _demand = host.demand(&name()).unwrap();
-    probe.wait(LoadingBoundary::StepComplete(Step::Content));
-    std::os::unix::fs::symlink("doc00.md", fixture.root.join("a-c.md")).unwrap();
-    fact_recorded(&account, 0);
-    probe.release();
-    ready(&host);
-    let advisories = host.inspect(&name()).unwrap().advisories;
-    assert!(
-        advisories.iter().any(|advisory| matches!(
-            advisory, norn_host::AttachmentAdvisory::SymlinkSkipped { path } if path == "a-c.md"
-        )),
-        "{advisories:?}"
+    let (advisories, rewalks) = advisories_after_a_change_at(
+        &fixture,
+        LoadingBoundary::StepComplete(Step::Content),
+        |root| std::os::unix::fs::symlink("doc00.md", root.join("a-c.md")).unwrap(),
     );
-    drop(host);
-    let dirs = ConfigDirs::new(
-        fixture.scratch.join("reference-config"),
-        fixture.scratch.join("reference-data"),
-    )
-    .unwrap();
-    let reference = fixture.host_over(
-        ProductionEntryOps::new(dirs, ProductionPolicy::new(2, 2).unwrap()),
-        norn_host::READ_SETTLE_BOUND,
-    );
-    let _demand = reference.demand(&name()).unwrap();
-    ready(&reference);
-    assert_eq!(advisories, reference.inspect(&name()).unwrap().advisories);
+    assert!(advises_link(&advisories, "a-c.md"), "{advisories:?}");
+    assert_eq!(rewalks, 0, "an added link never re-walks the vault");
+    assert_eq!(advisories, reference_advisories(&fixture));
 }
 
 #[test]
@@ -3776,13 +3707,14 @@ fn link_advisories_requeued_during_step_four_equal_from_scratch() {
     probe.release();
     ready(&host);
     let advisories = host.inspect(&name()).unwrap().advisories;
-    assert!(
-        advisories.iter().any(|advisory| matches!(
-            advisory, norn_host::AttachmentAdvisory::SymlinkSkipped { path } if path == "a-c.md"
-        )),
-        "{advisories:?}"
-    );
+    assert!(advises_link(&advisories, "a-c.md"), "{advisories:?}");
     drop(host);
+    assert_eq!(advisories, reference_advisories(&fixture));
+}
+
+/// The advisories a second host's from-zero build over the fixture's tree, as
+/// it now stands, reports at Ready.
+fn reference_advisories(fixture: &Fixture) -> Vec<norn_host::AttachmentAdvisory> {
     let dirs = ConfigDirs::new(
         fixture.scratch.join("reference-config"),
         fixture.scratch.join("reference-data"),
@@ -3794,7 +3726,145 @@ fn link_advisories_requeued_during_step_four_equal_from_scratch() {
     );
     let _demand = reference.demand(&name()).unwrap();
     ready(&reference);
-    assert_eq!(advisories, reference.inspect(&name()).unwrap().advisories);
+    reference.inspect(&name()).unwrap().advisories
+}
+
+fn advises_link(advisories: &[norn_host::AttachmentAdvisory], link: &str) -> bool {
+    advisories.iter().any(|advisory| {
+        matches!(
+            advisory, norn_host::AttachmentAdvisory::SymlinkSkipped { path } if path == link
+        )
+    })
+}
+
+/// Hold a from-zero build at `held`, make `change` to the vault, and answer
+/// the advisories at Ready beside the links-only re-walks the build ran.
+///
+/// A `held` of [`LoadingBoundary::LinkHealthChunk`] makes the change while
+/// Relations judges links, so the build's last requeue is the one that takes
+/// it.
+fn advisories_after_a_change_at(
+    fixture: &Fixture,
+    held: LoadingBoundary,
+    change: impl FnOnce(&Path),
+) -> (Vec<norn_host::AttachmentAdvisory>, u64) {
+    let relations = held == LoadingBoundary::LinkHealthChunk;
+    let probe = Probe::new(if relations {
+        vec![held, LoadingBoundary::Published(Step::Relations)]
+    } else {
+        vec![held]
+    });
+    let ops = fixture.ops(probe.clone());
+    let account = ops.account();
+    let host = fixture.host_over(ops, norn_host::READ_SETTLE_BOUND);
+    let _release = Release(&probe);
+    let _demand = host.demand(&name()).unwrap();
+    probe.wait(held);
+    let before = account.read().build_facts_recorded;
+    change(&fixture.root);
+    fact_recorded(&account, before);
+    probe.release();
+    if relations {
+        probe.wait(LoadingBoundary::Published(Step::Relations));
+        probe.release();
+    }
+    ready(&host);
+    let advisories = host.inspect(&name()).unwrap().advisories;
+    (advisories, account.read().link_rewalks)
+}
+
+#[test]
+fn a_link_replaced_by_a_file_on_requeue_drops_its_advisory() {
+    let fixture = Fixture::new("requeue-link-replaced");
+    std::os::unix::fs::symlink("doc00.md", fixture.root.join("link.md")).unwrap();
+    let (advisories, rewalks) = advisories_after_a_change_at(
+        &fixture,
+        LoadingBoundary::StepComplete(Step::Content),
+        |root| {
+            std::fs::remove_file(root.join("link.md")).unwrap();
+            std::fs::write(root.join("link.md"), "# Now a file\n").unwrap();
+        },
+    );
+    assert!(!advises_link(&advisories, "link.md"), "{advisories:?}");
+    assert_eq!(rewalks, 0, "a list the bound never cut is exact as it is");
+    assert_eq!(advisories, reference_advisories(&fixture));
+}
+
+#[test]
+fn a_link_deleted_during_the_names_step_drops_its_advisory() {
+    let fixture = Fixture::new("requeue-link-deleted");
+    std::os::unix::fs::symlink("doc00.md", fixture.root.join("link.md")).unwrap();
+    let (advisories, rewalks) = advisories_after_a_change_at(
+        &fixture,
+        LoadingBoundary::StepComplete(Step::Names),
+        |root| std::fs::remove_file(root.join("link.md")).unwrap(),
+    );
+    assert!(!advises_link(&advisories, "link.md"), "{advisories:?}");
+    assert_eq!(rewalks, 0);
+    assert_eq!(advisories, reference_advisories(&fixture));
+}
+
+#[test]
+fn a_linked_folder_replaced_by_a_folder_advises_only_the_link_inside_it() {
+    let fixture = Fixture::new("requeue-linked-folder");
+    std::fs::create_dir_all(fixture.root.join("real")).unwrap();
+    std::os::unix::fs::symlink(fixture.root.join("real"), fixture.root.join("linked")).unwrap();
+    let (advisories, rewalks) = advisories_after_a_change_at(
+        &fixture,
+        LoadingBoundary::StepComplete(Step::Content),
+        |root| {
+            std::fs::remove_file(root.join("linked")).unwrap();
+            std::fs::create_dir(root.join("linked")).unwrap();
+            std::os::unix::fs::symlink(root.join("doc00.md"), root.join("linked/inner.md"))
+                .unwrap();
+        },
+    );
+    assert!(!advises_link(&advisories, "linked"), "{advisories:?}");
+    assert!(
+        advises_link(&advisories, "linked/inner.md"),
+        "{advisories:?}"
+    );
+    assert_eq!(rewalks, 0);
+    assert_eq!(advisories, reference_advisories(&fixture));
+}
+
+#[test]
+fn a_link_replaced_while_relations_judges_links_drops_its_advisory() {
+    let fixture = Fixture::new("relations-requeue-link-replaced");
+    std::os::unix::fs::symlink("doc00.md", fixture.root.join("link.md")).unwrap();
+    let (advisories, rewalks) =
+        advisories_after_a_change_at(&fixture, LoadingBoundary::LinkHealthChunk, |root| {
+            std::fs::remove_file(root.join("link.md")).unwrap();
+            std::fs::write(root.join("link.md"), "# Now a file\n").unwrap();
+        });
+    assert!(!advises_link(&advisories, "link.md"), "{advisories:?}");
+    assert_eq!(rewalks, 0);
+    assert_eq!(advisories, reference_advisories(&fixture));
+}
+
+#[test]
+fn a_link_removed_from_a_cut_list_recovers_the_link_the_bound_dropped() {
+    let fixture = Fixture::new("requeue-link-overflow");
+    std::fs::create_dir_all(fixture.root.join("a")).unwrap();
+    for n in 0..=16 {
+        std::os::unix::fs::symlink(
+            fixture.root.join("doc00.md"),
+            fixture.root.join(format!("a/x{n:02}.md")),
+        )
+        .unwrap();
+    }
+    let (advisories, rewalks) = advisories_after_a_change_at(
+        &fixture,
+        LoadingBoundary::StepComplete(Step::Content),
+        |root| {
+            std::fs::remove_file(root.join("a/x03.md")).unwrap();
+            std::fs::write(root.join("a/x03.md"), "# Now a file\n").unwrap();
+        },
+    );
+    assert!(!advises_link(&advisories, "a/x03.md"), "{advisories:?}");
+    assert!(advises_link(&advisories, "a/x16.md"), "{advisories:?}");
+    assert_eq!(rewalks, 1, "only a hole in a cut list re-walks the vault");
+    assert_eq!(advisories, reference_advisories(&fixture));
 }
 
 #[test]
