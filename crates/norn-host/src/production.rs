@@ -4853,8 +4853,13 @@ fn rows_the_changeset_leaves(changes: &[Change]) -> BTreeMap<&DocumentPath, bool
 /// discard clears the finding with no second mechanism.
 struct Pending<'s> {
     /// Construction walks write names only, including requeues during Content
-    /// through Relations. Only the initial Names step defers refused spellings.
+    /// through Relations. Refused spellings defer only through the content
+    /// step's drain ([`Pending::defers_spelling`]).
     names: bool,
+    /// Whether this scope is the content step's spelling drain, which files
+    /// every refused spelling it reads: occupancy has settled there, and a
+    /// spelling it deferred again would be one it reads again.
+    drains_spellings: bool,
     content: Vec<norn_store::ContentWrite>,
     misses: norn_wire::WatcherMisses,
     store: &'s mut Store,
@@ -4939,6 +4944,7 @@ impl<'s> Pending<'s> {
         };
         Ok(Pending {
             names,
+            drains_spellings: false,
             content: Vec::new(),
             misses: norn_wire::WatcherMisses::default(),
             store,
@@ -5292,7 +5298,7 @@ impl<'s> Pending<'s> {
 
     /// File the finding that says why a path contributes no facts.
     fn quarantine(&mut self, path: &Path, quarantine: Quarantine) -> Result<(), JobFailure> {
-        if self.store.construction_step() == Some(norn_store::Step::Names) {
+        if self.defers_spelling(path)? {
             self.store
                 .begin_request()
                 .defer_construction_spelling(path.as_os_str().as_encoded_bytes())
@@ -5301,6 +5307,34 @@ impl<'s> Pending<'s> {
             self.file(plan_quarantine(path, quarantine), None);
         }
         Ok(())
+    }
+
+    /// Whether a refused spelling at `path` waits for the content step's
+    /// spelling drain rather than filing now.
+    ///
+    /// **A refused spelling waits while its place still owes content.** A
+    /// provisional names row stands at that place and withholds the finding
+    /// ([`Pending::recordable`]), and only its content settles whether a row
+    /// stays: an undecodable document leaves none, and then the spelling
+    /// stands. Every place owes content through the names step. In the content
+    /// step a requeue asks the place: one it did not reset is derived by a
+    /// content page after the requeue ends, and nothing reads its spellings
+    /// again then. The drain itself files what it reads, and later steps defer
+    /// nothing, because every place has its content and a requeue there files a
+    /// reset place's spellings again once its content leaves no row.
+    fn defers_spelling(&mut self, path: &Path) -> Result<bool, JobFailure> {
+        if self.drains_spellings {
+            return Ok(false);
+        }
+        match self.store.construction_step() {
+            Some(norn_store::Step::Names) => Ok(true),
+            Some(norn_store::Step::Content) => self
+                .store
+                .begin_request()
+                .content_owed(&DocumentPath::rendered(path))
+                .map_err(store_effect),
+            _ => Ok(false),
+        }
     }
 
     /// Re-derive the spelling findings at `place` from every spelling that
@@ -13954,6 +13988,66 @@ mod tests {
                 }
                 ops.detach(&name, attachment);
             }
+        }
+        assert!(divergent.is_empty(), "{divergent:#?}");
+    }
+
+    /// **A refused spelling that appears beside a quarantined document at its
+    /// place is filed once that document's content settles.** `notes/..md`
+    /// renders onto the place `notes/\u{fffd}..md`, where an undecodable
+    /// document stands. Created during the names or content step, the spelling
+    /// is taken by a requeue while that document's provisional row still
+    /// withholds it, and the content step then quarantines the document and
+    /// leaves no row. The build files both findings there, as a from-scratch
+    /// derivation does; which one is filed first is not compared.
+    #[cfg(all(unix, feature = "induced-failure"))]
+    #[test]
+    fn a_refused_spelling_beside_a_quarantined_document_is_filed_once_content_settles() {
+        let mut divergent = Vec::new();
+        for moment in [
+            DocumentMoment::NamesPage,
+            DocumentMoment::NamesComplete,
+            DocumentMoment::ContentPage,
+            DocumentMoment::ContentComplete,
+        ] {
+            let f = Fixture::new("refused-beside-quarantine");
+            let notes = f.vault().join("notes");
+            fs::create_dir(&notes).unwrap();
+            fs::write(notes.join("\u{fffd}..md"), UNDECODABLE).unwrap();
+            fs::write(notes.join("a.md"), "# A\n").unwrap();
+            norn_fs::watch::settle_prior_changes(f.root.root(), lifecycle_budget().work()).unwrap();
+            let (ops, name) = f.ops(2);
+            let folder = notes.clone();
+            let probe = ChangeAt::new(moment, ops.account(), move || {
+                fs::write(folder.join("..md"), b"refused spelling").unwrap();
+            });
+            let ops = ops.with_loading_probe(Arc::new(probe));
+            let mut attachment = ops
+                .attach(&f.registration(), &ProgressReporter::disconnected())
+                .unwrap();
+            assert!(
+                ops.evidence.read().requeued_roots >= 1,
+                "{moment:?}: the build takes the fact"
+            );
+            let mut scratch = scratch_store(
+                &f,
+                "refused-beside-quarantine-oracle",
+                ProductionPolicy::new(2, 2).unwrap(),
+            );
+            let place = DocumentPath::rendered(Path::new("notes/..md"));
+            let mut built = spelling_outcome(&mut attachment.store, &place);
+            let mut oracle = spelling_outcome(&mut scratch, &place);
+            assert_eq!(
+                oracle.0.len(),
+                2,
+                "{moment:?}: the place holds both findings"
+            );
+            built.0.sort();
+            oracle.0.sort();
+            if built != oracle {
+                divergent.push(format!("{moment:?}: {built:#?} against {oracle:#?}"));
+            }
+            ops.detach(&name, attachment);
         }
         assert!(divergent.is_empty(), "{divergent:#?}");
     }
