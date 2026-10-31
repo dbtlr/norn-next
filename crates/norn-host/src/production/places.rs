@@ -181,6 +181,15 @@ impl PlaceReadings {
     }
 }
 
+/// The places a drain of deferred spellings has read, and those of them a
+/// folder hid every spelling of, whose deferred spellings stand as the walk
+/// read them.
+#[derive(Default)]
+pub(super) struct DeferredReadings {
+    pub(super) readings: PlaceReadings,
+    pub(super) withheld: BTreeSet<DocumentPath>,
+}
+
 /// What the vault holds at one spelling a reading names.
 pub(super) enum Reached {
     /// A regular file stands there, at the spelling its folder lists.

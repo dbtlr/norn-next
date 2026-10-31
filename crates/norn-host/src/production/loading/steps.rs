@@ -144,7 +144,7 @@ pub(super) fn documents(
     // Each deferred spelling's place is read again as the vault now spells
     // it, once per place, rather than filed from the names walk's record.
     let mut pending = Pending::new(store, policy.changeset_size, root, exclusions, &mut account)?;
-    let mut readings = places::PlaceReadings::default();
+    let mut readings = places::DeferredReadings::default();
     loop {
         let paths = pending
             .store

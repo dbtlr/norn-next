@@ -5156,32 +5156,35 @@ impl<'s> Pending<'s> {
     /// File a spelling the names walk deferred, once content has settled.
     ///
     /// **It files its whole place as the vault now spells it**, read once per
-    /// `readings`, rather than the deferred bytes alone: a fact since the names
-    /// walk may have removed the spelling, added another at its place or
-    /// respelled it, and the first finding this scope files at the place
-    /// replaces what a requeue filed there meanwhile. A spelling a folder now
-    /// hides is filed as the walk read it, since an unlistable folder withholds
-    /// the spelling-side findings beneath it (ADR 0046).
+    /// drain, rather than the deferred bytes alone: a fact since the names walk
+    /// may have removed the spelling, added another at its place or respelled
+    /// it, and the first finding this scope files at the place replaces what a
+    /// requeue filed there meanwhile. Only where a folder hides every spelling
+    /// of the place does a hidden one stand as the walk read it, since an
+    /// unlistable folder withholds the spelling-side findings beneath it
+    /// (ADR 0046); a place the reading reaches states a hidden one nowhere.
     fn file_deferred_spelling(
         &mut self,
         vault: &norn_fs::Vault,
-        readings: &mut places::PlaceReadings,
+        drain: &mut places::DeferredReadings,
         path: &Path,
     ) -> Result<(), JobFailure> {
-        if let places::Reached::Hidden = places::reach_spelling(vault, path)? {
-            if let Err(quarantine) = document_path(path) {
-                self.quarantine(path, quarantine)?;
-            }
-            return Ok(());
-        }
         let place = DocumentPath::rendered(path);
-        if !readings.first_reading(&place) {
-            return Ok(());
+        if drain.readings.first_reading(&place) {
+            match drain.readings.spellings(vault, &place)? {
+                Some(spellings) => return self.file_spellings(spellings),
+                None => {
+                    drain.withheld.insert(place.clone());
+                }
+            }
         }
-        match readings.spellings(vault, &place)? {
-            Some(spellings) => self.file_spellings(spellings),
-            None => Ok(()),
+        if drain.withheld.contains(&place)
+            && let places::Reached::Hidden = places::reach_spelling(vault, path)?
+            && let Err(quarantine) = document_path(path)
+        {
+            self.quarantine(path, quarantine)?;
         }
+        Ok(())
     }
 
     fn file_spellings(&mut self, mut spellings: Vec<places::Spelling>) -> Result<(), JobFailure> {
@@ -13046,6 +13049,94 @@ mod tests {
                 let place = DocumentPath::rendered(Path::new("notes/bad\\name.md"));
                 let built = spelling_outcome(&mut attachment.store, &place);
                 let oracle = spelling_outcome(&mut scratch, &place);
+                if built != oracle {
+                    divergent.push(format!("{case}: {built:#?} against {oracle:#?}"));
+                }
+                ops.detach(&name, attachment);
+            }
+        }
+        assert!(divergent.is_empty(), "{divergent:#?}");
+    }
+
+    /// **A spelling a folder hides beside one the drain reaches is stated
+    /// nowhere.** Two refused folders render onto one folder, each holding
+    /// `x.md`, so both files name one place. One folder stops listing during
+    /// the document steps, either with both files standing at the names walk
+    /// or with the visible one created during the build. A reading that
+    /// reaches a spelling at the place states only what it reached (ADR
+    /// 0046 withholds a hidden spelling only where every spelling is hidden),
+    /// so the build equals an ordinary build over the readable tree healed
+    /// once the folder is locked.
+    #[cfg(all(unix, feature = "induced-failure"))]
+    #[test]
+    fn a_hidden_spelling_beside_a_reached_one_is_stated_nowhere() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut divergent = Vec::new();
+        for moment in [
+            DocumentMoment::NamesComplete,
+            DocumentMoment::ContentPage,
+            DocumentMoment::ContentComplete,
+        ] {
+            for created in [false, true] {
+                let f = Fixture::new("refused-hidden-beside");
+                let hidden = f.vault().join("a\\b");
+                let visible = f.vault().join("a\u{1}b");
+                for folder in [&hidden, &visible] {
+                    if let Err(error) = fs::create_dir(folder) {
+                        eprintln!(
+                            "skipped: this filesystem does not create `{}`: {error}",
+                            folder.display()
+                        );
+                        return;
+                    }
+                }
+                fs::write(hidden.join("x.md"), "refused spelling").unwrap();
+                if !created {
+                    fs::write(visible.join("x.md"), "refused spelling").unwrap();
+                }
+                for index in 0..6 {
+                    fs::write(f.vault().join(format!("note-{index}.md")), "# Note\n").unwrap();
+                }
+                norn_fs::watch::settle_prior_changes(f.root.root(), lifecycle_budget().work())
+                    .unwrap();
+                let (ops, name) = f.ops(2);
+                let (locking, creating) = (hidden.clone(), visible.join("x.md"));
+                let probe = ChangeAt::new(moment, ops.account(), move || {
+                    if created {
+                        fs::write(&creating, "refused spelling").unwrap();
+                    }
+                    fs::set_permissions(&locking, fs::Permissions::from_mode(0o000)).unwrap();
+                });
+                let ops = ops.with_loading_probe(Arc::new(probe));
+                let mut attachment = ops
+                    .attach(&f.registration(), &ProgressReporter::disconnected())
+                    .unwrap();
+                let readable = fs::read_dir(&hidden).is_ok();
+                fs::set_permissions(&hidden, fs::Permissions::from_mode(0o755)).unwrap();
+                if readable {
+                    eprintln!("skipped: this account reads mode-000 directories");
+                    ops.detach(&name, attachment);
+                    return;
+                }
+                let case = format!("{moment:?}, visible created {created}");
+                let mut ordinary = scratch_store(
+                    &f,
+                    "refused-hidden-beside-oracle",
+                    ProductionPolicy::new(2, 2).unwrap(),
+                );
+                fs::set_permissions(&hidden, fs::Permissions::from_mode(0o000)).unwrap();
+                let healed = heal_documents(
+                    &mut ordinary,
+                    &f.vault(),
+                    &exclusions(&attachment.registration, &attachment.shadows),
+                    ProductionPolicy::new(2, 2).unwrap(),
+                    &ProgressReporter::disconnected().healing(),
+                );
+                fs::set_permissions(&hidden, fs::Permissions::from_mode(0o755)).unwrap();
+                healed.unwrap();
+                let place = DocumentPath::rendered(Path::new("a\\b/x.md"));
+                let built = spelling_outcome(&mut attachment.store, &place);
+                let oracle = spelling_outcome(&mut ordinary, &place);
                 if built != oracle {
                     divergent.push(format!("{case}: {built:#?} against {oracle:#?}"));
                 }
