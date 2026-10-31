@@ -3176,6 +3176,11 @@ fn scoped_increment_closed(
             Some(spelling) => pending.land_before_reading(spelling)?,
             None => pending.flush()?,
         }
+        // Several arms push and move on without landing, so the bound is held
+        // here, once per root, rather than by each of them.
+        if pending.is_full() {
+            pending.flush()?;
+        }
         // **What this leg may read is what the vault walk reaches**, and the
         // vault is asked once for it rather than re-read here: an excluded
         // root, a shadow basename and a symbolic link on the way down are one
@@ -11917,6 +11922,49 @@ mod tests {
         assert_eq!(
             (healed.documents, healed.findings),
             (built.documents, built.findings)
+        );
+        ops.detach(&name, attachment);
+    }
+
+    /// **Shared changesets stay within their bound.** Roots that push and move
+    /// on without landing — a vault file's birth among them — still commit
+    /// whenever the changeset fills, so no transaction outgrows the bound.
+    #[test]
+    fn a_scoped_heal_over_unrelated_vault_files_holds_each_changeset_to_its_bound() {
+        let f = Fixture::new("scoped-vault-file-bound");
+        fs::write(f.vault().join("kept.md"), "# Kept\n").unwrap();
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let normalizer = norn_fs::PathNormalizer::detect(&f.vault()).unwrap();
+        let files: usize = 24;
+        let dirty: std::collections::BTreeSet<_> = (0..files)
+            .map(|n| {
+                let relative = format!("image{n:02}.png");
+                fs::write(f.vault().join(&relative), b"png").unwrap();
+                normalizer.normalize(Path::new(&relative)).unwrap()
+            })
+            .collect();
+        let changeset_size = 8;
+        let before = ops.evidence.read();
+        {
+            let _job = ops.evidence.attributing();
+            scoped_increment(
+                &mut attachment.store,
+                f.vault().as_path(),
+                &dirty,
+                ProductionPolicy::new(8, changeset_size).unwrap(),
+                &progress.healing(),
+                &exclusions(&attachment.registration, &attachment.shadows),
+            )
+            .unwrap();
+        }
+        let spent = ops.evidence.read().since(before);
+        let least = files.div_ceil(changeset_size) as u64;
+        assert!(
+            (least..=least + 1).contains(&spent.changesets_applied),
+            "{files} vault files in changesets of {changeset_size} committed {} changesets",
+            spent.changesets_applied
         );
         ops.detach(&name, attachment);
     }
