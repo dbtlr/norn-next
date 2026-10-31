@@ -340,6 +340,11 @@ fn an_editor_atomic_save_reports_the_destination_path() {
 /// The closing negative is bounded by a later change, not by a clock: a
 /// backend delivers in order, so once the vault's own later write is reported,
 /// a report of the earlier write behind the link would already have arrived.
+///
+/// The link's own creation is settled before attaching. FSEvents can deliver
+/// it after [`Collector::start`] has emptied coverage, and a `linked` root is
+/// at or above `linked/behind.md`, so a late report of the link would read as
+/// a report of the write behind it.
 #[cfg(unix)]
 #[test]
 fn a_change_behind_a_linked_folder_outside_the_vault_is_not_reported() {
@@ -348,6 +353,8 @@ fn a_change_behind_a_linked_folder_outside_the_vault_is_not_reported() {
     std::fs::create_dir_all(&outside).expect("a folder outside the vault");
     std::os::unix::fs::symlink(&outside, scratch.vault().join("linked"))
         .expect("an in-vault link to it");
+    norn_fs::watch::settle_prior_changes(scratch.tree.root(), budget().work())
+        .expect("the link's creation has passed through the backend");
     let mut collector = Collector::start(&scratch.vault(), &scratch.schema());
 
     std::fs::write(outside.join("behind.md"), b"behind\n").expect("a write behind the link");
