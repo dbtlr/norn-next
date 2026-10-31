@@ -12860,15 +12860,17 @@ mod tests {
         f
     }
 
+    /// Each finding at a place by kind and detail, the kinds at `kept.md`, and
+    /// the store's finding total.
+    #[cfg(all(unix, feature = "induced-failure"))]
+    type SpellingOutcome = (Vec<(String, Option<String>)>, Vec<String>, u64);
+
     /// Each finding at `place` by kind and detail, in the order filed — the
     /// detail names the spelling it was read from — then the findings at
     /// `kept.md` and the store's finding total: what a spelling case is judged
     /// by, beside the whole derived vault, which reads no nested place.
     #[cfg(all(unix, feature = "induced-failure"))]
-    fn spelling_outcome(
-        store: &mut Store,
-        place: &DocumentPath,
-    ) -> (Vec<(String, Option<String>)>, Vec<String>, u64) {
+    fn spelling_outcome(store: &mut Store, place: &DocumentPath) -> SpellingOutcome {
         (
             findings_at(store, place.as_str())
                 .into_iter()
