@@ -3165,6 +3165,16 @@ fn scoped_increment_closed(
         if refused.iter().any(|taken| taken.covers(relative)) {
             continue;
         }
+        // **Roots share changesets; a root reads its range landed.** What the
+        // roots before this one queued stays queued unless it is about this
+        // root's range. The arms below whose readings reach past that range —
+        // a refusal, a directory, a refused spelling's places — land
+        // everything before them. A spelling no string holds addresses no
+        // range to test, so it lands.
+        match path.to_str() {
+            Some(spelling) => pending.land_before_reading(spelling)?,
+            None => pending.flush()?,
+        }
         // **What this leg may read is what the vault walk reaches**, and the
         // vault is asked once for it rather than re-read here: an excluded
         // root, a shadow basename and a symbolic link on the way down are one
@@ -3364,17 +3374,15 @@ fn scoped_increment_closed(
                         pending.passed_over(skip.path().as_path(), skip.reason());
                     }
                 }
-                pending.flush()?;
                 if let Some(scope) = scope {
-                    prune_subtree_ordered(
-                        pending.store,
-                        root,
-                        exclusions,
+                    pending.land_before_reading(HealScope::from(scope).as_str())?;
+                    queue_range_deaths(
+                        &mut pending,
                         scope,
+                        None,
                         policy,
                         progress,
                         stored_path_order(sensitivity),
-                        pending.account,
                     )?;
                     // **Either kind is a scope read to its end.** Nothing is at
                     // a path that is not there and so nothing is under it, and
@@ -3393,6 +3401,13 @@ fn scoped_increment_closed(
                     pending
                         .account
                         .walked(HealScope::from(scope), stored_path_order(sensitivity));
+                }
+                // A spelling either grammar refuses has its places read off
+                // the store, past this root's range, so the deaths queued
+                // above land first. An admitted spelling has no place to read
+                // and its deaths wait for the next landing.
+                if identity.is_err() || prefix.is_none() {
+                    pending.flush()?;
                 }
                 places::read_places_of_a_refused_spelling(
                     &mut pending,
@@ -3450,17 +3465,22 @@ fn scoped_increment_closed(
                 continue;
             }
         };
-        pending.flush()?;
-        prune_descendants_and_aliases(
-            pending.store,
-            root,
-            exclusions,
-            &document_path,
+        // The prune pages this path's range, which holds its aliases and what
+        // stood beneath it; the reads after it are of that same range, so the
+        // deaths it queued land before them. A path with no alias and nothing
+        // beneath it queues none, and its derivation waits for the next landing.
+        pending.land_before_reading(document_path.as_str())?;
+        if queue_range_deaths(
+            &mut pending,
+            SubtreeScope::Subtree(&document_path),
+            Some(&document_path),
             policy,
             progress,
-            sensitivity,
-            pending.account,
-        )?;
+            stored_path_order(sensitivity),
+        )? > 0
+        {
+            pending.flush()?;
+        }
         // **A regular file holds nothing beneath it.** That is the whole reading
         // the prune above acts on — every row under this path dies — and the
         // findings under it join the same discipline. The path's own place is
@@ -3487,10 +3507,13 @@ fn scoped_increment_closed(
             continue;
         }
         if pending.names {
+            pending.settle_content()?;
             pending.push(Change::Named {
                 path: document_path,
             });
-            pending.flush()?;
+            if pending.is_full() {
+                pending.flush()?;
+            }
             continue;
         }
         // Read from the vault root down, so a dirty path reaches the same file
@@ -4073,9 +4096,6 @@ fn prune_subtree_ordered(
     order: StoredPathOrder,
     account: &mut Account,
 ) -> Result<(), JobFailure> {
-    let scope = HealScope::from(scope);
-    let mut after = None;
-    let mut healed = 0;
     let mut pending = Pending::new(
         store,
         policy.changeset_size,
@@ -4083,6 +4103,30 @@ fn prune_subtree_ordered(
         exclusions,
         account,
     )?;
+    queue_range_deaths(&mut pending, scope, None, policy, progress, order)?;
+    pending.flush()
+}
+
+/// Queue the death of every stored row in `scope` except `kept`, landing a
+/// changeset only when the scope's bound fills, and answer how many it queued.
+///
+/// The rows are paged off the store, so a row this scope already holds a
+/// change for is read as the store has it: the caller lands the scope first
+/// where that matters ([`Pending::land_before_reading`]). What is queued here
+/// waits for the caller's next landing, which is how a scoped heal's deaths at
+/// unrelated roots share one changeset.
+fn queue_range_deaths(
+    pending: &mut Pending<'_>,
+    scope: SubtreeScope<'_>,
+    kept: Option<&DocumentPath>,
+    policy: ProductionPolicy,
+    progress: &Healing<'_, ProductionAttachment>,
+    order: StoredPathOrder,
+) -> Result<u64, JobFailure> {
+    pending.settle_content()?;
+    let scope = HealScope::from(scope);
+    let mut after = None;
+    let mut queued = 0;
     loop {
         let page = scope.page(pending.store, after.as_ref(), policy, order)?;
         if page.is_empty() {
@@ -4090,67 +4134,18 @@ fn prune_subtree_ordered(
         }
         after = page.last().map(|row| row.path.clone());
         for row in page {
-            pending.push(target_death(row.path, Provenance::WatcherRemoval));
-            healed += 1;
-            if pending.is_full() {
-                pending.flush()?;
-            }
-        }
-        pending.flush()?;
-        progress.report(healed, None);
-    }
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn prune_descendants_and_aliases(
-    store: &mut Store,
-    vault_root: &Path,
-    exclusions: &[PathBuf],
-    root: &DocumentPath,
-    policy: ProductionPolicy,
-    progress: &Healing<'_, ProductionAttachment>,
-    sensitivity: norn_fs::CaseSensitivity,
-    account: &mut Account,
-) -> Result<(), JobFailure> {
-    let mut after = None;
-    let mut pruned = 0;
-    let mut pending = Pending::new(
-        store,
-        policy.changeset_size,
-        vault_root,
-        exclusions,
-        account,
-    )?;
-    loop {
-        let page = pending
-            .store
-            .begin_request()
-            .stored_targets_in_range_after_ordered(
-                SubjectScope::Subtree(root),
-                after.as_ref(),
-                policy.store_page_size,
-                stored_path_order(sensitivity),
-            )
-            .map_err(store_effect)?;
-        if page.is_empty() {
-            break;
-        }
-        after = page.last().map(|row| row.path.clone());
-        for row in page {
-            if &row.path == root {
+            if kept == Some(&row.path) {
                 continue;
             }
             pending.push(target_death(row.path, Provenance::WatcherRemoval));
-            pruned += 1;
+            queued += 1;
             if pending.is_full() {
                 pending.flush()?;
             }
         }
-        pending.flush()?;
-        progress.report(pruned, None);
+        progress.report(queued, None);
     }
-    Ok(())
+    Ok(queued)
 }
 
 /// Whether `path` names a document: its extension is the wire's document
@@ -4959,6 +4954,43 @@ impl<'s> Pending<'s> {
             return Ok(());
         }
         self.flush()
+    }
+
+    /// Land what this scope holds before a scoped root reads the store in the
+    /// range `root` addresses, when anything held is about that range.
+    ///
+    /// **A scoped root reads the store only in its own range**: the rows it
+    /// prunes, the row it compares, the findings at its place. What an earlier
+    /// root queued outside that range changes none of those readings, so it
+    /// stays queued and unrelated roots share changesets instead of committing
+    /// one each. An entry inside the range — the root's own path, an alias
+    /// spelling of it, a path beneath it, or an unlistable range above it —
+    /// would be read stale, so the changeset lands first: the reading the root
+    /// had when every root landed its own.
+    ///
+    /// The test walks what is held, which [`Self::is_full`] bounds, so a root
+    /// pays the bound rather than anything the vault's size sets.
+    fn land_before_reading(&mut self, root: &str) -> Result<(), JobFailure> {
+        let order = self.store.path_order();
+        let reaches = |path: &DocumentPath| folded_reaches(root, path.as_str(), order);
+        let held = self.changes.iter().any(|change| match change {
+            Change::BeneathUnlistable { prefix } => {
+                folded_reaches(prefix.as_str(), root, order)
+                    || folded_reaches(root, prefix.as_str(), order)
+            }
+            Change::Upsert(facts) => reaches(&facts.path),
+            Change::FileBirth { path }
+            | Change::Named { path }
+            | Change::Unreadable { path }
+            | Change::FileDeath { path }
+            | Change::Death { path, .. }
+            | Change::Vacated { path } => reaches(path),
+        }) || self.content.iter().any(|write| reaches(&write.facts.path))
+            || self
+                .queued
+                .iter()
+                .any(|queued| reaches(&queued.finding.path));
+        if held { self.flush() } else { Ok(()) }
     }
 
     /// Keep an unreadable document's names and discard facts no bytes support.
@@ -11813,6 +11845,138 @@ mod tests {
         ));
     }
 
+    /// **A scoped heal over unrelated roots commits once per changeset bound,
+    /// not once per root.** Edits, births and deaths at roots that address
+    /// disjoint ranges share changesets, and the store still equals a build
+    /// from zero over the tree.
+    #[test]
+    fn a_scoped_heal_over_unrelated_roots_commits_per_changeset_bound() {
+        let f = Fixture::new("scoped-batched-commits");
+        let roots = 24;
+        for n in 0..roots {
+            fs::write(
+                f.vault().join(format!("edited{n:02}.md")),
+                format!("# Edited {n}\n[[removed{n:02}]]\n"),
+            )
+            .unwrap();
+            fs::write(f.vault().join(format!("removed{n:02}.md")), "# Removed\n").unwrap();
+        }
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let normalizer = norn_fs::PathNormalizer::detect(&f.vault()).unwrap();
+        let mut dirty = std::collections::BTreeSet::new();
+        for n in 0..roots {
+            for (relative, change) in [
+                (format!("edited{n:02}.md"), "edit"),
+                (format!("removed{n:02}.md"), "remove"),
+                (format!("created{n:02}.md"), "create"),
+            ] {
+                let at = f.vault().join(&relative);
+                match change {
+                    "remove" => fs::remove_file(at).unwrap(),
+                    _ => fs::write(at, format!("# {change} {n}\n[[edited00]]\n")).unwrap(),
+                }
+                dirty.insert(normalizer.normalize(Path::new(&relative)).unwrap());
+            }
+        }
+        let changeset_size = 8;
+        let before = ops.evidence.read();
+        {
+            let _job = ops.evidence.attributing();
+            scoped_increment(
+                &mut attachment.store,
+                f.vault().as_path(),
+                &dirty,
+                ProductionPolicy::new(8, changeset_size).unwrap(),
+                &progress.healing(),
+                &exclusions(&attachment.registration, &attachment.shadows),
+            )
+            .unwrap();
+        }
+        let spent = ops.evidence.read().since(before);
+        assert_eq!(spent.documents_deleted, roots as u64);
+        assert!(
+            spent.changesets_applied <= dirty.len().div_ceil(changeset_size) as u64 + 1,
+            "{} roots in changesets of {changeset_size} committed {} changesets",
+            dirty.len(),
+            spent.changesets_applied
+        );
+        let mut scratch = scratch_store(
+            &f,
+            "scoped-batched-commits-oracle",
+            ProductionPolicy::new(2, 2).unwrap(),
+        );
+        // A warm heal tombstones what it kills, and a build from zero has
+        // nothing to tombstone: the rows and the findings are what agree.
+        let (healed, built) = (
+            derived_vault(&mut attachment.store, &f.vault()),
+            derived_vault(&mut scratch, &f.vault()),
+        );
+        assert_eq!(
+            (healed.documents, healed.findings),
+            (built.documents, built.findings)
+        );
+        ops.detach(&name, attachment);
+    }
+
+    /// **A root whose range holds a death an earlier root queued sees it
+    /// landed.** Removing a folder named like a document reports the folder and
+    /// the document beneath it; the folder's prune queues the document's death,
+    /// and the document's own root must find its row gone rather than kill it a
+    /// second time.
+    #[test]
+    fn a_scoped_root_sees_the_death_an_earlier_root_queued_in_its_range() {
+        let f = Fixture::new("scoped-queued-death-in-range");
+        fs::create_dir(f.vault().join("archive.md")).unwrap();
+        fs::write(f.vault().join("archive.md/child.md"), "# Child\n").unwrap();
+        fs::write(f.vault().join("kept.md"), "[[child]]\n").unwrap();
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        fs::remove_dir_all(f.vault().join("archive.md")).unwrap();
+        let normalizer = norn_fs::PathNormalizer::detect(&f.vault()).unwrap();
+        let dirty = ["archive.md", "archive.md/child.md"]
+            .into_iter()
+            .map(|relative| normalizer.normalize(Path::new(relative)).unwrap())
+            .collect();
+        let before = ops.evidence.read();
+        {
+            let _job = ops.evidence.attributing();
+            scoped_increment(
+                &mut attachment.store,
+                f.vault().as_path(),
+                &dirty,
+                ProductionPolicy::new(8, 8).unwrap(),
+                &progress.healing(),
+                &exclusions(&attachment.registration, &attachment.shadows),
+            )
+            .unwrap();
+        }
+        let spent = ops.evidence.read().since(before);
+        assert_eq!(
+            (spent.documents_deleted, spent.tombstones_recorded),
+            (1, 1),
+            "the child dies once"
+        );
+        let mut scratch = scratch_store(
+            &f,
+            "scoped-queued-death-in-range-oracle",
+            ProductionPolicy::new(2, 2).unwrap(),
+        );
+        // A warm heal tombstones what it kills, and a build from zero has
+        // nothing to tombstone: the rows and the findings are what agree.
+        let (healed, built) = (
+            derived_vault(&mut attachment.store, &f.vault()),
+            derived_vault(&mut scratch, &f.vault()),
+        );
+        assert_eq!(
+            (healed.documents, healed.findings),
+            (built.documents, built.findings)
+        );
+        ops.detach(&name, attachment);
+    }
+
     #[test]
     fn scoped_missing_markdown_file_prunes_its_stored_document() {
         let f = Fixture::new("missing-markdown-file");
@@ -12798,6 +12962,113 @@ mod tests {
             })
             .unwrap();
         }
+    }
+
+    /// Edits every `edited` file and removes every `removed` one when the build
+    /// first reaches `at`, then holds the build until the watcher has accepted
+    /// a fact for each.
+    #[cfg(feature = "induced-failure")]
+    struct ChangeManyAt {
+        at: crate::LoadingBoundary,
+        edited: Vec<PathBuf>,
+        removed: Vec<PathBuf>,
+        fired: std::sync::atomic::AtomicBool,
+        account: Arc<crate::JobEvidence>,
+    }
+
+    #[cfg(feature = "induced-failure")]
+    impl crate::LoadingProbe for ChangeManyAt {
+        fn at(&self, boundary: crate::LoadingBoundary) {
+            if boundary != self.at || self.fired.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
+            let before = self.account.read().build_facts_recorded;
+            for file in &self.edited {
+                fs::write(file, "# Edited\n[[kept]]\n").unwrap();
+            }
+            for file in &self.removed {
+                fs::remove_file(file).unwrap();
+            }
+            let facts = (self.edited.len() + self.removed.len()) as u64;
+            let budget = Budget::new(Duration::from_secs(20), Duration::from_millis(10));
+            wait_until("the injected build facts", budget, || {
+                let recorded = self.account.read().build_facts_recorded - before;
+                if recorded >= facts {
+                    Observed::Met(())
+                } else {
+                    Observed::pending(format!("{recorded} of {facts} facts accepted"))
+                }
+            })
+            .unwrap();
+        }
+    }
+
+    /// **A construction requeue over unrelated roots commits per changeset
+    /// bound, not per root.** Edits and removals taken while a from-zero
+    /// build stands in its content step share the requeue's changesets, and
+    /// the build still equals a from-scratch derivation.
+    #[cfg(feature = "induced-failure")]
+    #[test]
+    fn a_construction_requeue_over_unrelated_roots_commits_per_changeset_bound() {
+        let f = Fixture::new("requeue-batched-commits");
+        let roots = 24;
+        let mut edited = Vec::new();
+        let mut removed = Vec::new();
+        for n in 0..roots {
+            let file = f.vault().join(format!("edited{n:02}.md"));
+            fs::write(&file, "# Original\n").unwrap();
+            edited.push(file);
+            let file = f.vault().join(format!("removed{n:02}.md"));
+            fs::write(&file, "# Removed\n").unwrap();
+            removed.push(file);
+        }
+        fs::write(f.vault().join("kept.md"), "# Kept\n").unwrap();
+        norn_fs::watch::settle_prior_changes(f.root.root(), lifecycle_budget().work()).unwrap();
+        let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
+        let changeset_size = 8;
+        let ops = ProductionEntryOps::new(dirs, ProductionPolicy::new(8, changeset_size).unwrap());
+        let probe = ChangeManyAt {
+            at: crate::LoadingBoundary::StepComplete(norn_store::Step::Content),
+            edited,
+            removed,
+            fired: Default::default(),
+            account: ops.account(),
+        };
+        let ops = ops.with_loading_probe(Arc::new(probe));
+        let mut attachment = ops
+            .attach(&f.registration(), &ProgressReporter::disconnected())
+            .unwrap();
+        let spent = ops.evidence.read();
+        assert!(spent.requeue_drains >= 1, "the build takes the facts");
+        assert_eq!(spent.requeued_roots, 2 * roots as u64);
+        // Each drain closes its step group and takes its roots in changesets
+        // of the names bound; the documents it derives again go in changesets
+        // of their own.
+        let bound = spent.requeue_drains * 2
+            + spent.requeued_roots.div_ceil(changeset_size as u64 * 16)
+            + spent.requeued_documents.div_ceil(changeset_size as u64) * 2;
+        assert!(
+            spent.requeue_commits <= bound,
+            "{} roots and {} documents over {} drains committed {} times, past {bound}",
+            spent.requeued_roots,
+            spent.requeued_documents,
+            spent.requeue_drains,
+            spent.requeue_commits
+        );
+        let mut scratch = scratch_store(
+            &f,
+            "requeue-batched-commits-oracle",
+            ProductionPolicy::new(2, 2).unwrap(),
+        );
+        assert_eq!(
+            derived_vault(&mut attachment.store, &f.vault()),
+            derived_vault(&mut scratch, &f.vault())
+        );
+        assert_eq!(
+            finding_total(&mut attachment.store),
+            finding_total(&mut scratch)
+        );
+        ops.detach(&f.registration().name, attachment);
     }
 
     /// **A content-step requeue settles a refused spelling's finding before a
