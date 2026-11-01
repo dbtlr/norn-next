@@ -383,7 +383,7 @@ impl OwnedProcessGroup {
         }
     }
 
-    // Whether nothing in the group can fork any more: the leader has ended
+    // Whether no member the SIGKILL reached can still fork: the leader has ended
     // (with every thread of it, which is when `waitid` reports it) and `/proc`
     // lists no other process in the group. Any error reads as "not proved".
     // Linux only; elsewhere the window runs until `killpg` proves the group gone.
