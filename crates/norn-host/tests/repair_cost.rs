@@ -436,9 +436,14 @@ fn a_repair_of_routes_previews_in_time_linear_in_routes_and_links_touched() {
         let ratio = at(800, hub).as_secs_f64() / at(400, hub).as_secs_f64();
         assert!(ratio <= 2.5, "{hub} grows faster than linear: {readings:?}");
     }
-    // A debug build's clock says nothing of the absolute bars, which are
-    // read in a release build only.
-    if cfg!(debug_assertions) {
+    // An unoptimized build's clock says nothing of the absolute bars. Read
+    // the actual opt-level, even when optimization keeps debug assertions on.
+    if !norn_testkit::build_subject::BuildSubject::new(
+        env!("NORN_MEASURED_OPT_LEVEL"),
+        env!("NORN_MEASURED_PROFILE_OVERRIDES"),
+    )
+    .is_optimized()
+    {
         return;
     }
     assert!(

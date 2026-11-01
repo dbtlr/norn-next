@@ -1796,13 +1796,15 @@ pub fn fits<T: PartialOrd>(reading: T, ceiling: T) -> bool {
 ///
 /// A qualification record carries the platform and the runner but no
 /// build-configuration field, so what the measured build was is read here.
-#[allow(clippy::assertions_on_constants)] // The constant is the build profile, and the point is to fail the run under the wrong one.
+/// The package build script records OPT_LEVEL and refuses profile overrides,
+/// including dependency-only optimization that would change allocations.
 pub fn assert_the_profile_the_bars_were_authored_on() {
-    assert!(
-        cfg!(debug_assertions),
-        "the host measurement baselines are debug-profile values; this suite was built with \
-         optimizations, so its bars describe a different subject"
-    );
+    norn_testkit::build_subject::BuildSubject::new(
+        env!("NORN_MEASURED_OPT_LEVEL"),
+        env!("NORN_MEASURED_PROFILE_OVERRIDES"),
+    )
+    .check_unoptimized()
+    .unwrap_or_else(|message| panic!("{message}"));
 }
 
 /// How a reading is rendered and where it is recorded is the harness's, and

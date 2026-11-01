@@ -115,6 +115,22 @@ pub const MANIFEST_TREES: &[ManifestTree] = &[
 /// The files outside the swept trees that decide what a run is.
 pub const MANIFEST_FILES: &[ManifestFile] = &[
     ManifestFile {
+        path: "crates/norn-testkit/src/build_subject.rs",
+        why: "the build subject on which authored measurement bars are valid",
+    },
+    ManifestFile {
+        path: "crates/norn-testkit/src/build_provenance.rs",
+        why: "the compiler provenance and profile override discovery used by measurement guards",
+    },
+    ManifestFile {
+        path: "crates/norn-host/build.rs",
+        why: "the host measured executable's provenance carrier",
+    },
+    ManifestFile {
+        path: "crates/norn-fixtures/build.rs",
+        why: "the generator measured executable's provenance carrier",
+    },
+    ManifestFile {
         path: "rust-toolchain.toml",
         why: "the compiler and the lint set every suite is built with",
     },

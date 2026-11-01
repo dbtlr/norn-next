@@ -182,6 +182,11 @@ fn the_manifest_covers_the_lanes_the_bars_and_the_suites() {
         "crates/norn-testkit/src/process.rs",
         "crates/norn-testkit/src/process/group.rs",
         "crates/norn-testkit/src/scratch.rs",
+        // Build provenance decides whether authored measurement bars apply.
+        "crates/norn-testkit/src/build_subject.rs",
+        "crates/norn-testkit/src/build_provenance.rs",
+        "crates/norn-host/build.rs",
+        "crates/norn-fixtures/build.rs",
         // The instruments a verdict is read off.
         "crates/norn-testkit/src/equivalence.rs",
         "crates/norn-testkit/src/churn.rs",
