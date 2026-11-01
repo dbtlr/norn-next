@@ -294,8 +294,11 @@
 //! the path-only link index.
 //!
 //! Content withdrawal also reaches rowless quarantines through the subject's
-//! filesystem-ordered range. The partial content-path index supports its folded
-//! arm while excluding spelling findings that the withdrawal must preserve.
+//! filesystem-ordered range. `findings_path_nocase`, `(path COLLATE NOCASE,
+//! path)`, is the seek of its folded arm, and the withdrawal filters out the
+//! spelling findings it must preserve. The same index is the folded root's seek
+//! for a walk's finding-subject page, so a scoped prune there costs the findings
+//! its scope holds rather than the table, as `findings_path` makes it bytewise.
 //!
 //! # Findings outlive their subject, and the class owns their lifecycle
 //!
@@ -451,8 +454,7 @@ const STATEMENTS: &[&str] = &[
     path_key TEXT    NOT NULL,
     PRIMARY KEY (finding, path_key)
 ) WITHOUT ROWID",
-    "CREATE INDEX findings_content_path_nocase ON findings(path COLLATE NOCASE)
-    WHERE kind NOT IN ('document/path-bytes-not-utf8', 'document/path-names-no-document')",
+    "CREATE INDEX findings_path_nocase ON findings(path COLLATE NOCASE, path)",
     "CREATE INDEX finding_paths_path_key ON finding_paths(path_key)",
     "CREATE TABLE directory_marks (
     finding INTEGER PRIMARY KEY REFERENCES findings(id) ON DELETE CASCADE,

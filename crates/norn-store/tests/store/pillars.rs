@@ -1390,18 +1390,17 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
     assert_cascade_seeks_the_primary_key(&kind_discard, "finding_classes");
     assert_cascade_seeks_the_primary_key(&kind_discard, "finding_paths");
 
-    // **The walked-scope prune's page is one ordered pass over `findings_path`,
-    // and the bar it carries is the findings table's rather than the vault's.**
-    // A page is a cursor into that index — the rows come off it in the order the
-    // page states, so nothing sorts and the distinct subjects are adjacent — and
-    // the anti-join that drops a subject a document row stands at is a seek of
-    // `documents_path` per row rather than a read of the documents table. What
-    // the page does not carry is a seek bound: a scope, a kind and a standing row
-    // are all filters on rows the index order already reached, so a scope holding
-    // no unaccounted subject costs one pass over the findings index. That is the
-    // measured trade — the findings table holds a vault's defective documents
-    // rather than its documents — and a narrower bound is a second index this
-    // table has no reader asking for.
+    // **The walked-scope prune's page seeks the findings index declared under
+    // the vault's own order, and a bounded scope costs its own findings.** A
+    // page is a cursor into `findings_path` where the vault compares bytes and
+    // into `findings_path_nocase` where it folds — the rows come off it in the
+    // order the page states, so nothing sorts and the distinct subjects are
+    // adjacent — and the anti-join that drops a subject a document row stands
+    // at is a seek of `documents_path` per row rather than a read of the
+    // documents table. A kind and a standing row are filters on the rows the
+    // seek reached; the scope's range and the cursor are the seek, in both
+    // orders, which `a_bounded_prune_scope_reads_no_finding_outside_it_in_either_order`
+    // measures.
     let prefix = norn_store::DirectoryPrefix::new("one").expect("a directory");
     for scope in [
         norn_store::SubjectScope::Vault,
@@ -1427,18 +1426,15 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
             subjects.assert_no_table_scan();
             subjects.assert_no_full_scan_of("documents");
             subjects.assert_searches("documents");
-            subjects.assert_searches_through("findings", Access::Index("findings_path"));
+            subjects.assert_searches_through(
+                "findings",
+                Access::Index(match order {
+                    norn_store::StoredPathOrder::Sensitive => "findings_path",
+                    norn_store::StoredPathOrder::AsciiCaseInsensitive => "findings_path_nocase",
+                }),
+            );
             subjects.assert_searches_through("documents", Access::Index("documents_path"));
             subjects.assert_no_temp_btree();
-            // The cursor is a bound on `findings_path` rather than a filter over
-            // it, so a page seeks the index in every scope and both orders —
-            // which is what makes the pass one per prune rather than one per
-            // page of it. What the two orders differ in is how much of the index
-            // that seek skips, not whether there is one: a scope the vault
-            // spells as it stores it narrows the seek to the scope's own range,
-            // while a vault that folds ASCII case bounds its scope under the
-            // folding against an index that orders bytewise, so there the fold
-            // is a filter over the rows the cursor's seek reaches.
             subjects.assert_searches("findings");
             subjects.assert_no_full_scan_of("findings");
         }
@@ -3986,12 +3982,13 @@ fn the_walked_scope_page_names_the_subjects_no_document_row_stands_at() {
 }
 
 /// **A vault that folds ASCII case bounds a prune's scope under the same fold,
-/// and pages it bytewise all the same.** Scope membership is the walk's question
-/// — the two sides of one walk have to address one set of places, so a root
-/// spelled one way holds a subject spelled the other — while the cursor and the
-/// order are the page's own, and a page read against a caller's set needs only a
-/// total order. A page of one is what states that the cursor is exclusive under
-/// that split rather than only the first page of it.
+/// and pages it in that fold with the bytewise tie-break.** Scope membership is
+/// the walk's question — the two sides of one walk have to address one set of
+/// places, so a root spelled one way holds a subject spelled the other — and the
+/// order is the folded index's, which a page read against a caller's set may
+/// state because it needs only a total order. A page of one is what states that
+/// the cursor is exclusive under that order rather than only the first page of
+/// it.
 #[test]
 fn a_folded_prune_scope_holds_the_subjects_its_fold_reaches() {
     let scratch = Scratch::new("walked-scope-page-folded");
@@ -4021,7 +4018,7 @@ fn a_folded_prune_scope_holds_the_subjects_its_fold_reaches() {
     // in — and never the subject under a root the fold does not reach.
     assert_eq!(
         drained_subjects(norn_store::SubjectScope::Subtree(&path("one"))),
-        ["One", "One/Gone.md", "one/deep/gone.md"]
+        ["One", "one/deep/gone.md", "One/Gone.md"]
     );
     // A directory names no subject of its own, so the same span read that way
     // holds the descendants alone.
@@ -4029,7 +4026,7 @@ fn a_folded_prune_scope_holds_the_subjects_its_fold_reaches() {
         drained_subjects(norn_store::SubjectScope::Under(
             &norn_store::DirectoryPrefix::new("ONE").expect("a directory")
         )),
-        ["One/Gone.md", "one/deep/gone.md"]
+        ["one/deep/gone.md", "One/Gone.md"]
     );
 }
 
@@ -4639,7 +4636,7 @@ fn write_bar(statement: WriteStatement) -> WriteBar {
             ),
             (
                 "findings",
-                Access::Index("findings_content_path_nocase"),
+                Access::Index("findings_path_nocase"),
                 "(path>? AND path<?)",
             ),
             ("findings", Access::RowId, "(rowid=?)"),
