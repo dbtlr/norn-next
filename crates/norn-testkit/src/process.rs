@@ -396,8 +396,9 @@ impl<'a> Run<'a> {
                 (decoded(ended.pid, status)?, max_rss)
             }
             // The measuring launcher was signalled before it published — the
-            // harness's own kill at the deadline, or a signal it does not
-            // shield sent to the whole group — so the child has no reading.
+            // harness's own kill at the deadline, a `SIGKILL` sent to the
+            // whole group, or a fault of its own — so the child has no
+            // reading.
             None if matches!(launcher, RunStatus::Signaled(_)) => (launcher, 0),
             None => {
                 let (stderr, _) = capture(&err_path, self.capture_limit)?;
@@ -464,10 +465,15 @@ pub struct Outcome {
     /// which varies with the binary (a few megabytes) and bounds how small a
     /// reading can be rather than how large.
     ///
-    /// It is zero when the run produced no reading of its own: a run that
-    /// reports [`RunStatus::TimedOut`], or one whose process group took a
-    /// signal the measuring launcher does not shield (`SIGKILL` among them)
-    /// before the child ended, ended the measuring launcher with the child.
+    /// It is zero only when the measuring launcher was killed before it
+    /// published the child's reading: by `SIGKILL` — the harness's own at the
+    /// deadline, so every [`RunStatus::TimedOut`] run, or one sent to the
+    /// run's process group — or by a fault signal (`SIGSEGV`, `SIGBUS`,
+    /// `SIGILL`, `SIGFPE`, `SIGTRAP`), or on glibc by one of the two signals
+    /// the C library reserves (32 and 33). The measuring launcher ignores
+    /// every other signal it can catch, realtime ones included, except
+    /// `SIGCHLD`, so a group signal the child survives leaves the reading
+    /// intact.
     pub peak_rss_bytes: u64,
     pub stdout: Vec<u8>,
     /// Whether the child wrote more to stdout than the capture limit, so what
@@ -671,6 +677,43 @@ mod tests {
             assert_eq!(outcome.status, RunStatus::Exited(3), "SIG{signal}");
             assert_eq!(outcome.stdout_text(), "survived\n", "SIG{signal}");
             assert!(outcome.peak_rss_bytes > 0, "SIG{signal}: no peak");
+        }
+    }
+
+    /// **Every catchable signal that would end the measuring launcher is
+    /// shielded, not only the common ones.** Signals a child rarely sends its
+    /// group — profiling and resource-limit signals, and the realtime range
+    /// on Linux — are numbered here rather than derived, so a shield that
+    /// misses one fails.
+    #[test]
+    fn a_child_that_ignores_an_uncommon_signal_to_its_group_reports_its_own_exit() {
+        #[allow(unused_mut)] // Only Linux adds to it.
+        let mut signals = vec![
+            libc::SIGPROF,
+            libc::SIGVTALRM,
+            libc::SIGXCPU,
+            libc::SIGXFSZ,
+            libc::SIGSYS,
+            libc::SIGABRT,
+            libc::SIGIO,
+        ];
+        #[cfg(target_os = "linux")]
+        signals.extend([
+            libc::SIGPWR,
+            libc::SIGSTKFLT,
+            libc::SIGRTMIN(),
+            libc::SIGRTMIN() + 1,
+            libc::SIGRTMAX(),
+        ]);
+        for signal in signals {
+            let sandbox = sandbox("group-signal-uncommon");
+            let outcome = shell(
+                &sandbox,
+                &format!("trap '' {signal}; kill -{signal} 0; echo survived; exit 3"),
+            );
+            assert_eq!(outcome.status, RunStatus::Exited(3), "signal {signal}");
+            assert_eq!(outcome.stdout_text(), "survived\n", "signal {signal}");
+            assert!(outcome.peak_rss_bytes > 0, "signal {signal}: no peak");
         }
     }
 

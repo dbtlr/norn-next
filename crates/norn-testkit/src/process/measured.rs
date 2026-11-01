@@ -70,16 +70,32 @@
 //! A signal the child sends to its own group reaches the measuring launcher
 //! too. So that such a signal ends what it would have ended had the child been
 //! spawned directly — the child, unless it handles or ignores it — the
-//! measuring launcher ignores [`SHIELDED_SIGNALS`] and restores, for the
-//! child, the default disposition of each one it found at the default, and an
-//! empty signal mask. `SIGKILL` cannot be ignored, which is what keeps the
-//! harness's deadline kill of the complete group working.
+//! measuring launcher shields itself: it ignores every signal it can catch,
+//! realtime signals included, except `SIGCHLD`, which it needs to reap the
+//! child, and the fault signals `SIGSEGV`, `SIGBUS`, `SIGILL`, `SIGFPE` and
+//! `SIGTRAP`, which it could raise itself. The child gets back what the
+//! measuring launcher inherited: the default disposition of each shielded
+//! signal the launcher found at the default, an ignored one staying ignored,
+//! and the launcher's signal mask as it started.
+//!
+//! So a group signal ends the measuring launcher, and with it the run's
+//! reading, only when it is `SIGKILL` — which is what keeps the harness's
+//! deadline kill of the complete group working — or a fault signal, or on
+//! glibc one of the two signals below the first realtime one that the C
+//! library reserves for itself and refuses to let a program ignore. A
+//! `SIGSTOP` stops it until the deadline.
 //!
 //! # Declared limitations
 //!
 //! - **musl targets are unsupported.** musl calls `.init_array` functions
 //!   without `argc`, `argv` and `envp`, so [`DIVERT`] would read registers
 //!   that hold no environment.
+//! - **On glibc, signals 32 and 33 end the measuring launcher.** glibc
+//!   reserves them and will not ignore them, and ignoring them below the C
+//!   library would mean a system call whose layout differs by architecture.
+//!   A child sending one to its own group loses its reading; a child built on
+//!   glibc cannot ignore them either, so it ends with the same status as it
+//!   would have spawned directly.
 //! - **A script without a shebang line no longer runs through `/bin/sh`.**
 //!   The child is started by libc `posix_spawnp`, which reports `ENOEXEC` for
 //!   such a file, where the standard library's spawn on glibc fell back to
@@ -129,24 +145,37 @@ pub(super) const NOT_STARTED: c_int = 127;
 /// person reading the status by hand.
 const LAUNCHER_FAILED: c_int = 125;
 
-/// The signals a child commonly sends to its own process group, which the
-/// measuring launcher ignores so that only the child answers them.
-/// `SIGCHLD` is absent on purpose — ignoring it would reap the child before
-/// `wait4` could — and so are the signals that report a fault of the
-/// receiving process.
-const SHIELDED_SIGNALS: [c_int; 11] = [
-    libc::SIGHUP,
-    libc::SIGINT,
-    libc::SIGQUIT,
-    libc::SIGTERM,
-    libc::SIGPIPE,
-    libc::SIGUSR1,
-    libc::SIGUSR2,
-    libc::SIGALRM,
-    libc::SIGTSTP,
-    libc::SIGTTIN,
-    libc::SIGTTOU,
+/// The signals the measuring launcher does not shield, beyond the two no
+/// process can catch: `SIGCHLD`, which it must keep at its default to reap
+/// the child with `wait4`, and the signals that report a fault of the
+/// receiving process, which the measuring launcher could raise itself and
+/// must not survive.
+const UNSHIELDED_SIGNALS: [c_int; 8] = [
+    libc::SIGKILL,
+    libc::SIGSTOP,
+    libc::SIGCHLD,
+    libc::SIGSEGV,
+    libc::SIGBUS,
+    libc::SIGILL,
+    libc::SIGFPE,
+    libc::SIGTRAP,
 ];
+
+/// The highest signal number on this platform. Linux's goes past the
+/// standard signals to the last realtime one; macOS has no realtime signals
+/// and its `NSIG` is 32.
+fn last_signal() -> c_int {
+    #[cfg(target_os = "linux")]
+    return libc::SIGRTMAX();
+    #[cfg(not(target_os = "linux"))]
+    return 31;
+}
+
+/// Whether the measuring launcher shields `signal`: every signal it can
+/// catch, realtime ones included, except [`UNSHIELDED_SIGNALS`].
+fn is_shielded(signal: c_int) -> bool {
+    !UNSHIELDED_SIGNALS.contains(&signal)
+}
 
 /// What the measuring launcher learned about the child.
 #[derive(Debug, Eq, PartialEq)]
@@ -368,24 +397,37 @@ unsafe fn launch(
 struct SpawnAttributes(libc::posix_spawnattr_t);
 
 impl SpawnAttributes {
-    /// Ignore [`SHIELDED_SIGNALS`] in this process, and describe a child that
-    /// gets back the default disposition of each one this process had at the
-    /// default — one this process inherited as ignored stays ignored, as it
-    /// would have for a child spawned directly — and an empty signal mask.
+    /// Ignore every shielded signal — see [`is_shielded`] — in this process,
+    /// and describe a child that gets back what this process inherited: the
+    /// default disposition of each shielded signal this process found at the
+    /// default — one it inherited as ignored stays ignored, as it would have
+    /// for a child spawned directly — and the signal mask this process
+    /// started with.
     fn shielding() -> Option<SpawnAttributes> {
-        // SAFETY: zero is a valid out-value for `sigemptyset`.
+        // SAFETY: zero is a valid out-value for `sigemptyset` and
+        // `sigprocmask`.
         let mut defaults: libc::sigset_t = unsafe { std::mem::zeroed() };
-        let mut empty: libc::sigset_t = unsafe { std::mem::zeroed() };
-        // SAFETY: both sets are valid and this process's own.
+        let mut inherited_mask: libc::sigset_t = unsafe { std::mem::zeroed() };
+        // SAFETY: both sets are valid and this process's own; a null new
+        // mask only reads the current one, which is the inherited mask
+        // because nothing before this point changes it.
         if unsafe { libc::sigemptyset(&mut defaults) } != 0
-            || unsafe { libc::sigemptyset(&mut empty) } != 0
+            || unsafe {
+                libc::sigprocmask(libc::SIG_SETMASK, std::ptr::null(), &mut inherited_mask)
+            } != 0
         {
             return None;
         }
-        for signal in SHIELDED_SIGNALS {
-            // SAFETY: ignoring a catchable signal installs no code to run.
+        for signal in (1..=last_signal()).filter(|&signal| is_shielded(signal)) {
+            // SAFETY: ignoring a signal installs no code to run.
             let previous = unsafe { libc::signal(signal, libc::SIG_IGN) };
             if previous == libc::SIG_ERR {
+                // glibc keeps two signals below the first realtime one for
+                // itself and refuses to change them; no other refusal is
+                // expected.
+                if io::Error::last_os_error().raw_os_error() == Some(libc::EINVAL) {
+                    continue;
+                }
                 return None;
             }
             // SAFETY: `defaults` is a valid set and `signal` a valid number.
@@ -405,7 +447,7 @@ impl SpawnAttributes {
         // SAFETY: the attributes object is initialized and both sets are valid.
         let configured = unsafe {
             libc::posix_spawnattr_setsigdefault(&mut attributes.0, &defaults) == 0
-                && libc::posix_spawnattr_setsigmask(&mut attributes.0, &empty) == 0
+                && libc::posix_spawnattr_setsigmask(&mut attributes.0, &inherited_mask) == 0
                 && libc::posix_spawnattr_setflags(&mut attributes.0, flags) == 0
         };
         configured.then_some(attributes)
@@ -563,6 +605,105 @@ mod tests {
             "ended 0 1\n"
         );
         assert!(!partial_path(&path).exists(), "the partial report was left");
+    }
+
+    /// Start a measuring launcher directly, as a run would, with `inherit`
+    /// applied to the signal state it starts with, and return its report and
+    /// what the child wrote. A run cannot give the measuring launcher such
+    /// state: the standard library empties the signal mask of every child it
+    /// starts, and a disposition set in this process would reach every
+    /// concurrent test.
+    #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // Harness scaffolding: starting this binary as a launcher.
+    fn launch_inheriting(
+        label: &str,
+        script: &str,
+        inherit: fn() -> io::Result<()>,
+    ) -> (Option<Report>, String) {
+        use std::os::unix::process::CommandExt;
+        let scratch = crate::scratch::Scratch::under(&std::env::temp_dir(), label)
+            .expect("a scratch directory");
+        let report = scratch.root().join("run.usage");
+        let mut command = std::process::Command::new(image().expect("this executable"));
+        command
+            .args([LAUNCHER_ARGUMENT, "/bin/sh", "-c", script])
+            .env(REPORT_VARIABLE, &report)
+            .stdin(std::process::Stdio::null());
+        // SAFETY: the closure only changes this child's own signal state
+        // with async-signal-safe calls.
+        unsafe { command.pre_exec(inherit) };
+        let output = command.output().expect("starting a measuring launcher");
+        let report = read_report(&report).expect("a readable report");
+        (report, String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
+    /// The report of a child that exited with `code`, whatever its peak.
+    fn exited_with(report: Option<Report>) -> Option<c_int> {
+        match report {
+            Some(Report::Ended { status, .. }) if libc::WIFEXITED(status) => {
+                Some(libc::WEXITSTATUS(status))
+            }
+            _ => None,
+        }
+    }
+
+    const SURVIVES_SIGUSR1: &str = "kill -USR1 $$; echo survived; exit 3";
+
+    /// **The child inherits the signal mask the measuring launcher started
+    /// with**, as it would have inherited it with no launcher between: a
+    /// signal blocked there stays blocked, so the child does not die of it.
+    #[test]
+    fn the_child_inherits_the_launchers_blocked_signals() {
+        fn block_sigusr1() -> io::Result<()> {
+            // SAFETY: the set is this function's own; `sigprocmask` is
+            // async-signal-safe.
+            unsafe {
+                let mut set: libc::sigset_t = std::mem::zeroed();
+                libc::sigemptyset(&mut set);
+                libc::sigaddset(&mut set, libc::SIGUSR1);
+                if libc::sigprocmask(libc::SIG_BLOCK, &set, std::ptr::null_mut()) != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+            }
+            Ok(())
+        }
+        let (report, stdout) = launch_inheriting("inherited-mask", SURVIVES_SIGUSR1, block_sigusr1);
+        assert_eq!(stdout, "survived\n");
+        assert_eq!(exited_with(report), Some(3));
+    }
+
+    /// **A signal the measuring launcher inherited as ignored stays ignored
+    /// for the child**, rather than being reset to the default along with
+    /// those the launcher ignores only to shield itself.
+    #[test]
+    fn the_child_inherits_the_launchers_ignored_signals() {
+        fn ignore_sigusr1() -> io::Result<()> {
+            // SAFETY: ignoring a signal installs no code to run; `signal` is
+            // async-signal-safe here.
+            if unsafe { libc::signal(libc::SIGUSR1, libc::SIG_IGN) } == libc::SIG_ERR {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        }
+        let (report, stdout) =
+            launch_inheriting("inherited-ignored", SURVIVES_SIGUSR1, ignore_sigusr1);
+        assert_eq!(stdout, "survived\n");
+        assert_eq!(exited_with(report), Some(3));
+    }
+
+    /// The default dispositions the measuring launcher shields itself from
+    /// are the child's again: with nothing inherited, the same child dies of
+    /// the signal, which is what makes the two tests above about
+    /// inheritance.
+    #[test]
+    fn the_child_without_inherited_signal_state_dies_of_sigusr1() {
+        let (report, stdout) = launch_inheriting("no-inherited", SURVIVES_SIGUSR1, || Ok(()));
+        assert_eq!(stdout, "");
+        match report {
+            Some(Report::Ended { status, .. }) => {
+                assert!(libc::WIFSIGNALED(status) && libc::WTERMSIG(status) == libc::SIGUSR1);
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
