@@ -106,15 +106,15 @@ pub struct JobEvidence {
     build_facts_recorded: AtomicU64,
     /// Construction requeue calls that could take: each takes at most once.
     requeue_calls: AtomicU64,
-    /// Completed construction requeue drains.
-    requeue_drains: AtomicU64,
-    /// Filesystem roots taken by construction requeue drains.
+    /// Completed non-empty construction requeue takes.
+    requeue_takes: AtomicU64,
+    /// Filesystem roots taken by construction requeue takes.
     requeued_roots: AtomicU64,
-    /// Documents re-derived by construction requeue drains.
+    /// Documents re-derived by construction requeue takes.
     requeued_documents: AtomicU64,
-    /// Store commits made during construction requeue drains.
+    /// Store commits made during construction requeue takes.
     requeue_commits: AtomicU64,
-    /// Elapsed nanoseconds spent in construction requeue drains.
+    /// Elapsed nanoseconds spent in construction requeue takes.
     requeue_ns: AtomicU64,
     /// SQLite VM steps spent by every multi-row request read in construction requeues.
     /// Single-row reads (`read_one`) are not counted.
@@ -264,15 +264,15 @@ pub struct EvidenceReading {
     pub build_facts_recorded: u64,
     /// Construction requeue calls that could take: each takes at most once.
     pub requeue_calls: u64,
-    /// Completed construction requeue drains.
-    pub requeue_drains: u64,
-    /// Filesystem roots taken by construction requeue drains.
+    /// Completed non-empty construction requeue takes.
+    pub requeue_takes: u64,
+    /// Filesystem roots taken by construction requeue takes.
     pub requeued_roots: u64,
-    /// Documents re-derived by construction requeue drains.
+    /// Documents re-derived by construction requeue takes.
     pub requeued_documents: u64,
-    /// Store commits made during construction requeue drains.
+    /// Store commits made during construction requeue takes.
     pub requeue_commits: u64,
-    /// Elapsed nanoseconds spent in construction requeue drains.
+    /// Elapsed nanoseconds spent in construction requeue takes.
     pub requeue_ns: u64,
     /// SQLite VM steps spent by every multi-row request read in construction requeues.
     /// Single-row reads (`read_one`) are not counted.
@@ -474,7 +474,7 @@ impl EvidenceReading {
                 .saturating_sub(earlier.requeue_links_rejudged),
             link_rewalks: self.link_rewalks.saturating_sub(earlier.link_rewalks),
             requeue_calls: self.requeue_calls.saturating_sub(earlier.requeue_calls),
-            requeue_drains: self.requeue_drains.saturating_sub(earlier.requeue_drains),
+            requeue_takes: self.requeue_takes.saturating_sub(earlier.requeue_takes),
             requeued_roots: self.requeued_roots.saturating_sub(earlier.requeued_roots),
             requeued_documents: self
                 .requeued_documents
@@ -645,7 +645,7 @@ impl JobEvidence {
             requeue_links_rejudged: get(&self.requeue_links_rejudged),
             link_rewalks: get(&self.link_rewalks),
             requeue_calls: get(&self.requeue_calls),
-            requeue_drains: get(&self.requeue_drains),
+            requeue_takes: get(&self.requeue_takes),
             requeued_roots: get(&self.requeued_roots),
             requeued_documents: get(&self.requeued_documents),
             requeue_commits: get(&self.requeue_commits),
@@ -2590,7 +2590,7 @@ impl JobEvidence {
         commits: u64,
         elapsed: std::time::Duration,
     ) {
-        self.requeue_drains.fetch_add(1, Ordering::Relaxed);
+        self.requeue_takes.fetch_add(1, Ordering::Relaxed);
         self.requeued_roots.fetch_add(roots, Ordering::Relaxed);
         self.requeued_documents
             .fetch_add(documents, Ordering::Relaxed);

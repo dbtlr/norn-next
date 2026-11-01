@@ -4161,7 +4161,7 @@ fn quiet_requeue_calls(fixture: &Fixture) -> u64 {
         spent.requeue_calls, calls,
         "the evidence counts each quiet requeue call once"
     );
-    assert_eq!(spent.requeue_drains, 0, "the evidence counts no quiet take");
+    assert_eq!(spent.requeue_takes, 0, "the evidence counts no quiet take");
     calls
 }
 
@@ -4200,7 +4200,7 @@ fn a_writer_inside_every_take_never_outnumbers_the_requeue_calls() {
     eprintln!(
         "quiet calls {quiet}; calls {calls} (evidence {}), takes {takes} (evidence {}), \
          facts accepted {facts}",
-        spent.requeue_calls, spent.requeue_drains
+        spent.requeue_calls, spent.requeue_takes
     );
     // Pulling the hot document ahead takes it out of the ordinary passes, so
     // they can page fewer chunks than the quiet build's, never more.
@@ -4218,7 +4218,7 @@ fn a_writer_inside_every_take_never_outnumbers_the_requeue_calls() {
     );
     assert_eq!(takes, calls, "a call left the fact pending at it untaken");
     assert_eq!(
-        spent.requeue_drains, takes,
+        spent.requeue_takes, takes,
         "the evidence counts each completed take once"
     );
     assert!(

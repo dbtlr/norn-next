@@ -13389,28 +13389,28 @@ mod tests {
             .attach(&f.registration(), &ProgressReporter::disconnected())
             .unwrap();
         let spent = ops.evidence.read();
-        assert!(spent.requeue_drains >= 1, "the build takes the facts");
+        assert!(spent.requeue_takes >= 1, "the build takes the facts");
         // Every changed root is requeued. macOS FSEvents may report one
-        // path's change in two deliveries; a report arriving after a drain
-        // took the path is a new fact, so the next drain takes it again.
+        // path's change in two deliveries; a report arriving after a take
+        // took the path is a new fact, so a later take takes it again.
         assert!(
             spent.requeued_roots >= 2 * roots as u64,
             "{} roots requeued of {}",
             spent.requeued_roots,
             2 * roots
         );
-        // Each drain closes its step group and takes its roots in changesets
+        // Each take closes its step group and takes its roots in changesets
         // of the names bound; the documents it derives again go in changesets
         // of their own.
-        let bound = spent.requeue_drains * 2
+        let bound = spent.requeue_takes * 2
             + spent.requeued_roots.div_ceil(changeset_size as u64 * 16)
             + spent.requeued_documents.div_ceil(changeset_size as u64) * 2;
         assert!(
             spent.requeue_commits <= bound,
-            "{} roots and {} documents over {} drains committed {} times, past {bound}",
+            "{} roots and {} documents over {} takes committed {} times, past {bound}",
             spent.requeued_roots,
             spent.requeued_documents,
-            spent.requeue_drains,
+            spent.requeue_takes,
             spent.requeue_commits
         );
         let mut scratch = scratch_store(
@@ -16737,7 +16737,7 @@ mod tests {
     ///
     /// A caller settles its fixture's writes before attaching. FSEvents can
     /// number a fixture's creation of a file after the watch's history marker,
-    /// and the build takes that late report as a change. A requeue drained
+    /// and the build takes that late report as a change. A requeue taking it
     /// after the build's link judgment re-decides every link the file answers,
     /// which `links_redecided` would then count.
     fn assert_judged_build(
@@ -21870,7 +21870,7 @@ mod tests {
                 spent.requeue_calls > 0,
                 "a quiet attach makes requeue calls"
             );
-            assert_eq!(spent.requeue_drains, 0, "a quiet attach takes nothing");
+            assert_eq!(spent.requeue_takes, 0, "a quiet attach takes nothing");
             spent.requeue_calls
         };
         let running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
@@ -21900,9 +21900,9 @@ mod tests {
             spent.requeue_calls
         );
         assert!(
-            spent.requeue_drains <= spent.requeue_calls,
+            spent.requeue_takes <= spent.requeue_calls,
             "{} takes outnumber {} requeue calls",
-            spent.requeue_drains,
+            spent.requeue_takes,
             spent.requeue_calls
         );
         let last = norn_fs::ContentHash::of(last.to_string().as_bytes()).to_string();
