@@ -86,15 +86,25 @@ jobs:
           rustc --version
           cargo --version
       - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest@0.9.114
       - name: Build
         run: cargo build --locked --workspace
       - name: Test
-        run: .github/scripts/flake-tripwire.sh cargo nextest run --locked --retries 0 --no-fail-fast --workspace
-      - name: Doctests
-        run: .github/scripts/flake-tripwire.sh cargo test --locked --workspace --doc
+        run: .github/scripts/flake-tripwire.sh cargo test --locked --workspace --exclude norn-host
+
+  # The named packages and catch-all exclusions must match exactly. Each package's
+  # ordinary tests and doctests run once; new crates join the catch-all automatically.
+  build-host:
+    name: build and test (norn-host)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@v2
+      # cargo test builds every selected target before running tests and doctests.
+      - name: Test
+        run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-host
 
   # `lint and document` is a required check in the `main` ruleset.
   # Its 30-minute timeout is a runaway guard, under the same doctrine above.
@@ -171,13 +181,8 @@ jobs:
         with:
           persist-credentials: false
       - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest@0.9.114
       - name: Host functional suite
-        run: .github/scripts/flake-tripwire.sh cargo nextest run --locked --retries 0 --no-fail-fast -p norn-host --features induced-failure
-      - name: Host doctests
-        run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-host --features induced-failure --doc
+        run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-host --features induced-failure
 
   # A targeted second-architecture gate. The default build already runs the
   # full workspace on Linux x86_64; this job holds contracts whose answers can

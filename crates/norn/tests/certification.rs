@@ -1285,52 +1285,16 @@ fn ci_job(workflow: &str, key: &str) -> Vec<String> {
     lines.collect()
 }
 
-/// A runner config can silently filter cases or turn elapsed time into a verdict.
-fn assert_nextest_has_no_repository_config(root: &Path) {
-    // 0.9.114 reads only this workspace-root path by default. --config-file and
-    // --tool-config-file are explicit CLI options, with no NEXTEST_* path override;
-    // the workflow command pins and closed environment grammar reject those inputs.
-    assert!(
-        !root
-            .join(".config/nextest.toml")
-            .try_exists()
-            .expect("checking nextest config"),
-        "nextest config can narrow coverage with default-filter or add wall-clock verdicts \
-         with slow-timeout.terminate-after; before adding one, a reviewer must rule on \
-         complete suite membership and the CI timeout doctrine"
-    );
-}
-
-/// The same fast-gate entry point accepts a pristine root and refuses runner config.
-#[test]
-fn the_fast_gate_refuses_repository_nextest_config() {
-    let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), "nextest-config")
-        .expect("creating nextest config sandbox");
-    let gate = std::fs::read_to_string(workspace_root().join(".github/workflows/ci.yml"))
-        .expect("reading the PR gate");
-    assert_fast_gate(sandbox.root(), &gate);
-    std::fs::create_dir(sandbox.root().join(".config")).unwrap();
-    std::fs::write(sandbox.root().join(".config/nextest.toml"), "").unwrap();
-    assert!(
-        std::panic::catch_unwind(|| assert_fast_gate(sandbox.root(), &gate)).is_err(),
-        "the fast gate accepted repository nextest config"
-    );
-}
-
 /// The PR gate retains every ordinary host target while deep lanes run in full regression.
 #[test]
 fn the_fast_gate_keeps_ordinary_functional_coverage() {
     let gate = std::fs::read_to_string(workspace_root().join(".github/workflows/ci.yml"))
         .expect("reading the PR gate");
-    assert_fast_gate(&workspace_root(), &gate);
+    assert_fast_gate(&gate);
     let mut mutants = vec![
         gate.replace("  architecture:", "  missing:"),
-        gate.replace("--retries 0", "--retries 1"),
-        gate.replace("cargo test --locked --workspace --doc", "true"),
-        gate.replace(
-            "    name: lint and document",
-            "    continue-on-error: true\n    name: lint and document",
-        ),
+        gate.replace("--exclude norn-host", "--exclude norn-store"),
+        gate.replace("--locked -p norn-host\n", "--locked -p norn-store\n"),
         gate.replace("cargo fmt --all --check", "true"),
         gate.replace(
             "--features induced-failure\n",
@@ -1350,6 +1314,21 @@ fn the_fast_gate_keeps_ordinary_functional_coverage() {
             "      - name: Test\n        if: always()\n",
         ),
     ];
+    for command in [
+        "cargo test --locked --workspace --exclude norn-host",
+        "cargo test --locked -p norn-host",
+    ] {
+        for narrowing in [
+            " ordinary",
+            " -- --skip ordinary",
+            " --lib",
+            " --tests",
+            " --retries 1",
+        ] {
+            mutants.push(gate.replace(command, &format!("{command}{narrowing}")));
+        }
+        mutants.push(gate.replace(command, &format!("retry 3 {command}")));
+    }
     for case in NATIVE_CASES {
         mutants.push(
             gate.lines()
@@ -1361,14 +1340,13 @@ fn the_fast_gate_keeps_ordinary_functional_coverage() {
     for mutant in mutants {
         assert_ne!(mutant, gate, "a mutant made no change");
         assert!(
-            std::panic::catch_unwind(|| assert_fast_gate(&workspace_root(), &mutant)).is_err(),
+            std::panic::catch_unwind(|| assert_fast_gate(&mutant)).is_err(),
             "a PR coverage mutant survived"
         );
     }
 }
 
-fn assert_fast_gate(root: &Path, workflow: &str) {
-    assert_nextest_has_no_repository_config(root);
+fn assert_fast_gate(workflow: &str) {
     assert_triggers(
         workflow,
         &[
@@ -1379,6 +1357,22 @@ fn assert_fast_gate(root: &Path, workflow: &str) {
         ],
     );
     assert_complete_active_matrix(workflow, false);
+    let lines = ci_job(workflow, "build-host");
+    assert_ci_lines(
+        &lines,
+        &[
+            "name: build and test (norn-host)",
+            "runs-on: ubuntu-latest",
+            "timeout-minutes: 30",
+        ],
+    );
+    assert_job_cannot_skip_or_excuse(&lines);
+    assert_matrix_step_values(
+        workflow,
+        "build-host",
+        &[".github/scripts/flake-tripwire.sh cargo test --locked -p norn-host"],
+        false,
+    );
 }
 
 const NATIVE_CASES: &[&str] = &[
@@ -1458,7 +1452,7 @@ fn full_regression_adopts_fault_and_audit_cases_with_their_features() {
         );
     }
     let gate = std::fs::read_to_string(root.join(".github/workflows/ci.yml")).unwrap();
-    assert_fast_gate(&workspace_root(), &gate);
+    assert_fast_gate(&gate);
     let manifest = std::fs::read_to_string(root.join("crates/norn-host/Cargo.toml")).unwrap();
     assert!(
         !manifest.contains("autotests = false"),
@@ -1595,7 +1589,6 @@ fn assert_matrix_mapping_keys(workflow: &str, full: bool) {
                 10 if nested == "with" => assert!(
                     [
                         "persist-credentials",
-                        "tool",
                         "args",
                         "name",
                         "path",
@@ -1666,9 +1659,6 @@ fn assert_matrix_step_values(workflow: &str, job: &str, runs: &[&str], full: boo
         expected.push("uses: docker://rhysd/actionlint:1.7.12\nargs: -color".to_string());
     }
     expected.push("uses: Swatinem/rust-cache@v2".to_string());
-    if !full && matches!(job, "build" | "host-functional") {
-        expected.push("uses: taiki-e/install-action@v2\ntool: cargo-nextest@0.9.114".to_string());
-    }
     for command in runs {
         let command = if full {
             command.replace("cargo test --locked", "cargo test --locked --no-fail-fast")
@@ -1710,6 +1700,7 @@ fn assert_complete_active_matrix(workflow: &str, full: bool) {
         } else {
             &[
                 "build",
+                "build-host",
                 "lint",
                 "host-functional",
                 "platform",
@@ -1826,16 +1817,11 @@ fn assert_complete_active_matrix(workflow: &str, full: bool) {
             assert_matrix_step_values(workflow, "lint", &lint_runs, false);
             runs = vec![
                 "cargo build --locked --workspace",
-                ".github/scripts/flake-tripwire.sh cargo nextest run --locked --retries 0 --no-fail-fast --workspace",
-                ".github/scripts/flake-tripwire.sh cargo test --locked --workspace --doc",
+                ".github/scripts/flake-tripwire.sh cargo test --locked --workspace --exclude norn-host",
             ];
         } else if key == "induced-failure" {
             key = "host-functional";
             name = "host functional (induced-failure)";
-            runs = vec![
-                ".github/scripts/flake-tripwire.sh cargo nextest run --locked --retries 0 --no-fail-fast -p norn-host --features induced-failure",
-                ".github/scripts/flake-tripwire.sh cargo test --locked -p norn-host --features induced-failure --doc",
-            ];
         } else if key == "platform" {
             runs = vec![
                 ".github/scripts/flake-tripwire.sh cargo test --locked -p norn-embed --test determinism",
@@ -2353,7 +2339,6 @@ fn fixture_cargo(sandbox: &Sandbox) -> (PathBuf, std::ffi::OsString) {
 fn reaches_a_suite(line: &str) -> bool {
     [
         "cargo test",
-        "cargo nextest run",
         "lane-suite.sh",
         "test-suite.sh",
         "certification-suite.sh",
@@ -2415,100 +2400,66 @@ fn a_ledgered_signature_matches_a_failure_and_never_a_run_that_passed_it() {
     // beside one unrelated failure. This is the shape of an ordinary red run in
     // a suite that holds the ledgered cases, and nothing in the ledger is what
     // failed.
-    for nextest in [false, true] {
-        let mut passed = String::from("running tests\n");
-        for fields in &entries {
-            let signature = ledger_field(fields, "signature");
-            if nextest {
-                passed.push_str(&format!("        PASS [   0.001s] (1/4) fixture suite::{signature}\n        SKIP [         ] (───) fixture suite::{signature}\n        SLOW [>  1.000s] (───) fixture suite::{signature}\n        LEAK [   0.207s] (3/4) fixture suite::{signature}\n"));
-            } else {
-                passed.push_str(&format!("test suite::{signature} ... ok\n"));
-            }
-        }
-        if nextest {
-            passed.push_str(&failed_run("something_else", "assertion failed"));
-        } else {
-            passed.push_str(
+    let mut passed = String::from("running tests\n");
+    for fields in &entries {
+        passed.push_str(&format!(
+            "test suite::{} ... ok\n",
+            ledger_field(fields, "signature")
+        ));
+    }
+    passed.push_str(
         "test suite::something_else ... FAILED\n\nfailures:\n\n---- suite::something_else stdout \
          ----\nthread 'suite::something_else' panicked at src/lib.rs:1:1:\nassertion \
          failed\n\nfailures:\n    suite::something_else\n\ntest result: FAILED. 1 failed\n",
     );
-        }
-        let (status, summary, annotations) = tripwire_over(&sandbox, &root, "passed", &passed);
+    let (status, summary, annotations) = tripwire_over(&sandbox, &root, "passed", &passed);
+    assert_eq!(
+        status,
+        norn_testkit::process::RunStatus::Exited(101),
+        "the tripwire changed the suite's own verdict"
+    );
+    assert!(
+        summary.contains("no ledgered signature matched"),
+        "a failure of no ledgered class was recorded as a recurrence: {}",
+        unread(&summary)
+    );
+    for fields in &entries {
+        let id = ledger_field(fields, "id");
+        assert!(
+            !annotations.contains(id),
+            "`{id}` was reported as recurring by a run in which its own test passed, so the \
+             entry cannot tell a recurrence from any other red run: {}",
+            unread(&annotations)
+        );
+    }
+
+    // The same entries, each in a run that really did fail on it.
+    for fields in &entries {
+        let (id, signature) = (
+            ledger_field(fields, "id"),
+            ledger_field(fields, "signature"),
+        );
+        let failed = format!(
+            "running 1 test\ntest suite::a_case ... FAILED\n\nfailures:\n\n---- suite::a_case \
+             stdout ----\nthread 'suite::a_case' panicked at src/lib.rs:1:1:\n{signature}\n\ntest \
+             result: FAILED. 1 failed\n"
+        );
+        let (status, summary, annotations) = tripwire_over(&sandbox, &root, id, &failed);
         assert_eq!(
             status,
             norn_testkit::process::RunStatus::Exited(101),
             "the tripwire changed the suite's own verdict"
         );
         assert!(
-            summary.contains("no ledgered signature matched"),
-            "a failure of no ledgered class was recorded as a recurrence: {}",
-            unread(&summary)
+            annotations.contains(&format!("Ledgered flake recurred: {id}")),
+            "`{id}` recurred and the run carries no annotation naming it: {}",
+            unread(&annotations)
         );
         assert!(
-            !summary.contains("bound was breached"),
-            "passing/skipped status lines cannot classify breached bounds: {}",
+            summary.contains(ledger_field(fields, "disposition")),
+            "`{id}` recurred and the job summary carries no disposition to read: {}",
             unread(&summary)
         );
-        for fields in &entries {
-            let id = ledger_field(fields, "id");
-            assert!(
-                !annotations.contains(id),
-                "`{id}` was reported as recurring by a run in which its own test passed, so the \
-             entry cannot tell a recurrence from any other red run: {}",
-                unread(&annotations)
-            );
-        }
-
-        if nextest {
-            for status in ["LEAK-FAIL", "FAIL", "TIMEOUT", "SIGABRT", "SIGSEGV"] {
-                let fields = &entries[0];
-                let signature = ledger_field(fields, "signature");
-                let output = format!("    {status} [   0.207s] (1/1) fixture {signature}\n");
-                let (_, _, annotations) = tripwire_over(&sandbox, &root, status, &output);
-                assert!(
-                    annotations.contains(&format!(
-                        "Ledgered flake recurred: {}",
-                        ledger_field(fields, "id")
-                    )),
-                    "{status} must still be scanned"
-                );
-            }
-        }
-
-        // The same entries, each in a run that really did fail on it.
-        for fields in &entries {
-            let (id, signature) = (
-                ledger_field(fields, "id"),
-                ledger_field(fields, "signature"),
-            );
-            let failed = format!(
-                "running 1 test\ntest suite::a_case ... FAILED\n\nfailures:\n\n---- suite::a_case \
-             stdout ----\nthread 'suite::a_case' panicked at src/lib.rs:1:1:\n{signature}\n\ntest \
-             result: FAILED. 1 failed\n"
-            );
-            let failed = if nextest {
-                failed_run("a_case", signature)
-            } else {
-                failed
-            };
-            let (status, summary, annotations) = tripwire_over(&sandbox, &root, id, &failed);
-            assert_eq!(
-                status,
-                norn_testkit::process::RunStatus::Exited(101),
-                "the tripwire changed the suite's own verdict"
-            );
-            assert!(
-                annotations.contains(&format!("Ledgered flake recurred: {id}")),
-                "`{id}` recurred and the run carries no annotation naming it: {}",
-                unread(&annotations)
-            );
-            assert!(
-                summary.contains(ledger_field(fields, "disposition")),
-                "`{id}` recurred and the job summary carries no disposition to read: {}",
-                unread(&summary)
-            );
-        }
     }
 }
 
@@ -2907,16 +2858,13 @@ fn wait_failure(
 }
 
 /// A suite run in which `case` failed by panicking with `message`, in the
-/// shape nextest 0.9.114 prints it.
+/// shape libtest prints it.
 #[cfg(unix)]
 fn failed_run(case: &str, message: &str) -> String {
-    let message = message.replace('\n', "\n    ");
     format!(
-        "        FAIL [   0.001s] (1/1) fixture tests::{case}\n  stdout ───\n\n    running 1 test\n    \
-         test tests::{case} ... FAILED\n\n    failures:\n\n    failures:\n        tests::{case}\n\n    \
-         test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n  stderr ───\n\n    \
-         thread 'tests::{case}' (2900872) panicked at crates/norn-testkit/src/isolation.rs:298:59:\n    \
-         {message}\n\n────────────\n     Summary [   0.001s] 1 test run: 0 passed, 1 failed, 0 skipped\n"
+        "running 1 test\ntest tests::{case} ... FAILED\n\nfailures:\n\n---- tests::{case} stdout \
+         ----\nthread 'tests::{case}' panicked at crates/norn-testkit/src/isolation.rs:298:59:\n\
+         {message}\n\nfailures:\n    tests::{case}\n\ntest result: FAILED. 0 passed; 1 failed\n"
     )
 }
 

@@ -78,15 +78,15 @@ summary=${GITHUB_STEP_SUMMARY:-/dev/null}
 # Everything else is: the `... FAILED` status lines, the `failures:` list at the
 # end, the panic text a signature naming an assertion lives in, and whatever
 # else the run printed.
-# Limitation: captured failure output beginning with a passing status shape is also
-# excluded (as with libtest's `test ... ok`); only our tripwire fixtures print these.
-nonfailure_status='^[[:space:]]*(test .+ [.][.][.] (ok|ignored)|(PASS|SKIP|SLOW|LEAK) [[][^]]*[]])'
-matches=$(awk -v output="$log" -v nonfailure_status="$nonfailure_status" '
+matches=$(awk -v output="$log" '
+  function reports_a_test_that_did_not_fail(line) {
+    return line ~ /^[ \t]*test .+ [.][.][.] (ok|ignored)/
+  }
   function flush() {
     if (id != "" && signature != "") {
       matched = ""
       while ((getline line < output) > 0) {
-        if (line ~ nonfailure_status) continue
+        if (reports_a_test_that_did_not_fail(line)) continue
         if (index(line, signature) > 0) { matched = line; break }
       }
       close(output)
@@ -119,8 +119,8 @@ work_bound_phrase="work bound after"
 # The distinct lines of the run that carry `phrase`, read the way a signature
 # is: a line reporting a test that passed or was skipped is not scanned.
 lines_carrying() {
-  awk -v phrase="$1" -v nonfailure_status="$nonfailure_status" '
-    $0 ~ nonfailure_status { next }
+  awk -v phrase="$1" '
+    /^[ \t]*test .+ [.][.][.] (ok|ignored)/ { next }
     index($0, phrase) > 0 && !seen[$0]++ { print }
   ' "$log"
 }

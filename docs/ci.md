@@ -7,14 +7,19 @@ Clocks and trends belong to the dormant soak tier under
 
 ## PR and full-regression coverage
 
-`ci.yml` runs five jobs on PRs, main pushes and manual runs. Ordinary default
-workspace tests and doctests stay in `build and test`. The whole feature-enabled
+`ci.yml` runs six jobs on PRs, main pushes and manual runs. Ordinary default
+workspace tests and doctests split by package between `build and test` (everything
+except `norn-host`) and `build and test (norn-host)`. The named shard
+uses `-p norn-host`; the catch-all uses `--workspace --exclude norn-host`.
+Their package lists must match exactly, so new crates join the catch-all and
+every package's doctests run exactly once through ordinary `cargo test`. The whole feature-enabled
 `norn-host` package runs in `host functional (induced-failure)`, so current and
 future ordinary targets and cases join PR coverage automatically.
 
 | PR job | Evidence |
 |---|---|
-| Build and test | Workspace build, ordinary default workspace tests through nextest, separate doctests, cheap registry structure and dormancy checks |
+| Build and test | Workspace build, default tests and doctests except norn-host, cheap registry structure and dormancy checks |
+| Build and test (norn-host) | Default norn-host tests and doctests; cargo test builds its selected targets |
 | Lint and document | Format, all five clippy contexts, performance-harness unit tests, denied-warning rustdoc |
 | Host functional (induced-failure) | Complete ordinary feature-enabled host suite, including churn and rolling-heal correctness and work counters |
 | macOS platform | Embedding determinism, filesystem contracts, Obsidian parity, exact case-rename and unreadable-document/subtree cases, folding-root spelling bar |
@@ -123,14 +128,18 @@ stop merges; triage records that classification and what clears it. Diagnose red
 runs before rerunning. A runner failure or missed nightly supplies no positive
 regression evidence. Repairs may dispatch a full run immediately.
 
-The `main` ruleset requires these checks:
+The required-context set after merge is:
 
 - `build and test`
+- `build and test (norn-host)`
 - `lint and document`
 - `host functional (induced-failure)`
 - `determinism and filesystem (macOS ARM64)`
 - `architecture gate`
 - `CodeRabbit`
+
+The orchestrator adds `lint and document` and `build and test (norn-host)` to
+the `main` ruleset after merge. This change does not edit repository settings.
 
 Full-run names stay distinct so a manual regression run cannot alias a
 PR-required context.

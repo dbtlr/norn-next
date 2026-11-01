@@ -55,12 +55,10 @@
 //! to, and the template decides what runs — `true {0}` runs nothing. The
 //! arguments are then held to a grammar: optionally the flake tripwire in
 //! front, then either the lane script with a package, a target and harness
-//! arguments that select nothing, or `cargo test` / `cargo nextest run` with
-//! the flags that name a package, a feature and the targets it selects and
-//! the few that change nothing about which tests run. Nextest must explicitly
-//! disable retries with `--retries 0` and run every test with `--no-fail-fast`.
-//! `--release` is not among them: it compiles out every test gated on
-//! `debug_assertions`. A command outside that grammar
+//! arguments that select nothing, or `cargo test` with the flags that name a
+//! package, a feature and the targets it selects and the few that change
+//! nothing about which tests run. `--release` is not among them: it compiles
+//! out every test gated on `debug_assertions`. A command outside that grammar
 //! runs nothing, so a step this
 //! cannot read fails whatever needed it rather than vouching for a test it may
 //! not run.
@@ -233,6 +231,11 @@ enum Invocation {
     Lane { package: String, target: String },
     /// `cargo test`, with what it runs under a feature.
     Test(Vec<FeaturedRun>),
+    /// A default-feature package shard, including all targets and doctests.
+    Shard {
+        catch_all: bool,
+        packages: BTreeSet<String>,
+    },
 }
 
 /// What the workflows in `directory` run.
@@ -568,29 +571,40 @@ fn invocation(run: &str) -> Option<Invocation> {
                 target: (*target).to_string(),
             })
         }
-        ["cargo", "test", arguments @ ..] => featured_runs_of(arguments).map(Invocation::Test),
-        ["cargo", "nextest", "run", arguments @ ..] => {
-            // Retry and filtering options fail closed; this is the sole accepted runner policy.
-            let mut plain = Vec::new();
-            let mut retries_off = false;
-            let mut tokens = arguments.iter().copied();
-            while let Some(token) = tokens.next() {
-                if token == "--retries" {
-                    if tokens.next()? != "0" {
-                        return None;
-                    }
-                    retries_off = true;
-                } else {
-                    plain.push(token);
-                }
-            }
-            if !retries_off || !plain.contains(&"--no-fail-fast") {
-                return None;
-            }
-            featured_runs_of(&plain).map(Invocation::Test)
+        ["cargo", "test", arguments @ ..] => {
+            default_shard(arguments).or_else(|| featured_runs_of(arguments).map(Invocation::Test))
         }
         _ => None,
     }
+}
+
+/// A deliberately closed grammar: no filters, target selectors, features or retries.
+fn default_shard(arguments: &[&str]) -> Option<Invocation> {
+    let ["--locked", rest @ ..] = arguments else {
+        return None;
+    };
+    let (catch_all, selector, rest) = match rest {
+        ["--workspace", rest @ ..] => (true, "--exclude", rest),
+        rest => (false, "-p", rest),
+    };
+    let mut packages = BTreeSet::new();
+    let mut tokens = rest.iter().copied();
+    while let Some(token) = tokens.next() {
+        if token != selector {
+            return None;
+        }
+        let package = tokens.next()?;
+        if package.is_empty() || package.starts_with('-') || !packages.insert(package.to_string()) {
+            return None;
+        }
+    }
+    if packages.is_empty() {
+        return None;
+    }
+    Some(Invocation::Shard {
+        catch_all,
+        packages,
+    })
 }
 
 /// The runs the arguments of one `cargo test` invocation make under a
@@ -692,36 +706,6 @@ mod tests {
 
     fn tested(runs: Vec<FeaturedRun>) -> Option<Invocation> {
         Some(Invocation::Test(runs))
-    }
-
-    #[test]
-    fn nextest_vouches_only_for_unfiltered_runs_without_retries() {
-        assert_eq!(
-            invocation(
-                "cargo nextest run --locked --retries 0 --no-fail-fast -p norn-host --features induced-failure"
-            ),
-            tested(vec![run("norn-host", None, "induced-failure")])
-        );
-        for policy in [
-            "--no-fail-fast",
-            "--retries 0",
-            "--retries 1 --no-fail-fast",
-            "--retries 2 --no-fail-fast",
-            // Keep the argument free of shell metacharacters so -E itself is rejected.
-            "--retries 0 --no-fail-fast -E foo",
-            "--retries 0 --no-fail-fast --skip foo",
-            "--retries 0 --no-fail-fast --run-ignored all",
-            "--retries 0 --no-fail-fast --no-tests pass",
-            "--retries 0 --no-fail-fast --profile custom",
-        ] {
-            assert_eq!(
-                invocation(&format!(
-                    "cargo nextest run --locked -p norn-host --features induced-failure {policy}"
-                )),
-                None,
-                "must reject {policy}"
-            );
-        }
     }
 
     /// **A lane step reads as its package and target**, bare or behind the
@@ -1444,5 +1428,47 @@ mod tests {
                 ("B".to_string(), "true".to_string()),
             ])
         );
+    }
+}
+
+#[cfg(test)]
+mod shard_tests {
+    use super::*;
+
+    #[test]
+    fn default_shards_are_complementary_and_cannot_narrow_or_retry() {
+        let workflow = include_str!("../../../.github/workflows/ci.yml");
+        let shards: Vec<_> = steps_in(workflow)
+            .unwrap()
+            .into_iter()
+            .filter(|step| step.vouches)
+            .filter_map(|step| invocation(step.run.as_deref()?))
+            .filter_map(|run| match run {
+                Invocation::Shard {
+                    catch_all,
+                    packages,
+                } => Some((catch_all, packages)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(shards.len(), 2);
+        assert_eq!(shards[0].0, true);
+        assert_eq!(shards[1].0, false);
+        assert_eq!(shards[0].1, shards[1].1);
+        for command in [
+            "--locked --workspace --exclude norn-host",
+            "--locked -p norn-host",
+        ] {
+            for suffix in [
+                " ordinary",
+                " -- --skip ordinary",
+                " --lib",
+                " --tests",
+                " --retries 1",
+            ] {
+                let mutant = format!("{command}{suffix}");
+                assert!(default_shard(&mutant.split_whitespace().collect::<Vec<_>>()).is_none());
+            }
+        }
     }
 }
