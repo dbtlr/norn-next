@@ -330,6 +330,7 @@ impl<'a> Run<'a> {
         // to measure it.
         let mut command = Command::new(measured::image()?);
         command
+            .arg(measured::LAUNCHER_ARGUMENT)
             .arg(&self.program)
             .args(&self.args)
             .current_dir(self.sandbox.work_dir())
@@ -717,10 +718,17 @@ mod tests {
     #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // Harness scaffolding: starting this binary as a launcher.
     fn a_test_binary_with_a_stray_report_variable_fails_loudly() {
         let sandbox = sandbox("stray-variable");
-        for arguments in [&["--list"][..], &[]] {
-            let report = sandbox
-                .root()
-                .join(format!("stray-{}.usage", arguments.len()));
+        for (index, arguments) in [
+            &["--list"][..],
+            &[],
+            &["true"],
+            &["true", "true"],
+            &[measured::LAUNCHER_ARGUMENT],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let report = sandbox.root().join(format!("stray-{index}.usage"));
             let output = Command::new(measured::image().expect("this executable"))
                 .args(arguments)
                 .env(measured::REPORT_VARIABLE, &report)
@@ -729,6 +737,10 @@ mod tests {
                 .expect("starting this binary as a launcher");
             assert_eq!(output.status.code(), Some(127), "{arguments:?}: {output:?}");
             assert!(output.stdout.is_empty(), "{arguments:?}: the tests ran");
+            assert!(
+                !report.exists(),
+                "{arguments:?}: a stray launcher wrote a report"
+            );
         }
     }
 

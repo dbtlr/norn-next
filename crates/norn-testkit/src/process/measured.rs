@@ -44,14 +44,20 @@
 //! [`DIVERT`] is placed in the platform's initializer section, checks for
 //! [`REPORT_VARIABLE`] in the environment it was started with, and returns at
 //! once when it is absent. When it is present, the process is a measuring
-//! launcher: it spawns its arguments as the child, with that variable removed
-//! from the child's environment, and exits without returning to `main`. That
-//! path calls only libc and the system allocator, and touches no state of the
-//! standard library's runtime, which has not been set up yet.
+//! launcher and exits without returning to `main`. A run starts it with
+//! [`LAUNCHER_ARGUMENT`] first and the program after it; the measuring
+//! launcher spawns the program and its arguments as the child, with the
+//! variable removed from the child's environment. That path calls only libc
+//! and the system allocator, and touches no state of the standard library's
+//! runtime, which has not been set up yet.
 //!
-//! A binary started with the variable set and nothing it can spawn exits
-//! [`NOT_STARTED`], so a test binary that inherited a stray copy of the
-//! variable fails rather than exiting 0 having run nothing.
+//! A binary started with the variable set exits [`NOT_STARTED`], running
+//! nothing and writing no report, whenever its first argument is not
+//! [`LAUNCHER_ARGUMENT`] or no program follows it. A test binary that
+//! inherited a stray copy of the variable therefore fails whatever filter it
+//! was given, even one that names a program on `PATH`, rather than exiting 0
+//! having run no tests. Started by a run, it also exits [`NOT_STARTED`] when
+//! the program cannot be spawned, having reported why.
 //!
 //! # What the child sees
 //!
@@ -104,13 +110,18 @@ const REPORT_ENTRY_PREFIX: &[u8] = b"NORN_TESTKIT_MEASURED_REPORT=";
 #[cfg_attr(not(target_vendor = "apple"), unsafe(link_section = ".init_array"))]
 static DIVERT: extern "C" fn(c_int, *const *const c_char, *const *const c_char) = divert;
 
+/// The first argument of every measuring launcher a run starts, ahead of the
+/// program. A binary started with [`REPORT_VARIABLE`] set and any other first
+/// argument was not started by a run, and does nothing.
+pub(super) const LAUNCHER_ARGUMENT: &str = "--norn-testkit-measured-launcher";
+
 /// The measuring launcher's exit code when it reported [`Report::Ended`].
 pub(super) const REPORTED: c_int = 0;
 
 /// The measuring launcher's exit code when it reported
-/// [`Report::NotStarted`]: the shell's code for a command that was not found,
-/// and never 0, so a binary that became the measuring launcher by accident
-/// fails loudly.
+/// [`Report::NotStarted`], or when it was not started by a run at all: the
+/// shell's code for a command that was not found, and never 0, so a binary
+/// that became the measuring launcher by accident fails loudly.
 pub(super) const NOT_STARTED: c_int = 127;
 
 /// The measuring launcher's exit code when it could not produce a report.
@@ -260,7 +271,7 @@ unsafe fn report_path(envp: *const *const c_char) -> Option<&'static CStr> {
     }
 }
 
-/// Spawn `argv[1..]` with the environment minus the report variable, reap
+/// Spawn `argv[2..]` — what follows [`LAUNCHER_ARGUMENT`] — with the environment minus the report variable, reap
 /// it, publish the report, and return the measuring launcher's exit code.
 ///
 /// # Safety
@@ -273,8 +284,14 @@ unsafe fn launch(
     envp: *const *const c_char,
     report: &CStr,
 ) -> c_int {
-    if argc < 2 {
-        return finish(report, &Report::NotStarted(libc::EINVAL));
+    // SAFETY: `argv` holds `argc` valid strings, so index 1 is in bounds
+    // when `argc >= 2`.
+    if argc < 3
+        || unsafe { CStr::from_ptr(*argv.add(1)) }.to_bytes() != LAUNCHER_ARGUMENT.as_bytes()
+    {
+        // Not started by a run: a stray copy of the variable. Write nothing
+        // to the path it names and run nothing.
+        return NOT_STARTED;
     }
     let mut environment = Vec::new();
     let mut entry = envp;
@@ -299,9 +316,9 @@ unsafe fn launch(
     let Some(attributes) = SpawnAttributes::shielding() else {
         return LAUNCHER_FAILED;
     };
-    // SAFETY: `argc >= 2`, so `argv[1]` is the program and `argv + 1` is a
+    // SAFETY: `argc >= 3`, so `argv[2]` is the program and `argv + 2` is a
     // null-terminated argument vector beginning with it.
-    let (program, arguments) = unsafe { (*argv.add(1), argv.add(1)) };
+    let (program, arguments) = unsafe { (*argv.add(2), argv.add(2)) };
     let mut pid: libc::pid_t = 0;
     // SAFETY: every pointer is valid and null-terminated as `posix_spawnp`
     // requires. Null file actions ask for the defaults, so the child inherits
