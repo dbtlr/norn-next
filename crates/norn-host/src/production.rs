@@ -21853,11 +21853,14 @@ mod tests {
         let running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
         let writer_running = std::sync::Arc::clone(&running);
         let hot = f.vault().join("hot.md");
+        // A writer held near 1 kHz keeps this an end-to-end check whose
+        // runtime follows the build, not the host's load.
         let writer = thread::spawn(move || {
             let mut generation = 0;
             while writer_running.load(std::sync::atomic::Ordering::SeqCst) {
                 fs::write(&hot, generation.to_string()).unwrap();
                 generation += 1;
+                thread::sleep(Duration::from_millis(1));
             }
         });
         let (ops, name) = f.ops(2);
@@ -21866,6 +21869,14 @@ mod tests {
             .unwrap();
         running.store(false, std::sync::atomic::Ordering::SeqCst);
         writer.join().unwrap();
+        // ADR 0048: each requeue takes once, whatever the event rate.
+        let spent = ops.evidence.read();
+        assert!(
+            spent.requeue_drains <= spent.requeue_calls,
+            "{} takes outnumber {} requeue calls",
+            spent.requeue_drains,
+            spent.requeue_calls
+        );
         ops.detach(&name, attachment);
     }
 
