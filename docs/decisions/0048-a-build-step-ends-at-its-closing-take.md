@@ -707,12 +707,12 @@ until `Ready`.
   requeue calls, not by the number or rate of facts accepted while it runs. The calls
   follow the vault's shape: a build under edits makes no more of them than a quiet build
   of the same tree, and can make fewer, because a document pulled ahead leaves its normal
-  pass with fewer chunks to page. On the 200-document test vault the build made 210
+  pass with fewer chunks to page. On the 200-document test vault the build made about 210
   requeue calls and never more takes than that. With a writer rewriting one note as fast
-  as it could, which produced 50,000 to 55,000 accepted facts during the build, the
-  attach took 0.68–0.73 s; with a writer near 1 kHz it took 0.73–0.78 s. With 20 ms injected per take, it took 5.1 s with a writer at
-  100 Hz and 5.2–5.3 s with an unthrottled writer, whose 440,000 facts the build
-  accepted; under ADR 0045 those attaches never finished. The bound is on work, not on
+  as it could, which produced about 50,000 accepted facts during the build, the attach
+  took about 0.7 s, as it did with a writer near 1 kHz. With 20 ms injected per take, it
+  took about 5 s with a writer at 100 Hz and with an unthrottled writer, whose roughly
+  440,000 facts the build accepted; under ADR 0045 those attaches never finished. The bound is on work, not on
   wall time: host load still stretches the attach. With 24 busy loops on 12 CPUs, the
   test with a writer near 1 kHz took about 5 s against about 0.7 s on a quiet host, and
   still finished.
@@ -730,15 +730,17 @@ until `Ready`.
   facts' reach, as it already did for facts accepted from step 5 on.
 - **An invariant pins the rule.** A take is one call of the build's take that returns
   a non-empty set of roots. The number of takes never exceeds the number of requeue
-  calls, whatever the event rate. A test counts calls and takes at their own construction
-  boundaries, apart from the counters the build keeps. It builds the vault once with no
+  calls, whatever the event rate. A test counts takes at their own construction boundary
+  and calls where each caller marks one just before it calls, outside the requeue, so no
+  change to how a requeue takes can change the call count; both counts stand apart from
+  the counters the build keeps. It builds the vault once with no
   writes, which makes 24 requeue calls and no take. It then builds it again under a
   writer that keeps a fact pending at every call. The writer rewrites one note twenty
   times inside every take, before the take reads it, and once after each take's read. It
   rewrites the note again once Structure publishes, and rewrites a second note once
   Relations publishes. Each rewrite waits to be accepted. That build makes 22 requeue
-  calls, no more than the quiet build, and exactly one take per call while 520 to 590
-  facts are accepted. Its counters agree with the boundary counts, and the store it
+  calls, no more than the quiet build, and exactly one take per call, while it accepts at
+  least ten facts per call. Its counters agree with the boundary counts, and the store it
   reaches `Ready` with equals a from-scratch build of the final bytes, so a fact a take
   left behind was not lost. Under ADR 0045's rule an earlier form of this test, writing
   only inside takes, took again within one requeue until its writer stopped at a 400-take
