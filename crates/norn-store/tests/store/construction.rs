@@ -1783,3 +1783,212 @@ fn an_increment_ending_a_nested_directory_mark_rejudges_its_links() {
     assert_eq!(findings.len(), 1);
     assert_eq!(findings[0].kind, norn_wire::FindingKind::Broken.as_str());
 }
+
+/// **A requeue the judgment has already judged past refiles a path link's
+/// finding once.** `target.md` dies while Relations runs, before the
+/// judgment, so its death's path discard finds nothing to take; the judgment
+/// then files `ref.md`'s path link to it as broken, keyed by the path
+/// `target.md`, and the requeue's rejudgment of that path judges the same
+/// link again. The finding it files replaces the judgment's rather than
+/// meeting it at the link's one place (`findings_one_per_link`).
+///
+/// The host reaches no such window — it judges as Relations begins, before
+/// any requeue — so only a caller of the store's own steps can.
+#[test]
+fn a_requeue_before_the_judgment_refiles_a_path_links_finding_once() {
+    use crate::common::{document, path};
+    use norn_store::{
+        Change, ContentModel, ContentWrite, IncrementProvenance, Provenance, Span, Step,
+    };
+    let scratch = Scratch::new("requeue-before-judgment");
+    let mut store = scratch.open();
+    store.defer_link_health().unwrap();
+    store.begin_steps().unwrap();
+    let model = ContentModel::none();
+    store
+        .begin_request()
+        .apply_increment(
+            IncrementProvenance::Derived,
+            [
+                Change::Named {
+                    path: path("ref.md"),
+                },
+                Change::Named {
+                    path: path("target.md"),
+                },
+            ],
+            &[],
+            &model,
+        )
+        .unwrap();
+    store.finish_step(Step::Names).unwrap();
+    let origin = Span {
+        line: 1,
+        column: 1,
+        byte_offset: 0,
+    };
+    let body = "[x](/target.md)\n";
+    let mut group = store.step_group().unwrap();
+    group
+        .begin_request()
+        .write_content(
+            &[
+                ContentWrite {
+                    facts: document("ref.md", "ref", body),
+                    origin,
+                },
+                ContentWrite {
+                    facts: document("target.md", "target", "t\n"),
+                    origin,
+                },
+            ],
+            &[],
+            &model,
+        )
+        .unwrap();
+    let mut rows = group.begin_request().structure_page(8).unwrap();
+    for row in &mut rows {
+        if row.facts.path == path("ref.md") {
+            row.facts.links = crate::health::derived("ref.md", body).links;
+        }
+    }
+    group
+        .begin_request()
+        .write_structure(&rows, &[], &model)
+        .unwrap();
+    group.commit().unwrap();
+    store.finish_step(Step::Content).unwrap();
+    store.finish_step(Step::Structure).unwrap();
+
+    store
+        .begin_request()
+        .apply_increment(
+            IncrementProvenance::Derived,
+            [Change::Death {
+                path: path("target.md"),
+                provenance: Provenance::WatcherRemoval,
+            }],
+            &[],
+            &model,
+        )
+        .unwrap();
+    store
+        .begin_request()
+        .judge_link_health_deferred(&model, &mut || {})
+        .unwrap();
+    let judged = store
+        .begin_request()
+        .stored_findings(&path("ref.md"))
+        .unwrap();
+    assert_eq!(judged.len(), 1, "{judged:?}");
+    assert_eq!(judged[0].kind, norn_wire::FindingKind::Broken.as_str());
+
+    store.begin_request().rejudge_reach(&model).unwrap();
+    let rejudged = store
+        .begin_request()
+        .stored_findings(&path("ref.md"))
+        .unwrap();
+    assert_eq!(rejudged.len(), 1, "{rejudged:?}");
+    assert_eq!(rejudged[0].kind, norn_wire::FindingKind::Broken.as_str());
+}
+
+/// **A document rewritten before the judgment has its links' findings
+/// replaced, not refiled beside the judgment's.** `holder.md` is written
+/// while Relations runs and before the judgment, so its write's subject
+/// discard finds nothing; the judgment then files its broken link, and the
+/// rejudgment of the rewritten document judges that link again. Its other
+/// findings are no link's health and stand.
+#[test]
+fn a_document_rewritten_before_the_judgment_refiles_its_links_findings_once() {
+    use crate::common::path;
+    use norn_store::{
+        Change, ContentModel, ContentWrite, DerivedFinding, IncrementProvenance, Span, Step,
+    };
+    let scratch = Scratch::new("rewritten-before-judgment");
+    let mut store = scratch.open();
+    let model = ContentModel::none();
+    store.defer_link_health().unwrap();
+    store.begin_steps().unwrap();
+    for step in [Step::Names, Step::Content, Step::Structure] {
+        store.finish_step(step).unwrap();
+    }
+    store
+        .begin_request()
+        .apply_increment(
+            IncrementProvenance::Derived,
+            [Change::Named {
+                path: path("holder.md"),
+            }],
+            &[],
+            &model,
+        )
+        .unwrap();
+    let body = "[gone](/missing.md)\n[[also-missing]]\n";
+    let mut facts = crate::health::derived("holder.md", body);
+    let links = std::mem::take(&mut facts.links);
+    let mut group = store.step_group().unwrap();
+    group
+        .begin_request()
+        .write_content(
+            &[ContentWrite {
+                facts,
+                origin: Span {
+                    line: 1,
+                    column: 1,
+                    byte_offset: 0,
+                },
+            }],
+            &[DerivedFinding {
+                facts: crate::common::unread_block("holder.md"),
+                replaces: None,
+                bytes_hash: None,
+            }],
+            &model,
+        )
+        .unwrap();
+    let mut rows = group.begin_request().structure_page(8).unwrap();
+    rows[0].facts.links = links;
+    group
+        .begin_request()
+        .write_structure(&rows, &[], &model)
+        .unwrap();
+    group.commit().unwrap();
+    store
+        .begin_request()
+        .judge_link_health_deferred(&model, &mut || {})
+        .unwrap();
+    assert_eq!(
+        store
+            .begin_request()
+            .stored_findings(&path("holder.md"))
+            .unwrap()
+            .len(),
+        3
+    );
+
+    assert_eq!(store.begin_request().rejudge_reach(&model).unwrap(), 2);
+    let held = store
+        .begin_request()
+        .stored_findings(&path("holder.md"))
+        .unwrap();
+    let judged = store
+        .begin_request()
+        .judge_link_health(&[path("holder.md")], &model)
+        .unwrap();
+    let (links, document): (Vec<_>, Vec<_>) = held.iter().partition(|f| f.ordinal.is_some());
+    assert_eq!(
+        links
+            .iter()
+            .map(|f| (f.ordinal, f.kind.clone()))
+            .collect::<Vec<_>>(),
+        judged
+            .iter()
+            .map(|f| (f.ordinal, f.kind.as_str().to_string()))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(links.len(), 2, "{held:?}");
+    assert_eq!(
+        document.iter().map(|f| f.kind.as_str()).collect::<Vec<_>>(),
+        [norn_wire::FindingKind::FrontmatterUnreadable.as_str()]
+    );
+}
