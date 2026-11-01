@@ -181,6 +181,7 @@ fn the_manifest_covers_the_lanes_the_bars_and_the_suites() {
         "crates/norn-testkit/src/regression/compiled.rs",
         "crates/norn-testkit/src/process.rs",
         "crates/norn-testkit/src/process/group.rs",
+        "crates/norn-testkit/src/process/measured.rs",
         "crates/norn-testkit/src/scratch.rs",
         // Build provenance decides whether authored measurement bars apply.
         "crates/norn-testkit/src/build_subject.rs",
@@ -1830,6 +1831,7 @@ fn assert_complete_active_matrix(workflow: &str, full: bool) {
             runs = vec![
                 ".github/scripts/flake-tripwire.sh cargo test --locked -p norn-embed --test determinism",
                 ".github/scripts/flake-tripwire.sh cargo test --locked -p norn-fs",
+                ".github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-testkit --lib process",
                 ".github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-host --features induced-failure --lib",
                 ".github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-host --features induced-failure --test early_reads",
                 ".github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-host --features induced-failure --test provisional_registration",

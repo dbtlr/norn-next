@@ -27,7 +27,6 @@ const GROUP_CLEANUP_DEADLINE: Duration = Duration::from_secs(5);
 pub(super) struct ProcessEnd {
     pub(super) pid: libc::pid_t,
     pub(super) status: libc::c_int,
-    pub(super) usage: libc::rusage,
     pub(super) timed_out: bool,
 }
 
@@ -281,7 +280,7 @@ impl OwnedProcessGroup {
             std::mem::replace(&mut self.state, OwnershipState::Reaped)
         else {
             return Err(io::Error::other(format!(
-                "process group {} lost its leader identity before `wait4` reaped it",
+                "process group {} lost its leader identity before `waitpid` reaped it",
                 self.pgid
             )));
         };
@@ -309,7 +308,6 @@ impl OwnedProcessGroup {
                     return Ok(ProcessEnd {
                         pid: self.pgid,
                         status: ended.status,
-                        usage: ended.usage,
                         timed_out,
                     });
                 }
@@ -484,7 +482,6 @@ impl Drop for OwnedProcessGroup {
 
 struct Ended {
     status: libc::c_int,
-    usage: libc::rusage,
 }
 
 #[derive(Clone, Copy)]
@@ -517,14 +514,13 @@ fn leader_has_ended(pid: libc::pid_t) -> io::Result<bool> {
 fn reap_leader(pid: libc::pid_t) -> io::Result<Ended> {
     loop {
         let mut status = 0;
-        let mut usage = unsafe { std::mem::zeroed() };
-        let waited = unsafe { libc::wait4(pid, &mut status, 0, &mut usage) };
+        let waited = unsafe { libc::waitpid(pid, &mut status, 0) };
         if waited == pid {
-            return Ok(Ended { status, usage });
+            return Ok(Ended { status });
         }
         if waited != -1 {
             return Err(io::Error::other(format!(
-                "`wait4` on pid {pid} returned {waited}, which is neither the child nor a failure"
+                "`waitpid` on pid {pid} returned {waited}, which is neither the child nor a failure"
             )));
         }
         let error = io::Error::last_os_error();

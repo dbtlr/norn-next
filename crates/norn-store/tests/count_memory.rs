@@ -16,7 +16,14 @@ const DATABASE_ENV: &str = "NORN_COUNT_RESOURCE_DATABASE";
 const SIZE_ENV: &str = "NORN_COUNT_RESOURCE_DOCUMENTS";
 const CASE: &str = "retained_results_bound_native_memory_and_price_their_descriptors";
 // A whole-result Vec at the larger scale retains over 14 MiB more label bytes.
+// On ubuntu-latest x86_64-glibc, full memory invariant runs 41323116407,
+// 41324737076 and 41329840687 at PR #423 head 5dd80988b read growth of
+// -200,704, 102,400 and -20,480 bytes between 512 and 4096 rows.
+// No measurement-based lowering rule is authored for either bar.
 const MEMORY_GROWTH: u64 = 8 * 1024 * 1024;
+// The same runs read the child's own peaks (NORN-443), in bytes:
+// 512 rows: 14,512,128; 14,282,752; 14,340,096.
+// 4096 rows: 14,311,424; 14,385,152; 14,319,616.
 const MEMORY_CEILING: u64 = 64 * 1024 * 1024;
 
 fn model() -> ContentModel {
