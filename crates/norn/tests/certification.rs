@@ -1286,8 +1286,7 @@ fn ci_job(workflow: &str, key: &str) -> Vec<String> {
 }
 
 /// A runner config can silently filter cases or turn elapsed time into a verdict.
-#[test]
-fn nextest_has_no_repository_config() {
+fn assert_nextest_has_no_repository_config() {
     // 0.9.114 reads only this workspace-root path by default. --config-file and
     // --tool-config-file are explicit CLI options, with no NEXTEST_* path override;
     // the workflow command pins and closed environment grammar reject those inputs.
@@ -1305,6 +1304,7 @@ fn nextest_has_no_repository_config() {
 /// The PR gate retains every ordinary host target while deep lanes run in full regression.
 #[test]
 fn the_fast_gate_keeps_ordinary_functional_coverage() {
+    assert_nextest_has_no_repository_config();
     let gate = std::fs::read_to_string(workspace_root().join(".github/workflows/ci.yml"))
         .expect("reading the PR gate");
     assert_fast_gate(&gate);
