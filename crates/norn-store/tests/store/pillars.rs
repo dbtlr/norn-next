@@ -4628,6 +4628,7 @@ fn write_bar(statement: WriteStatement) -> WriteBar {
         UpsertDocument
         | InsertLink
         | InsertLinkKey
+        | InsertLinkAnchorKey
         | InsertHeading
         | InsertBlock
         | InsertTag
@@ -4848,6 +4849,14 @@ fn every_write_path_statement_scans_no_table_and_each_keyed_one_seeks() {
     {
         let scratch = Scratch::new("write-plans-cascade-control");
         let mut store = scratch.open();
+        // `link_anchor_keys` cascades from `link_keys` through the same
+        // index, so with it dropped that foreign key names no parent key and
+        // the discard cannot be prepared at all. The table goes first, so the
+        // control isolates the cascade into `link_keys`; the anchored-link
+        // index's own cascade seeks its primary key, which no drop removes,
+        // and the no-scan bar above holds it.
+        induced_failure::execute_out_of_band(&mut store, "DROP TABLE link_anchor_keys")
+            .expect("dropping link_anchor_keys");
         induced_failure::execute_out_of_band(&mut store, "DROP INDEX link_keys_link")
             .expect("dropping link_keys_link");
         let statement = WriteStatement::DiscardLinks;

@@ -489,6 +489,7 @@ impl<'a> Request<'a> {
             &reach.classes,
             &reach.paths,
             &reach.directories,
+            &crate::anchor::AnchorMoves::new(),
             Some(&reach.documents),
         )?;
         transaction
@@ -2350,6 +2351,7 @@ fn redecide_directories(
         &BTreeSet::new(),
         &BTreeSet::new(),
         directories,
+        &crate::anchor::AnchorMoves::new(),
     )
 }
 

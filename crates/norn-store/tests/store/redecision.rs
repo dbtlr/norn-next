@@ -1942,20 +1942,27 @@ fn an_in_place_rewrite_that_moves_no_anchor_redecides_only_its_own_links() {
     }
 }
 
-/// **An in-place rewrite that moves an anchor value still reaches every link
-/// to the document** (ADR 0047): until the anchored-link index is built, it
-/// re-decides every link its class and path reach, beside its own. Each
-/// rewrite here moves one value — a heading renamed, a heading added, a
-/// heading's reading moved where its slug stays, a slug moved where its
-/// reading stays, a block id renamed — and the next restores it, so each
-/// missing anchor it moves is filed and ended once each way, each time at the
-/// link's one place, and the store equals a rebuild after every step. A
+/// **An in-place rewrite that moves an anchor value re-decides the links
+/// naming what it moved** (ADR 0047): beside its own links, exactly the
+/// anchored links that could name the document and name a moved heading
+/// reading, heading slug or block id. Each rewrite here moves one value — a
+/// heading renamed, a heading added, a heading's reading moved where its slug
+/// stays, a slug moved where its reading stays, a block id renamed — and the
+/// next restores it, so each missing anchor it moves is filed and ended once
+/// each way, each time at the link's one place, and the store equals a
+/// rebuild after every step. Each holder names the hub seven ways, so the
+/// value a step moves reaches one or two of them and the rest stand. A
 /// heading respelled only in case moves neither its reading nor its slug, so
 /// it is an in-place rewrite that re-decides its own links alone.
 #[test]
-fn an_in_place_rewrite_that_moves_an_anchor_reaches_every_link_to_it() {
+fn an_in_place_rewrite_that_moves_an_anchor_redecides_the_links_naming_it() {
     const HOLDERS: usize = 20;
-    let reach = HUB_OWN_LINKS + IN_LINKS_PER_HOLDER * HOLDERS as u64;
+    // Its own links, and in each holder the links naming the moved value:
+    // `[[hub#Intro]]` by the reading `intro`, `[[hub#intro-two]]` by the slug
+    // `intro-two`, `[[hub#^blk]]` by the block `blk`, and both links naming
+    // `Nope` by the reading `nope`.
+    let naming = |per_holder: u64| HUB_OWN_LINKS + per_holder * HOLDERS as u64;
+    let reach = naming(1);
     // The ordinals of the holder's links missing their anchor: the two naming
     // `Nope` unless `nope`, and each other anchored link named.
     let holder_with = |nope: bool, missing: &[u64]| {
@@ -1987,13 +1994,13 @@ fn an_in_place_rewrite_that_moves_an_anchor_reaches_every_link_to_it() {
         (
             "a heading added",
             hub("# Intro", "## Intro Two", "## Nope\n\n", "^blk"),
-            reach,
+            naming(2),
             holder_with(true, &[]),
         ),
         (
             "the heading removed",
             HUB.to_string(),
-            reach,
+            naming(2),
             standing.clone(),
         ),
         (
@@ -2056,13 +2063,138 @@ fn an_in_place_rewrite_that_moves_an_anchor_reaches_every_link_to_it() {
     }
 }
 
+/// **A moved anchor's work follows the links naming the moved value**
+/// (ADR 0047's write-work bar). `hub.md` is linked three ways: by holders
+/// `n/NNN.md` naming the heading the rewrite renames, by holders `o/NNN.md`
+/// naming its other heading, its block and a heading it lacks, and, beside a
+/// second document of the same class `z/hub.md` holding the same heading, by
+/// holders `s/NNN.md` naming that heading there. Renaming the heading
+/// re-decides the hub's own links and the `n` links alone, so its work grows
+/// with the `n` holders and is the same beside ten `o` and `s` holders as
+/// beside a hundred of each, and the store equals a rebuild.
+#[test]
+fn a_moved_anchors_work_follows_the_links_naming_it() {
+    let vault_of = |label: &str, order, naming: usize, others: usize| {
+        let mut vault = Vault::new(label, order);
+        let mut held: BTreeMap<String, String> = BTreeMap::from([
+            ("hub.md".to_string(), HUB.to_string()),
+            ("own.md".to_string(), "own\n".to_string()),
+            ("z/hub.md".to_string(), "# Intro\n".to_string()),
+        ]);
+        held.extend((0..naming).map(|at| (format!("n/{at:03}.md"), "[[hub#Intro]]\n".to_string())));
+        held.extend((0..others).map(|at| {
+            (
+                format!("o/{at:03}.md"),
+                "[[hub#Intro Two]]\n\n[[hub#^blk]]\n\n[[hub#Nope]]\n".to_string(),
+            )
+        }));
+        held.extend(
+            (0..others).map(|at| (format!("s/{at:03}.md"), "[[z/hub#Intro]]\n".to_string())),
+        );
+        vault.apply(
+            held.iter()
+                .map(|(at, body)| Change::Upsert(derived(at, body)))
+                .collect::<Vec<_>>(),
+        );
+        (vault, held)
+    };
+    let renamed = hub_body("# Other", "## Intro Two", "", "^blk");
+    for order in [Sensitive, Folding] {
+        let mut steps = BTreeMap::new();
+        for (naming, others) in [(10, 10), (10, 100), (100, 10)] {
+            let at = format!("{order:?} beside {naming} naming and {others} other holders");
+            let (mut vault, mut held) = vault_of(
+                &format!("redecide-anchor-work-{order:?}-{naming}-{others}"),
+                order,
+                naming,
+                others,
+            );
+            held.insert("hub.md".to_string(), renamed.clone());
+            let (counters, taken) = measured(
+                &mut vault,
+                vec![Change::Upsert(derived("hub.md", &renamed))],
+            );
+            assert_eq!(
+                counted(&counters, "links_redecided"),
+                HUB_OWN_LINKS + naming as u64,
+                "{at}"
+            );
+            assert_rebuilds(&mut vault.store, order, &held, &at);
+            steps.insert((naming, others), taken);
+        }
+        assert_eq!(
+            steps[&(10, 10)],
+            steps[&(10, 100)],
+            "{order:?}: links naming other values or another document moved a renamed \
+             heading's work: {steps:?}"
+        );
+        assert!(
+            steps[&(100, 10)] > steps[&(10, 10)],
+            "{order:?}: the links naming the renamed heading cost nothing: {steps:?}"
+        );
+    }
+}
+
+/// **A link reached by a names move and by an anchor move in one changeset
+/// holds one finding** (ADR 0047). A path link `[q](./a/note.md#Gone)` misses
+/// its anchor, and its finding is filed under the path `a/note.md` and,
+/// through its candidate's name, under the class `note/`. One changeset adds
+/// the heading `Gone` to `a/note.md` in place and gives birth to `b/note.md`,
+/// so the class's findings pass judges the link through its candidate's
+/// class and the anchor arm reaches it by its path and the moved value. The
+/// store holds one finding about it, which a rebuild holds too, and the
+/// reverse changeset restores the missing anchor.
+#[test]
+fn a_link_a_names_move_and_an_anchor_move_both_reach_holds_one_finding() {
+    for order in [Sensitive, Folding] {
+        let at = format!("{order:?}");
+        let mut vault = Vault::new(&format!("redecide-anchor-and-names-{order:?}"), order);
+        let mut held: BTreeMap<String, String> = BTreeMap::from([
+            ("a/note.md".to_string(), "# Here\n".to_string()),
+            ("h.md".to_string(), "[q](./a/note.md#Gone)\n".to_string()),
+        ]);
+        vault.apply(
+            held.iter()
+                .map(|(at, body)| Change::Upsert(derived(at, body)))
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(
+            vault.findings("h.md"),
+            [missing_anchor(0, "a/note.md")],
+            "{at}"
+        );
+        held.insert("a/note.md".to_string(), "# Gone\n".to_string());
+        held.insert("b/note.md".to_string(), "b\n".to_string());
+        vault.apply(vec![
+            Change::Upsert(derived("a/note.md", "# Gone\n")),
+            Change::Upsert(derived("b/note.md", "b\n")),
+        ]);
+        assert_eq!(vault.findings("h.md"), [], "{at}: the anchor now stands");
+        assert_rebuilds(&mut vault.store, order, &held, &at);
+        held.insert("a/note.md".to_string(), "# Here\n".to_string());
+        held.remove("b/note.md");
+        vault.apply(vec![
+            Change::Upsert(derived("a/note.md", "# Here\n")),
+            death("b/note.md"),
+        ]);
+        assert_eq!(
+            vault.findings("h.md"),
+            [missing_anchor(0, "a/note.md")],
+            "{at}"
+        );
+        assert_rebuilds(&mut vault.store, order, &held, &at);
+    }
+}
+
 /// **A write that is not an in-place rewrite moves its names and reaches
 /// every link to them** (ADR 0047): a birth, a death, a rename, a respelling
 /// only a folding comparison calls the same path, a readable document
 /// becoming names alone and a names-only row becoming readable — with the
 /// same anchors on both sides, and with none, where only whether the body is
 /// known moved. Each re-decides every link the hub's class and path reach,
-/// and the store equals a rebuild after every step.
+/// and the store equals a rebuild after every step. The one in-place step
+/// the script needs to get back to the hub's anchors re-decides only the
+/// links naming them.
 #[test]
 fn a_write_that_is_not_in_place_reaches_every_link_to_its_names() {
     const HOLDERS: u64 = 20;
@@ -2091,10 +2223,14 @@ fn a_write_that_is_not_in_place_reaches_every_link_to_its_names() {
                 in_links,
                 5,
             ),
+            // Readable over readable at the same path, so an in-place rewrite:
+            // its headings and block are born, and the links naming them —
+            // `[[hub#Intro]]`, `[[hub#^blk]]` and `[[hub#intro-two]]` in each
+            // holder — are re-decided beside its own.
             (
                 "the hub as it was",
                 upserts(&[("hub.md", HUB)]),
-                in_links + HUB_OWN_LINKS,
+                HUB_OWN_LINKS + 3 * HOLDERS,
                 2,
             ),
             (

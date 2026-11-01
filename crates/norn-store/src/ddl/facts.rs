@@ -136,6 +136,37 @@
 //! is set: a path key is not in them, and a folder note's class costs its own
 //! links however many links into the folder beside it stand.
 
+//! # `link_anchor_keys` holds an anchored link by its key and anchor value
+//!
+//! Whether a document holds the place a link's anchor names is an equality
+//! over the document's heading readings, heading slugs and block ids, so an
+//! in-place rewrite moving one of those values can change only the verdicts
+//! of the links naming it ([ADR 0047]). Those links are found here: one row
+//! per key `link_keys` holds an anchored link
+//! under, and per value its anchor is matched by — its text reading and its
+//! marked reading as `reading`, which a heading's reading matches, the
+//! anchor as written as `slug`, which a heading's slug matches, and a block
+//! reference as `block`, which a block's identifier matches. A marked reading
+//! equal to the text reading is one row, which the primary key makes so.
+//!
+//! **The value leads, and the key is beside it.** `link_anchor_keys_value`
+//! orders `(kind, value, key, link)`, and a re-decision seeks it by equality
+//! at each key that could name the rewritten document — each segment-aligned
+//! prefix of its suffix key, and its path key — so it reads only the links
+//! that could name that document and name the moved value. A seek by value
+//! alone would read every link naming a common heading in the vault, and a
+//! class range would read the links naming it in every document the class
+//! holds. A suffix key ends in the separator and a path key never does, so
+//! one index holds both kinds and an equality seek never meets the other.
+//!
+//! **Its rows are the key row's.** The foreign key on `(link, key)` cascades
+//! from `link_keys`, whose own rows cascade from the link, and the primary
+//! key leads with those columns, so a re-derivation's delete reaches a
+//! document's anchor rows by seek. The table is `WITHOUT ROWID` because the
+//! primary key is the whole row.
+//!
+//! [ADR 0047]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0047-a-write-re-decides-only-the-links-whose-inputs-it-moved.md
+
 //! # `headings` is addressed two ways
 //!
 //! A heading anchor matches a heading by its **text**, which `reading` holds
@@ -228,6 +259,15 @@ const STATEMENTS: &[&str] = &[
     "CREATE INDEX link_keys_key ON link_keys(key, document, link)",
     "CREATE INDEX link_keys_suffix_key ON link_keys(key, document, link)
     WHERE segments IS NOT NULL",
+    "CREATE TABLE link_anchor_keys (
+    link  INTEGER NOT NULL,
+    key   TEXT    NOT NULL,
+    kind  TEXT    NOT NULL CHECK (kind IN ('reading', 'slug', 'block')),
+    value TEXT    NOT NULL,
+    PRIMARY KEY (link, key, kind, value),
+    FOREIGN KEY (link, key) REFERENCES link_keys(link, key) ON DELETE CASCADE
+) WITHOUT ROWID",
+    "CREATE INDEX link_anchor_keys_value ON link_anchor_keys(kind, value, key, link)",
     "CREATE TABLE headings (
     id               INTEGER PRIMARY KEY,
     document         INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,

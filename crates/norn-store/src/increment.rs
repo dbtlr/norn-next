@@ -505,13 +505,25 @@ pub(crate) fn apply(
             // link another document holds reads anything it moved, so the
             // subject discard above and the re-decision of its own links are
             // all it owes ([`Reach`]).
-            if reach == Reach::Neighborhood {
-                tally
-                    .affected_classes
-                    .insert(subject.class_key_in(class_space));
-                tally
-                    .affected_paths
-                    .insert(subject.path_key_in(class_space));
+            match reach {
+                Reach::Neighborhood => {
+                    tally
+                        .affected_classes
+                        .insert(subject.class_key_in(class_space));
+                    tally
+                        .affected_paths
+                        .insert(subject.path_key_in(class_space));
+                }
+                Reach::Anchors(moved) => {
+                    for key in crate::link::keys_naming(subject, class_space) {
+                        tally
+                            .anchor_moves
+                            .entry(key)
+                            .or_default()
+                            .extend(moved.iter().cloned());
+                    }
+                }
+                Reach::OwnLinks => {}
             }
 
             // The point a changeset can be torn at, and the only one: between
@@ -551,6 +563,7 @@ pub(crate) fn apply(
             &tally.affected_classes,
             &tally.affected_paths,
             &tally.directories,
+            &tally.anchor_moves,
         )?
     } else {
         Redecided::default()
@@ -646,6 +659,10 @@ struct Tally {
     findings_discarded: u64,
     affected_classes: BTreeSet<ClassKey>,
     affected_paths: BTreeSet<PathKey>,
+    /// The anchor values each in-place rewrite moved, under each key that
+    /// could name its document. No construction step admits an upsert, so a
+    /// from-zero build's requeue never carries one.
+    anchor_moves: crate::anchor::AnchorMoves,
     directories: BTreeSet<DirectoryPrefix>,
 }
 
@@ -663,6 +680,7 @@ pub(crate) struct Statements<'t> {
     discard_facts: Vec<CachedStatement<'t>>,
     insert_link: CachedStatement<'t>,
     insert_link_key: CachedStatement<'t>,
+    insert_link_anchor_key: CachedStatement<'t>,
     insert_heading: CachedStatement<'t>,
     insert_block: CachedStatement<'t>,
     insert_tag: CachedStatement<'t>,
@@ -752,6 +770,10 @@ impl<'t> Statements<'t> {
             insert_link_key: registered(
                 WriteStatement::InsertLinkKey,
                 "preparing a link key write",
+            )?,
+            insert_link_anchor_key: registered(
+                WriteStatement::InsertLinkAnchorKey,
+                "preparing an anchored-link index write",
             )?,
             insert_heading: registered(WriteStatement::InsertHeading, "preparing a heading write")?,
             insert_block: registered(WriteStatement::InsertBlock, "preparing a block write")?,
@@ -851,10 +873,13 @@ fn upsert(
     // The comparison reads the replaced document's own rows, before the
     // discard below takes them, and only where its names stay.
     let reach = match &replaced {
-        Some(row)
-            if row.in_place(facts, admitting) && anchors_kept(statements, row.document, facts)? =>
-        {
-            Reach::OwnLinks
+        Some(row) if row.in_place(facts, admitting) => {
+            let moved = moved_anchors(statements, row.document, facts)?;
+            if moved.is_empty() {
+                Reach::OwnLinks
+            } else {
+                Reach::Anchors(moved)
+            }
         }
         _ => Reach::Neighborhood,
     };
@@ -927,15 +952,19 @@ fn upsert(
 /// which links the changeset re-decides for it ([ADR 0047]).
 ///
 /// [ADR 0047]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0047-a-write-re-decides-only-the-links-whose-inputs-it-moved.md
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum Reach {
-    /// The entry moved the names at its path, or an anchor value of the
-    /// document there, or cannot tell: the changeset discards the findings
-    /// under its class and path and re-decides every link they reach.
-    ///
-    /// An anchor move reaches as far as a names move until the index that
-    /// reaches an anchored link by the anchor value it names is built.
+    /// The entry moved the names at its path, or cannot tell: the changeset
+    /// discards the findings under its class and path and re-decides every
+    /// link they reach.
     Neighborhood,
+    /// An in-place rewrite that moved these anchor values: beside its own
+    /// links, the changeset re-decides the anchored links that could name
+    /// the document and name one of them, which the anchored-link index
+    /// reaches by key and value ([`crate::anchor::AnchorMoves`]). No class or
+    /// path discard reaches their findings, since no name moved; the
+    /// re-decision replaces each at its link's own place.
+    Anchors(BTreeSet<crate::anchor::AnchorValue>),
     /// An in-place rewrite that moved no anchor value: every link another
     /// document holds reads the same inputs before and after it, so its
     /// standing finding is the one a re-decision would file again. Only the
@@ -969,51 +998,69 @@ impl Replaced {
     }
 }
 
-/// Whether `facts` holds exactly the anchor values the stored `document`
-/// holds: the same heading readings, heading slugs and block ids, each read
-/// as a set.
+/// The anchor values that stand on one side of an in-place rewrite and not
+/// the other: the heading readings, heading slugs and block ids the stored
+/// `document` holds set against those `facts` writes, each read as a set.
 ///
 /// The anchor predicate ([`crate::anchor`]) is an equality over these three
-/// sets alone, so while the body stays known no link's missing-anchor verdict
-/// can move unless one of them does. The cost is the written document's rows,
-/// one index seek each, and the comparison stops at the first set that
-/// differs.
-fn anchors_kept(
+/// sets alone, so while the body stays known a link's missing-anchor verdict
+/// can move only where it names one of the values returned. The cost is the
+/// written document's rows, one index seek for each set.
+fn moved_anchors(
     statements: &mut Statements<'_>,
     document: i64,
     facts: &DocumentFacts,
-) -> Result<bool, StoreError> {
-    let kept = |statement: &mut CachedStatement<'_>,
-                written: BTreeSet<&str>|
-     -> Result<bool, StoreError> {
+) -> Result<BTreeSet<crate::anchor::AnchorValue>, StoreError> {
+    use crate::anchor::AnchorKind;
+    let mut moved = BTreeSet::new();
+    let mut compare = |statement: &mut CachedStatement<'_>,
+                       kind: AnchorKind,
+                       written: BTreeSet<&str>|
+     -> Result<(), StoreError> {
         let held: BTreeSet<String> = statement
             .query_map(params![document], |row| row.get(0))
             .and_then(|rows| rows.collect())
             .map_err(|error| error::sql("reading the anchor values an upsert replaces", error))?;
-        // Both sets iterate in order, so equal sequences are equal sets.
-        Ok(held.iter().map(String::as_str).eq(written))
+        moved.extend(
+            held.iter()
+                .filter(|value| !written.contains(value.as_str()))
+                .map(|value| (kind, value.clone())),
+        );
+        moved.extend(
+            written
+                .iter()
+                .filter(|value| !held.contains(**value))
+                .map(|value| (kind, (*value).to_string())),
+        );
+        Ok(())
     };
     let headings = &facts.headings;
-    Ok(kept(
+    compare(
         &mut statements.replaced_readings,
+        AnchorKind::Reading,
         headings
             .iter()
             .map(|heading| heading.reading.as_str())
             .collect(),
-    )? && kept(
+    )?;
+    compare(
         &mut statements.replaced_slugs,
+        AnchorKind::Slug,
         headings
             .iter()
             .map(|heading| heading.slug.as_str())
             .collect(),
-    )? && kept(
+    )?;
+    compare(
         &mut statements.replaced_block_ids,
+        AnchorKind::Block,
         facts
             .blocks
             .iter()
             .map(|block| block.block_id.as_str())
             .collect(),
-    )?)
+    )?;
+    Ok(moved)
 }
 
 /// The from-zero content and structure steps in NORN-467 append facts through
@@ -1092,11 +1139,20 @@ pub(crate) fn insert_fact_rows(
                 link.field,
             ])
             .map_err(|error| error::sql("writing a link row", error))?;
+        let values = crate::anchor::values_of(link.anchor.as_ref());
         for key in link_keys(link, &facts.path) {
             statements
                 .insert_link_key
                 .execute(params![row, document, key.key, key.segments])
                 .map_err(|error| error::sql("writing a link key", error))?;
+            // The anchored-link index holds the link under this key once per
+            // value its anchor is matched by.
+            for (kind, value) in &values {
+                statements
+                    .insert_link_anchor_key
+                    .execute(params![row, key.key, kind.as_str(), value])
+                    .map_err(|error| error::sql("writing an anchored-link index row", error))?;
+            }
         }
     }
 

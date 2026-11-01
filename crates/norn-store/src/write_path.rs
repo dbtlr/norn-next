@@ -99,6 +99,9 @@ registry! {
     InsertLink,
     /// One key a link is held under.
     InsertLinkKey,
+    /// One value an anchored link's anchor is matched by, under one of its
+    /// keys: a row of the anchored-link index.
+    InsertLinkAnchorKey,
     InsertHeading,
     InsertBlock,
     InsertTag,
@@ -244,6 +247,9 @@ impl WriteStatement {
             Self::InsertLinkKey => {
                 "INSERT INTO link_keys (link, document, key, segments)
                  VALUES (?1, ?2, ?3, ?4)"
+            }
+            Self::InsertLinkAnchorKey => {
+                "INSERT INTO link_anchor_keys (link, key, kind, value) VALUES (?1, ?2, ?3, ?4)"
             }
             Self::InsertHeading => {
                 "INSERT INTO headings (

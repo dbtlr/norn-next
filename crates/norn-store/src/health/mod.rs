@@ -118,6 +118,7 @@ use norn_db::rusqlite::types::Value;
 use norn_db::rusqlite::{Connection, Transaction, params_from_iter};
 use norn_wire::{FindingKind, LinkHealth, TargetGap, VAULT_PROTOCOL};
 
+use crate::anchor::{AnchorKind, AnchorMoves};
 use crate::error::StoreError;
 use crate::facts::{CANDIDATE_HEAD, CandidateFact, FindingFacts, LinkAnchor, LinkFact, StoredLink};
 use crate::path::{ClassKey, DirectoryPrefix, DocumentPath, PathKey, SuffixKey};
@@ -416,6 +417,9 @@ enum PagedBy<'a> {
     Path(&'a PathKey),
     /// Path-addressed links whose comparison keys lie beneath this directory.
     Beneath(&'a DirectoryPrefix),
+    /// The anchored links held under exactly this key that name this value:
+    /// the anchor arm's seek of the anchored-link index.
+    Anchored(&'a str, AnchorKind, &'a str),
     /// Exactly one key the link index holds, of either kind: a path key, or
     /// a suffix key, which the index holds as written as it holds a path. The
     /// resolution change set reads the links one changed key holds this way
@@ -474,6 +478,21 @@ impl<'a> Pages<'a> {
         }
     }
 
+    /// The pages of the anchored links held under exactly `key` whose
+    /// anchor is matched by `value` of `kind`: an equality seek of the
+    /// anchored-link index at the value and the key.
+    fn anchored(key: &'a str, kind: AnchorKind, value: &'a str) -> Self {
+        Pages {
+            selected: Selected::Anchored,
+            by: PagedBy::Anchored(key, kind, value),
+            after: Some(After {
+                text: key.to_string(),
+                first: -1,
+                second: 0,
+            }),
+        }
+    }
+
     /// The pages of the links held under exactly `key`, of either kind,
     /// read as a path key's are: an equality seek of the link index.
     fn by_key(key: &'a str) -> Self {
@@ -508,6 +527,9 @@ impl<'a> Pages<'a> {
             PagedBy::Class(class) => statement::class_parameters(class, &after, LINK_HEALTH_CHUNK),
             PagedBy::Path(path) => statement::path_parameters(path, &after, LINK_HEALTH_CHUNK),
             PagedBy::Key(key) => statement::key_parameters(key, &after, LINK_HEALTH_CHUNK),
+            PagedBy::Anchored(key, kind, value) => {
+                statement::anchored_parameters(key, kind, value, &after, LINK_HEALTH_CHUNK)
+            }
             PagedBy::Beneath(prefix) => {
                 statement::paged_directory_parameters(prefix, &after, LINK_HEALTH_CHUNK)
             }
@@ -679,6 +701,7 @@ pub(crate) fn redecide(
     classes: &BTreeSet<ClassKey>,
     paths: &BTreeSet<PathKey>,
     directories: &BTreeSet<DirectoryPrefix>,
+    anchors: &AnchorMoves,
 ) -> Result<Redecided, StoreError> {
     redecide_reach(
         transaction,
@@ -688,6 +711,7 @@ pub(crate) fn redecide(
         classes,
         paths,
         directories,
+        anchors,
         None,
     )
 }
@@ -709,6 +733,7 @@ pub(crate) fn redecide_reach(
     classes: &BTreeSet<ClassKey>,
     paths: &BTreeSet<PathKey>,
     directories: &BTreeSet<DirectoryPrefix>,
+    anchors: &AnchorMoves,
     documents: Option<&BTreeSet<DocumentPath>>,
 ) -> Result<Redecided, StoreError> {
     let key = SuffixKey::Comparison;
@@ -894,7 +919,44 @@ pub(crate) fn redecide_reach(
             file(links, &mut summaries)?;
         }
     }
-    redecided.discarded += judged_discarded;
+    // The anchor arm, last: the anchored links that could name a document
+    // whose anchor values an in-place rewrite moved and that name a moved
+    // value, each judged at the first seek that reaches it. No discard so
+    // far reached their findings, since no name of theirs moved, so each
+    // chunk takes the findings about its own links before they are judged
+    // again; running last, it also takes the finding of a link an earlier arm
+    // judged only through a candidate's naming class, which it files again.
+    let mut anchored_discarded = 0;
+    if !anchors.is_empty() {
+        let fingerprint: String =
+            norn_db::meta::get_meta(transaction, crate::ddl::meta::VAULT_SCHEMA_FINGERPRINT)?
+                .unwrap_or_default();
+        for (held_under, values) in anchors {
+            for (kind, value) in values {
+                let mut pages = Pages::anchored(held_under, *kind, value);
+                while let Some(mut links) = pages.next(&writer, key)? {
+                    links.retain(|held| {
+                        held.generation != stamp
+                            && !rewritten.contains(held.holder.as_str())
+                            && !reached_by_a_class(held, classes)
+                            && !held.keys.iter().any(|(text, segments, _)| {
+                                segments.is_none()
+                                    && PathKey::new(text).is_ok_and(|path| paths.contains(&path))
+                            })
+                            && !directories.iter().any(|prefix| beneath(held, prefix))
+                            && first_anchored_seek(held, anchors)
+                                == Some((held_under.as_str(), *kind, value.as_str()))
+                    });
+                    if links.is_empty() {
+                        continue;
+                    }
+                    anchored_discarded += discard_judged(transaction, &links, &fingerprint)?;
+                    file(links, &mut summaries)?;
+                }
+            }
+        }
+    }
+    redecided.discarded += judged_discarded + anchored_discarded;
     redecided.keys_resolved = summaries.keys_resolved();
     redecided.candidates_read = summaries.candidates_read();
     Ok(redecided)
@@ -976,6 +1038,27 @@ fn reached_by_a_class(held: &Held, classes: &BTreeSet<ClassKey>) -> bool {
     held.keys.iter().any(|(text, segments, _)| {
         segments.is_some() && class_of(text).is_some_and(|class| classes_hold(classes, class))
     })
+}
+
+/// The first seek of the anchor arm that reaches `held`: the least key it is
+/// held under and value its anchor is matched by that `anchors` names
+/// together, in the order the arm walks them. `None` for a link the arm does
+/// not reach.
+fn first_anchored_seek<'h>(
+    held: &'h Held,
+    anchors: &AnchorMoves,
+) -> Option<(&'h str, AnchorKind, &'h str)> {
+    let values = crate::anchor::values_of(held.link.fact.anchor.as_ref());
+    held.keys
+        .iter()
+        .filter_map(|(text, _, _)| anchors.get(text).map(|moved| (text.as_str(), moved)))
+        .flat_map(|(text, moved)| {
+            values
+                .iter()
+                .filter(|(kind, value)| moved.contains(&(*kind, (*value).to_string())))
+                .map(move |(kind, value)| (text, *kind, *value))
+        })
+        .min()
 }
 
 /// Discard the findings whose row ids `findings` holds, and report how many
