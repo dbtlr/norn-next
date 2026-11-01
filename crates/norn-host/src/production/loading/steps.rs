@@ -306,8 +306,9 @@ pub(super) fn documents(
 /// is pending or the heal window is closed; a refusal (schema dirty, a rescan,
 /// a control-file root, lost coverage) leaves its batch to that reconcile.
 ///
-/// Each caller marks its call with [`LoadingBoundary::RequeueCalled`] just
-/// before calling, so a probe counts calls apart from how this takes.
+/// Each caller marks its call with `LoadingBoundary::RequeueCalled`, an
+/// `induced-failure` probe, just before calling, so a probe counts calls apart
+/// from how this takes.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn requeue(
     ops: &ProductionEntryOps,
