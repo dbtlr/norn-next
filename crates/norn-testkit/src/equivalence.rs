@@ -558,6 +558,12 @@ impl StoreProjection {
 
     /// Judge this projection against another, naming the first field they
     /// disagree about.
+    ///
+    /// Equal structures always render equal, so they are judged without
+    /// rendering; only unequal structures are rendered and compared field by
+    /// field. Rendering is also where two facts rendering to one field would
+    /// panic, so that self-check runs only when the structures differ (and on
+    /// every `DerivedRows::read`).
     pub fn compare(&self, other: &StoreProjection) -> Comparison {
         Comparison {
             divergence: if self == other {

@@ -1256,6 +1256,10 @@ fn heal(
 
 /// `store` equals `other` under the testkit's comparator, finding order
 /// included, and every derived row agrees field by field.
+///
+/// Each store is read once: the comparator judges the stored-order projection
+/// the derived rows carry, so a divergence in finding order alone is named by
+/// the first assertion rather than the field-by-field one.
 fn assert_same(store: &mut Store, other: &mut Store, subject: &str) {
     let left = DerivedRows::read(store).expect("the derived rows");
     let right = DerivedRows::read(other).expect("the derived rows");
