@@ -2876,9 +2876,9 @@ fn wait_failure(
 #[cfg(unix)]
 fn failed_run(case: &str, message: &str) -> String {
     format!(
-        "running 1 test\ntest tests::{case} ... FAILED\n\nfailures:\n\n---- tests::{case} stdout \
-         ----\nthread 'tests::{case}' panicked at crates/norn-testkit/src/isolation.rs:298:59:\n\
-         {message}\n\nfailures:\n    tests::{case}\n\ntest result: FAILED. 0 passed; 1 failed\n"
+        "        FAIL [ 0.001s] fixture tests::{case}\n--- STDERR: fixture tests::{case} ---\n\
+         thread 'tests::{case}' panicked at crates/norn-testkit/src/isolation.rs:298:59:\n\
+         {message}\n     Summary [ 0.001s] 1 test run: 0 passed, 1 failed\n"
     )
 }
 
