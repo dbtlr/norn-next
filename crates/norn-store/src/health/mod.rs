@@ -83,9 +83,10 @@
 //!
 //! After every entry of a changeset is written, the store judges the links
 //! the changeset reaches and files these findings in the same transaction
-//! ([`redecide`], [ADR 0044]): the links its written documents hold, read a
+//! ([`redecide`], [ADR 0047]): the links its written documents hold, read a
 //! chunk at a time off the generation the write stamped them with; then, for
-//! each class it changed, the findings standing under the class, discarded a
+//! each class it changed — every class but an in-place rewrite's that moved
+//! no anchor value — the findings standing under the class, discarded a
 //! chunk at a time with the links they were about that no key of the class
 //! reaches, and the links the class selects; then the links each path key it
 //! changed selects, read a chunk at a time too. A class or a path key is
@@ -102,6 +103,7 @@
 //! either runs.
 //!
 //! [ADR 0044]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0044-a-from-zero-build-judges-link-health-once.md
+//! [ADR 0047]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0047-a-write-re-decides-only-the-links-whose-inputs-it-moved.md
 
 pub(crate) mod resolution;
 pub(crate) mod run;
@@ -613,15 +615,20 @@ pub(crate) struct Redecided {
 
 /// Re-decide the link health of every link the changeset that stamped
 /// `generation` reaches, inside its `transaction`, and file the findings:
-/// [ADR 0044]'s re-decided set, which is
+/// [ADR 0047]'s re-decided set, which is
 ///
 /// 1. every link a document the changeset wrote holds — those stamped with
 ///    `generation`;
-/// 2. for each of `classes`, the classes of the paths it wrote or killed, in
-///    order: every link a finding standing under the class was about, and
-///    every suffix-addressed link whose keys fall in the class;
-/// 3. every path-addressed link whose key is one of `paths`, the paths it
-///    wrote or killed.
+/// 2. for each of `classes`, the classes of the paths whose names it moved or
+///    whose anchor values an in-place rewrite moved, in order: every link a
+///    finding standing under the class was about, and every suffix-addressed
+///    link whose keys fall in the class;
+/// 3. every path-addressed link whose key is one of `paths`, the same paths
+///    as path keys.
+///
+/// An in-place rewrite that moves no anchor value names neither a class nor
+/// a path ([`crate::IncrementOutcome::affected_classes`]), so it reaches only
+/// the first arm.
 ///
 /// **The second arm is where a class's findings are discarded.** Each class
 /// first reads the findings standing under it that the changeset did not
@@ -674,7 +681,7 @@ pub(crate) struct Redecided {
 /// changeset and the work stays the links plus the candidates: the totals
 /// kept are one per distinct filled key the re-decided links hold.
 ///
-/// [ADR 0044]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0044-a-from-zero-build-judges-link-health-once.md
+/// [ADR 0047]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0047-a-write-re-decides-only-the-links-whose-inputs-it-moved.md
 pub(crate) fn redecide(
     transaction: &Transaction<'_>,
     work: &ReadWork,

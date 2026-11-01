@@ -3484,18 +3484,17 @@ fn a_finding_is_reachable_and_discardable_through_every_class_it_is_in() {
             );
         }
 
-        // And a changeset writing the document reaches it through the
+        // And a changeset moving the document's names reaches it through the
         // document's class, taking the whole finding — every membership row it
         // had included, so no other class still holds it and nothing is left
-        // referencing a finding that is gone.
-        let invalidation = write_document(
-            &mut request,
-            &document(subject.as_str(), "hash-2", "a body\n"),
-        )
-        .invalidated;
+        // referencing a finding that is gone. Its death does; a rewrite in
+        // place would move no name and leave the finding standing.
+        let invalidation =
+            crate::common::record_death(&mut request, &subject, Provenance::WatcherRemoval)
+                .invalidated;
         assert_eq!(
             invalidation.findings_discarded, 1,
-            "a changeset writing `{at}` discarded nothing"
+            "a changeset killing `{at}` discarded nothing"
         );
         for key in probe.class_keys() {
             let stem = key.as_str().strip_suffix('/').expect("a class key");
@@ -4101,8 +4100,11 @@ fn re_deriving_a_class_is_a_discard_and_a_record() {
     );
 
     // Re-deriving the class twice leaves one copy, and nothing had to remember a
-    // dedupe rule to make that true.
+    // dedupe rule to make that true. Each derivation is a birth, so it moves
+    // the class's names: a rewrite in place moves none and discards nothing
+    // under the class.
     for _ in 0..2 {
+        crate::common::record_death(&mut request, &glossary.path, Provenance::WatcherRemoval);
         write_document(&mut request, &glossary);
         request
             .record_finding(&path_names_no_document_in_class(
@@ -4461,7 +4463,25 @@ fn write_bar(statement: WriteStatement) -> WriteBar {
             "(document=?)",
         )],
         DiscardFields => &[("document_fields", Access::PrimaryKey, "(document=?)")],
-        DeleteDocument | RowAt => &[("documents", Access::Index("documents_path"), "(path=?)")],
+        DeleteDocument | RowAt | ReplacedRow => {
+            &[("documents", Access::Index("documents_path"), "(path=?)")]
+        }
+        // Each covered by the index holding the one value it reads.
+        ReplacedReadings => &[(
+            "headings",
+            Access::Index("headings_document_reading"),
+            "(document=?)",
+        )],
+        ReplacedSlugs => &[(
+            "headings",
+            Access::Index("headings_document_slug"),
+            "(document=?)",
+        )],
+        ReplacedBlockIds => &[(
+            "blocks",
+            Access::Index("blocks_document_block_id"),
+            "(document=?)",
+        )],
         WithholdDocuments | WithheldPaths => &[
             ("documents", Access::RowId, "(rowid=?)"),
             (
@@ -4871,8 +4891,24 @@ fn every_write_path_statement_scans_no_table_and_each_keyed_one_seeks() {
             &["document_tags_document_ordinal"],
         ),
         (
-            &[WriteStatement::DeleteDocument, WriteStatement::RowAt],
+            &[
+                WriteStatement::DeleteDocument,
+                WriteStatement::RowAt,
+                WriteStatement::ReplacedRow,
+            ],
             &["documents_path"],
+        ),
+        (
+            &[WriteStatement::ReplacedReadings],
+            &["headings_document_reading"],
+        ),
+        (
+            &[WriteStatement::ReplacedSlugs],
+            &["headings_document_slug"],
+        ),
+        (
+            &[WriteStatement::ReplacedBlockIds],
+            &["blocks_document_block_id"],
         ),
         // Two indexes lead with the fingerprint, so both go.
         (
