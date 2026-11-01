@@ -670,7 +670,7 @@ mod tests {
     /// **A measuring launcher that ended without a report is an error**,
     /// unless it was signalled: a launcher that exited on its own without
     /// publishing has failed, and the run has no outcome to report. The
-    /// launcher is made to fail by taking the path it writes its report to
+    /// launcher is made to fail by planting a file where it writes its report
     /// before publishing it.
     #[test]
     #[allow(clippy::disallowed_methods)] // Harness scaffolding: blocking the run's own report.
@@ -678,7 +678,7 @@ mod tests {
         let sandbox = sandbox("no-report");
         let mut partial = sandbox.root().join("run-0.usage").into_os_string();
         partial.push(OsStr::from_bytes(measured::PARTIAL_SUFFIX));
-        std::fs::create_dir(&partial).expect("blocking the report");
+        std::fs::write(&partial, "planted").expect("blocking the report");
         let error = Run::new(&sandbox, "/bin/sh")
             .args(["-c", "exit 0"])
             .wait()
@@ -729,7 +729,7 @@ mod tests {
                 .expect("starting this binary as a launcher");
             assert_eq!(
                 output.status.code(),
-                Some(measured::NOT_STARTED),
+                Some(127),
                 "{arguments:?}: {output:?}"
             );
             assert!(output.stdout.is_empty(), "{arguments:?}: the tests ran");
