@@ -54,13 +54,11 @@ pub fn documents(name: &str) -> usize {
 /// It fails here rather than at compile time on purpose: a release build of
 /// the workspace suite is a normal thing to want, and it is only the
 /// measurement cases that are wrong under it.
-#[allow(clippy::assertions_on_constants)] // The constant is the build profile, and the point is to fail the run under the wrong one.
+/// Testkit records OPT_LEVEL; the runtime guard refuses profile overrides,
+/// including dependency-only optimization that would change allocations.
 fn assert_the_profile_the_bars_were_authored_on() {
-    assert!(
-        cfg!(debug_assertions),
-        "the memory baselines are debug-profile values; this suite was built with \
-         optimizations, so its bars describe a different subject"
-    );
+    norn_testkit::build_subject::check_current_unoptimized()
+        .unwrap_or_else(|message| panic!("{message}"));
 }
 
 /// The document count the generator reported it emitted, if its report carries
