@@ -560,7 +560,11 @@ impl StoreProjection {
     /// disagree about.
     pub fn compare(&self, other: &StoreProjection) -> Comparison {
         Comparison {
-            divergence: first_divergence(&self.entries(), &other.entries()),
+            divergence: if self == other {
+                None
+            } else {
+                first_divergence(&self.entries(), &other.entries())
+            },
             left: self.population(),
             right: other.population(),
         }
@@ -1595,8 +1599,35 @@ mod tests {
             .divergence
             .expect("a changed field diverges");
         assert_eq!(divergence.field, "document[docs/a.md].content_hash");
-        assert!(divergence.left.contains("hash-1"), "{divergence}");
-        assert!(divergence.right.contains("hash-2"), "{divergence}");
+        assert_eq!(
+            divergence.to_string(),
+            "`document[docs/a.md].content_hash`: the first store says \"hash-1\" and the second says \"hash-2\""
+        );
+        let failure = std::panic::catch_unwind(|| {
+            projection().assert_equivalent(&other, "changed hash");
+        })
+        .expect_err("a changed field must fail the equivalence assertion");
+        assert_eq!(
+            failure.downcast_ref::<String>().expect("a failure message"),
+            "changed hash: the two stores are not equivalent. \
+             `document[docs/a.md].content_hash`: the first store says \"hash-1\" and the second says \"hash-2\"\n\
+             the first holds 1 documents, 0 derived fact rows, 0 findings, 1 indexed terms, 0 indexed trigrams, no pinned vault schema\n\
+             the second holds 1 documents, 0 derived fact rows, 0 findings, 1 indexed terms, 0 indexed trigrams, no pinned vault schema"
+        );
+    }
+
+    #[test]
+    fn different_row_orders_with_the_same_rendering_are_equal() {
+        let mut left = projection();
+        let mut second = left.documents[0].clone();
+        second.path = "docs/b.md".to_string();
+        left.documents.push(second);
+        let mut right = left.clone();
+        right.documents.reverse();
+        assert_ne!(left, right);
+        let comparison = left.compare(&right);
+        assert!(comparison.is_equal(), "{comparison:?}");
+        assert_eq!(comparison.left, comparison.right);
     }
 
     /// A document one store derived and the other did not is a named field with
