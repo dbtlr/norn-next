@@ -556,19 +556,7 @@ pub(crate) fn judge_every_link(
         let fingerprint: String =
             norn_db::meta::get_meta(&transaction, crate::ddl::meta::VAULT_SCHEMA_FINGERPRINT)?
                 .unwrap_or_default();
-        let subjects: Vec<_> = links
-            .iter()
-            .map(|held| (held.holder.as_str(), held.ordinal))
-            .collect();
-        let discarded = transaction
-            .execute(
-                &statement::judged_discard_sql(),
-                params_from_iter(statement::judged_discard_parameters(
-                    &subjects,
-                    &fingerprint,
-                )?),
-            )
-            .map_err(|error| crate::error::sql("discarding a judged page's findings", error))?;
+        let discarded = discard_judged(&transaction, &links, &fingerprint)?;
         let resolved = summaries.keys_resolved();
         let candidates = summaries.candidates_read();
         let findings = judge_links(&transaction, work, ignore, &links, &mut summaries)?;
@@ -579,7 +567,7 @@ pub(crate) fn judge_every_link(
             .commit()
             .map_err(|error| crate::error::sql("committing a link-health judgment chunk", error))?;
         counters.add(Counter::LinksJudged, links.len() as u64);
-        counters.add(Counter::FindingsDiscarded, discarded as u64);
+        counters.add(Counter::FindingsDiscarded, discarded);
         counters.add(Counter::FindingsWritten, findings.len() as u64);
         counters.add(
             Counter::LinkHealthKeysResolved,
@@ -608,7 +596,9 @@ pub(crate) struct Redecided {
     pub(crate) candidates_read: u64,
     /// Findings filed.
     pub(crate) findings: u64,
-    /// Findings discarded from under the classes the changeset changed.
+    /// Findings the re-decision discarded: under the classes the changeset
+    /// changed, beneath its directories, and, in a construction rejudgment,
+    /// about each link it judged.
     pub(crate) discarded: u64,
 }
 
@@ -703,6 +693,13 @@ pub(crate) fn redecide(
 }
 
 /// Re-decide a construction requeue, including outgoing links across all its commits.
+///
+/// With `documents`, it is a construction rejudgment, whose reach was
+/// gathered by changesets that may have run before the from-zero judgment
+/// filed its findings. Their discards then took nothing, so the rule that
+/// every finding a re-decided link held is gone before it is judged is kept
+/// here instead: each chunk first discards the link-health findings about its
+/// own links, as the judgment does.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn redecide_reach(
     transaction: &Transaction<'_>,
@@ -725,6 +722,19 @@ pub(crate) fn redecide_reach(
         .flatten()
         .map(DocumentPath::as_str)
         .collect();
+    // A construction rejudgment can follow a judgment that filed findings its
+    // reach's own discards ran too early to take: an increment during
+    // Relations discards at once, and the judgment may run after it. So each
+    // link it judges first loses the link-health finding standing about it,
+    // which is what the judgment itself does. A warm changeset's discards run
+    // in its own transaction, before this re-decision, and need no second.
+    let construction_fingerprint: Option<String> = match documents {
+        Some(_) => Some(
+            norn_db::meta::get_meta(transaction, crate::ddl::meta::VAULT_SCHEMA_FINGERPRINT)?
+                .unwrap_or_default(),
+        ),
+        None => None,
+    };
     let mut range_discarded = 0;
     for prefix in directories {
         let (lower, upper) = statement::directory_bounds(prefix);
@@ -734,6 +744,7 @@ pub(crate) fn redecide_reach(
         ).map_err(|error| crate::error::sql("discarding findings beneath a directory", error))? as u64;
     }
     let mut summaries = KeySummaries::default();
+    let mut judged_discarded = 0;
     let mut redecided = Redecided {
         discarded: range_discarded,
         ..Redecided::default()
@@ -743,6 +754,9 @@ pub(crate) fn redecide_reach(
             return Ok(());
         }
         redecided.links += links.len() as u64;
+        if let Some(fingerprint) = &construction_fingerprint {
+            judged_discarded += discard_judged(transaction, &links, fingerprint)?;
+        }
         for finding in judge_links(transaction, work, ignore, &links, summaries)? {
             request::write_finding(transaction, &finding)?;
             redecided.findings += 1;
@@ -880,6 +894,7 @@ pub(crate) fn redecide_reach(
             file(links, &mut summaries)?;
         }
     }
+    redecided.discarded += judged_discarded;
     redecided.keys_resolved = summaries.keys_resolved();
     redecided.candidates_read = summaries.candidates_read();
     Ok(redecided)
@@ -983,6 +998,30 @@ fn discard(transaction: &Transaction<'_>, findings: &BTreeSet<i64>) -> Result<u6
     let discarded = statement
         .execute(params_from_iter(values))
         .map_err(|error| crate::error::sql("discarding the findings under a class", error))?;
+    Ok(discarded as u64)
+}
+
+/// Discard the link-health findings standing about `links` under
+/// `fingerprint`, and report how many went: what a judgment replaces before
+/// it files a link's finding. Findings of other kinds at those places stand.
+fn discard_judged(
+    transaction: &Transaction<'_>,
+    links: &[Held],
+    fingerprint: &str,
+) -> Result<u64, StoreError> {
+    let subjects: Vec<_> = links
+        .iter()
+        .map(|held| (held.holder.as_str(), held.ordinal))
+        .collect();
+    let discarded = transaction
+        .execute(
+            &statement::judged_discard_sql(),
+            params_from_iter(statement::judged_discard_parameters(
+                &subjects,
+                fingerprint,
+            )?),
+        )
+        .map_err(|error| crate::error::sql("discarding a judged page's findings", error))?;
     Ok(discarded as u64)
 }
 
