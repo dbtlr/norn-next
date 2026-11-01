@@ -276,7 +276,7 @@ documents link to.
 **Every schema pin owes the vault a link-health re-decision over every link.** Link-health
 findings are keyed by the vault schema fingerprint, as every finding is, and a pin discards
 every finding keyed by the fingerprint it replaced — whether or not the schema changed
-anything link health reads. Today the walk after a pin discharges it by deriving every row
+anything link health reads. The walk after a pin discharges it by deriving every row
 stamped at or below the pin's generation again, under every schema: the changeset that writes
 a document re-decides the links it holds, and a row whose admitting count the new
 `paths.ambiguity_ignore` globs change is not an in-place rewrite, so it moves its names and
