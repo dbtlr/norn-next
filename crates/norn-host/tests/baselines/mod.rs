@@ -109,7 +109,29 @@ use std::time::Duration;
 /// [`READ_OVER_ATTACH_PEAK_RSS_PER_MILLE`]. On 2026-09-23 the same host read
 /// **22.40–23.39 MiB** over eight runs. An indicative band, not a fixed
 /// measurement, so a rerun lands near an edge rather than the middle. On
-/// `ubuntu-latest` x86_64-glibc, `full memory invariant` runs 41323116407,
+/// `ubuntu-latest` x86_64-glibc the earlier hosted readings of this lane's attaches at
+/// this profile span **16.73–24.24 MiB** over nineteen readings: 17.69 and
+/// 18.26 at the first hosted run, 16.73 and 17.00 in the Layer 1 acceptance
+/// pass, 17.73/18.30, 17.96/18.18, 18.82/18.37 and 17.95/17.91 across four
+/// consecutive `memory invariant` runs, then 21.40 from this case and 21.53
+/// from the attach-only child of [`READ_OVER_ATTACH_PEAK_RSS_PER_MILLE`] in
+/// `memory invariant` run 35858094556, 23.95 from this case, 24.13 from the
+/// pair's `realistic` child and 24.24 from that attach-only child in run
+/// 36215052561, and 24.22 from this case and 24.19 from that attach-only child
+/// in run 36218303281. Every hosted reading before run 36215052561 sits below
+/// the local band of its day, as 4 KiB pages against 16 KiB predict; the
+/// readings of that run and the one after it, 23.95–24.24, sit inside the
+/// local band above.
+///
+/// **At that stage, the hosted spread was 7.5 MiB wide, and it had risen twice.**
+/// The first twelve readings sit inside 16.73–18.82, where one run's two attaches differ by
+/// as much as 0.57 MiB; the next run reads about 2.7 MiB above that, and the
+/// one after it about 2.7 MiB above that again, where the run after that
+/// stays. The local band rose by the same order between its two days. The rise
+/// is recorded for the trend this file keeps, and the number that bounds the
+/// readings is the top one.
+///
+/// On `ubuntu-latest` x86_64-glibc, `full memory invariant` runs 41323116407,
 /// 41324737076 and 41329840687 at PR #423 head 5dd80988b read this case at
 /// **38.52, 39.50 and 39.36 MiB**, the pair's `realistic` child at 39.57,
 /// 39.49 and 39.44, and the read pair's attach-only child at 39.41, 39.60
@@ -118,10 +140,18 @@ use std::time::Duration;
 /// old-harness readings (runs 41292371209 and 41184528420), so the hosted
 /// Linux bars were not floor-masked.
 ///
-/// The ceiling stays at 40 MiB: the original 1.61x rule over the current
-/// highest reading, 39.60 MiB, would give 64 MiB rounded up, loosening it.
-/// The readings are whole-process peaks carrying the child binary and its
-/// runtime as a fixed addend that page size or allocator changes move.
+/// The ceiling was authored at 40 MiB, which was 1.61x the highest reading,
+/// local or hosted, 24.87 MiB, and 1.65x the highest hosted one, 24.24 MiB.
+/// The readings it holds are whole-process peaks, so each carries the child
+/// binary and its runtime as a
+/// fixed addend that a page-size or allocator change moves without the
+/// attachment costing more — and a bar that flakes teaches people to rerun
+/// rather than to look. What a vault-shaped cost would read here is multiples
+/// of that band, not the then-observed 2 MiB of spread between platforms.
+/// Hosted readings have since risen to 39.60 MiB, so 40 MiB is below the
+/// 1.61x rule (64 MiB rounded up) and is kept rather than loosened.
+/// Whether the rise is a cost to cut or the bar should be re-authored is
+/// Mimir task NORN-501.
 ///
 /// **Platform scope: the Linux measurement lane.** The full-regression `memory
 /// invariant` job on `ubuntu-latest` x86_64-glibc is where this gates; the
@@ -150,12 +180,22 @@ pub const ATTACH_PEAK_RSS_CEILING_BYTES: u64 = 40 * 1024 * 1024;
 /// **1.08–1.10 on macos-arm64** over five runs, against attach peaks of
 /// 22.12–22.50 MiB at `ambiguous` and 24.17–24.71 MiB at `realistic`, and on
 /// 2026-09-23 read 1.09–1.15 against 20.31–20.64 and 22.40–23.39 MiB; the
-/// hosted readings on `ubuntu-latest` x86_64-glibc in `full memory invariant`
-/// runs 41323116407, 41324737076 and 41329840687 are **1.06, 1.06 and 1.09**:
+/// earlier hosted band on `ubuntu-latest` x86_64-glibc was **1.10–1.26** over seven
+/// runs — 1.21 (14.60 against 17.69 MiB) at the first, then 1.19, 1.17, 1.26
+/// and 1.13 across four consecutive `memory invariant` runs, against bases of
+/// 14.83–15.82 MiB, 1.12 (21.54 against 24.13 MiB) in run 36215052561, and
+/// 1.10 in run 36218303281. A
+/// lower base and a wider ratio band, the shape a smaller page size predicts:
+/// the fixed addend both readings carry shrinks, so the same difference between
+/// the two scales is a larger multiple of it.
+///
+/// The newest hosted readings on `ubuntu-latest` x86_64-glibc in
+/// `full memory invariant` runs 41323116407, 41324737076 and 41329840687
+/// are **1.06, 1.06 and 1.09**:
 /// 37.16 against 39.57 MiB, 37.08 against 39.49, and 36.12 against 39.44.
 ///
-/// The bar stays at 1.6, originally a quarter of headroom over the highest
-/// hosted reading of 1.26, far below the 6.7x a vault-shaped cost would show.
+/// The bar is 1.6, which leaves a quarter of headroom over the highest reading
+/// while staying far below the 6.7x a vault-shaped cost would show.
 ///
 /// **Platform scope: the Linux measurement lane**, the same one
 /// [`ATTACH_PEAK_RSS_CEILING_BYTES`] gates in — a ratio between two readings
@@ -186,16 +226,34 @@ pub const ATTACH_PAIR_PEAK_RSS_PER_MILLE: u64 = 1_600;
 /// indicative, not a fixed measurement**: the same subject with an unfiltered
 /// find and a validate over the whole vault read 28.43–28.95 MiB over four
 /// runs on 2026-09-25 and 29.28 MiB in a fifth, the highest read reading on
-/// that day. On `ubuntu-latest` x86_64-glibc, `full memory invariant` runs
+/// either platform at the time. On `ubuntu-latest` x86_64-glibc the
+/// `memory invariant` run 36218303281 read the mix at **26.59 MiB** from
+/// this case and 26.67 from
+/// the ratio's reading child, and run 36215052561 read the unfiltered subject
+/// at 26.06 and 26.12. Trend: a find-only read, one child reading eight pages
+/// and no other shape, read 25.10–25.85 MiB over twelve local readings
+/// through 2026-09-23, and 21.83 and 21.67 MiB hosted in run 35858094556.
+///
+/// On `ubuntu-latest` x86_64-glibc, `full memory invariant` runs
 /// 41323116407, 41324737076 and 41329840687 read this case at **42.84,
 /// 42.82 and 42.66 MiB**, and the ratio's reading child at 42.82, 42.10
-/// and 42.66 MiB, respectively. A find-only read, one child reading eight
-/// pages and no other shape, read 25.10–25.85 MiB over twelve local readings
-/// through 2026-09-23.
+/// and 42.66 MiB, respectively.
 ///
-/// **This ceiling bounds the process.** It stays at 48 MiB, originally
-/// 1.61x the highest reading of 29.28 MiB, rounded up to a whole MiB.
-/// The same rule over the current 42.84 MiB gives 69 MiB, loosening it.
+/// **This ceiling bounds the process.** It was authored at 48 MiB, by the
+/// rule that it kept the proportion [`ATTACH_PEAK_RSS_CEILING_BYTES`] kept
+/// over its highest reading at the time: that ceiling was 1.61x the highest
+/// attach reading, local or hosted, 24.87 MiB, and the highest read reading,
+/// local or hosted, was 29.28
+/// MiB, which at 1.61x is 47.14 MiB, rounded up to a whole MiB. The local
+/// readings it was scaled from sat above the hosted ones; from those hosted
+/// readings alone the rule gave 45 MiB (26.67 at 1.65x is 44.01). It was
+/// 1.80x the highest hosted reading. The readings are whole-process peaks
+/// carrying the child binary and its runtime as a fixed addend, and a bar
+/// that flakes teaches people to rerun rather than to look.
+/// Hosted readings have since risen to 42.84 MiB, so 48 MiB is below the
+/// 1.61x rule (69 MiB rounded up) and is kept rather than loosened.
+/// Whether the rise is a cost to cut or the bar should be re-authored is
+/// Mimir task NORN-501.
 ///
 /// **It is not what refuses a read whose cost is the vault.** Every shape
 /// answers a page, a single target or what a narrowing part admits, so what
@@ -222,11 +280,17 @@ pub const READ_PEAK_RSS_CEILING_BYTES: u64 = 48 * 1024 * 1024;
 /// Observed ratios on macos-arm64 on 2026-09-26: **1.11–1.18** over five
 /// runs, 1.11 (24.75 against 27.56 MiB), 1.13 (24.87 against 28.21), 1.17
 /// (24.35 against 28.70), 1.18 (23.79 against 28.23) and 1.15 (24.51 against
-/// 28.31). On `ubuntu-latest` x86_64-glibc, `full memory invariant` runs
+/// 28.31). On `ubuntu-latest` x86_64-glibc the `memory invariant` run
+/// 36218303281 read the mix at **1.10** (24.19 against 26.67 MiB), and run
+/// 36215052561 read the subject with an unfiltered find and a validate over
+/// the whole vault at 1.07 (24.24 against 26.12 MiB). Trend:
+/// that unfiltered subject read 1.15–1.18 locally over four runs on
+/// 2026-09-25, and a find-only read read 1.07–1.13 locally through 2026-09-23
+/// and 1.00 hosted in run 35858094556.
+///
+/// On `ubuntu-latest` x86_64-glibc, `full memory invariant` runs
 /// 41323116407, 41324737076 and 41329840687 read **1.08, 1.06 and 1.08**:
 /// 39.41 against 42.82 MiB, 39.60 against 42.10, and 39.44 against 42.66.
-/// The unfiltered subject read 1.15–1.18 locally over four runs on
-/// 2026-09-25, and a find-only read read 1.07–1.13 locally through 2026-09-23.
 ///
 /// The bar is 1.5, by the rule [`ATTACH_PAIR_PEAK_RSS_PER_MILLE`] is authored
 /// under: a quarter of headroom over the highest reading, local or hosted,
@@ -395,9 +459,10 @@ pub const HUB_WRITE_HEAP_GROWTH_ALLOWANCE_BYTES: u64 = 4 * 1024;
 /// Five earlier runs of the same mix read 31.03–31.52 MiB over fifteen
 /// readings. The same runs read the attach ceiling's child at 29.00–30.36
 /// MiB, so the plans and the live host add about 2 MiB over the attach. On
-/// `ubuntu-latest` x86_64-glibc, `full memory invariant` runs 41323116407,
-/// 41324737076 and 41329840687 read the plan gate child at **44.23, 44.04
-/// and 44.10 MiB**, respectively.
+/// `ubuntu-latest` x86_64-glibc the `memory invariant` jobs 111331931343 and
+/// 111384985926 (runs 37166270607 and 37185003929) read the same mix at
+/// **32.31–32.46 MiB** over six `realistic` readings and 30.00–30.20 over four
+/// `ambiguous` ones.
 ///
 /// **The readings are the plans', not the allocator's.** With glibc's mmap
 /// threshold fixed at 512 KiB (`GLIBC_TUNABLES=glibc.malloc.mmap_threshold=524288`
@@ -427,9 +492,20 @@ pub const HUB_WRITE_HEAP_GROWTH_ALLOWANCE_BYTES: u64 = 4 * 1024;
 /// MiB and every other planning child's at 33.82 to 36.32, under the ceiling,
 /// which was not changed.
 ///
-/// **This ceiling bounds the process.** It stays at 53 MiB, originally
-/// 1.61x the highest reading of 32.46 MiB, rounded up to a whole MiB.
-/// The same rule over the current 44.23 MiB gives 72 MiB, loosening it.
+/// On `ubuntu-latest` x86_64-glibc, `full memory invariant` runs
+/// 41323116407, 41324737076 and 41329840687 read the plan gate child at
+/// **44.23, 44.04 and 44.10 MiB**, respectively.
+///
+/// **This ceiling bounds the process.** It was authored at 53 MiB, by the rule
+/// [`READ_PEAK_RSS_CEILING_BYTES`] was authored under: the proportion
+/// [`ATTACH_PEAK_RSS_CEILING_BYTES`] kept over its highest reading, 1.61x,
+/// over the then-highest plan reading, local or hosted, 32.46 MiB, which is 52.26
+/// MiB, rounded up to a whole MiB. From the local readings alone the rule
+/// gave 52 MiB (32.18 at 1.61x is 51.81).
+/// Hosted readings have since risen to 44.23 MiB, so 53 MiB is below the
+/// 1.61x rule (72 MiB rounded up) and is kept rather than loosened.
+/// Whether the rise is a cost to cut or the bar should be re-authored is
+/// Mimir task NORN-501.
 /// It is the coarse backstop: what refuses a plan whose memory is the vault is
 /// [`PLAN_PREVIEW_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES`] and
 /// [`PLAN_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES`].
