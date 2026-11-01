@@ -80,7 +80,8 @@ summary=${GITHUB_STEP_SUMMARY:-/dev/null}
 # else the run printed.
 matches=$(awk -v output="$log" '
   function reports_a_test_that_did_not_fail(line) {
-    return line ~ /^[ \t]*test .+ [.][.][.] (ok|ignored)/
+    return line ~ /^[ \t]*test .+ [.][.][.] (ok|ignored)/ ||
+      line ~ /^[ \t]*(PASS|SKIP) [[][ ]*[0-9.]+s[]]/
   }
   function flush() {
     if (id != "" && signature != "") {
@@ -121,6 +122,7 @@ work_bound_phrase="work bound after"
 lines_carrying() {
   awk -v phrase="$1" '
     /^[ \t]*test .+ [.][.][.] (ok|ignored)/ { next }
+    /^[ \t]*(PASS|SKIP) [[][ ]*[0-9.]+s[]]/ { next }
     index($0, phrase) > 0 && !seen[$0]++ { print }
   ' "$log"
 }

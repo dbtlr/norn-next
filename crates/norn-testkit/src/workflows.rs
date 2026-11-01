@@ -567,6 +567,26 @@ fn invocation(run: &str) -> Option<Invocation> {
             })
         }
         ["cargo", "test", arguments @ ..] => featured_runs_of(arguments).map(Invocation::Test),
+        ["cargo", "nextest", "run", arguments @ ..] => {
+            // Retry and filtering options fail closed; this is the sole accepted runner policy.
+            let mut plain = Vec::new();
+            let mut retries_off = false;
+            let mut tokens = arguments.iter().copied();
+            while let Some(token) = tokens.next() {
+                if token == "--retries" {
+                    if tokens.next()? != "0" {
+                        return None;
+                    }
+                    retries_off = true;
+                } else {
+                    plain.push(token);
+                }
+            }
+            if !retries_off {
+                return None;
+            }
+            featured_runs_of(&plain).map(Invocation::Test)
+        }
         _ => None,
     }
 }
@@ -670,6 +690,31 @@ mod tests {
 
     fn tested(runs: Vec<FeaturedRun>) -> Option<Invocation> {
         Some(Invocation::Test(runs))
+    }
+
+    #[test]
+    fn nextest_vouches_only_for_unfiltered_runs_without_retries() {
+        assert_eq!(
+            invocation(
+                "cargo nextest run --locked --retries 0 --no-fail-fast -p norn-host --features induced-failure"
+            ),
+            tested(vec![run("norn-host", None, "induced-failure")])
+        );
+        for option in [
+            "--retries 1",
+            "--retries 2",
+            "-E test(foo)",
+            "--run-ignored all",
+            "--no-tests pass",
+            "--profile custom",
+        ] {
+            assert_eq!(
+                invocation(&format!(
+                    "cargo nextest run --locked -p norn-host --features induced-failure {option}"
+                )),
+                None
+            );
+        }
     }
 
     /// **A lane step reads as its package and target**, bare or behind the

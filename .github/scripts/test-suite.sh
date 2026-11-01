@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run one libtest target, rejecting a successful command that ran no case.
+# Run one libtest target or nextest suite, rejecting a successful command that ran no case.
 # Shared by the ignored-lane runner and explicit single-target invocations. The final summary
 # is authoritative: an earlier look-alike printed by a case proves nothing.
 
@@ -21,8 +21,8 @@ if [ "$status" -ne 0 ]; then
   exit "$status"
 fi
 
-summary=$(grep -E '^test result: ' "$log" | tail -n1)
-if ! printf '%s\n' "$summary" | grep -qE '^test result: ok\. [1-9][0-9]* passed'; then
+summary=$(grep -E '^test result: |^[[:space:]]*Summary \[' "$log" | tail -n1)
+if ! printf '%s\n' "$summary" | grep -qE '^test result: ok\. [1-9][0-9]* passed|^[[:space:]]*Summary \[[^]]+\] [1-9][0-9]* tests? run: [1-9][0-9]* passed(, [0-9]+ skipped)?$'; then
   echo "::error::$* ran no passing test case."
   exit 1
 fi
