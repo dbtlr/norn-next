@@ -2186,6 +2186,213 @@ fn a_link_a_names_move_and_an_anchor_move_both_reach_holds_one_finding() {
     }
 }
 
+/// What one changeset carrying `findings` re-decided.
+fn redecided_by(vault: &mut Vault, changes: Vec<Change>, findings: &[DerivedFinding<'_>]) -> u64 {
+    let mut request = vault.store.begin_request();
+    request
+        .apply_increment(IncrementProvenance::Derived, changes, findings, &declared())
+        .unwrap_or_else(|refusal| panic!("{:?}: a changeset: {refusal}", vault.order));
+    counted(&request.finish(), "links_redecided")
+}
+
+/// **A moved marked reading reaches the links naming it** (ADR 0047). A
+/// heading anchor is matched by its marked reading too, the text past its
+/// `#` markers, so `[[t### Intro]]` names the heading `Intro`. Adding the
+/// heading ends the link's missing anchor and removing it files the finding
+/// again, each time as a rebuild does.
+#[test]
+fn a_moved_marked_reading_reaches_the_links_naming_it() {
+    for order in [Sensitive, Folding] {
+        let mut vault = Vault::new(&format!("redecide-marked-reading-{order:?}"), order);
+        let mut held = BTreeMap::from([
+            ("t.md".to_string(), "# Other\n".to_string()),
+            ("h.md".to_string(), "[[t### Intro]]\n".to_string()),
+        ]);
+        vault.write(&[("t.md", "# Other\n"), ("h.md", "[[t### Intro]]\n")]);
+        assert_eq!(
+            vault.findings("h.md"),
+            [missing_anchor(0, "t.md")],
+            "{order:?}"
+        );
+        for (body, expected) in [
+            ("# Intro\n", vec![]),
+            ("# Other\n", vec![missing_anchor(0, "t.md")]),
+        ] {
+            let at = format!("{order:?}: t.md as {body:?}");
+            held.insert("t.md".to_string(), body.to_string());
+            assert_eq!(
+                redecided_by(&mut vault, upserts(&[("t.md", body)]), &[]),
+                1,
+                "{at}"
+            );
+            assert_eq!(vault.findings("h.md"), expected, "{at}");
+            assert_rebuilds(&mut vault.store, order, &held, &at);
+        }
+    }
+}
+
+/// **A link two arms reach is judged once** (ADR 0047). Beside an in-place
+/// rewrite that moves the anchor a link names, the link is also reached by a
+/// second moved value it names, by a birth in its class, by its path, by a
+/// directory mark over its path, and, for a link in the rewritten document
+/// itself, by the write: each re-decides it exactly once, and its finding
+/// ends.
+#[test]
+fn a_link_two_arms_reach_is_judged_once() {
+    for order in [Sensitive, Folding] {
+        let case = |label: &str| Vault::new(&format!("redecide-once-{label}-{order:?}"), order);
+
+        // Its reading and its slug, both moved.
+        let mut vault = case("two-values");
+        vault.write(&[("t.md", "# Other\n"), ("h.md", "[[t#nope]]\n")]);
+        assert_eq!(
+            vault.findings("h.md"),
+            [missing_anchor(0, "t.md")],
+            "{order:?}"
+        );
+        let redecided = redecided_by(&mut vault, upserts(&[("t.md", "# nope\n")]), &[]);
+        assert_eq!(
+            (redecided, vault.findings("h.md")),
+            (1, vec![]),
+            "{order:?}: two values"
+        );
+
+        // A birth in its class.
+        let mut vault = case("class");
+        vault.write(&[("t.md", "# Other\n"), ("h.md", "[[t#Nope]]\n")]);
+        let redecided = redecided_by(
+            &mut vault,
+            upserts(&[("t.md", "# Nope\n"), ("archive/t.md", "plain\n")]),
+            &[],
+        );
+        assert_eq!(
+            (redecided, vault.findings("h.md")),
+            (1, vec![]),
+            "{order:?}: class"
+        );
+
+        // A vault file born at the path it spells.
+        let mut vault = case("path");
+        vault.write(&[("v1.2.md", "# Other\n"), ("h.md", "[p](./v1.2#Nope)\n")]);
+        let redecided = redecided_by(
+            &mut vault,
+            vec![
+                Change::Upsert(derived("v1.2.md", "# Nope\n")),
+                Change::FileBirth { path: path("v1.2") },
+            ],
+            &[],
+        );
+        assert_eq!(redecided, 1, "{order:?}: path");
+
+        // A directory mark over its path.
+        let mut vault = case("directory");
+        vault.write(&[("x/t.md", "# Other\n"), ("h.md", "[p](/x/t.md#Nope)\n")]);
+        assert_eq!(
+            vault.findings("h.md"),
+            [missing_anchor(0, "x/t.md")],
+            "{order:?}"
+        );
+        let redecided = redecided_by(
+            &mut vault,
+            upserts(&[("x/t.md", "# Nope\n")]),
+            &[DerivedFinding {
+                facts: crate::health::directory_mark("x"),
+                replaces: None,
+                bytes_hash: None,
+            }],
+        );
+        assert_eq!(redecided, 1, "{order:?}: directory");
+
+        // A link in the rewritten document itself.
+        let mut vault = case("self");
+        vault.write(&[("t.md", "# Other\n\n[[#Nope]]\n")]);
+        let redecided = redecided_by(
+            &mut vault,
+            upserts(&[("t.md", "# Nope\n\n[[#Nope]]\n")]),
+            &[],
+        );
+        assert_eq!(
+            (redecided, vault.findings("t.md")),
+            (1, vec![]),
+            "{order:?}: self"
+        );
+    }
+}
+
+/// **A hub rewritten twice in one changeset, across several pages of
+/// in-links, equals a rebuild** (ADR 0047). Five hundred and nineteen
+/// holders — more than two of the anchor arm's pages — name `t.md` seven
+/// ways. One changeset rewrites it twice, moving its anchors each time, and
+/// rewrites every fifth holder; the next moves them back beside a death of an
+/// ignored twin and a birth in the class; the last moves one heading alone.
+/// After each, the store equals a rebuild.
+#[test]
+fn a_hub_rewritten_twice_over_several_pages_equals_a_rebuild() {
+    const HOLDERS: usize = 2 * 256 + 7;
+    let links = [
+        "[[t#Nope]]",
+        "[[t.md#nope]]",
+        "[[vault://t#Nope]]",
+        "[p](./t.md#Nope)",
+        "[[t### Nope]]",
+        "[[t#A]]",
+        "[[x/t#Nope]]",
+    ];
+    for order in [Sensitive, Folding] {
+        let mut vault = Vault::new(&format!("redecide-hub-pages-{order:?}"), order);
+        let mut held: BTreeMap<String, String> = BTreeMap::from([
+            ("t.md".to_string(), "# A\n\n## Setup\n".to_string()),
+            ("y/t.md".to_string(), "# Nope\n".to_string()),
+            ("archive/t.md".to_string(), "# A\n".to_string()),
+        ]);
+        held.extend((0..HOLDERS).map(|at| {
+            (
+                format!("h/{at:03}.md"),
+                format!("{}\n", links[at % links.len()]),
+            )
+        }));
+        vault.apply(
+            held.iter()
+                .map(|(at, body)| Change::Upsert(derived(at, body)))
+                .collect::<Vec<_>>(),
+        );
+        // `[[t#...]]` resolves to `t.md` alone once its twin is gone.
+        held.remove("y/t.md");
+        vault.kill("y/t.md");
+
+        let mut changes = vec![Change::Upsert(derived("t.md", "# X\n\n## Setup\n"))];
+        for at in (0..HOLDERS).step_by(5) {
+            let at = format!("h/{at:03}.md");
+            let body = format!("{}\n\nmore\n", held[&at].trim_end());
+            held.insert(at.clone(), body.clone());
+            changes.push(Change::Upsert(derived(&at, &body)));
+        }
+        held.insert("t.md".to_string(), "# Nope\n\n## Setup\n".to_string());
+        changes.push(Change::Upsert(derived("t.md", "# Nope\n\n## Setup\n")));
+        vault.apply(changes);
+        assert_rebuilds(&mut vault.store, order, &held, &format!("{order:?}: twice"));
+
+        held.insert("t.md".to_string(), "# A\n\n## Setup\n".to_string());
+        held.remove("archive/t.md");
+        held.insert("x/t.md".to_string(), "# Nope\n".to_string());
+        vault.apply(vec![
+            Change::Upsert(derived("t.md", "# A\n\n## Setup\n")),
+            death("archive/t.md"),
+            Change::Upsert(derived("x/t.md", "# Nope\n")),
+        ]);
+        assert_rebuilds(&mut vault.store, order, &held, &format!("{order:?}: back"));
+
+        held.insert("t.md".to_string(), "# Nope\n".to_string());
+        vault.write(&[("t.md", "# Nope\n")]);
+        assert_rebuilds(
+            &mut vault.store,
+            order,
+            &held,
+            &format!("{order:?}: one heading"),
+        );
+    }
+}
+
 /// **A write that is not an in-place rewrite moves its names and reaches
 /// every link to them** (ADR 0047): a birth, a death, a rename, a respelling
 /// only a folding comparison calls the same path, a readable document
@@ -2365,21 +2572,32 @@ fn a_row_whose_admitting_count_moved_reaches_every_link_to_it() {
 // ---- incremental equals rebuild over in-place rewrites ----
 
 /// The lines a document's anchors are made of in [`mixed_step`]: headings,
-/// one a case twin of another, and paragraphs carrying block ids.
-const ANCHOR_LINES: [&str; 6] = [
+/// one a case twin of another, one whose reading is another's slug, one
+/// whose reading is a block id, an empty one and a non-ASCII one, and
+/// paragraphs carrying block ids.
+const ANCHOR_LINES: [&str; 14] = [
     "# Intro",
     "## Setup",
     "# intro",
     "A paragraph. ^blk",
     "An item. ^b2",
     "## Nope",
+    "# Intro Two",
+    "# intro-two",
+    "### Deep",
+    "# blk",
+    "# setup",
+    "#",
+    "# Café",
+    "Other para. ^nope",
 ];
 
 /// Links naming the values [`ANCHOR_LINES`] holds, in each way a link is
-/// read: by suffix and by path, by text reading and by slug, by block id, and
+/// read: by suffix and by path, with and without `.md`, rooted and by
+/// `vault://`, by text reading, marked reading and slug, by block id, and
 /// within the holding document — so a moved anchor value reaches some link
 /// in most scripts.
-const ANCHORED_LINKS: [&str; 12] = [
+const ANCHORED_LINKS: [&str; 36] = [
     "[[t#Nope]]",
     "[[t#nope]]",
     "[[t#Setup]]",
@@ -2392,6 +2610,30 @@ const ANCHORED_LINKS: [&str; 12] = [
     "[[#Nope]]",
     "[[#^b2]]",
     "[[a#^blk]]",
+    "[[t### Intro]]",
+    "[[t#### Deep]]",
+    "[[t#intro-two]]",
+    "[[t#Intro Two]]",
+    "[[t.md#Setup]]",
+    "[[vault://x/t#Intro]]",
+    "[[vault://t.md#intro-two]]",
+    "[[T#Intro]]",
+    "![[t#Intro]]",
+    "[[t#blk]]",
+    "[[t#^nope]]",
+    "[[t/x#Intro]]",
+    "[[v1.2#Intro]]",
+    "[[v1.2.md#Setup]]",
+    "[[t.md.md#Deep]]",
+    "[[t###]]",
+    "[[t## Setup]]",
+    "[p](/t.md#Setup)",
+    "[p](t.md#intro-two)",
+    "[[x/t#Café]]",
+    "[[t#Cafe]]",
+    "[[#Intro Two]]",
+    "[[archive/t#Intro]]",
+    "[[u#Intro]]",
 ];
 
 /// The lines a body's rewritable rest is made of: [`LINES`] without its
