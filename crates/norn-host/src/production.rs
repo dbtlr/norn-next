@@ -16736,9 +16736,10 @@ mod tests {
     /// Asserts that the build `before` opened judged each stored link once.
     ///
     /// A caller settles its fixture's writes before attaching. FSEvents can
-    /// deliver a fixture's creation of a file after the watch's history marker,
-    /// and the build takes that late report as a change: its requeue re-decides
-    /// every link the file answers, which `links_redecided` would then count.
+    /// number a fixture's creation of a file after the watch's history marker,
+    /// and the build takes that late report as a change. A requeue drained
+    /// after the build's link judgment re-decides every link the file answers,
+    /// which `links_redecided` would then count.
     fn assert_judged_build(
         ops: &ProductionEntryOps,
         attachment: &mut ProductionAttachment,
