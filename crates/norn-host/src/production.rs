@@ -25416,9 +25416,10 @@ mod tests {
     ///
     /// So the outcome is the condition and the batches are what the wait
     /// pumps. The pump is [`norn_testkit::wait::absorb_until`]; what this adds
-    /// is the two ends that are this crate's — a take that is the same
-    /// nonblocking one [`poll_subscription`] makes, and an apply that is a real
-    /// scoped reconcile.
+    /// is the two ends that are this crate's: a take that is the dispatcher's
+    /// own nonblocking [`EntryOps::poll`], which hands on the facts a heal
+    /// window accepted before it polls the subscription, and an apply that is
+    /// a real scoped reconcile.
     ///
     /// A terminal watch error ends the wait rather than being polled for
     /// again, because it takes the subscription with it and every look after
@@ -25435,7 +25436,7 @@ mod tests {
             what,
             absorbing_budget(),
             attachment,
-            |attachment, absorbed| match poll_subscription(attachment) {
+            |attachment, absorbed| match ops.poll(name, attachment) {
                 Ok(Some(batch)) => {
                     note_batch(&batch, absorbed);
                     Some(batch)
