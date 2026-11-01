@@ -707,7 +707,8 @@ mod tests {
             "--retries 0",
             "--retries 1 --no-fail-fast",
             "--retries 2 --no-fail-fast",
-            "--retries 0 --no-fail-fast -E test(foo)",
+            // Keep the argument free of shell metacharacters so -E itself is rejected.
+            "--retries 0 --no-fail-fast -E foo",
             "--retries 0 --no-fail-fast --skip foo",
             "--retries 0 --no-fail-fast --run-ignored all",
             "--retries 0 --no-fail-fast --no-tests pass",
