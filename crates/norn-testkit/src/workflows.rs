@@ -684,8 +684,11 @@ fn is_count(text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{FeaturedRun, Invocation, LANE_FEATURES, Step, invocation, steps_in};
+    use super::{
+        FeaturedRun, Invocation, LANE_FEATURES, Step, default_shard, invocation, steps_in,
+    };
     use crate::regression::Target;
+    use serde_yaml::Value;
     use std::collections::BTreeMap;
 
     /// One featured run, as the reader reports it.
