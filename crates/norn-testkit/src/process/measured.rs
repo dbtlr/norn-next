@@ -458,6 +458,14 @@ fn finish(path: &CStr, report: &Report) -> c_int {
 /// The suffix of the file a report is written to before it is published.
 pub(super) const PARTIAL_SUFFIX: &[u8] = b".partial";
 
+/// The file the report for `path` is written to before it is published.
+pub(super) fn partial_path(path: &Path) -> PathBuf {
+    use std::os::unix::ffi::OsStrExt;
+    let mut partial = path.as_os_str().to_owned();
+    partial.push(std::ffi::OsStr::from_bytes(PARTIAL_SUFFIX));
+    partial.into()
+}
+
 /// Create `path`, which must not exist, holding exactly `bytes`.
 fn write_new(path: &CStr, bytes: &[u8]) -> bool {
     // SAFETY: `path` is null-terminated; the descriptor is this function's.
@@ -518,13 +526,6 @@ mod tests {
         (path, raw)
     }
 
-    fn partial_of(path: &Path) -> PathBuf {
-        use std::os::unix::ffi::OsStrExt;
-        let mut partial = path.as_os_str().to_owned();
-        partial.push(std::ffi::OsStr::from_bytes(PARTIAL_SUFFIX));
-        partial.into()
-    }
-
     /// A published report is whole at its path, and the file it was
     /// written to first is gone, so nothing in the directory is ever a
     /// report half-written.
@@ -540,7 +541,7 @@ mod tests {
         };
         assert_eq!(finish(&raw, &report), REPORTED);
         assert_eq!(read_report(&path).expect("the report"), Some(report));
-        assert!(!partial_of(&path).exists(), "the partial report was left");
+        assert!(!partial_path(&path).exists(), "the partial report was left");
     }
 
     /// **Publishing never replaces a report that is already there.** A
@@ -561,7 +562,7 @@ mod tests {
             std::fs::read_to_string(&path).expect("the planted report"),
             "ended 0 1\n"
         );
-        assert!(!partial_of(&path).exists(), "the partial report was left");
+        assert!(!partial_path(&path).exists(), "the partial report was left");
     }
 
     #[test]

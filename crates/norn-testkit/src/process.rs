@@ -324,6 +324,25 @@ impl<'a> Run<'a> {
         let out_path = self.sandbox.tree.join(format!("run-{serial}.stdout"));
         let err_path = self.sandbox.tree.join(format!("run-{serial}.stderr"));
         let report_path = self.sandbox.tree.join(format!("run-{serial}.usage"));
+        // **A run starts only where no report exists yet**, so a report read
+        // after it ends was published by this run's measuring launcher and
+        // by no one before it. Neither the report nor the file it is written
+        // to first may exist: a planted report would be read as this run's
+        // when its measuring launcher is killed before publishing, and a
+        // planted partial one blocks publishing.
+        for path in [report_path.clone(), measured::partial_path(&report_path)] {
+            if path.symlink_metadata().is_ok() {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!(
+                        "not starting {}: {} already exists, so a report found there could \
+                         not be told from this run's",
+                        self.program.display(),
+                        path.display()
+                    ),
+                ));
+            }
+        }
 
         // Output goes to files rather than pipes: a pipe nobody is reading
         // fills and stops the child, and the harness has to wait on the child
@@ -541,8 +560,6 @@ mod tests {
     use std::collections::BTreeSet;
     use std::time::Instant;
 
-    use std::os::unix::ffi::OsStrExt;
-
     use super::*;
     use crate::wait::{Budget, Observed, wait_until};
 
@@ -671,43 +688,89 @@ mod tests {
     /// **A measuring launcher that ended without a report is an error**,
     /// unless it was signalled: a launcher that exited on its own without
     /// publishing has failed, and the run has no outcome to report. The
-    /// launcher is made to fail by planting a file where it writes its report
-    /// before publishing it.
+    /// child makes it fail by taking the file the launcher writes its report
+    /// to before publishing it.
     #[test]
-    #[allow(clippy::disallowed_methods)] // Harness scaffolding: blocking the run's own report.
     fn a_launcher_that_exits_without_a_report_is_an_error() {
         let sandbox = sandbox("no-report");
-        let mut partial = sandbox.root().join("run-0.usage").into_os_string();
-        partial.push(OsStr::from_bytes(measured::PARTIAL_SUFFIX));
-        std::fs::write(&partial, "planted").expect("blocking the report");
+        let partial = measured::partial_path(&sandbox.root().join("run-0.usage"));
         let error = Run::new(&sandbox, "/bin/sh")
-            .args(["-c", "exit 0"])
+            .args(["-c", "echo planted > \"$1\"", "sh"])
+            .arg(&partial)
             .wait()
             .err()
             .expect("a run whose launcher could not report");
         assert!(error.to_string().contains("without a report"), "{error}");
     }
 
-    /// **A report path that already holds a report is an error**, not that
-    /// report: the measuring launcher publishes only to a path nobody has
-    /// written, so a run whose path was taken reads a stranger's report.
-    #[test]
+    /// Plant `contents` at `name` in a fresh sandbox, then run `script` there
+    /// under `deadline`, and return the run's result and whether the script
+    /// got as far as running.
     #[allow(clippy::disallowed_methods)] // Harness scaffolding: planting a stale report.
-    fn a_report_path_that_already_exists_is_an_error() {
-        let sandbox = sandbox("stale-report");
-        let report = sandbox.root().join("run-0.usage");
-        std::fs::write(&report, "ended 0 1\n").expect("planting a stale report");
-        let error = Run::new(&sandbox, "/bin/sh")
-            .args(["-c", "exit 7"])
-            .wait()
-            .err()
-            .expect("a run whose report path was taken");
-        assert!(error.to_string().contains("not this run's"), "{error}");
+    fn run_over_a_planted_file(
+        name: &str,
+        contents: &str,
+        script: &str,
+        deadline: Duration,
+    ) -> (io::Result<Outcome>, bool) {
+        let sandbox = sandbox("planted-report");
+        let planted = sandbox.root().join(name);
+        std::fs::write(&planted, contents).expect("planting a file");
+        let started = sandbox.root().join("started");
+        let result = Run::new(&sandbox, "/bin/sh")
+            .args(["-c", &format!(": > \"$1\"; {script}"), "sh"])
+            .arg(&started)
+            .deadline(deadline)
+            .wait();
         assert_eq!(
-            std::fs::read_to_string(&report).expect("the stale report"),
-            "ended 0 1\n",
-            "the stale report was overwritten"
+            std::fs::read_to_string(&planted).expect("the planted file"),
+            contents,
+            "the planted file was replaced"
         );
+        (result, started.exists())
+    }
+
+    /// **A run does not start over a report that is already there**, nor
+    /// over the file a report is written to first: whatever was found there
+    /// afterwards could not be told from what this run's measuring launcher
+    /// wrote. Refusing before the program starts is what makes every report
+    /// a run reads its own.
+    #[test]
+    fn a_run_refuses_to_start_over_an_existing_report() {
+        for name in ["run-0.usage", "run-0.usage.partial"] {
+            let (result, started) =
+                run_over_a_planted_file(name, "ended 0 1\n", "exit 7", DEFAULT_WAIT_DEADLINE);
+            let error = result.err().expect("a run whose report path was taken");
+            assert_eq!(
+                error.kind(),
+                io::ErrorKind::AlreadyExists,
+                "{name}: {error}"
+            );
+            assert!(!started, "{name}: the program ran");
+        }
+    }
+
+    /// A planted report is not read as the run's when the measuring
+    /// launcher dies before publishing — at the deadline, or by a `SIGKILL`
+    /// sent to the group — where nothing else would tell the two apart.
+    #[test]
+    fn a_planted_report_is_not_read_as_a_killed_runs() {
+        for (script, deadline) in [
+            ("sleep 30", Duration::from_millis(300)),
+            ("kill -KILL 0", DEFAULT_WAIT_DEADLINE),
+        ] {
+            let (result, _) =
+                run_over_a_planted_file("run-0.usage", "ended 0 1\n", script, deadline);
+            let error = result
+                .map(|outcome| outcome.status)
+                .err()
+                .unwrap_or_else(|| panic!("{script}: the planted report was read as the run's"));
+            assert_eq!(
+                error.kind(),
+                io::ErrorKind::AlreadyExists,
+                "{script}: {error}"
+            );
+        }
     }
 
     /// **A binary that becomes the measuring launcher by accident fails.**
