@@ -103,7 +103,6 @@
 //! either runs.
 //!
 //! [ADR 0047]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0047-a-write-re-decides-only-the-links-whose-inputs-it-moved.md
-//! [ADR 0047]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0047-a-write-re-decides-only-the-links-whose-inputs-it-moved.md
 
 pub(crate) mod resolution;
 pub(crate) mod run;
