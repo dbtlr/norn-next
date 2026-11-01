@@ -21,58 +21,123 @@
 //! string both reported 263.9 MB.
 //!
 //! So [`super::Run`] starts a fresh image of the binary it is running in —
-//! the launcher — and the launcher spawns the child. The launcher's own
-//! reading carries the floor, and nothing reads it. The child is spawned from
-//! the launcher's address space, which is a few megabytes of freshly loaded
-//! image, so the child's floor is that. The launcher reaps the child with
+//! the measuring launcher — and the measuring launcher spawns the child. The
+//! measuring launcher's own reading carries the parent's floor, and nothing
+//! reads it. The child is spawned from the measuring launcher's address
+//! space, which is the spawning binary's freshly loaded image, so the child's
+//! floor is that image's resident size. It varies with the binary — 3.4 MiB
+//! for this crate's unit-test binary and 6.9 MiB for the debug norn-host
+//! `memory` test binary, measured — and is independent of how high the
+//! spawning process has peaked. The measuring launcher reaps the child with
 //! `wait4` and writes the child's wait status and peak to a report file, and
 //! the run reads its outcome from there.
 //!
 //! macOS's `posix_spawn` is a system call that gives the child an address
-//! space of its own, so the floor is not expected there; the launcher runs
-//! there too, so one path measures on both platforms.
+//! space of its own, so the floor is not expected there; the measuring
+//! launcher runs there too, so one path measures on both platforms.
 //!
-//! # How a binary becomes the launcher
+//! # How a binary becomes the measuring launcher
 //!
 //! The binary that starts a run is whatever links this crate — usually a
-//! test binary, whose `main` belongs to the test runner. The launcher is
-//! therefore an initializer the loader runs before `main`: [`DIVERT`] is
-//! placed in the platform's initializer section, checks for
+//! test binary, whose `main` belongs to the test runner. The measuring
+//! launcher is therefore an initializer the loader runs before `main`:
+//! [`DIVERT`] is placed in the platform's initializer section, checks for
 //! [`REPORT_VARIABLE`] in the environment it was started with, and returns at
-//! once when it is absent. When it is present, the process is a launcher: it
-//! spawns its arguments as the child, with that variable removed from the
-//! child's environment, and exits without returning to `main`. Only libc is
-//! called on that path, because the standard library's runtime has not been
-//! set up yet.
+//! once when it is absent. When it is present, the process is a measuring
+//! launcher: it spawns its arguments as the child, with that variable removed
+//! from the child's environment, and exits without returning to `main`. That
+//! path calls only libc and the system allocator, and touches no state of the
+//! standard library's runtime, which has not been set up yet.
 //!
-//! The launcher leads the run's process group and the child joins it, so the
-//! group-ownership contract — cleanup of the complete group, the bounded
-//! wait — is unchanged. The launcher passes no descriptor of its own to the
-//! child: its report is a file it opens only after the child has ended.
+//! A binary started with the variable set and nothing it can spawn exits
+//! [`NOT_STARTED`], so a test binary that inherited a stray copy of the
+//! variable fails rather than exiting 0 having run nothing.
+//!
+//! # What the child sees
+//!
+//! The measuring launcher leads the run's process group and the child joins
+//! it, so the group-ownership contract — cleanup of the complete group, the
+//! bounded wait — is unchanged. The measuring launcher passes no descriptor
+//! of its own to the child: its report is a file it creates only after the
+//! child has ended.
+//!
+//! A signal the child sends to its own group reaches the measuring launcher
+//! too. So that such a signal ends what it would have ended had the child been
+//! spawned directly — the child, unless it handles or ignores it — the
+//! measuring launcher ignores [`SHIELDED_SIGNALS`] and restores, for the
+//! child, the default disposition of each one it found at the default, and an
+//! empty signal mask. `SIGKILL` cannot be ignored, which is what keeps the
+//! harness's deadline kill of the complete group working.
+//!
+//! # Declared limitations
+//!
+//! - **musl targets are unsupported.** musl calls `.init_array` functions
+//!   without `argc`, `argv` and `envp`, so [`DIVERT`] would read registers
+//!   that hold no environment.
+//! - **A script without a shebang line no longer runs through `/bin/sh`.**
+//!   The child is started by libc `posix_spawnp`, which reports `ENOEXEC` for
+//!   such a file, where the standard library's spawn on glibc fell back to
+//!   running it through the shell.
 
 use std::ffi::{CStr, c_char, c_int, c_long};
 use std::io;
 use std::path::{Path, PathBuf};
 
 /// The variable that makes a binary linking this crate start as the
-/// launcher. Its value is the path the launcher writes its report to.
+/// measuring launcher. Its value is the path the measuring launcher writes
+/// its report to.
 pub(super) const REPORT_VARIABLE: &str = "NORN_TESTKIT_MEASURED_REPORT";
 
-/// The same name as a prefix of an environment entry, for the launcher,
-/// which reads the raw environment rather than the standard library's view.
+/// The same name as a prefix of an environment entry, for the measuring
+/// launcher, which reads the raw environment rather than the standard
+/// library's view.
 const REPORT_ENTRY_PREFIX: &[u8] = b"NORN_TESTKIT_MEASURED_REPORT=";
 
 /// The initializer the loader runs before `main`. glibc and dyld both call
-/// one with `argc`, `argv` and `envp`.
+/// one with `argc`, `argv` and `envp`. The Mach-O section, with its
+/// `mod_init_funcs` type, is the one the `ctor` crate uses.
 #[used]
 #[cfg_attr(
     target_vendor = "apple",
-    unsafe(link_section = "__DATA,__mod_init_func")
+    unsafe(link_section = "__DATA,__mod_init_func,mod_init_funcs")
 )]
 #[cfg_attr(not(target_vendor = "apple"), unsafe(link_section = ".init_array"))]
 static DIVERT: extern "C" fn(c_int, *const *const c_char, *const *const c_char) = divert;
 
-/// What the launcher learned about the child.
+/// The measuring launcher's exit code when it reported [`Report::Ended`].
+pub(super) const REPORTED: c_int = 0;
+
+/// The measuring launcher's exit code when it reported
+/// [`Report::NotStarted`]: the shell's code for a command that was not found,
+/// and never 0, so a binary that became the measuring launcher by accident
+/// fails loudly.
+pub(super) const NOT_STARTED: c_int = 127;
+
+/// The measuring launcher's exit code when it could not produce a report.
+/// The run reads the absence of the report, not this code; the code is for a
+/// person reading the status by hand.
+const LAUNCHER_FAILED: c_int = 125;
+
+/// The signals a child commonly sends to its own process group, which the
+/// measuring launcher ignores so that only the child answers them.
+/// `SIGCHLD` is absent on purpose — ignoring it would reap the child before
+/// `wait4` could — and so are the signals that report a fault of the
+/// receiving process.
+const SHIELDED_SIGNALS: [c_int; 11] = [
+    libc::SIGHUP,
+    libc::SIGINT,
+    libc::SIGQUIT,
+    libc::SIGTERM,
+    libc::SIGPIPE,
+    libc::SIGUSR1,
+    libc::SIGUSR2,
+    libc::SIGALRM,
+    libc::SIGTSTP,
+    libc::SIGTTIN,
+    libc::SIGTTOU,
+];
+
+/// What the measuring launcher learned about the child.
 #[derive(Debug, Eq, PartialEq)]
 pub(super) enum Report {
     /// The child ended with this raw wait status and peak, in the platform's
@@ -82,27 +147,42 @@ pub(super) enum Report {
     NotStarted(c_int),
 }
 
-/// The executable a run starts as its launcher: the image this process is
-/// running, which links [`DIVERT`].
+/// The executable a run starts as its measuring launcher: the image this
+/// process is running, which links [`DIVERT`].
 ///
 /// On Linux that is `/proc/self/exe`, the very file this process executes,
 /// so a concurrent build replacing the artifact at its path does not change
 /// which image starts. macOS has no such link, so it is the path the loader
-/// reports.
+/// reports, made absolute once: the loader may report it relative to the
+/// directory this process started in, and a run starts its child in the
+/// sandbox's.
+#[allow(clippy::disallowed_methods)] // Harness scaffolding: resolving this process's own executable.
 pub(super) fn image() -> io::Result<PathBuf> {
     // Naming the initializer here is what keeps it in every binary that
     // starts a run: a linker may leave out an unreferenced part of a library.
+    // No test can tell this from a linker that happened to keep it anyway.
     std::hint::black_box(&DIVERT);
     if cfg!(target_os = "linux") {
-        Ok(PathBuf::from("/proc/self/exe"))
-    } else {
-        std::env::current_exe()
+        return Ok(PathBuf::from("/proc/self/exe"));
     }
+    static CANONICAL: std::sync::OnceLock<Result<PathBuf, (io::ErrorKind, String)>> =
+        std::sync::OnceLock::new();
+    CANONICAL
+        .get_or_init(|| {
+            std::env::current_exe()
+                .and_then(|path| path.canonicalize())
+                .map_err(|error| (error.kind(), error.to_string()))
+        })
+        .clone()
+        .map_err(|(kind, message)| {
+            io::Error::new(kind, format!("locating this executable: {message}"))
+        })
 }
 
-/// Read the launcher's report at `path`, or `None` when it wrote none —
-/// the launcher was killed before the child ended, or failed before it could
-/// report.
+/// Read the measuring launcher's report at `path`, or `None` when it wrote
+/// none — it was killed before it published one, or failed before it could.
+/// A report is published whole or not at all, so one that is present and
+/// unreadable was not written by a measuring launcher.
 #[allow(clippy::disallowed_methods)] // Harness scaffolding: the run's own report file.
 pub(super) fn read_report(path: &Path) -> io::Result<Option<Report>> {
     let text = match std::fs::read_to_string(path) {
@@ -181,7 +261,7 @@ unsafe fn report_path(envp: *const *const c_char) -> Option<&'static CStr> {
 }
 
 /// Spawn `argv[1..]` with the environment minus the report variable, reap
-/// it, write the report, and return the launcher's exit code.
+/// it, publish the report, and return the measuring launcher's exit code.
 ///
 /// # Safety
 ///
@@ -216,24 +296,29 @@ unsafe fn launch(
     }
     environment.push(std::ptr::null_mut());
 
+    let Some(attributes) = SpawnAttributes::shielding() else {
+        return LAUNCHER_FAILED;
+    };
     // SAFETY: `argc >= 2`, so `argv[1]` is the program and `argv + 1` is a
     // null-terminated argument vector beginning with it.
     let (program, arguments) = unsafe { (*argv.add(1), argv.add(1)) };
     let mut pid: libc::pid_t = 0;
     // SAFETY: every pointer is valid and null-terminated as `posix_spawnp`
-    // requires; null file actions and attributes ask for the defaults, so the
-    // child inherits this process's descriptors, directory, group and signal
-    // state, as it would have inherited the run's.
+    // requires. Null file actions ask for the defaults, so the child inherits
+    // this process's descriptors, directory and group, as it would have
+    // inherited the run's; the attributes give back the signal state this
+    // process had before it shielded itself.
     let spawned = unsafe {
         libc::posix_spawnp(
             &mut pid,
             program,
             std::ptr::null(),
-            std::ptr::null(),
+            attributes.as_ptr(),
             arguments.cast(),
             environment.as_ptr().cast(),
         )
     };
+    drop(attributes);
     if spawned != 0 {
         return finish(report, &Report::NotStarted(spawned));
     }
@@ -247,6 +332,7 @@ unsafe fn launch(
         if unsafe { libc::wait4(pid, &mut status, 0, &mut usage) } == pid {
             break;
         }
+        // EINTR is retried defensively; with no handler installed no test can provoke it.
         if io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
             return LAUNCHER_FAILED;
         }
@@ -260,13 +346,103 @@ unsafe fn launch(
     )
 }
 
-/// The launcher's exit code when it could not produce a report. The run
-/// reads the absence of the report, not this code; the code is for a person
-/// reading the launcher's status by hand.
-const LAUNCHER_FAILED: c_int = 125;
+/// The `posix_spawn` attributes that undo the measuring launcher's signal
+/// shield for the child.
+struct SpawnAttributes(libc::posix_spawnattr_t);
 
+impl SpawnAttributes {
+    /// Ignore [`SHIELDED_SIGNALS`] in this process, and describe a child that
+    /// gets back the default disposition of each one this process had at the
+    /// default — one this process inherited as ignored stays ignored, as it
+    /// would have for a child spawned directly — and an empty signal mask.
+    fn shielding() -> Option<SpawnAttributes> {
+        // SAFETY: zero is a valid out-value for `sigemptyset`.
+        let mut defaults: libc::sigset_t = unsafe { std::mem::zeroed() };
+        let mut empty: libc::sigset_t = unsafe { std::mem::zeroed() };
+        // SAFETY: both sets are valid and this process's own.
+        if unsafe { libc::sigemptyset(&mut defaults) } != 0
+            || unsafe { libc::sigemptyset(&mut empty) } != 0
+        {
+            return None;
+        }
+        for signal in SHIELDED_SIGNALS {
+            // SAFETY: ignoring a catchable signal installs no code to run.
+            let previous = unsafe { libc::signal(signal, libc::SIG_IGN) };
+            if previous == libc::SIG_ERR {
+                return None;
+            }
+            // SAFETY: `defaults` is a valid set and `signal` a valid number.
+            if previous == libc::SIG_DFL && unsafe { libc::sigaddset(&mut defaults, signal) } != 0 {
+                return None;
+            }
+        }
+
+        // SAFETY: zero is a valid out-value for `posix_spawnattr_init`.
+        let mut raw: libc::posix_spawnattr_t = unsafe { std::mem::zeroed() };
+        // SAFETY: `raw` is valid storage for an attributes object.
+        if unsafe { libc::posix_spawnattr_init(&mut raw) } != 0 {
+            return None;
+        }
+        let mut attributes = SpawnAttributes(raw);
+        let flags = (libc::POSIX_SPAWN_SETSIGDEF | libc::POSIX_SPAWN_SETSIGMASK) as libc::c_short;
+        // SAFETY: the attributes object is initialized and both sets are valid.
+        let configured = unsafe {
+            libc::posix_spawnattr_setsigdefault(&mut attributes.0, &defaults) == 0
+                && libc::posix_spawnattr_setsigmask(&mut attributes.0, &empty) == 0
+                && libc::posix_spawnattr_setflags(&mut attributes.0, flags) == 0
+        };
+        configured.then_some(attributes)
+    }
+
+    fn as_ptr(&self) -> *const libc::posix_spawnattr_t {
+        &raw const self.0
+    }
+}
+
+impl Drop for SpawnAttributes {
+    fn drop(&mut self) {
+        // SAFETY: the object was initialized by `shielding` and is destroyed
+        // once.
+        unsafe { libc::posix_spawnattr_destroy(&mut self.0) };
+    }
+}
+
+/// Publish `report` at `path` and return the exit code that goes with it.
+///
+/// **A report is complete or absent at `path`, never partial.** It is
+/// written to a sibling with [`PARTIAL_SUFFIX`] and linked into place, so a
+/// deadline kill landing mid-write leaves no file at `path` and the run reads
+/// a killed measuring launcher rather than an unreadable report. Linking
+/// fails when `path` already exists, so a report path some other process
+/// wrote is never overwritten and the run sees its contents disagree with
+/// this exit code.
 fn finish(path: &CStr, report: &Report) -> c_int {
-    let bytes = render_report(report);
+    let mut partial = path.to_bytes().to_vec();
+    partial.extend_from_slice(PARTIAL_SUFFIX);
+    partial.push(0);
+    let Ok(partial) = CStr::from_bytes_with_nul(&partial) else {
+        return LAUNCHER_FAILED;
+    };
+    let written = write_new(partial, render_report(report).as_bytes());
+    // SAFETY: both paths are null-terminated.
+    let published = written && unsafe { libc::link(partial.as_ptr(), path.as_ptr()) } == 0;
+    // SAFETY: `partial` is null-terminated; a partial file left behind by a
+    // failed write is removed with it.
+    unsafe { libc::unlink(partial.as_ptr()) };
+    if !published {
+        return LAUNCHER_FAILED;
+    }
+    match report {
+        Report::Ended { .. } => REPORTED,
+        Report::NotStarted(_) => NOT_STARTED,
+    }
+}
+
+/// The suffix of the file a report is written to before it is published.
+pub(super) const PARTIAL_SUFFIX: &[u8] = b".partial";
+
+/// Create `path`, which must not exist, holding exactly `bytes`.
+fn write_new(path: &CStr, bytes: &[u8]) -> bool {
     // SAFETY: `path` is null-terminated; the descriptor is this function's.
     let fd = unsafe {
         libc::open(
@@ -276,7 +452,7 @@ fn finish(path: &CStr, report: &Report) -> c_int {
         )
     };
     if fd < 0 {
-        return LAUNCHER_FAILED;
+        return false;
     }
     let mut written = 0;
     while written < bytes.len() {
@@ -293,16 +469,12 @@ fn finish(path: &CStr, report: &Report) -> c_int {
         } else if count < 0 && io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
             continue;
         } else {
-            // SAFETY: `fd` is this function's.
-            unsafe { libc::close(fd) };
-            return LAUNCHER_FAILED;
+            break;
         }
     }
     // SAFETY: `fd` is this function's.
-    if unsafe { libc::close(fd) } != 0 {
-        return LAUNCHER_FAILED;
-    }
-    0
+    let closed = unsafe { libc::close(fd) } == 0;
+    closed && written == bytes.len()
 }
 
 #[cfg(test)]
@@ -320,6 +492,59 @@ mod tests {
         ] {
             assert_eq!(parse_report(&render_report(&report)), Some(report));
         }
+    }
+
+    fn report_path_in(directory: &Path) -> (PathBuf, std::ffi::CString) {
+        use std::os::unix::ffi::OsStrExt;
+        let path = directory.join("run.usage");
+        let raw = std::ffi::CString::new(path.as_os_str().as_bytes()).expect("a path");
+        (path, raw)
+    }
+
+    fn partial_of(path: &Path) -> PathBuf {
+        use std::os::unix::ffi::OsStrExt;
+        let mut partial = path.as_os_str().to_owned();
+        partial.push(std::ffi::OsStr::from_bytes(PARTIAL_SUFFIX));
+        partial.into()
+    }
+
+    /// A published report is whole at its path, and the file it was
+    /// written to first is gone, so nothing in the directory is ever a
+    /// report half-written.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: inspecting the report's directory.
+    fn a_published_report_is_whole_and_leaves_no_partial_behind() {
+        let scratch = crate::scratch::Scratch::under(&std::env::temp_dir(), "report-publish")
+            .expect("a scratch directory");
+        let (path, raw) = report_path_in(scratch.root());
+        let report = Report::Ended {
+            status: 0,
+            max_rss: 4_096,
+        };
+        assert_eq!(finish(&raw, &report), REPORTED);
+        assert_eq!(read_report(&path).expect("the report"), Some(report));
+        assert!(!partial_of(&path).exists(), "the partial report was left");
+    }
+
+    /// **Publishing never replaces a report that is already there.** A
+    /// measuring launcher that finds its path taken fails and leaves the
+    /// existing file, and no partial, behind.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: planting a stale report and inspecting its directory.
+    fn publishing_onto_an_existing_report_fails_and_leaves_it() {
+        let scratch = crate::scratch::Scratch::under(&std::env::temp_dir(), "report-taken")
+            .expect("a scratch directory");
+        let (path, raw) = report_path_in(scratch.root());
+        std::fs::write(&path, "ended 0 1\n").expect("planting a report");
+        assert_eq!(
+            finish(&raw, &Report::NotStarted(libc::ENOENT)),
+            LAUNCHER_FAILED
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("the planted report"),
+            "ended 0 1\n"
+        );
+        assert!(!partial_of(&path).exists(), "the partial report was left");
     }
 
     #[test]

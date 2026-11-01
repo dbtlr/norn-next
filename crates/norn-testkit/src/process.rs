@@ -39,8 +39,8 @@
 //!   starts the run — because on Linux a child spawned directly from a test
 //!   process inherits that process's peak as a floor under its own; the
 //!   `measured` module records the mechanism.
-//! - **Every run owns one process group.** The direct child leads it. The
-//!   harness sends `SIGKILL` to the complete group on every end, reaps the
+//! - **Every run owns one process group.** The measuring launcher leads it
+//!   and the child joins it. The harness sends `SIGKILL` to the complete group on every end, reaps the
 //!   leader, and returns an [`Outcome`] only after the group no longer exists.
 //!   A workload that calls `setsid` or changes its process group has left this
 //!   contract.
@@ -61,7 +61,8 @@
 //! The non-shipping `norn-process supervise` command owns commands started by
 //! development scripts and agents. Its resident launcher leads the workload's
 //! process group, waits behind a private release pipe, and stays alive after the
-//! direct workload exits to pin the registered identity. The supervisor writes
+//! direct workload exits to pin the registered identity. It is a different
+//! process from a [`Run`]'s measuring launcher, which only measures. The supervisor writes
 //! and syncs one registry record before it releases the workload. SIGINT and
 //! SIGTERM first close the owned group through the same mechanism as [`Run`],
 //! then terminate the supervisor with the original signal.
@@ -341,7 +342,29 @@ impl<'a> Run<'a> {
 
         let ended = group::OwnedProcessGroup::spawn(&mut command)?.wait(self.deadline)?;
         let launcher = decoded(ended.pid, ended.status)?;
-        let (status, max_rss) = match measured::read_report(&report_path)? {
+        let report = measured::read_report(&report_path)?;
+        // A report that disagrees with how the measuring launcher ended is not
+        // this run's: the launcher found the path taken and published nothing.
+        // A launcher signalled after it published is the one disagreement
+        // that is not a stranger's report.
+        let agreed = match (&report, launcher) {
+            (Some(measured::Report::Ended { .. }), RunStatus::Exited(code)) => {
+                code == measured::REPORTED
+            }
+            (Some(measured::Report::NotStarted(_)), RunStatus::Exited(code)) => {
+                code == measured::NOT_STARTED
+            }
+            _ => true,
+        };
+        if !agreed {
+            return Err(io::Error::other(format!(
+                "the measuring launcher for {} ended {launcher:?}, which is not what the \
+                 report at {} says it did; the report is not this run's",
+                self.program.display(),
+                report_path.display()
+            )));
+        }
+        let (status, max_rss) = match report {
             Some(measured::Report::NotStarted(errno)) => {
                 let error = io::Error::from_raw_os_error(errno);
                 return Err(io::Error::new(
@@ -352,9 +375,9 @@ impl<'a> Run<'a> {
             Some(measured::Report::Ended { status, max_rss }) => {
                 (decoded(ended.pid, status)?, max_rss)
             }
-            // The launcher was signalled before the child ended — the
-            // harness's own kill at the deadline, or a signal sent to the
-            // whole group — so the child has no reading to report.
+            // The measuring launcher was signalled before it published — the
+            // harness's own kill at the deadline, or a signal it does not
+            // shield sent to the whole group — so the child has no reading.
             None if matches!(launcher, RunStatus::Signaled(_)) => (launcher, 0),
             None => {
                 let (stderr, _) = capture(&err_path, self.capture_limit)?;
@@ -416,14 +439,15 @@ pub struct Outcome {
     /// the program the run names and every descendant it waited on.
     ///
     /// The reading is the child's own. It is taken by the measuring launcher,
-    /// so it carries no floor from the process that started the run; the
-    /// floor it does carry is the launcher's freshly loaded image, a few
-    /// megabytes, which bounds how small a reading can be rather than how
-    /// large.
+    /// so it carries no floor from the process that started the run's peak;
+    /// the floor it does carry is the spawning binary's freshly loaded image,
+    /// which varies with the binary (a few megabytes) and bounds how small a
+    /// reading can be rather than how large.
     ///
     /// It is zero when the run produced no reading of its own: a run that
-    /// reports [`RunStatus::TimedOut`], or one whose whole process group was
-    /// signalled before the child ended, ended the launcher with the child.
+    /// reports [`RunStatus::TimedOut`], or one whose process group took a
+    /// signal the measuring launcher does not shield (`SIGKILL` among them)
+    /// before the child ended, ended the measuring launcher with the child.
     pub peak_rss_bytes: u64,
     pub stdout: Vec<u8>,
     /// Whether the child wrote more to stdout than the capture limit, so what
@@ -516,6 +540,8 @@ mod tests {
     use std::collections::BTreeSet;
     use std::time::Instant;
 
+    use std::os::unix::ffi::OsStrExt;
+
     use super::*;
     use crate::wait::{Budget, Observed, wait_until};
 
@@ -576,7 +602,7 @@ mod tests {
         );
     }
 
-    /// The variable that makes the launcher a launcher stops there: a child
+    /// The variable that makes the measuring launcher stops there: a child
     /// that saw it would be one more process on its way to becoming one.
     #[test]
     fn a_runs_child_does_not_see_the_launchers_report_variable() {
@@ -601,14 +627,113 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::NotFound, "{error}");
     }
 
-    /// A signal sent to the whole group ends the launcher with the child, so
-    /// the run reports the signal and no reading of its own.
+    /// A signal the child sends to its whole group and does not handle ends
+    /// the child, which reports it; the measuring launcher shields itself, so
+    /// the reading is still the child's own.
     #[test]
-    fn a_run_whose_group_is_signalled_reports_the_signal_and_no_peak() {
+    fn a_group_signal_the_child_does_not_handle_ends_the_child_and_keeps_its_peak() {
         let sandbox = sandbox("group-signal");
         let outcome = shell(&sandbox, "kill -TERM 0; sleep 10");
         assert_eq!(outcome.status, RunStatus::Signaled(libc::SIGTERM));
-        assert_eq!(outcome.peak_rss_bytes, 0);
+        assert!(outcome.peak_rss_bytes > 0, "the child's peak went unread");
+    }
+
+    /// **A group signal ends what it would have ended had the child been
+    /// spawned directly.** A child that ignores a signal it sends to its own
+    /// group carries on and reports its own exit; the measuring launcher in
+    /// the same group must not die of it and take the child with it.
+    #[test]
+    fn a_child_that_ignores_a_signal_to_its_group_reports_its_own_exit() {
+        for signal in ["TERM", "INT", "HUP", "QUIT"] {
+            let sandbox = sandbox("group-signal-ignored");
+            let outcome = shell(
+                &sandbox,
+                &format!("trap '' {signal}; kill -{signal} 0; echo survived; exit 3"),
+            );
+            assert_eq!(outcome.status, RunStatus::Exited(3), "SIG{signal}");
+            assert_eq!(outcome.stdout_text(), "survived\n", "SIG{signal}");
+            assert!(outcome.peak_rss_bytes > 0, "SIG{signal}: no peak");
+        }
+    }
+
+    /// The measuring launcher ignores the signals it shields; the child gets
+    /// their default dispositions back, so a child that does not ignore one
+    /// is not left immune to it.
+    #[test]
+    fn a_child_gets_back_the_default_dispositions_the_launcher_ignores() {
+        let sandbox = sandbox("signal-defaults");
+        let outcome = shell(&sandbox, "kill -INT $$; echo survived");
+        assert_eq!(outcome.status, RunStatus::Signaled(libc::SIGINT));
+        assert_eq!(outcome.stdout_text(), "");
+    }
+
+    /// **A measuring launcher that ended without a report is an error**,
+    /// unless it was signalled: a launcher that exited on its own without
+    /// publishing has failed, and the run has no outcome to report. The
+    /// launcher is made to fail by taking the path it writes its report to
+    /// before publishing it.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: blocking the run's own report.
+    fn a_launcher_that_exits_without_a_report_is_an_error() {
+        let sandbox = sandbox("no-report");
+        let mut partial = sandbox.root().join("run-0.usage").into_os_string();
+        partial.push(OsStr::from_bytes(measured::PARTIAL_SUFFIX));
+        std::fs::create_dir(&partial).expect("blocking the report");
+        let error = Run::new(&sandbox, "/bin/sh")
+            .args(["-c", "exit 0"])
+            .wait()
+            .err()
+            .expect("a run whose launcher could not report");
+        assert!(error.to_string().contains("without a report"), "{error}");
+    }
+
+    /// **A report path that already holds a report is an error**, not that
+    /// report: the measuring launcher publishes only to a path nobody has
+    /// written, so a run whose path was taken reads a stranger's report.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: planting a stale report.
+    fn a_report_path_that_already_exists_is_an_error() {
+        let sandbox = sandbox("stale-report");
+        let report = sandbox.root().join("run-0.usage");
+        std::fs::write(&report, "ended 0 1\n").expect("planting a stale report");
+        let error = Run::new(&sandbox, "/bin/sh")
+            .args(["-c", "exit 7"])
+            .wait()
+            .err()
+            .expect("a run whose report path was taken");
+        assert!(error.to_string().contains("not this run's"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(&report).expect("the stale report"),
+            "ended 0 1\n",
+            "the stale report was overwritten"
+        );
+    }
+
+    /// **A binary that becomes the measuring launcher by accident fails.**
+    /// A test binary started with a stray copy of the report variable spawns
+    /// its first argument rather than running its tests; it must not exit 0
+    /// having run nothing, which a test runner would read as a pass.
+    #[test]
+    #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // Harness scaffolding: starting this binary as a launcher.
+    fn a_test_binary_with_a_stray_report_variable_fails_loudly() {
+        let sandbox = sandbox("stray-variable");
+        for arguments in [&["--list"][..], &[]] {
+            let report = sandbox
+                .root()
+                .join(format!("stray-{}.usage", arguments.len()));
+            let output = Command::new(measured::image().expect("this executable"))
+                .args(arguments)
+                .env(measured::REPORT_VARIABLE, &report)
+                .stdin(Stdio::null())
+                .output()
+                .expect("starting this binary as a launcher");
+            assert_eq!(
+                output.status.code(),
+                Some(measured::NOT_STARTED),
+                "{arguments:?}: {output:?}"
+            );
+            assert!(output.stdout.is_empty(), "{arguments:?}: the tests ran");
+        }
     }
 
     /// The allowlist is the contract, so the environment is exactly it, `PATH`,
