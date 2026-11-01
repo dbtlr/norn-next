@@ -1901,7 +1901,9 @@ fn a_requeue_before_the_judgment_refiles_a_path_links_finding_once() {
 #[test]
 fn a_document_rewritten_before_the_judgment_refiles_its_links_findings_once() {
     use crate::common::path;
-    use norn_store::{Change, ContentModel, ContentWrite, IncrementProvenance, Span, Step};
+    use norn_store::{
+        Change, ContentModel, ContentWrite, DerivedFinding, IncrementProvenance, Span, Step,
+    };
     let scratch = Scratch::new("rewritten-before-judgment");
     let mut store = scratch.open();
     let model = ContentModel::none();
@@ -1936,7 +1938,11 @@ fn a_document_rewritten_before_the_judgment_refiles_its_links_findings_once() {
                     byte_offset: 0,
                 },
             }],
-            &[],
+            &[DerivedFinding {
+                facts: crate::common::unread_block("holder.md"),
+                replaces: None,
+                bytes_hash: None,
+            }],
             &model,
         )
         .unwrap();
@@ -1957,7 +1963,7 @@ fn a_document_rewritten_before_the_judgment_refiles_its_links_findings_once() {
             .stored_findings(&path("holder.md"))
             .unwrap()
             .len(),
-        2
+        3
     );
 
     assert_eq!(store.begin_request().rejudge_reach(&model).unwrap(), 2);
@@ -1969,8 +1975,10 @@ fn a_document_rewritten_before_the_judgment_refiles_its_links_findings_once() {
         .begin_request()
         .judge_link_health(&[path("holder.md")], &model)
         .unwrap();
+    let (links, document): (Vec<_>, Vec<_>) = held.iter().partition(|f| f.ordinal.is_some());
     assert_eq!(
-        held.iter()
+        links
+            .iter()
             .map(|f| (f.ordinal, f.kind.clone()))
             .collect::<Vec<_>>(),
         judged
@@ -1978,5 +1986,9 @@ fn a_document_rewritten_before_the_judgment_refiles_its_links_findings_once() {
             .map(|f| (f.ordinal, f.kind.as_str().to_string()))
             .collect::<Vec<_>>()
     );
-    assert_eq!(held.len(), 2, "{held:?}");
+    assert_eq!(links.len(), 2, "{held:?}");
+    assert_eq!(
+        document.iter().map(|f| f.kind.as_str()).collect::<Vec<_>>(),
+        [norn_wire::FindingKind::FrontmatterUnreadable.as_str()]
+    );
 }
