@@ -132,7 +132,7 @@ use std::time::{Duration, Instant};
 
 use crate::poll;
 
-/// The widest gap a bounded wait leaves between two questions.
+/// The widest gap [`wait_until`] leaves between two questions.
 ///
 /// The gap starts short and doubles to this, so a wait notices what it was
 /// waiting for up to this late. A suite that reads a clock off a poll carries
@@ -452,10 +452,45 @@ impl std::error::Error for WaitFailure {}
 pub fn wait_until<T>(
     what: &str,
     budget: Budget,
+    probe: impl FnMut() -> Observed<T>,
+) -> Result<T, WaitFailure> {
+    let mut gap = poll::FIRST_GAP;
+    wait_until_with_pause(what, budget, probe, |left| {
+        gap = poll::sleep_gap(gap, left);
+    })
+}
+
+/// Wait as [`wait_until`] does, with a fixed gap between pending probes.
+///
+/// Use this for cheap observations whose detection latency matters. Each gap
+/// is clamped to the remaining work budget; probe and work bounds, immediate
+/// first observation, and failure diagnostics are the same as [`wait_until`].
+/// Scheduler delays can still make an observation later than one interval.
+///
+/// # Panics
+///
+/// Panics if `interval` is zero, which would busy-poll a pending condition.
+pub fn wait_until_with_interval<T>(
+    what: &str,
+    budget: Budget,
+    interval: Duration,
+    probe: impl FnMut() -> Observed<T>,
+) -> Result<T, WaitFailure> {
+    assert!(!interval.is_zero(), "a poll interval must be positive");
+    wait_until_with_pause(what, budget, probe, |left| {
+        std::thread::sleep(interval.min(left));
+    })
+}
+
+// Both cadences share the bounds and diagnostics so changing observation
+// latency cannot change what a wait accepts or how a failed wait explains it.
+fn wait_until_with_pause<T>(
+    what: &str,
+    budget: Budget,
     mut probe: impl FnMut() -> Observed<T>,
+    mut pause: impl FnMut(Duration),
 ) -> Result<T, WaitFailure> {
     let started = Instant::now();
-    let mut poll_wait = poll::FIRST_GAP;
     let mut probes = 0usize;
     // Written by the first pending observation, and read only after one has
     // happened: every failure path here is downstream of a probe that
@@ -496,7 +531,7 @@ pub fn wait_until<T>(
         if left.is_zero() {
             return Err(failure(FailureKind::Elapsed));
         }
-        poll_wait = poll::sleep_gap(poll_wait, left);
+        pause(left);
     }
 }
 
@@ -682,6 +717,61 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_fixed_interval_is_clamped_to_the_remaining_work_bound() {
+        let started = Instant::now();
+        let mut probes = 0;
+        let value = met(
+            wait_until_with_interval("the final look", budget(), Duration::from_secs(60), || {
+                probes += 1;
+                if probes == 2 {
+                    Observed::Met("ready at the bound")
+                } else {
+                    Observed::pending("warming")
+                }
+            }),
+            "the final look observes readiness",
+        );
+        assert_eq!(value, "ready at the bound");
+        assert!(started.elapsed() < PROBE, "the gap ignored the work bound");
+    }
+
+    #[test]
+    #[should_panic(expected = "a poll interval must be positive")]
+    fn a_zero_interval_cannot_busy_poll() {
+        let _ = wait_until_with_interval("an entry", budget(), Duration::ZERO, || {
+            Observed::<()>::pending("warming")
+        });
+    }
+
+    #[test]
+    fn a_fixed_interval_wait_keeps_the_callers_bounds_and_last_observation() {
+        let declared = Budget::new(Duration::ZERO, PROBE);
+        let failure = wait_until_with_interval(
+            "an unsettled entry",
+            declared,
+            Duration::from_millis(1),
+            || Observed::<()>::pending("warming"),
+        )
+        .unwrap_err();
+        assert_eq!(failure.kind, FailureKind::Elapsed);
+        assert_eq!(failure.budget, declared);
+        assert_eq!(failure.probes, 1);
+        assert_eq!(failure.last_state, "warming");
+        assert_eq!(
+            met(
+                wait_until_with_interval(
+                    "an already ready entry",
+                    declared,
+                    Duration::from_millis(1),
+                    || Observed::Met(42),
+                ),
+                "readiness wins even with no work time left",
+            ),
+            42,
+        );
     }
 
     #[test]
