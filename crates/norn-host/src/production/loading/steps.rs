@@ -301,6 +301,7 @@ pub(super) fn requeue(
     {
         return Ok(());
     }
+    ops.evidence.count_requeue_call();
     while let Some(taken) = subscription.take_build_roots() {
         if taken.roots.is_empty() {
             break;

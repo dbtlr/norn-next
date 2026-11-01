@@ -4038,3 +4038,92 @@ fn a_directory_relisted_during_step_four_rejudges_the_links_beneath_it() {
         "directory relisted before Relations",
     );
 }
+
+/// Rewrites one note `per_take` times inside every take of the build, waiting
+/// for each rewrite to be accepted, so a new fact always lands mid-take. The
+/// first content page seeds the chain. It stops writing after `cap` takes, so
+/// a build that takes again within one requeue ends and fails its assertions
+/// instead of running forever.
+struct HotWriter {
+    path: PathBuf,
+    per_take: u64,
+    cap: u64,
+    account: std::sync::OnceLock<Arc<norn_host::JobEvidence>>,
+    version: std::sync::atomic::AtomicU64,
+    takes: std::sync::atomic::AtomicU64,
+}
+
+impl HotWriter {
+    fn rewrite(&self) {
+        use std::sync::atomic::Ordering;
+        let account = self.account.get().expect("the account is bound first");
+        for _ in 0..self.per_take {
+            let before = account.read().build_facts_recorded;
+            let version = self.version.fetch_add(1, Ordering::SeqCst) + 1;
+            std::fs::write(&self.path, format!("# Version {version}\n")).unwrap();
+            fact_recorded(account, before);
+        }
+    }
+}
+
+impl LoadingProbe for HotWriter {
+    fn at(&self, boundary: LoadingBoundary) {
+        use std::sync::atomic::Ordering;
+        match boundary {
+            LoadingBoundary::CanonicalPage if self.version.load(Ordering::SeqCst) == 0 => {
+                self.rewrite()
+            }
+            LoadingBoundary::RequeueStarted
+                if self.takes.fetch_add(1, Ordering::SeqCst) < self.cap =>
+            {
+                self.rewrite()
+            }
+            _ => {}
+        }
+    }
+}
+
+/// ADR 0048: each requeue takes once. A writer that lands a fact inside every
+/// take never lets the build's takes outnumber its requeue calls, and the
+/// store it reaches `Ready` with equals a from-scratch build of the last bytes.
+#[test]
+fn a_writer_inside_every_take_never_outnumbers_the_requeue_calls() {
+    const PER_TAKE: u64 = 20;
+    const CAP: u64 = 400;
+    let fixture = Fixture::new("hot-writer");
+    let writer = Arc::new(HotWriter {
+        path: fixture.root.join("doc00.md"),
+        per_take: PER_TAKE,
+        cap: CAP,
+        account: std::sync::OnceLock::new(),
+        version: std::sync::atomic::AtomicU64::new(0),
+        takes: std::sync::atomic::AtomicU64::new(0),
+    });
+    let ops = fixture.ops(writer.clone());
+    let account = ops.account();
+    writer.account.set(account.clone()).ok().unwrap();
+    let host = fixture.host_over(ops, norn_host::READ_SETTLE_BOUND);
+    {
+        let _demand = host.demand(&name()).unwrap();
+        ready(&host);
+    }
+    let spent = account.read();
+    let calls = spent.requeue_calls;
+    let takes = spent.requeue_drains;
+    let facts = spent.build_facts_recorded;
+    eprintln!("requeue calls {calls}, takes {takes}, facts accepted {facts}");
+    assert!(takes > 0, "the writer's facts are taken");
+    assert!(
+        takes <= calls,
+        "{takes} takes outnumber {calls} requeue calls"
+    );
+    assert!(
+        facts >= 10 * calls,
+        "{facts} facts accepted do not outrun {calls} requeue calls"
+    );
+    drop(host);
+    project(&fixture.store_path(), &fixture.root).assert_equivalent(
+        &from_scratch(&fixture, "reference"),
+        "a writer inside every take",
+    );
+}

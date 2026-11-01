@@ -104,6 +104,8 @@ pub struct JobEvidence {
     build_fact_withdrawals_control: AtomicU64,
     build_fact_withdrawals_capacity: AtomicU64,
     build_facts_recorded: AtomicU64,
+    /// Construction requeue calls that could take: each takes at most once.
+    requeue_calls: AtomicU64,
     /// Completed construction requeue drains.
     requeue_drains: AtomicU64,
     /// Filesystem roots taken by construction requeue drains.
@@ -260,6 +262,8 @@ pub struct EvidenceReading {
     pub build_fact_withdrawals_capacity: u64,
     /// Accepted root reports during construction.
     pub build_facts_recorded: u64,
+    /// Construction requeue calls that could take: each takes at most once.
+    pub requeue_calls: u64,
     /// Completed construction requeue drains.
     pub requeue_drains: u64,
     /// Filesystem roots taken by construction requeue drains.
@@ -469,6 +473,7 @@ impl EvidenceReading {
                 .requeue_links_rejudged
                 .saturating_sub(earlier.requeue_links_rejudged),
             link_rewalks: self.link_rewalks.saturating_sub(earlier.link_rewalks),
+            requeue_calls: self.requeue_calls.saturating_sub(earlier.requeue_calls),
             requeue_drains: self.requeue_drains.saturating_sub(earlier.requeue_drains),
             requeued_roots: self.requeued_roots.saturating_sub(earlier.requeued_roots),
             requeued_documents: self
@@ -639,6 +644,7 @@ impl JobEvidence {
             build_fact_withdrawals_capacity: get(&self.build_fact_withdrawals_capacity),
             requeue_links_rejudged: get(&self.requeue_links_rejudged),
             link_rewalks: get(&self.link_rewalks),
+            requeue_calls: get(&self.requeue_calls),
             requeue_drains: get(&self.requeue_drains),
             requeued_roots: get(&self.requeued_roots),
             requeued_documents: get(&self.requeued_documents),
@@ -2571,6 +2577,10 @@ impl JobEvidence {
 
     pub(crate) fn count_requeue_read_steps(&self, steps: u64) {
         self.requeue_read_steps.fetch_add(steps, Ordering::Relaxed);
+    }
+
+    pub(crate) fn count_requeue_call(&self) {
+        self.requeue_calls.fetch_add(1, Ordering::Relaxed);
     }
 
     pub(crate) fn count_requeue(
