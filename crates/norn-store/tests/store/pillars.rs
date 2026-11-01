@@ -4033,6 +4033,58 @@ fn a_folded_prune_scope_holds_the_subjects_its_fold_reaches() {
     );
 }
 
+/// **A bounded prune scope costs its own findings in both orders, never the
+/// findings table.** A scoped heal pages the subjects of each dirty path, so a
+/// page that read every finding to answer one scope would make every scoped heal
+/// on a folding root cost the vault's defects. The bar is the work a page of one
+/// scope does with ten findings outside it against a thousand: it is equal.
+#[test]
+fn a_bounded_prune_scope_reads_no_finding_outside_it_in_either_order() {
+    let kinds = &[FindingKind::BodyBytesNotUtf8];
+    let prefix = norn_store::DirectoryPrefix::new("one").expect("a directory");
+    let scopes = [
+        norn_store::SubjectScope::Subtree(&path("one/gone.md")),
+        norn_store::SubjectScope::Under(&prefix),
+    ];
+    let measure = |outside: usize| {
+        let scratch = Scratch::new("walked-scope-page-cost");
+        let mut store = scratch.open();
+        let mut request = store.begin_request();
+        for at in ["one/gone.md", "One/Deep/Gone.md"] {
+            request
+                .record_finding(&violation(at))
+                .expect("recording a finding");
+        }
+        // Outside the scope on both sides, bytewise and folded alike.
+        for n in 0..outside {
+            for folder in ["a", "Z", "z"] {
+                request
+                    .record_finding(&violation(&format!("{folder}/{n:05}.md")))
+                    .expect("recording a finding");
+            }
+        }
+        let mut steps = Vec::new();
+        for scope in scopes {
+            for order in [
+                norn_store::StoredPathOrder::Sensitive,
+                norn_store::StoredPathOrder::AsciiCaseInsensitive,
+            ] {
+                let before = request.read_steps();
+                request
+                    .finding_subjects_without_rows_after(scope, kinds, None, 16, order)
+                    .expect("a page");
+                steps.push(request.read_steps() - before);
+            }
+        }
+        steps
+    };
+    let (few, many) = (measure(10), measure(1_000));
+    assert_eq!(
+        few, many,
+        "a bounded scope's page read findings outside it (per scope and order: 10 outside {few:?}, 1,000 outside {many:?})"
+    );
+}
+
 /// **Class-scoped maintenance runs in both directions, and discard-then-record is
 /// the idempotence story.** A changeset writing `glossary.md` changes the class
 /// `glossary/` and empties it, and recording what holds now after it means two
