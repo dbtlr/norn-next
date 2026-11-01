@@ -284,7 +284,8 @@ pub(super) fn documents(
 /// Each call takes at most once (ADR 0048), so a writer faster than a take
 /// never holds a step open: a root accepted during this take waits for the
 /// next call, and one accepted after Relations' closing take waits for the
-/// reconcile before `Ready`. A take refused (`None`: schema dirty, a rescan,
+/// reconcile before `Ready`. `None` takes nothing, as it does whenever nothing
+/// is pending or the heal window is closed; a refusal (schema dirty, a rescan,
 /// a control-file root, lost coverage) leaves its batch to that reconcile.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn requeue(

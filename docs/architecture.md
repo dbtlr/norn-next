@@ -2462,7 +2462,7 @@ document has passed structure, committed. A Get waiting for its step queues its 
 with the build through a weak reference to its demand lease; duplicates share a slot, an
 expired interest frees its slot, ready or not, and at most 256 distinct live targets are
 held. A Get past that bound, or naming an undeclared field, waits for vault-wide
-structure. The build drains the queue as the content step's first group opens and at
+structure. The build drains the queue as the content and structure steps' first groups open and at
 every content and structure chunk boundary inside an open group, within one budget of a
 host chunk per boundary: per target, candidate resolution and content repeat until the
 class holds no provisional name, then the resolved document runs structure. A target not
