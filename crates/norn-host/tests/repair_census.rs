@@ -1136,7 +1136,8 @@ fn census(plans: &[QueryPlan]) -> Vec<String> {
 /// bounded by what that statement reads rather than by the vault; `None` for
 /// a sort no bound admits. Each admission is held to the statements that
 /// carry it, recognised by the select list they open with and the seek that
-/// drives them, so a sort in any other statement is found.
+/// drives them, so a sort in any other statement is found. The SQL is
+/// normalized once per call and reused for each select-list prefix check.
 ///
 /// - **A class's heads** (`ExplainedStatement::LinkHealthHeads`): each
 ///   admitting count's run is read in ladder order off the admitted-key
@@ -1206,10 +1207,8 @@ fn admitted_sort(plan: &QueryPlan, sort: &PlanRow) -> Option<&'static str> {
             .iter()
             .any(|row| row.index().is_some_and(|index| indexes.contains(&index)))
     };
-    let opens_with = |select_list: &str| {
-        let spelled: Vec<&str> = plan.sql().split_whitespace().collect();
-        spelled.join(" ").starts_with(select_list)
-    };
+    let normalized_sql = plan.sql().split_whitespace().collect::<Vec<_>>().join(" ");
+    let opens_with = |select_list: &str| normalized_sql.starts_with(select_list);
     let a_page = opens_with("SELECT f.id, f.kind, f.severity, f.path,");
     let sourced = plan.rows().iter().any(|row| row.detail == "CO-ROUTINE dv");
     let matched = plan
