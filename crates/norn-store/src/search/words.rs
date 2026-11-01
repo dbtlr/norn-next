@@ -695,12 +695,33 @@ mod tests {
     #[test]
     fn the_word_table_is_the_tokenizers_for_every_code_point() {
         let probe = Probe::new();
+        // SQL now encodes each character with char(), rather than Rust's
+        // char::from_u32 followed by to_string(). Both encode the same Unicode
+        // scalar value as UTF-8: this sweep excludes surrogates and NUL.
+        let mut statement = probe
+            .store
+            .connection()
+            .prepare(
+                r#"WITH RECURSIVE code_points(code) AS (
+                    VALUES (1)
+                    UNION ALL
+                    SELECT code + 1 FROM code_points WHERE code < 0x10FFFF
+                )
+                SELECT code FROM code_points
+                WHERE code NOT BETWEEN 0xD800 AND 0xDFFF
+                  AND (SELECT count(*) FROM documents_fts
+                       WHERE documents_fts MATCH
+                           '"anchor" "' || replace(char(code), '"', '""') || '"') = 0
+                ORDER BY code"#,
+            )
+            .expect("the full code-point probe");
+        let codes: Vec<u32> = statement
+            .query_map([], |row| row.get(0))
+            .expect("a match against the probe for every code point")
+            .collect::<Result<_, _>>()
+            .expect("word-start code points");
         let mut read: Vec<(u32, u32)> = Vec::new();
-        for character in (1..=0x10_FFFF).filter_map(char::from_u32) {
-            if !probe.reads_a_word(&character.to_string()) {
-                continue;
-            }
-            let code = u32::from(character);
+        for &code in &codes {
             match read.last_mut() {
                 Some((_, last)) if follows(*last, code) => {
                     *last = code;
@@ -708,15 +729,24 @@ mod tests {
                 _ => read.push((code, code)),
             }
         }
-        let table: String = read
-            .iter()
-            .map(|(first, last)| format!("    ({first:#06X}, {last:#06X}),\n"))
-            .collect();
-        assert!(
-            read == WORD_STARTS,
-            "the tokenizer reads words at other code points than `WORD_STARTS` states; the table \
-             it reads now is:\n{table}"
-        );
+        assert!(read == WORD_STARTS, "{}", {
+            let actual: std::collections::BTreeSet<_> = codes.into_iter().collect();
+            let expected: std::collections::BTreeSet<_> = WORD_STARTS
+                .iter()
+                .flat_map(|&(first, last)| first..=last)
+                .filter(|&code| char::from_u32(code).is_some())
+                .collect();
+            let differences: Vec<_> = actual
+                .symmetric_difference(&expected)
+                .take(8)
+                .map(|code| format!("U+{code:04X}"))
+                .collect();
+            format!(
+                "the tokenizer reads words at other code points than `WORD_STARTS` states; \
+                 first differing code points: {}",
+                differences.join(", ")
+            )
+        });
     }
 
     /// **A term holds a word exactly where FTS5 reads one in it.** Every
