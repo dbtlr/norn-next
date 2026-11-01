@@ -277,8 +277,15 @@ pub(super) fn documents(
     Ok(account.links)
 }
 
-/// Take accepted roots ahead of the ordinary queue, finish their owed steps,
-/// commit, then publish their derivation. Nothing calls this from FullText on.
+/// Take the roots accepted so far, once, ahead of the ordinary queue, finish
+/// their owed steps, commit, then publish their derivation. Nothing calls this
+/// from FullText on.
+///
+/// Each call takes at most once (ADR 0048), so a writer faster than a take
+/// never holds a step open: a root accepted during this take waits for the
+/// next call, and one accepted after Relations' closing take waits for the
+/// reconcile before `Ready`. A take refused (`None`: schema dirty, a rescan,
+/// a control-file root, lost coverage) leaves its batch to that reconcile.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn requeue(
     ops: &ProductionEntryOps,
@@ -302,30 +309,30 @@ pub(super) fn requeue(
         return Ok(());
     }
     ops.evidence.count_requeue_call();
-    while let Some(taken) = subscription.take_build_roots() {
-        if taken.roots.is_empty() {
-            break;
-        }
-        if grouped || store.construction_step() == Some(Step::Names) {
-            requeue_taken(
-                ops, store, root, exclusions, progress, publisher, &taken, walk,
-            )?;
-        } else {
-            let mut group = store.step_group().map_err(store_effect)?;
-            requeue_taken(
-                ops,
-                group.store(),
-                root,
-                exclusions,
-                progress,
-                publisher,
-                &taken,
-                walk,
-            )?;
-            group.commit().map_err(store_effect)?;
-        }
+    let Some(taken) = subscription.take_build_roots() else {
+        return Ok(());
+    };
+    if taken.roots.is_empty() {
+        return Ok(());
     }
-    Ok(())
+    if grouped || store.construction_step() == Some(Step::Names) {
+        requeue_taken(
+            ops, store, root, exclusions, progress, publisher, &taken, walk,
+        )
+    } else {
+        let mut group = store.step_group().map_err(store_effect)?;
+        requeue_taken(
+            ops,
+            group.store(),
+            root,
+            exclusions,
+            progress,
+            publisher,
+            &taken,
+            walk,
+        )?;
+        group.commit().map_err(store_effect)
+    }
 }
 
 /// Finish one taken set, using the caller's document-step group when needed.
