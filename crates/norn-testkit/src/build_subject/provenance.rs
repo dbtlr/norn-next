@@ -88,14 +88,14 @@ fn workspace_configs(root: &Path) -> std::io::Result<Vec<PathBuf>> {
             if name == "target" || (name.starts_with('.') && name != ".cargo") {
                 continue;
             }
-            if entry.file_type()?.is_dir() {
-                if name == ".cargo" {
-                    for file in ["config.toml", "config"] {
-                        paths.push(entry.path().join(file));
-                    }
-                } else {
-                    pending.push((entry.path(), depth + 1));
+            if name == ".cargo" {
+                // Read named config paths even when .cargo itself is a symlink;
+                // do not traverse its contents or follow other directory links.
+                for file in ["config.toml", "config"] {
+                    paths.push(entry.path().join(file));
                 }
+            } else if entry.file_type()?.is_dir() {
+                pending.push((entry.path(), depth + 1));
             }
         }
     }
