@@ -4041,7 +4041,8 @@ fn a_directory_relisted_during_step_four_rejudges_the_links_beneath_it() {
 
 /// A build's requeue calls and takes, counted at their own boundaries rather
 /// than by the evidence counters `requeue` keeps, so a test can hold those
-/// counters to an independent count.
+/// counters to an independent count. Each caller marks a call before calling,
+/// outside `requeue`, so how `requeue` takes cannot change the call count.
 #[derive(Default)]
 struct RequeueCount {
     calls: std::sync::atomic::AtomicU64,

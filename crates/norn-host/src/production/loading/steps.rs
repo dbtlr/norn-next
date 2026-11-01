@@ -40,6 +40,8 @@ pub(super) fn documents(
         &mut account,
         Some(&mut checkpoint),
     )?;
+    #[cfg(feature = "induced-failure")]
+    ops.loading_boundary(LoadingBoundary::RequeueCalled);
     requeue(
         ops,
         store,
@@ -68,6 +70,8 @@ pub(super) fn documents(
         )?;
         if std::mem::take(&mut opening) {
             pending.flush()?;
+            #[cfg(feature = "induced-failure")]
+            ops.loading_boundary(LoadingBoundary::RequeueCalled);
             requeue(
                 ops,
                 pending.store,
@@ -105,6 +109,8 @@ pub(super) fn documents(
             content_chunk(ops, &mut pending, &source, &paths)?;
             pending.flush()?;
             checkpoint();
+            #[cfg(feature = "induced-failure")]
+            ops.loading_boundary(LoadingBoundary::RequeueCalled);
             requeue(
                 ops,
                 pending.store,
@@ -119,6 +125,8 @@ pub(super) fn documents(
             drain(ops, publisher, &mut Scope::Content(&mut pending, &source))?;
         }
         pending.flush()?;
+        #[cfg(feature = "induced-failure")]
+        ops.loading_boundary(LoadingBoundary::RequeueCalled);
         requeue(
             ops,
             pending.store,
@@ -175,6 +183,8 @@ pub(super) fn documents(
     }
     drop(pending);
     close_job(store, root, exclusions, policy, &mut account)?;
+    #[cfg(feature = "induced-failure")]
+    ops.loading_boundary(LoadingBoundary::RequeueCalled);
     requeue(
         ops,
         store,
@@ -195,6 +205,8 @@ pub(super) fn documents(
         let mut group = store.step_group().map_err(store_effect)?;
         let mut count = 0;
         if std::mem::take(&mut opening) {
+            #[cfg(feature = "induced-failure")]
+            ops.loading_boundary(LoadingBoundary::RequeueCalled);
             requeue(
                 ops,
                 group.store(),
@@ -224,6 +236,8 @@ pub(super) fn documents(
             count += rows.len();
             structure_chunk(group.store(), rows, &declared.model)?;
             checkpoint();
+            #[cfg(feature = "induced-failure")]
+            ops.loading_boundary(LoadingBoundary::RequeueCalled);
             requeue(
                 ops,
                 group.store(),
@@ -241,6 +255,8 @@ pub(super) fn documents(
                 &mut Scope::Structure(group.store(), &declared.model),
             )?;
         }
+        #[cfg(feature = "induced-failure")]
+        ops.loading_boundary(LoadingBoundary::RequeueCalled);
         requeue(
             ops,
             group.store(),
@@ -261,6 +277,8 @@ pub(super) fn documents(
         Step::Structure,
         store.construction_group_commits() - commits,
     );
+    #[cfg(feature = "induced-failure")]
+    ops.loading_boundary(LoadingBoundary::RequeueCalled);
     requeue(
         ops,
         store,
@@ -287,6 +305,9 @@ pub(super) fn documents(
 /// reconcile before `Ready`. `None` takes nothing, as it does whenever nothing
 /// is pending or the heal window is closed; a refusal (schema dirty, a rescan,
 /// a control-file root, lost coverage) leaves its batch to that reconcile.
+///
+/// Each caller marks its call with [`LoadingBoundary::RequeueCalled`] just
+/// before calling, so a probe counts calls apart from how this takes.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn requeue(
     ops: &ProductionEntryOps,
@@ -310,8 +331,6 @@ pub(super) fn requeue(
         return Ok(());
     }
     ops.evidence.count_requeue_call();
-    #[cfg(feature = "induced-failure")]
-    ops.loading_boundary(LoadingBoundary::RequeueCalled);
     let Some(taken) = subscription.take_build_roots() else {
         return Ok(());
     };

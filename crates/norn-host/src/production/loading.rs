@@ -24,8 +24,9 @@ pub enum LoadingBoundary {
     FullTextBatch,
     CanonicalComplete,
     Reconciling,
-    /// A requeue call that could take, before it takes: one per call, whether
-    /// or not anything is pending.
+    /// A requeue call, marked by its caller just before it calls: one per
+    /// call, whether or not anything is pending or the call can take. Marked
+    /// outside `requeue`, so how `requeue` takes cannot change the count.
     RequeueCalled,
     RequeueStarted,
     Requeued,
@@ -336,6 +337,8 @@ impl ProductionEntryOps {
         // The document steps' job ends have run, so nothing prunes against this
         // account; only the links the requeue skipped are carried on.
         let mut relations = Account::default();
+        #[cfg(feature = "induced-failure")]
+        self.loading_boundary(LoadingBoundary::RequeueCalled);
         steps::requeue(
             self,
             &mut attachment.store,
