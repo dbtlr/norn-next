@@ -18,14 +18,20 @@ impl<'a> BuildSubject<'a> {
     /// Check the opt-level-0 subject on which the measurement bars were authored.
     /// Any profile declaration is refused, even one affecting only dependencies.
     pub fn check_unoptimized(self) -> Result<(), String> {
-        if cfg!(debug_assertions) && self.opt_level == "0" && self.overrides.is_empty() {
+        self.check_unoptimized_with(cfg!(debug_assertions))
+    }
+
+    /// The decision with the build's debug-assertion setting passed in, so the
+    /// condition the old guard enforced alone stays pinned by a test.
+    fn check_unoptimized_with(self, debug_assertions: bool) -> Result<(), String> {
+        if debug_assertions && self.opt_level == "0" && self.overrides.is_empty() {
             Ok(())
         } else {
             Err(format!(
                 "measurement baselines require opt-level=0 with no profile overrides; \
-                 measured subject has opt-level={}, debug_assertions={}; profile overrides: {}",
+                 measured subject has opt-level={}, debug_assertions={debug_assertions}; \
+                 profile overrides: {}",
                 self.opt_level,
-                cfg!(debug_assertions),
                 if self.overrides.is_empty() {
                     "none"
                 } else {
@@ -55,6 +61,36 @@ mod tests {
         // Cargo keeps debug assertions enabled when test.opt-level changes to 1.
         let error = BuildSubject::new("1", "").check_unoptimized().unwrap_err();
         assert!(error.contains("opt-level=1"), "{error}");
+    }
+
+    #[test]
+    fn a_build_without_debug_assertions_is_refused_even_at_opt_level_zero() {
+        let error = BuildSubject::new("0", "")
+            .check_unoptimized_with(false)
+            .unwrap_err();
+        assert!(error.contains("debug_assertions=false"), "{error}");
+    }
+
+    #[test]
+    fn recorded_optimization_rustflags_are_refused_and_others_are_not() {
+        let refused = with_recorded_rustflags(String::new(), "-C\x1fopt-level=3");
+        assert_eq!(
+            refused,
+            "CARGO_ENCODED_RUSTFLAGS contains optimization flags: \"-C\\u{1f}opt-level=3\""
+        );
+        assert!(
+            BuildSubject::new("0", &refused)
+                .check_unoptimized()
+                .is_err()
+        );
+        assert_eq!(
+            with_recorded_rustflags("a.toml: profile".to_owned(), "-O"),
+            "a.toml: profile; CARGO_ENCODED_RUSTFLAGS contains optimization flags: \"-O\""
+        );
+        assert_eq!(
+            with_recorded_rustflags(String::new(), "-C\x1fdebuginfo=1"),
+            ""
+        );
     }
 
     #[test]
@@ -125,13 +161,30 @@ fn optimized_skip_gate(level: &str, flags: &str) -> bool {
 /// between compilation and a direct binary run is not seen. Relative or unresolved
 /// Cargo home is refused because the invoking Cargo directory cannot be recovered.
 /// Scan the workspace manifest, nested configs, workspace ancestors and Cargo home.
+///
+/// A `RUSTC_WRAPPER` or `RUSTC_WORKSPACE_WRAPPER` (or the matching config keys)
+/// that injects optimization flags is not seen either: wrappers such as sccache
+/// are ordinary, so they are not refused, and measurement runs must not use one
+/// that alters codegen. A `.cargo` directory under a hidden directory inside the
+/// workspace is not walked.
 pub fn check_current_unoptimized() -> Result<(), String> {
-    let mut overrides = provenance::current_overrides();
-    let flags = env!("NORN_MEASURED_RUSTFLAGS");
+    let overrides = with_recorded_rustflags(
+        provenance::current_overrides(),
+        env!("NORN_MEASURED_RUSTFLAGS"),
+    );
+    BuildSubject::new(opt_level(), &overrides).check_unoptimized()
+}
+
+/// Add the recorded effective rustflags to the scanned overrides when they
+/// carry an optimization flag, so the encoded channel is refused like the rest.
+fn with_recorded_rustflags(mut overrides: String, flags: &str) -> String {
     if provenance::optimization_flag(flags.split('\x1f')).is_some() {
+        if !overrides.is_empty() {
+            overrides.push_str("; ");
+        }
         overrides.push_str(&format!(
-            "; CARGO_ENCODED_RUSTFLAGS contains optimization flags: {flags:?}"
+            "CARGO_ENCODED_RUSTFLAGS contains optimization flags: {flags:?}"
         ));
     }
-    BuildSubject::new(opt_level(), &overrides).check_unoptimized()
+    overrides
 }
