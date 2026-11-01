@@ -57,7 +57,7 @@
 //!   and outside the projection.
 //! - **Document vectors.** The store holds no vector state: embeddings are
 //!   lane-2 engine state in a sidecar database ([ADR
-//!   0044](../../../docs/decisions/0044-a-from-zero-build-judges-link-health-once.md)),
+//!   0047](../../../docs/decisions/0047-a-write-re-decides-only-the-links-whose-inputs-it-moved.md)),
 //!   outside the lane-1 projection this comparator reads. Two derivations
 //!   converging on the same vectors is the engine's own convergence bar, judged
 //!   against the sidecar rather than here.

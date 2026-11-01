@@ -14,7 +14,7 @@
 //! rows mean.
 //!
 //! Its verbs translate cleanly to SQL and carry no business logic beyond how a
-//! query is composed, save two exceptions. One is the rule [ADR 0044] rules
+//! query is composed, save two exceptions. One is the rule [ADR 0047] rules
 //! into it: link health, judged in SQL and filed inside every changeset
 //! ([`Request::apply_increment`]), save a from-zero build's, which judges every
 //! stored link once after its facts have landed. The other is the similarity measure
@@ -26,7 +26,7 @@
 //! trigram is. The store takes **typed facts rather than documents**: parsing
 //! is orchestration's job, so nothing here reads document text.
 //!
-//! [ADR 0044]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0044-a-from-zero-build-judges-link-health-once.md
+//! [ADR 0047]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0047-a-write-re-decides-only-the-links-whose-inputs-it-moved.md
 //!
 //! # Where to start
 //!

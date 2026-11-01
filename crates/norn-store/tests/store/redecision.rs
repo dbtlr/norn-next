@@ -2748,7 +2748,7 @@ fn comparison_twins_rejudge_link_health_when_created_and_removed() {
 }
 
 /// **Link health re-decides a suffix link when a document appears or
-/// disappears at its exact vault path** (ADR 0040, ADR 0044), in both
+/// disappears at its exact vault path** (ADR 0040, ADR 0047), in both
 /// families. Creating `a/x.md` beside `deep/a/x.md` and `other/a/x.md` turns
 /// `[[a/x]]` and `[x](a/x.md)` from ambiguous to naming it alone, and
 /// deleting it restores the ambiguity. `[[b/y]]`, naming `deep/b/y.md` alone,

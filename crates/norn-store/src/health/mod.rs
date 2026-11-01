@@ -1,6 +1,6 @@
 //! Link health: the findings the store judges about a selection of links —
 //! **broken**, **ambiguous**, **missing anchor** and **vault-scheme**, each a finding about
-//! exactly one link, at warning severity ([ADR 0044]).
+//! exactly one link, at warning severity ([ADR 0047]).
 //!
 //! # The rules are the ones every surface reads a link's health by
 //!
@@ -102,7 +102,7 @@
 //! a selection and files nothing, and the plan seam bars each statement
 //! either runs.
 //!
-//! [ADR 0044]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0044-a-from-zero-build-judges-link-health-once.md
+//! [ADR 0047]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0047-a-write-re-decides-only-the-links-whose-inputs-it-moved.md
 //! [ADR 0047]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0047-a-write-re-decides-only-the-links-whose-inputs-it-moved.md
 
 pub(crate) mod resolution;
@@ -165,7 +165,7 @@ const VAULT_SCHEME: &str = "the link resolves through `vault://`, a scheme Obsid
 /// ([`crate::IncrementOutcome::affected_classes`],
 /// [`crate::IncrementOutcome::affected_paths`]).
 ///
-/// [ADR 0044]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0044-a-from-zero-build-judges-link-health-once.md
+/// [ADR 0047]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0047-a-write-re-decides-only-the-links-whose-inputs-it-moved.md
 #[derive(Clone, Copy, Debug)]
 pub enum LinkSelection<'a> {
     /// Every link the documents at these paths hold. A path named twice holds
@@ -227,7 +227,7 @@ struct Summary {
 
 /// What each key a judgment has resolved names, so a judgment taken in chunks
 /// resolves a key once across a run of consecutive chunks that hold it, and
-/// counts a filled key's total once however many runs hold it ([ADR 0044]'s
+/// counts a filled key's total once however many runs hold it ([ADR 0047]'s
 /// fifth condition) — and how each candidate its findings carried is named,
 /// so a candidate is named once while its key is held. A set nothing evicts
 /// from, as the public judgment door's, resolves each distinct key once.
@@ -250,7 +250,7 @@ struct Summary {
 /// whose head filled, one key and one count each, so a key resolved again
 /// reads its bounded head and never counts what it names twice.
 ///
-/// [ADR 0044]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0044-a-from-zero-build-judges-link-health-once.md
+/// [ADR 0047]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0047-a-write-re-decides-only-the-links-whose-inputs-it-moved.md
 #[derive(Debug, Default)]
 pub struct KeySummaries {
     summaries: BTreeMap<Key, Summary>,

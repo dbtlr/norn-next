@@ -29,7 +29,7 @@
 //! **A link row's health is computed, never stored on the row.** Resolution
 //! runs at read time over syntactic link facts, so the health a row carries is
 //! a fact about the vault at the instant of the read (link-health findings,
-//! which ADR 0044 rules into the stored findings a validate reads, are a
+//! which ADR 0047 rules into the stored findings a validate reads, are a
 //! separate reading): one target is healthy, none is broken, and more than one
 //! is ambiguous. **A link is judged by resolving it first**
 //! ([`LinkHealth::of_link`]): a link addressed elsewhere — a protocol other

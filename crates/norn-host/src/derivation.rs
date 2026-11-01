@@ -428,7 +428,7 @@ const CAUSES: [Cause; 18] = [
 /// Quarantine, the unread block, the tag facet and rule judgment are the
 /// producers recording findings today. Link health's four kinds — broken,
 /// ambiguous, missing anchor, vault scheme — are named here because they have no cause in
-/// this crate: ADR 0044 rules the store to judge link health in SQL and file
+/// this crate: ADR 0047 rules the store to judge link health in SQL and file
 /// those findings itself — inside the changeset, or once over every stored link
 /// on a from-zero build — over per-document facts this
 /// crate's derivation already writes, so no per-document act here ever
