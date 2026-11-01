@@ -389,7 +389,7 @@ fn every_statement_a_repair_runs_is_planned_as_an_index_search() {
         .iter()
         .find(|row| row.detail == "USE TEMP B-TREE FOR ORDER BY")
         .expect("the bounded head merge sorts");
-    assert!(admitted_sort(health_head, head_sort).is_some());
+    assert!(admitted_sort(health_head, &normalized(health_head.sql()), head_sort).is_some());
     let count_only = QueryPlan::new(
         health_head.sql(),
         health_head
@@ -409,7 +409,7 @@ fn every_statement_a_repair_runs_is_planned_as_an_index_search() {
             .collect(),
     );
     assert!(
-        admitted_sort(&count_only, head_sort).is_none(),
+        admitted_sort(&count_only, &normalized(count_only.sql()), head_sort).is_none(),
         "a health head's count-only seek was admitted without its suffix bounds"
     );
     // The set the census plans is every statement the store began while the
@@ -1099,6 +1099,13 @@ fn with_row_references_unbound(sql: &str) -> String {
     unbound
 }
 
+/// `sql` with every run of whitespace collapsed to one space, the form the
+/// admissions match select lists against. The census normalizes a statement
+/// at most once, and only when its plan has a temporary sort to judge.
+fn normalized(sql: &str) -> String {
+    sql.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// Every plan in `plans` that reads a relation end to end but the one
 /// [`admitted_scan`] names, builds an automatic index, or sorts into a
 /// temporary b-tree [`admitted_sort`] does not admit, each spelled with its
@@ -1108,6 +1115,7 @@ fn census(plans: &[QueryPlan]) -> Vec<String> {
         .iter()
         .filter_map(|plan| {
             let scans = plan.unbounded_steps();
+            let normalized_sql = std::cell::OnceCell::new();
             let unbounded: Vec<&PlanRow> = plan
                 .rows()
                 .iter()
@@ -1115,7 +1123,12 @@ fn census(plans: &[QueryPlan]) -> Vec<String> {
                     (scans.contains(row) && admitted_scan(plan, row).is_none())
                         || row.uses_automatic_index()
                         || (row.detail.contains("TEMP B-TREE")
-                            && admitted_sort(plan, row).is_none())
+                            && admitted_sort(
+                                plan,
+                                normalized_sql.get_or_init(|| normalized(plan.sql())),
+                                row,
+                            )
+                            .is_none())
                 })
                 .collect();
             (!unbounded.is_empty()).then(|| {
@@ -1184,7 +1197,7 @@ fn census(plans: &[QueryPlan]) -> Vec<String> {
 ///   target). Each admitting-count run is cut in ladder order through the
 ///   admitted index, then the bounded heads are merged and cut again. The
 ///   merge sorts at most one head per count and range, never the class.
-fn admitted_sort(plan: &QueryPlan, sort: &PlanRow) -> Option<&'static str> {
+fn admitted_sort(plan: &QueryPlan, normalized_sql: &str, sort: &PlanRow) -> Option<&'static str> {
     let admitted_runs = || {
         let runs: Vec<&PlanRow> = plan
             .rows()
@@ -1207,7 +1220,6 @@ fn admitted_sort(plan: &QueryPlan, sort: &PlanRow) -> Option<&'static str> {
             .iter()
             .any(|row| row.index().is_some_and(|index| indexes.contains(&index)))
     };
-    let normalized_sql = plan.sql().split_whitespace().collect::<Vec<_>>().join(" ");
     let opens_with = |select_list: &str| normalized_sql.starts_with(select_list);
     let a_page = opens_with("SELECT f.id, f.kind, f.severity, f.path,");
     let sourced = plan.rows().iter().any(|row| row.detail == "CO-ROUTINE dv");
