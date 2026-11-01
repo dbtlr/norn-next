@@ -63,5 +63,6 @@ sha2 = { workspace = true }
 # arms the widened seam through the environment the public entry point reads.
 [dev-dependencies]
 norn-fixtures = { path = "../norn-fixtures" }
-norn-fs = { path = ".", features = ["induced-failure"] }
+# Each CI shard must build this crate's tests with the whole-workspace feature set.
+norn-fs = { path = ".", features = ["induced-failure", "test-support"] }
 norn-testkit = { path = "../norn-testkit" }
