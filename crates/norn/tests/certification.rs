@@ -2403,7 +2403,7 @@ fn a_ledgered_signature_matches_a_failure_and_never_a_run_that_passed_it() {
         for fields in &entries {
             let signature = ledger_field(fields, "signature");
             if nextest {
-                passed.push_str(&format!("        PASS [ 0.001s] fixture suite::{signature}\n        SKIP [ 0.000s] fixture suite::{signature}\n"));
+                passed.push_str(&format!("        PASS [ 0.001s] fixture suite::{signature}\n        SKIP [         ] fixture suite::{signature}\n"));
             } else {
                 passed.push_str(&format!("test suite::{signature} ... ok\n"));
             }

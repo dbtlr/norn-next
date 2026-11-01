@@ -55,9 +55,10 @@
 //! to, and the template decides what runs — `true {0}` runs nothing. The
 //! arguments are then held to a grammar: optionally the flake tripwire in
 //! front, then either the lane script with a package, a target and harness
-//! arguments that select nothing, or `cargo test` with the flags that name a
-//! package, a feature and the targets it selects and the few that change
-//! nothing about which tests run. `--release` is not among them: it compiles
+//! arguments that select nothing, or `cargo test` / `cargo nextest run` with
+//! the flags that name a package, a feature and the targets it selects and
+//! the few that change nothing about which tests run. Nextest must explicitly
+//! disable retries with `--retries 0`. `--release` is not among them: it compiles
 //! out every test gated on `debug_assertions`. A command outside that grammar
 //! runs nothing, so a step this
 //! cannot read fails whatever needed it rather than vouching for a test it may

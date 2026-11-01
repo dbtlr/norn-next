@@ -244,7 +244,7 @@ jobs:
   # allowlist and crate list against the tables in that document; it refuses a
   # local crate the workspace does not hold as a member; and it holds the
   # invariant-to-mechanism mapping to the boundary lints configured in
-  # clippy.toml. The lints themselves bind in the build job, where clippy runs.
+  # clippy.toml. The lints themselves bind in the lint job, where clippy runs.
   #
   # It also lints the workflows themselves with actionlint, whose image carries
   # shellcheck for every `run:` script: an unknown runner label, a bad
