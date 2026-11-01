@@ -1,7 +1,6 @@
 //! Build provenance for measurements whose bars depend on compiler optimization.
 
-/// Provenance of the package containing the measured executable, supplied by
-/// that package's build script (never inferred from testkit's own build).
+/// Inputs to the pure measurement-subject decision.
 #[derive(Clone, Copy, Debug)]
 pub struct BuildSubject<'a> {
     opt_level: &'a str,
@@ -18,8 +17,6 @@ impl<'a> BuildSubject<'a> {
 
     /// Check the opt-level-0 subject on which the measurement bars were authored.
     /// Any profile declaration is refused, even one affecting only dependencies.
-    /// Build scripts cannot discover Cargo's `--config` arguments or all config
-    /// includes; callers must not use those to supply hidden profile overrides.
     pub fn check_unoptimized(self) -> Result<(), String> {
         if self.opt_level == "0" && self.overrides.is_empty() {
             Ok(())
@@ -85,7 +82,22 @@ mod tests {
     }
 }
 
-#[cfg(test)]
 #[path = "build_provenance.rs"]
-#[allow(dead_code)] // The emitter is used by package build scripts, not this test binary.
 mod build_provenance;
+
+/// Testkit and the measured workspace crates share an opt level unless a
+/// per-package override exists; the runtime guard refuses those declarations.
+/// Cargo's profile identity reruns this minimal build script on profile changes.
+pub fn opt_level() -> &'static str {
+    env!("NORN_MEASURED_OPT_LEVEL")
+}
+
+/// Check the current measurement subject at run time, never at compile time.
+/// Cargo CLI `--config` arguments and config includes can hide dependency-only
+/// overrides: measurement runs must not use them. Relative or unresolved Cargo
+/// home is refused because the invoking Cargo directory cannot be recovered.
+/// Like performance/provenance.py, scan workspace ancestors and Cargo home;
+/// additionally inspect the workspace manifest and reject runtime profile env.
+pub fn check_current_unoptimized() -> Result<(), String> {
+    BuildSubject::new(opt_level(), &build_provenance::current_overrides()).check_unoptimized()
+}

@@ -1796,15 +1796,11 @@ pub fn fits<T: PartialOrd>(reading: T, ceiling: T) -> bool {
 ///
 /// A qualification record carries the platform and the runner but no
 /// build-configuration field, so what the measured build was is read here.
-/// The package build script records OPT_LEVEL and refuses profile overrides,
+/// Testkit records OPT_LEVEL; the runtime guard refuses profile overrides,
 /// including dependency-only optimization that would change allocations.
 pub fn assert_the_profile_the_bars_were_authored_on() {
-    norn_testkit::build_subject::BuildSubject::new(
-        env!("NORN_MEASURED_OPT_LEVEL"),
-        env!("NORN_MEASURED_PROFILE_OVERRIDES"),
-    )
-    .check_unoptimized()
-    .unwrap_or_else(|message| panic!("{message}"));
+    norn_testkit::build_subject::check_current_unoptimized()
+        .unwrap_or_else(|message| panic!("{message}"));
 }
 
 /// How a reading is rendered and where it is recorded is the harness's, and

@@ -438,11 +438,8 @@ fn a_repair_of_routes_previews_in_time_linear_in_routes_and_links_touched() {
     }
     // An unoptimized build's clock says nothing of the absolute bars. Read
     // the actual opt-level, even when optimization keeps debug assertions on.
-    if !norn_testkit::build_subject::BuildSubject::new(
-        env!("NORN_MEASURED_OPT_LEVEL"),
-        env!("NORN_MEASURED_PROFILE_OVERRIDES"),
-    )
-    .is_optimized()
+    if !norn_testkit::build_subject::BuildSubject::new(norn_testkit::build_subject::opt_level(), "")
+        .is_optimized()
     {
         return;
     }

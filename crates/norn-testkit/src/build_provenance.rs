@@ -1,5 +1,4 @@
-//! Dependency-free build-script support, included by the measured packages.
-//! It intentionally adds no build dependency (fixtures is an isolated leaf).
+//! Runtime profile-override discovery for measurement guards.
 
 use std::path::{Path, PathBuf};
 
@@ -35,102 +34,157 @@ fn profile_declaration(text: &str) -> Option<&str> {
     })
 }
 
-#[allow(clippy::disallowed_macros)] // Cargo build-script directives, not product rendering.
-fn read_env(name: &str) -> Option<std::ffi::OsString> {
-    println!("cargo:rerun-if-env-changed={name}");
-    std::env::var_os(name)
-}
-
-#[allow(clippy::disallowed_macros, clippy::disallowed_methods)] // Inspect build configuration and emit Cargo dependency directives.
-fn inspect_file(path: &Path, overrides: &mut Vec<String>) {
-    println!("cargo:rerun-if-changed={}", path.display());
-    match std::fs::read_to_string(path) {
-        Ok(text) => {
-            if let Some(declaration) = profile_declaration(&text) {
-                overrides.push(format!("{}: {declaration}", path.display()));
+/// Scan inputs supplied by the caller so configuration decisions can be tested
+/// without changing the process environment or touching real files.
+fn scan(
+    root: &Path,
+    env: &[(std::ffi::OsString, std::ffi::OsString)],
+    mut read: impl FnMut(&Path) -> std::io::Result<String>,
+) -> Vec<String> {
+    let mut overrides = Vec::new();
+    for (name, value) in env {
+        if name.to_string_lossy().starts_with("CARGO_PROFILE_") {
+            overrides.push(format!(
+                "{}={}",
+                name.to_string_lossy(),
+                value.to_string_lossy()
+            ));
+        }
+    }
+    let mut paths = vec![root.join("Cargo.toml")];
+    // Match scripts/performance/provenance.py's ancestor and Cargo-home sources.
+    for ancestor in root.ancestors() {
+        for name in ["config.toml", "config"] {
+            paths.push(ancestor.join(".cargo").join(name));
+        }
+    }
+    let lookup = |key: &str| {
+        env.iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value)
+    };
+    let home = lookup("CARGO_HOME").map(PathBuf::from).or_else(|| {
+        lookup("HOME")
+            .or_else(|| lookup("USERPROFILE"))
+            .map(|home| PathBuf::from(home).join(".cargo"))
+    });
+    match home {
+        Some(home) if home.is_absolute() => {
+            for name in ["config.toml", "config"] {
+                paths.push(home.join(name));
             }
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => overrides.push(format!(
-            "{}: cannot inspect profiles: {error}",
-            path.display()
-        )),
+        Some(_) => overrides.push(
+            "relative Cargo home: use an absolute CARGO_HOME/HOME to inspect profile overrides"
+                .into(),
+        ),
+        None => overrides.push("cannot locate Cargo home to inspect profile overrides".into()),
     }
+    paths.sort();
+    paths.dedup();
+    for path in paths {
+        match read(&path) {
+            Ok(text) => {
+                if let Some(declaration) = profile_declaration(&text) {
+                    overrides.push(format!("{}: {declaration}", path.display()));
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => overrides.push(format!(
+                "{}: cannot inspect profiles: {error}",
+                path.display()
+            )),
+        }
+    }
+    overrides.sort();
+    overrides
 }
 
-/// Record the measured package's build, not the helper crate's build. Cargo
-/// exposes the effective OPT_LEVEL for both its tests and bins. Host memory
-/// children are copies of current_exe(), so they retain exactly this provenance.
-///
-/// Cargo does not expose its CLI --config arguments or config include graph to
-/// build scripts. Those can hide dependency-only overrides and must not be used
-/// for measurement runs. Environment inspection covers variables visible here.
-/// A relative CARGO_HOME cannot be resolved against Cargo's invocation directory
-/// here, so it is refused rather than risking an uninspected profile override.
-#[allow(clippy::disallowed_macros)] // Cargo build-script protocol, not product rendering.
-pub fn emit() {
-    let opt_level = read_env("OPT_LEVEL").expect("Cargo supplies OPT_LEVEL");
-    println!(
-        "cargo:rustc-env=NORN_MEASURED_OPT_LEVEL={}",
-        opt_level.to_string_lossy()
-    );
-    let manifest_dir =
-        PathBuf::from(read_env("CARGO_MANIFEST_DIR").expect("Cargo supplies manifest directory"));
-    let root = manifest_dir
+/// Read overrides at test run time, including newly added variables and files.
+#[allow(clippy::disallowed_methods)] // Harness configuration, not vault I/O.
+pub(super) fn current_overrides() -> String {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
         .expect("workspace package under crates");
-    let mut overrides = Vec::new();
-    for (name, _) in std::env::vars_os() {
-        if name.to_string_lossy().starts_with("CARGO_PROFILE_") {
-            let name = name.to_string_lossy();
-            let value = read_env(&name).expect("enumerated environment variable");
-            overrides.push(format!("{name}={}", value.to_string_lossy()));
-        }
-    }
-    inspect_file(&root.join("Cargo.toml"), &mut overrides);
-    for ancestor in root.ancestors() {
-        for name in ["config.toml", "config"] {
-            inspect_file(&ancestor.join(".cargo").join(name), &mut overrides);
-        }
-    }
-    let cargo_home = read_env("CARGO_HOME");
-    let home = read_env("HOME").or_else(|| read_env("USERPROFILE"));
-    if let Some(home) = cargo_home
-        .map(PathBuf::from)
-        .or_else(|| home.map(|p| PathBuf::from(p).join(".cargo")))
-    {
-        if home.is_relative() {
-            overrides.push(
-                "relative Cargo home: use an absolute CARGO_HOME/HOME to inspect profile overrides"
-                    .to_owned(),
-            );
-        } else {
-            for name in ["config.toml", "config"] {
-                inspect_file(&home.join(name), &mut overrides);
-            }
-        }
-    } else {
-        overrides.push("cannot locate Cargo home to inspect profile overrides".to_owned());
-    }
-    // Cargo cannot watch an environment-variable prefix. A deliberately absent
-    // file makes this lightweight scan run on every Cargo invocation, including
-    // when a previously unseen CARGO_PROFILE_* variable or config file appears.
-    let out_dir = PathBuf::from(read_env("OUT_DIR").expect("Cargo supplies OUT_DIR"));
-    println!(
-        "cargo:rerun-if-changed={}",
-        out_dir.join("profile-provenance-refresh").display()
-    );
-    overrides.sort();
-    println!(
-        "cargo:rustc-env=NORN_MEASURED_PROFILE_OVERRIDES={}",
-        overrides.join("; ").replace(['\n', '\r'], " ")
-    );
+    scan(root, &std::env::vars_os().collect::<Vec<_>>(), |path| {
+        std::fs::read_to_string(path)
+    })
+    .join("; ")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_scan_covers_environment_manifest_ancestors_and_cargo_home() {
+        let env = vec![
+            ("HOME".into(), "/home/test".into()),
+            ("CARGO_PROFILE_TEST_OPT_LEVEL".into(), "0".into()),
+        ];
+        let overrides = scan(Path::new("/workspace/repo"), &env, |path| {
+            if [
+                "/workspace/repo/Cargo.toml",
+                "/workspace/.cargo/config",
+                "/home/test/.cargo/config.toml",
+            ]
+            .iter()
+            .any(|name| path == Path::new(name))
+            {
+                Ok("[profile.dev.package.\"*\"]\nopt-level = 3".into())
+            } else {
+                Err(std::io::ErrorKind::NotFound.into())
+            }
+        });
+        assert_eq!(overrides.len(), 4, "{overrides:?}");
+        for source in [
+            "CARGO_PROFILE_TEST_OPT_LEVEL=0",
+            "/workspace/repo/Cargo.toml:",
+            "/workspace/.cargo/config:",
+            "/home/test/.cargo/config.toml:",
+        ] {
+            assert!(
+                overrides.iter().any(|value| value.contains(source)),
+                "{overrides:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unreadable_configuration_and_unresolved_home_refuse_the_subject() {
+        for env in [vec![], vec![("CARGO_HOME".into(), "relative".into())]] {
+            let overrides = scan(Path::new("/workspace/repo"), &env, |path| {
+                if path == Path::new("/workspace/repo/Cargo.toml") {
+                    Err(std::io::ErrorKind::PermissionDenied.into())
+                } else {
+                    Err(std::io::ErrorKind::NotFound.into())
+                }
+            });
+            assert_eq!(overrides.len(), 2, "{overrides:?}");
+            assert!(overrides.iter().any(|value| value.contains("Cargo home")));
+            assert!(
+                overrides
+                    .iter()
+                    .any(|value| value.contains("cannot inspect profiles"))
+            );
+        }
+    }
+
+    #[test]
+    fn absent_configs_and_profile_free_files_are_accepted() {
+        let env = vec![("CARGO_HOME".into(), "/cargo".into())];
+        assert!(
+            scan(Path::new("/workspace/repo"), &env, |path| {
+                if path == Path::new("/workspace/repo/Cargo.toml") {
+                    Ok("[workspace]\nmembers = []".into())
+                } else {
+                    Err(std::io::ErrorKind::NotFound.into())
+                }
+            })
+            .is_empty()
+        );
+    }
 
     #[test]
     fn profile_declarations_include_dependency_tables_and_inline_forms() {
