@@ -15,8 +15,9 @@ another document only when it moved an input that link's verdict reads.** A link
 has two inputs from outside the document holding it: the **names** its keys reach, and the
 **anchor values** of the one document it names. A write that changes neither re-decides only
 the links its own written documents hold. Nothing else changes: the findings every changeset
-files are exactly the findings ADR 0044's set files over the same facts, finding order
-included, so the narrowing is a reduction in work and never in what is found. Link health
+leaves standing are exactly the findings ADR 0044's set leaves over the same facts, finding
+order included, apart from the write generation each was filed at, so the narrowing is a
+reduction in work and never in what is found. Link health
 stays on the changeset; moving it off was weighed and rejected below. A **from-zero build**
 — a vault's first build and every rebuild from zero, the construction
 [ADR 0045](0045-a-from-zero-build-writes-once-in-steps.md) builds in steps — still judges link
@@ -62,10 +63,10 @@ link's health by:
 
 - a link addressed elsewhere — a scheme link, a network link among them — is not judged and
   raises nothing;
-- a link whose target names an attachment and resolves to no document is not judged and
-  raises nothing;
-- an eligible link that resolves to no document is **broken**;
-- an eligible link that resolves to two or more documents is **ambiguous**, and its finding
+- an eligible link that resolves to no document and no vault file is **broken**, whatever
+  extension its last segment carries ([ADR 0040](0040-a-link-resolves-as-obsidian-resolves-it.md));
+  a link that resolves to one vault file is healthy, and its anchor is not judged;
+- an eligible link that resolves to two or more documents or vault files is **ambiguous**, and its finding
   carries a bounded head of five candidates, the exact total, and a hint that names how to
   enumerate the rest;
 - a link that resolves to one document lacking the link's `#heading` or `#^block` has a
@@ -114,21 +115,22 @@ registry states the rest:
   plus its link neighborhood", so the link neighborhood is already priced as part of a
   change's blast radius.
 
-**Class-scoped discard already rides lane 1.** The increment names the class of every path
-it changes and, inside its own transaction, discards every finding filed under a class key
-that class prefixes. That discard predates ADR 0021, which neither admitted nor forbade it,
-and the store's findings contract and this repository's architecture already assume
-link-health findings filed under class keys. Two things are not built. The re-decision that
-files the findings again, in the same act, is one. A path-key axis is the other: a finding
-today can carry only class keys, which end in a separator, so neither the storage nor the
-discard can yet key a finding by the exact path a path-addressed link spells.
+**A finding is discarded by the act that re-decides its link.** Inside its own transaction a
+changeset discards every finding standing at a path it writes or kills, every finding filed
+under the class key of a path whose names it moved, and every finding keyed by the exact path
+of such a path, and then re-decides the links those findings were about beside the links the
+re-decided set names. A finding keyed only by classes and paths whose names the changeset did
+not move stands, because nothing its verdict reads moved. The class discard predates ADR
+0021, which neither admitted nor forbade it; the path-key axis beside it, and the re-decision
+that files the findings again in the same act, were ruled by ADR 0027 and are built.
 
 **A link reaches documents through one of two key spaces, and they are not
 interchangeable.** A suffix-addressed link — `[[glossary]]`, `[[norn/glossary]]` — is keyed
 by the classes its reductions name, and a document is in such a class by its suffix. A
-path-addressed link — `[x](dir/t.md)`, `[[vault://Notes]]` — is keyed by the exact paths it
-spells, and no class range reaches it: deleting `dir/t.md` changes the class `t/`, and
-`dir/t.md` is not in that range. A change reaches a link's finding only through the key
+path-addressed link — `[x](./dir/t.md)`, `[[vault://Notes]]` — is keyed by the exact paths
+it spells, and no class range reaches it: deleting `dir/t.md` changes the class `t/`, and the
+path key `dir/t.md` is not in that range. An unprefixed target in either family, `[x](dir/t.md)`
+among them, is suffix-addressed (ADR 0040). A change reaches a link's finding only through the key
 space the link is addressed in.
 
 **The decision.** The store judges link health in SQL and files those findings inside the
@@ -147,10 +149,13 @@ another time, as the next section rules.
 - every link held by a document the changeset writes;
 - every suffix-addressed link whose keys fall in the class of a path whose names the
   changeset moved, as the next section defines;
+- every link whose standing finding is filed under such a class — a finding is filed under
+  the naming class of each candidate it carries, so a link addressed by path whose candidate
+  is named by its minimal disambiguating suffix is reached when a name in that class moves;
 - every path-addressed link whose key equals a path whose names the changeset moved,
   including the old path of a rename;
-- every anchored link whose keys reach a path whose anchor values the changeset moved, and
-  that names one of the values moved there, as the next section defines;
+- every anchored link whose keys reach a document whose anchor values an in-place rewrite
+  moved, and that names one of the values moved there, as the next section defines;
 - every path-addressed link whose key lies beneath a directory whose unreadable-directory
   finding the act files or ends, re-decided in the transaction that files or ends that
   finding, so a link left unjudged under a marked directory is judged once it lists again.
@@ -161,52 +166,59 @@ another time, as the next section rules.
 ## A write re-decides only the links whose inputs it moved
 
 **A link's verdict reads two things outside the document that holds it.** Its broken,
-ambiguous and vault-scheme verdicts read the **names** its keys reach — which documents and
-vault files stand at the classes and paths it is keyed by, less the places the schema's
-`paths.ambiguity_ignore` globs keep out, and which directories along a spelled path are
-marked unreadable. Its missing-anchor verdict reads the **anchor values** of the one document
-it names: the readings and slugs of that document's headings, the identifiers of its blocks,
-and whether its body is known at all. The anchor predicate is an equality over those values —
-a heading matches a link's anchor text or marked reading by its reading, or the anchor as
-written by its slug, and a block matches a block reference by its identifier — so whether a
-document holds the place a link names changes only when a value equal to one the link carries
-enters or leaves the document. A finding's candidate head and its minimal disambiguating
-suffixes are read from names alone. Nothing else outside the holding document enters a
-verdict.
+ambiguous and vault-scheme verdicts, and the candidate head and minimal disambiguating
+suffixes a finding carries, read the **names** its keys reach: which document and vault-file
+rows stand at the classes and exact paths it is keyed by, and in the naming classes of the
+candidates it carries; the facts each row is matched by — its path, whether it is a document,
+a vault file or a names-only row, its suffix and path keys, and its admitting count, the
+fewest target segments that admit it, which the schema's `paths.ambiguity_ignore` globs set;
+and which directories along a spelled path are marked unreadable. Its missing-anchor verdict
+reads the **anchor values** of the one document it names: the readings and slugs of that
+document's headings, the identifiers of its blocks, and whether its body is known at all. The
+anchor predicate is an equality over those values — a heading matches a link's anchor text or
+marked reading by its reading, or the anchor as written by its slug, and a block matches a
+block reference by its identifier — so, while the body stays known, whether a document holds
+the place a link names changes only when a value equal to one the link carries enters or
+leaves the document. Nothing else outside the holding document enters a verdict: a finding's
+message, target, span and ordinal are the holding document's.
 
-**A changeset moves a path's names** where it creates, kills or renames the document or
-vault file standing there — a rename kills the old path and writes the new — or changes which
-of the two stands there. A vault file's birth or death, a provisional name written during a
-from-zero build's names step, a death, and a range beneath an unlistable directory each move
-the names at every path they reach. Where an entry's effect on a path's names cannot be read
-from the entry and the row it replaces, it is taken to move them.
+**Exactly one kind of entry is narrowed: an in-place rewrite.** An entry is an **in-place
+rewrite** where it writes a readable document at a path that held a readable document before
+the entry, and the row it writes matches the row it replaces in every fact a row is matched
+by — kind, suffix and path keys, and admitting count; the row keeps its identity. Every other
+entry **moves the names** at every path it reaches and re-decides by them, as ADR 0044 ruled:
+a birth, a death, a rename (a death of the old path beside a birth of the new), a vault
+file's birth or death, a provisional name written during a from-zero build's names step, a
+document that becomes unreadable and keeps its names alone
+([ADR 0046](0046-one-unreadable-path-never-breaks-the-vault.md)), a names-only row written as
+a readable document, a range beneath an unlistable directory, and a write whose row differs
+from the one it replaces in any fact a row is matched by. An entry whose effect on those facts
+cannot be read from the entry and the row it replaces is taken to move them. Some of these
+leave the names standing and move only the body between known and unknown; re-deciding them
+by their names is the superset the next paragraph but one admits, and it reaches every
+anchored link the move can flip, including one naming a value neither side holds.
 
-**A changeset moves a path's anchor values** where it rewrites a readable document in place
-and the set of heading readings, heading slugs or block identifiers the document holds after
-the write differs from the set it held before. A document that becomes unreadable — its row
-reduced to names alone ([ADR 0046](0046-one-unreadable-path-never-breaks-the-vault.md)) — or
-a names-only row written as a readable document moves every anchor value either side holds:
-its body passes between known and unknown, and a link to it passes between judged and unjudged
-for its anchor, while its names stand. The comparison reads only
-the written document's own rows, before the write discards them and after it writes their
-replacement, so its cost is the written document's and never the vault's.
+**An in-place rewrite moves the anchor values** it changes: the heading readings, heading
+slugs and block identifiers the document holds after the write, set against those it held
+before. The comparison reads only the written document's own rows, before the write discards
+them and beside the replacement it writes, so its cost is the written document's and never
+the vault's. **An in-place rewrite that moves no anchor value re-decides only its own links.**
+Its path stays where it stood, every link in another document reads the same inputs before
+and after, and that link's standing finding, keyed by classes and paths whose names did not
+move, stays: it is exactly the finding a re-decision would file again. The subject discard
+still takes every finding standing at the written path, and the re-decision files the
+written document's own links again.
 
-**A readable document rewritten in place, with the same names and the same anchor values,
-re-decides only its own links.** Its row keeps its identity, its path stays where it stood, and
-every link in another document reads the same inputs before and after; that link's standing
-finding, keyed by the classes and paths its inputs live under, stays, and is exactly the
-finding a re-decision would file again. The subject discard still takes every finding standing
-at the written path, and the re-decision files the written document's own links again.
-
-**Re-deciding more than this set files the same findings.** A link whose inputs did not move
-is re-decided to the finding it already holds, so a changeset may re-decide a superset of the
-re-decided set and stay exact; the narrowing is an obligation on the work, which the write-work
-bar measures, and never a condition of correctness. **The index that reaches an anchored link
-by the anchor value it names is not yet built.** Until it is, a changeset that moves a path's
-anchor values re-decides every link reaching that path's class and exact path, as ADR 0044
-did for every write — the superset this paragraph admits. A seek by anchor value alone across
-the vault is not that index: a common heading names links to many other documents, and their
-work would follow the vault rather than the write.
+**Re-deciding more than the re-decided set files the same findings.** A link whose inputs did
+not move is re-decided to the finding it already holds, so a changeset may re-decide a
+superset of the set and stay exact; the narrowing is an obligation on the work, which the
+write-work bar measures, and never a condition of correctness. **The index that reaches an
+anchored link by the anchor value it names is not yet built.** Until it is, an in-place
+rewrite that moves an anchor value re-decides every link reaching the written path's class
+and exact path, as ADR 0044 did for every write, and the write-work bar holds such a rewrite
+to that reach and every other in-place rewrite to its own links. A seek by anchor value alone
+across the vault is not that index: a common heading names links to many other documents, and
+their work would follow the vault rather than the write.
 
 **The job-end prune's transaction is a lane-1 re-deciding transaction.** Where a walk's
 job-end prune ends an unreadable-directory finding
@@ -216,20 +228,22 @@ below as a changeset is: the finding's end and the re-decision commit together o
 all, and the transaction's work is bounded by the re-decided set.
 
 Every link-health finding carries invalidation keys in the key space its link is addressed
-in, so the changeset's discard reaches it through the same keys the re-decided set is found
-by. The path half of that discard, and the path keys it ranges over, are part of what this
-decision rules and does not yet exist. Within that family, the exception admits only re-decision that is:
+in, and the naming classes of the candidates it carries, so the changeset's discard reaches it
+through the same keys the re-decided set is found by. Within that family, the exception admits only re-decision that is:
 
 1. **indexed** — every link in the re-decided set is reached by an index seek: a written
    document's links by that document, every other link by its stored keys in its own key
    space — an anchored link reached for a moved anchor value by its keys and that value
-   together — and the links beneath a marked directory by a range seek over path keys under the
+   together once the index holding both is built, and until then by its keys alone, as every
+   link reaching the written path's class and exact path — a link reached through a
+   candidate's naming class by the finding filed under that class, and the links beneath a marked directory by a range seek over path keys under the
    directory's own key. A path-addressed link reaches a marked directory the same way: each
    directory its spelled path passes through is a prefix of that path, and the place key of
    each is sought among the unreadable-directory findings, one seek per directory the spelling
    names, so the work follows the spelling, never the vault;
 2. **keyed like its discard** — every finding it files is keyed by exactly the class and path
-   keys the discard ranges over, so the next change to any of them discards it;
+   keys the discard ranges over, so the next change that moves the names under any of them
+   discards it, and the act that re-decides its link for a moved anchor value replaces it;
 3. **deterministic, in facts and in order** — the same facts yield the same findings, and the
    order of a path's findings is a function of the findings' facts — the link's position in
    its document, then the kind — never of when they were filed;
@@ -292,8 +306,9 @@ unreadable-directory finding ends before they are judged, as ADR 0045 rules. The
 the same SQL predicate, over the same summaries of the keys each link is read through,
 filing the same kinds with the same invalidation keys, in the same deterministic order. A
 path a filesystem fact requeues while the judgment runs is derived again first, and the
-judgment then judges again the links that path reaches — every link its class and exact
-path reach, as a changeset that moves that path's names re-decides — before it ends, so every finding it files is judged over the
+judgment then judges again the links that path reaches — the links it holds, every link its
+class and exact path reach, and every link whose finding is filed under its class, as a
+changeset that moves that path's names re-decides — before it ends, so every finding it files is judged over the
 facts the store holds when it ends. Facts accepted after the judgment ends are reconciled
 before `Ready` as ordinary changesets, under the per-changeset rule. The judgment's working
 memory is a bounded chunk of links and the candidates they resolve against, plus one count
@@ -442,7 +457,7 @@ against, plus one count per distinct key naming more than a candidate head.
 **A full tree heal of an existing store still re-decides common-stem classes once per
 chunk.** A heal that maintains an existing store — an attach over a store it adopts, or a
 recovery that does not rebuild from zero — commits in chunks under the per-changeset rule,
-and a class touched by many chunks is re-decided by each of them. Such a heal still
+and a class in which many chunks move names is re-decided by each of them. Such a heal still
 converges to the rebuild's findings; the price is repeated work on common stems, largest
 when the heal reaches most of the vault.
 
