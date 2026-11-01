@@ -1390,18 +1390,17 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
     assert_cascade_seeks_the_primary_key(&kind_discard, "finding_classes");
     assert_cascade_seeks_the_primary_key(&kind_discard, "finding_paths");
 
-    // **The walked-scope prune's page is one ordered pass over `findings_path`,
-    // and the bar it carries is the findings table's rather than the vault's.**
-    // A page is a cursor into that index — the rows come off it in the order the
-    // page states, so nothing sorts and the distinct subjects are adjacent — and
-    // the anti-join that drops a subject a document row stands at is a seek of
-    // `documents_path` per row rather than a read of the documents table. What
-    // the page does not carry is a seek bound: a scope, a kind and a standing row
-    // are all filters on rows the index order already reached, so a scope holding
-    // no unaccounted subject costs one pass over the findings index. That is the
-    // measured trade — the findings table holds a vault's defective documents
-    // rather than its documents — and a narrower bound is a second index this
-    // table has no reader asking for.
+    // **The walked-scope prune's page seeks the findings index declared under
+    // the vault's own order, and a bounded scope costs its own findings.** A
+    // page is a cursor into `findings_path` where the vault compares bytes and
+    // into `findings_path_nocase` where it folds — the rows come off it in the
+    // order the page states, so nothing sorts and the distinct subjects are
+    // adjacent — and the anti-join that drops a subject a document row stands
+    // at is a seek of `documents_path` per row rather than a read of the
+    // documents table. A kind and a standing row are filters on the rows the
+    // seek reached; the scope's range and the cursor are the seek, in both
+    // orders, which `a_bounded_prune_scope_reads_no_finding_outside_it_in_either_order`
+    // measures.
     let prefix = norn_store::DirectoryPrefix::new("one").expect("a directory");
     for scope in [
         norn_store::SubjectScope::Vault,
@@ -1427,18 +1426,15 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
             subjects.assert_no_table_scan();
             subjects.assert_no_full_scan_of("documents");
             subjects.assert_searches("documents");
-            subjects.assert_searches_through("findings", Access::Index("findings_path"));
+            subjects.assert_searches_through(
+                "findings",
+                Access::Index(match order {
+                    norn_store::StoredPathOrder::Sensitive => "findings_path",
+                    norn_store::StoredPathOrder::AsciiCaseInsensitive => "findings_path_nocase",
+                }),
+            );
             subjects.assert_searches_through("documents", Access::Index("documents_path"));
             subjects.assert_no_temp_btree();
-            // The cursor is a bound on `findings_path` rather than a filter over
-            // it, so a page seeks the index in every scope and both orders —
-            // which is what makes the pass one per prune rather than one per
-            // page of it. What the two orders differ in is how much of the index
-            // that seek skips, not whether there is one: a scope the vault
-            // spells as it stores it narrows the seek to the scope's own range,
-            // while a vault that folds ASCII case bounds its scope under the
-            // folding against an index that orders bytewise, so there the fold
-            // is a filter over the rows the cursor's seek reaches.
             subjects.assert_searches("findings");
             subjects.assert_no_full_scan_of("findings");
         }
@@ -3986,19 +3982,26 @@ fn the_walked_scope_page_names_the_subjects_no_document_row_stands_at() {
 }
 
 /// **A vault that folds ASCII case bounds a prune's scope under the same fold,
-/// and pages it bytewise all the same.** Scope membership is the walk's question
-/// — the two sides of one walk have to address one set of places, so a root
-/// spelled one way holds a subject spelled the other — while the cursor and the
-/// order are the page's own, and a page read against a caller's set needs only a
-/// total order. A page of one is what states that the cursor is exclusive under
-/// that split rather than only the first page of it.
+/// and pages it in that fold with the bytewise tie-break.** Scope membership is
+/// the walk's question — the two sides of one walk have to address one set of
+/// places, so a root spelled one way holds a subject spelled the other — and the
+/// order is the folded index's, which a page read against a caller's set may
+/// state because it needs only a total order. A page of one is what states that
+/// the cursor is exclusive under that order rather than only the first page of
+/// it.
 #[test]
 fn a_folded_prune_scope_holds_the_subjects_its_fold_reaches() {
     let scratch = Scratch::new("walked-scope-page-folded");
     let mut store = scratch.open();
     let mut request = store.begin_request();
     let kinds = &[FindingKind::BodyBytesNotUtf8];
-    for at in ["One", "One/Gone.md", "one/deep/gone.md", "two/gone.md"] {
+    for at in [
+        "One",
+        "One/Gone.md",
+        "one/deep/gone.md",
+        "two/gone.md",
+        "Two/Gone.md",
+    ] {
         request
             .record_finding(&violation(at))
             .expect("recording a finding");
@@ -4021,7 +4024,7 @@ fn a_folded_prune_scope_holds_the_subjects_its_fold_reaches() {
     // in — and never the subject under a root the fold does not reach.
     assert_eq!(
         drained_subjects(norn_store::SubjectScope::Subtree(&path("one"))),
-        ["One", "One/Gone.md", "one/deep/gone.md"]
+        ["One", "one/deep/gone.md", "One/Gone.md"]
     );
     // A directory names no subject of its own, so the same span read that way
     // holds the descendants alone.
@@ -4029,7 +4032,80 @@ fn a_folded_prune_scope_holds_the_subjects_its_fold_reaches() {
         drained_subjects(norn_store::SubjectScope::Under(
             &norn_store::DirectoryPrefix::new("ONE").expect("a directory")
         )),
-        ["One/Gone.md", "one/deep/gone.md"]
+        ["one/deep/gone.md", "One/Gone.md"]
+    );
+    // Two subjects that fold together are two places, each its own group, in
+    // the bytewise tie-break's order — on one page as across two.
+    assert_eq!(
+        drained_subjects(norn_store::SubjectScope::Subtree(&path("two"))),
+        ["Two/Gone.md", "two/gone.md"]
+    );
+    assert_eq!(
+        request
+            .finding_subjects_without_rows_after(
+                norn_store::SubjectScope::Subtree(&path("two")),
+                kinds,
+                None,
+                16,
+                norn_store::StoredPathOrder::AsciiCaseInsensitive,
+            )
+            .expect("a page")
+            .iter()
+            .map(|subject| subject.as_str())
+            .collect::<Vec<&str>>(),
+        ["Two/Gone.md", "two/gone.md"]
+    );
+}
+
+/// **A bounded prune scope costs its own findings in both orders, never the
+/// findings table.** A scoped heal pages the subjects of each dirty path, so a
+/// page that read every finding to answer one scope would make every scoped heal
+/// on a folding root cost the vault's defects. The bar is the work a page of one
+/// scope does with ten findings outside it against a thousand: it is equal.
+#[test]
+fn a_bounded_prune_scope_reads_no_finding_outside_it_in_either_order() {
+    let kinds = &[FindingKind::BodyBytesNotUtf8];
+    let prefix = norn_store::DirectoryPrefix::new("one").expect("a directory");
+    let scopes = [
+        norn_store::SubjectScope::Subtree(&path("one/gone.md")),
+        norn_store::SubjectScope::Under(&prefix),
+    ];
+    let measure = |outside: usize| {
+        let scratch = Scratch::new("walked-scope-page-cost");
+        let mut store = scratch.open();
+        let mut request = store.begin_request();
+        for at in ["one/gone.md", "One/Deep/Gone.md"] {
+            request
+                .record_finding(&violation(at))
+                .expect("recording a finding");
+        }
+        // Outside the scope on both sides, bytewise and folded alike.
+        for n in 0..outside {
+            for folder in ["a", "Z", "z"] {
+                request
+                    .record_finding(&violation(&format!("{folder}/{n:05}.md")))
+                    .expect("recording a finding");
+            }
+        }
+        let mut steps = Vec::new();
+        for scope in scopes {
+            for order in [
+                norn_store::StoredPathOrder::Sensitive,
+                norn_store::StoredPathOrder::AsciiCaseInsensitive,
+            ] {
+                let before = request.read_steps();
+                request
+                    .finding_subjects_without_rows_after(scope, kinds, None, 16, order)
+                    .expect("a page");
+                steps.push(request.read_steps() - before);
+            }
+        }
+        steps
+    };
+    let (few, many) = (measure(10), measure(1_000));
+    assert_eq!(
+        few, many,
+        "a bounded scope's page read findings outside it (per scope and order: 10 outside {few:?}, 1,000 outside {many:?})"
     );
 }
 
@@ -4587,7 +4663,7 @@ fn write_bar(statement: WriteStatement) -> WriteBar {
             ),
             (
                 "findings",
-                Access::Index("findings_content_path_nocase"),
+                Access::Index("findings_path_nocase"),
                 "(path>? AND path<?)",
             ),
             ("findings", Access::RowId, "(rowid=?)"),

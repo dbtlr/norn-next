@@ -867,12 +867,15 @@ is judged by what it reads before it returns its first row: the cursor is a boun
 index rather than a test applied to rows already read. The document page seeks the index
 that holds the order it states — the unique path index where the vault compares bytes, and
 an index declared under the same ASCII fold where the vault folds case — in all three
-scopes and both orders, and never sorts. The finding-subject page carries the weaker bar its shape admits: one ordered
-pass over the findings index per prune, never a read of the table, never a sorter, and an
-indexed seek per row for the document the place may hold. A scope the vault spells as it
-stores it narrows that pass to a seek of the scope's own range; a vault that folds ASCII
-case bounds the scope under the folding while that index orders bytewise, so the fold reads
-as a filter over the one pass the cursor seeks into.
+scopes and both orders, and never sorts. The finding-subject page seeks the same way: the
+findings path index where the vault compares bytes, and a findings index declared under
+that ASCII fold with the bytewise tie-break where the vault folds case, so in both orders
+its cursor and a bounded scope's range are the seek. A page costs the findings its scope
+holds, never the findings table: a scoped heal pays for its own dirty paths whatever the
+vault's defects elsewhere, on either root. It never reads the table, never sorts, and
+seeks the document the place may hold once per row. The page states the order of the index
+it seeks, bytewise or folded with the bytewise tie-break; its callers read it against
+their own sets and need only that order to be total.
 
 The five enumerations carry the bar their shapes admit. Each reaches its first row without
 a full scan and without a sorter, over a column whose order is total, so a drain of a whole

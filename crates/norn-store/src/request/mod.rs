@@ -888,8 +888,8 @@ impl<'a> Request<'a> {
                 document: Some(document),
             })
             .collect();
-        let predicate = scope_page_predicate(scope, order, order);
-        let ordering = document_page_ordering(order);
+        let predicate = scope_page_predicate(scope, order);
+        let ordering = scoped_page_ordering(order);
         let bound = first_parameter_after_scope(scope);
         let sql = format!(
             "SELECT path, generation FROM vault_files WHERE {predicate}
@@ -1107,11 +1107,12 @@ impl<'a> Request<'a> {
     /// recorded is outside every walk's account of the place. An empty list
     /// names nothing, which is what pruning nothing reads.
     ///
-    /// `after` is exclusive and the order is bytewise whatever the vault's case
-    /// sensitivity is, because this page is read against a caller's own set
-    /// rather than merged against a walk — so the cursor needs a total order and
-    /// not the walk's. `order` decides only which paths a bounded scope holds,
-    /// which is the same question the row pages ask it.
+    /// `after` is exclusive. `order` decides which paths a bounded scope holds,
+    /// the same question the row pages ask it, and the order the page states:
+    /// bytewise, or folded with the bytewise tie-break. This page is read
+    /// against a caller's own set rather than merged against a walk, so the
+    /// cursor needs only a total order, and the one the vault's index holds is
+    /// what lets a bounded scope cost its own findings rather than the table.
     pub fn finding_subjects_without_rows_after(
         &self,
         scope: SubjectScope<'_>,
@@ -2699,17 +2700,14 @@ pub(crate) fn subject_discard_sql(scope: DiscardScope<'_>) -> String {
     format!("{SUBJECT_DISCARD_SQL} AND kind IN ({placeholders})")
 }
 
-/// The predicate one keyset page of a scope opens, for the collation the index
-/// it seeks holds and the collation the scope's bounds are read under.
+/// The predicate one keyset page of a scope opens under the order the vault
+/// proved for its root.
 ///
 /// Both paged readers emit this: the heal's document page and the walked-scope
-/// prune's finding-subject page ask one question of one column, and the only
-/// thing that differs between them is which of the two collations each half of
-/// the question is asked in. The document page seeks an index declared under the
-/// vault's own order, so both halves are that order. The prune's index orders
-/// bytewise while its scope may be read folded, so the two come apart there —
-/// and that is the whole of the difference, which is why it is a parameter here
-/// rather than a second builder.
+/// prune's finding-subject page ask one question of one column, and each seeks
+/// an index declared under the vault's own order — so the scope's bounds, the
+/// cursor and the seek are read in one collation, and one builder states the
+/// shape for both.
 ///
 /// # A page has exactly one lower bound, and the cursor is it
 ///
@@ -2733,13 +2731,13 @@ pub(crate) fn subject_discard_sql(scope: DiscardScope<'_>) -> String {
 /// of the two. `MAX()` would express the same intent and get it wrong: it
 /// compares under `BINARY`, and against a folded scope the wrong argument wins.
 ///
-/// **A scope's floor may join the coalesce only where the index orders the way
-/// the scope is read.** One term carries one collation, so a bytewise floor
-/// standing for a folded scope would drop rows the scope holds: a scope rooted
-/// at `b` holds `B/x.md`, which sorts below `b` bytewise. Where the two come
-/// apart, the cursor is the whole bound and the scope's bounds are filters over
-/// the rows it reaches — one pass across the read rather than one per page of
-/// it, which is the strongest shape a single-collation index admits.
+/// **A scope's floor joins the coalesce because the index orders the way the
+/// scope is read.** One term carries one collation, so a bytewise floor standing
+/// for a folded scope would drop rows the scope holds — a scope rooted at `b`
+/// holds `B/x.md`, which sorts below `b` bytewise — and a folded scope over a
+/// bytewise index could only filter the rows its cursor reaches, one pass over
+/// the whole index for every scope. Each reader therefore seeks an index under
+/// the vault's own order, and the floor is the scope's.
 ///
 /// A bounded scope is **one** range and not two. A root sorts ahead of the
 /// separator its descendants open with, so one range spans the root and
@@ -2760,26 +2758,18 @@ pub(crate) fn subject_discard_sql(scope: DiscardScope<'_>) -> String {
 /// excludes everything below the cursor's folded key admits a row equal under
 /// the fold only where it sorts after the cursor bytewise. That bytewise
 /// tie-break is what keeps the page total over two rows that fold together.
-fn scope_page_predicate(
-    scope: SubjectScope<'_>,
-    index_order: StoredPathOrder,
-    scope_order: StoredPathOrder,
-) -> String {
+fn scope_page_predicate(scope: SubjectScope<'_>, order: StoredPathOrder) -> String {
+    let collation = order.collation();
+    let cursor = match order {
+        StoredPathOrder::Sensitive => "(?1 IS NULL OR path > ?1)",
+        StoredPathOrder::AsciiCaseInsensitive => {
+            "(?1 IS NULL OR path > ?1 COLLATE NOCASE OR path > ?1)"
+        }
+    };
     if let SubjectScope::Window { through, .. } = scope {
-        let collation = scope_order.collation();
-        let cursor = match index_order {
-            StoredPathOrder::Sensitive => "(?1 IS NULL OR path > ?1)",
-            StoredPathOrder::AsciiCaseInsensitive => {
-                "(?1 IS NULL OR path > ?1 COLLATE NOCASE OR path > ?1)"
-            }
-        };
-        let opening = if index_order == scope_order {
-            format!(
-                "path >= MAX(COALESCE(?1, CAST(?2 AS TEXT)){collation}, CAST(?2 AS TEXT)){collation}"
-            )
-        } else {
-            "path > COALESCE(?1, '')".to_owned()
-        };
+        let opening = format!(
+            "path >= MAX(COALESCE(?1, CAST(?2 AS TEXT)){collation}, CAST(?2 AS TEXT)){collation}"
+        );
         let upper = if through.is_some() {
             format!("path <= CAST(?3 AS TEXT){collation}")
         } else {
@@ -2792,32 +2782,21 @@ fn scope_page_predicate(
         );
     }
     let bounded = scope.bounds().is_some();
-    let seek = index_order.collation();
-    let fold = scope_order.collation();
-    let floor_holds_the_scope = bounded && index_order == scope_order;
-    let arguments = if floor_holds_the_scope {
-        "?1, ?2, ?3"
-    } else {
-        "?1, ''"
-    };
-    let strict = !floor_holds_the_scope && index_order == StoredPathOrder::Sensitive;
+    let arguments = if bounded { "?1, ?2, ?3" } else { "?1, ''" };
+    // Unbounded and bytewise, the floor alone states the cursor's exclusivity.
+    let strict = !bounded && order == StoredPathOrder::Sensitive;
     let mut opening = if strict {
         format!("path > COALESCE({arguments})")
     } else {
-        format!("path >= COALESCE({arguments}){seek}")
+        format!("path >= COALESCE({arguments}){collation}")
     };
     let mut terms: Vec<String> = Vec::new();
     if bounded {
-        opening.push_str(&format!(" AND path < ?4{fold}"));
-        terms.push(format!("(path = ?2{fold} OR path >= ?3{fold})"));
+        opening.push_str(&format!(" AND path < ?4{collation}"));
+        terms.push(format!("(path = ?2{collation} OR path >= ?3{collation})"));
     }
     if !strict {
-        terms.push(match index_order {
-            StoredPathOrder::Sensitive => "(?1 IS NULL OR path > ?1)".to_string(),
-            StoredPathOrder::AsciiCaseInsensitive => {
-                "(?1 IS NULL OR path > ?1 COLLATE NOCASE OR path > ?1)".to_string()
-            }
-        });
+        terms.push(cursor.to_string());
     }
     std::iter::once(opening)
         .chain(terms)
@@ -2868,8 +2847,8 @@ fn scope_page_parameters(scope: SubjectScope<'_>, after: Option<&DocumentPath>) 
 /// bounds and the seek are read in one collation, and
 /// [`scope_page_predicate`] states what that shape has to be.
 fn document_page_sql(scope: SubjectScope<'_>, order: StoredPathOrder) -> String {
-    let predicate = scope_page_predicate(scope, order, order);
-    let ordering = document_page_ordering(order);
+    let predicate = scope_page_predicate(scope, order);
+    let ordering = scoped_page_ordering(order);
     let limit = first_parameter_after_scope(scope);
     format!(
         "SELECT {STORED_DOCUMENT_COLUMNS}
@@ -2880,14 +2859,15 @@ fn document_page_sql(scope: SubjectScope<'_>, order: StoredPathOrder) -> String 
     )
 }
 
-/// The order a document page states, which is the order the vault proved for
-/// its root: bytewise, or ASCII-folded with the bytewise tie-break that keeps
-/// it total where two rows fold together.
+/// The order a scoped page states — the document page and the finding-subject
+/// page alike — which is the order the vault proved for its root: bytewise, or
+/// ASCII-folded with the bytewise tie-break that keeps it total where two rows
+/// fold together.
 ///
-/// It is the walk's order, which a heal merges this page against, and not the
-/// order a read answers paths in: on a root that tells spellings apart the two
-/// differ, and this page is bytewise there.
-fn document_page_ordering(order: StoredPathOrder) -> &'static str {
+/// It is the walk's order, which a heal merges the document page against, and
+/// not the order a read answers paths in: on a root that tells spellings apart
+/// the two differ, and these pages are bytewise there.
+fn scoped_page_ordering(order: StoredPathOrder) -> &'static str {
     match order {
         StoredPathOrder::Sensitive => "path",
         StoredPathOrder::AsciiCaseInsensitive => "path COLLATE NOCASE, path",
@@ -2911,30 +2891,32 @@ fn document_page_parameters(
 /// The statement [`Request::finding_subjects_without_rows_after`] emits for a
 /// scope, a count of kinds, and the order that scope's bounds are read in.
 ///
-/// The cursor and the order are bytewise in every form: this page is read
-/// against a caller's own set rather than merged against a walk, so the order
-/// `findings_path` already holds is the order the page states — no sorter, and
-/// the distinct subjects come off the index adjacent. The kind list filters the
-/// rows the index order reached, exactly as the subject discard's does, and the
-/// anti-join is one seek of `documents_path` per row.
+/// The page seeks an index declared under the vault's own order —
+/// `findings_path` where the vault compares bytes, `findings_path_nocase` where
+/// it folds ASCII case — and states that index's order, so nothing sorts and the
+/// distinct subjects come off it adjacent. The page groups by that order's own
+/// columns rather than asking for distinct paths: a path decides its fold, so
+/// the groups are the distinct subjects, and only the index's columns let SQLite
+/// see that they are adjacent in the folded index. This page is read against a caller's
+/// own set rather than merged against a walk, so any total order serves it, and
+/// the index's is the one that costs nothing. The kind list filters the rows the
+/// seek reached, exactly as the subject discard's does, and the anti-join is one
+/// seek of `documents_path` per row.
 ///
 /// A bounded scope holds the paths its rows are paged under, which is what `order`
 /// decides: a case-insensitive vault folds a subtree's bounds the way that
 /// subtree's rows are folded, so the two sides of one walk address one set of
 /// places.
 ///
-/// **The cursor is the page's lower bound rather than a test applied to rows the
-/// page already read**, which is [`scope_page_predicate`]'s rule and the one
-/// this page's stated bar rests on. The index it seeks is `findings_path`, which
-/// orders bytewise whatever the vault's case behaviour is — so the seek's
-/// collation is always [`StoredPathOrder::Sensitive`] here, while the scope's
-/// bounds are read under `order`. Bytewise, the two agree and the cursor
-/// coalesces with the scope's floor. Folded, they come apart: the cursor is the
-/// whole bound and the fold filters the rows it reaches, which is one pass over
-/// the findings index across the whole prune. A narrower bound there would be a
-/// second index this table has no reader asking for.
+/// **The cursor and a bounded scope's range are the seek** rather than tests
+/// applied to rows the page already read, which is [`scope_page_predicate`]'s
+/// rule. A scoped heal pages the subjects of each path it was handed, so a page
+/// that reached its scope through the whole index would make every scoped heal
+/// cost the vault's findings; under one collation it costs the findings its
+/// scope holds, on either root.
 fn finding_subjects_sql(scope: SubjectScope<'_>, kinds: usize, order: StoredPathOrder) -> String {
-    let scoped = scope_page_predicate(scope, StoredPathOrder::Sensitive, order);
+    let scoped = scope_page_predicate(scope, order);
+    let ordering = scoped_page_ordering(order);
     let first_kind = first_parameter_after_scope(scope);
     let placeholders = (0..kinds)
         .map(|index| format!("?{}", first_kind + index))
@@ -2942,11 +2924,12 @@ fn finding_subjects_sql(scope: SubjectScope<'_>, kinds: usize, order: StoredPath
         .join(", ");
     let limit = first_kind + kinds;
     format!(
-        "SELECT DISTINCT path FROM findings
+        "SELECT path FROM findings
              WHERE {scoped}
                AND kind IN ({placeholders})
                AND NOT EXISTS (SELECT 1 FROM documents WHERE documents.path = findings.path)
-             ORDER BY path
+             GROUP BY {ordering}
+             ORDER BY {ordering}
              LIMIT ?{limit}"
     )
 }
