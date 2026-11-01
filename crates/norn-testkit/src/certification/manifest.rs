@@ -119,12 +119,12 @@ pub const MANIFEST_FILES: &[ManifestFile] = &[
         why: "the build subject on which authored measurement bars are valid",
     },
     ManifestFile {
-        path: "crates/norn-testkit/src/build_provenance.rs",
+        path: "crates/norn-testkit/src/build_subject/provenance.rs",
         why: "the runtime profile override discovery used by measurement guards",
     },
     ManifestFile {
         path: "crates/norn-testkit/build.rs",
-        why: "the shared workspace optimization level used by measurement guards",
+        why: "records testkit's own OPT_LEVEL and effective rustflags as the workspace proxy for measurement guards",
     },
     ManifestFile {
         path: "rust-toolchain.toml",

@@ -1,5 +1,5 @@
 //! **How long a repair of many routes takes to preview**, end to end through
-//! `Host::repair`, measured in a release build.
+//! `Host::repair`, measured with optimization.
 //!
 //! A route's link cascade is judged by construction rather than by generating
 //! it per route (`planner::repair::declared`'s respell check): one batched
@@ -24,7 +24,7 @@
 //! This is a clock, so it is the soak lane's (ADR 0004), not a per-PR gate.
 //! It records each case's best of three previews and holds each doubling of
 //! the routes to within 2.5 times — 2.3 for routes naming classes of their
-//! own — in any build; in a release build — run it with
+//! own — in any build; at opt-level 1, 2, 3, s or z — for example, run it with
 //! `cargo test --release -p norn-host --test repair_cost -- --ignored --nocapture`
 //! — it holds them to the bars the routes were accepted on as well: 400
 //! routes within 0.48 s, and 400 routes and a hub within 1.28 s.
@@ -401,7 +401,7 @@ fn a_repair_of_routes_naming_classes_of_their_own_previews_in_time_linear_in_rou
 /// links they touch**: 400 routes, 400 routes with a hub linking every one
 /// from its body and from a frontmatter list, and the same at 800.
 #[test]
-#[ignore = "soak-lane case: a clock of a repair's routes, its absolute bars read in a release build"]
+#[ignore = "soak-lane case: a clock of a repair's routes, its absolute bars read at opt-level 1, 2, 3, s or z"]
 fn a_repair_of_routes_previews_in_time_linear_in_routes_and_links_touched() {
     let mut readings = Vec::new();
     for routes in [400, 800] {
@@ -436,11 +436,9 @@ fn a_repair_of_routes_previews_in_time_linear_in_routes_and_links_touched() {
         let ratio = at(800, hub).as_secs_f64() / at(400, hub).as_secs_f64();
         assert!(ratio <= 2.5, "{hub} grows faster than linear: {readings:?}");
     }
-    // An unoptimized build's clock says nothing of the absolute bars. Read
-    // the actual opt-level, even when optimization keeps debug assertions on.
-    if !norn_testkit::build_subject::BuildSubject::new(norn_testkit::build_subject::opt_level(), "")
-        .is_optimized()
-    {
+    // Absolute bars run at opt-level 1, 2, 3, s or z, including rustflags,
+    // regardless of debug assertions. The scaling bar above runs in every build.
+    if !norn_testkit::build_subject::current_build_is_optimized() {
         return;
     }
     assert!(
