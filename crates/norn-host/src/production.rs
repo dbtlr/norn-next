@@ -16733,6 +16733,13 @@ mod tests {
             .sum()
     }
 
+    /// Asserts that the build `before` opened judged each stored link once.
+    ///
+    /// A caller settles its fixture's writes before attaching. FSEvents can
+    /// number a fixture's creation of a file after the watch's history marker,
+    /// and the build takes that late report as a change. A requeue drained
+    /// after the build's link judgment re-decides every link the file answers,
+    /// which `links_redecided` would then count.
     fn assert_judged_build(
         ops: &ProductionEntryOps,
         attachment: &mut ProductionAttachment,
@@ -16874,6 +16881,7 @@ mod tests {
             fs::create_dir_all(f.vault().join(at).parent().unwrap()).unwrap();
             fs::write(f.vault().join(at), "# Hub\n").unwrap();
         }
+        norn_fs::watch::settle_prior_changes(f.root.root(), lifecycle_budget().work()).unwrap();
         let (ops, name) = f.ops(4);
         let before = ops.evidence.read();
         let progress = ProgressReporter::disconnected();
@@ -16928,6 +16936,7 @@ mod tests {
         // A first attach, then an attach over the finished store.
         let f = Fixture::new("one-entry-first");
         write_a_vault_of_documents(&f, 120);
+        norn_fs::watch::settle_prior_changes(f.root.root(), lifecycle_budget().work()).unwrap();
         let (ops, name) = f.ops(64);
         let before = ops.evidence.read();
         let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
@@ -16965,6 +16974,7 @@ mod tests {
         drop(f);
         let f = Fixture::new("one-entry-earlier");
         fs::write(f.vault().join("note.md"), "# Title\n\n[[missing]]\n").unwrap();
+        norn_fs::watch::settle_prior_changes(f.root.root(), lifecycle_budget().work()).unwrap();
         let (ops, name) = f.ops(64);
         let earlier = norn_store::DerivationVersion::new(crate::DERIVATION_VERSION.get() - 1);
         let mut stale = Store::open(dirs_store(&f, &name), proven_order(&f), earlier).unwrap();
@@ -16991,6 +17001,7 @@ mod tests {
         let f = Fixture::new("one-entry-rebuild");
         write_two_spellings_of_one_stem(&f);
         fs::write(f.vault().join("ref.md"), "[[Foo]]\n").unwrap();
+        norn_fs::watch::settle_prior_changes(f.root.root(), lifecycle_budget().work()).unwrap();
         let (ops, name) = f.ops(64);
         let proven = proven_order(&f);
         let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
@@ -17025,6 +17036,7 @@ mod tests {
         let schema = f.vault().join(".norn/schema.yaml");
         fs::write(&schema, "version: 9\n").unwrap();
         write_a_vault_of_documents(&f, 12);
+        norn_fs::watch::settle_prior_changes(f.root.root(), lifecycle_budget().work()).unwrap();
         let (ops, name) = f.ops(64);
         let policy = ProductionPolicy::new(64, 2).unwrap();
         let progress = ProgressReporter::disconnected();
