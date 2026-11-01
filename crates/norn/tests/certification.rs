@@ -1286,12 +1286,12 @@ fn ci_job(workflow: &str, key: &str) -> Vec<String> {
 }
 
 /// A runner config can silently filter cases or turn elapsed time into a verdict.
-fn assert_nextest_has_no_repository_config() {
+fn assert_nextest_has_no_repository_config(root: &Path) {
     // 0.9.114 reads only this workspace-root path by default. --config-file and
     // --tool-config-file are explicit CLI options, with no NEXTEST_* path override;
     // the workflow command pins and closed environment grammar reject those inputs.
     assert!(
-        !workspace_root()
+        !root
             .join(".config/nextest.toml")
             .try_exists()
             .expect("checking nextest config"),
@@ -1301,13 +1301,28 @@ fn assert_nextest_has_no_repository_config() {
     );
 }
 
+/// The same fast-gate entry point accepts a pristine root and refuses runner config.
+#[test]
+fn the_fast_gate_refuses_repository_nextest_config() {
+    let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), "nextest-config")
+        .expect("creating nextest config sandbox");
+    let gate = std::fs::read_to_string(workspace_root().join(".github/workflows/ci.yml"))
+        .expect("reading the PR gate");
+    assert_fast_gate(sandbox.root(), &gate);
+    std::fs::create_dir(sandbox.root().join(".config")).unwrap();
+    std::fs::write(sandbox.root().join(".config/nextest.toml"), "").unwrap();
+    assert!(
+        std::panic::catch_unwind(|| assert_fast_gate(sandbox.root(), &gate)).is_err(),
+        "the fast gate accepted repository nextest config"
+    );
+}
+
 /// The PR gate retains every ordinary host target while deep lanes run in full regression.
 #[test]
 fn the_fast_gate_keeps_ordinary_functional_coverage() {
-    assert_nextest_has_no_repository_config();
     let gate = std::fs::read_to_string(workspace_root().join(".github/workflows/ci.yml"))
         .expect("reading the PR gate");
-    assert_fast_gate(&gate);
+    assert_fast_gate(&workspace_root(), &gate);
     let mut mutants = vec![
         gate.replace("  architecture:", "  missing:"),
         gate.replace("--retries 0", "--retries 1"),
@@ -1346,13 +1361,14 @@ fn the_fast_gate_keeps_ordinary_functional_coverage() {
     for mutant in mutants {
         assert_ne!(mutant, gate, "a mutant made no change");
         assert!(
-            std::panic::catch_unwind(|| assert_fast_gate(&mutant)).is_err(),
+            std::panic::catch_unwind(|| assert_fast_gate(&workspace_root(), &mutant)).is_err(),
             "a PR coverage mutant survived"
         );
     }
 }
 
-fn assert_fast_gate(workflow: &str) {
+fn assert_fast_gate(root: &Path, workflow: &str) {
+    assert_nextest_has_no_repository_config(root);
     assert_triggers(
         workflow,
         &[
@@ -1442,7 +1458,7 @@ fn full_regression_adopts_fault_and_audit_cases_with_their_features() {
         );
     }
     let gate = std::fs::read_to_string(root.join(".github/workflows/ci.yml")).unwrap();
-    assert_fast_gate(&gate);
+    assert_fast_gate(&workspace_root(), &gate);
     let manifest = std::fs::read_to_string(root.join("crates/norn-host/Cargo.toml")).unwrap();
     assert!(
         !manifest.contains("autotests = false"),
@@ -2404,7 +2420,7 @@ fn a_ledgered_signature_matches_a_failure_and_never_a_run_that_passed_it() {
         for fields in &entries {
             let signature = ledger_field(fields, "signature");
             if nextest {
-                passed.push_str(&format!("        PASS [   0.001s] (1/4) fixture suite::{signature}\n        SKIP [         ] (2/4) fixture suite::{signature}\n        SLOW [>  1.000s] (───) fixture suite::{signature}\n        LEAK [   0.207s] (3/4) fixture suite::{signature}\n"));
+                passed.push_str(&format!("        PASS [   0.001s] (1/4) fixture suite::{signature}\n        SKIP [         ] (───) fixture suite::{signature}\n        SLOW [>  1.000s] (───) fixture suite::{signature}\n        LEAK [   0.207s] (3/4) fixture suite::{signature}\n"));
             } else {
                 passed.push_str(&format!("test suite::{signature} ... ok\n"));
             }
@@ -2445,7 +2461,7 @@ fn a_ledgered_signature_matches_a_failure_and_never_a_run_that_passed_it() {
         }
 
         if nextest {
-            for status in ["LEAK-FAIL", "FAIL", "TIMEOUT", "SIGABRT"] {
+            for status in ["LEAK-FAIL", "FAIL", "TIMEOUT", "SIGABRT", "SIGSEGV"] {
                 let fields = &entries[0];
                 let signature = ledger_field(fields, "signature");
                 let output = format!("    {status} [   0.207s] (1/1) fixture {signature}\n");
@@ -2896,8 +2912,10 @@ fn wait_failure(
 fn failed_run(case: &str, message: &str) -> String {
     let message = message.replace('\n', "\n    ");
     format!(
-        "        FAIL [   0.001s] (1/1) fixture tests::{case}\n  stderr ───\n\n    \
-         thread 'tests::{case}' panicked at crates/norn-testkit/src/isolation.rs:298:59:\n    \
+        "        FAIL [   0.001s] (1/1) fixture tests::{case}\n  stdout ───\n\n    running 1 test\n    \
+         test tests::{case} ... FAILED\n\n    failures:\n\n    failures:\n        tests::{case}\n\n    \
+         test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n  stderr ───\n\n    \
+         thread 'tests::{case}' (2900872) panicked at crates/norn-testkit/src/isolation.rs:298:59:\n    \
          {message}\n\n────────────\n     Summary [   0.001s] 1 test run: 0 passed, 1 failed, 0 skipped\n"
     )
 }

@@ -78,6 +78,8 @@ summary=${GITHUB_STEP_SUMMARY:-/dev/null}
 # Everything else is: the `... FAILED` status lines, the `failures:` list at the
 # end, the panic text a signature naming an assertion lives in, and whatever
 # else the run printed.
+# Limitation: captured failure output beginning with a passing status shape is also
+# excluded (as with libtest's `test ... ok`); only our tripwire fixtures print these.
 nonfailure_status='^[[:space:]]*(test .+ [.][.][.] (ok|ignored)|(PASS|SKIP|SLOW|LEAK) [[][^]]*[]])'
 matches=$(awk -v output="$log" -v nonfailure_status="$nonfailure_status" '
   function flush() {
