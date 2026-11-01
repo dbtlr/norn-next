@@ -21857,6 +21857,9 @@ mod tests {
         }
         let hot = f.vault().join("hot.md");
         fs::write(&hot, "start").unwrap();
+        // FSEvents can report the fixture's creations after the quiet attach
+        // begins, and its build takes that late report as a change.
+        norn_fs::watch::settle_prior_changes(f.root.root(), lifecycle_budget().work()).unwrap();
         let quiet = {
             let dirs =
                 ConfigDirs::new(f.root.join("quiet-config"), f.root.join("quiet-data")).unwrap();
