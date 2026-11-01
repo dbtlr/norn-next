@@ -2799,50 +2799,62 @@ unlistable directory, and an upsert whose matched facts differ from the row it r
 respelling only a folding comparison calls the same path seeks no row at its bytes, so it is a
 birth. **An in-place rewrite that moves an anchor value names its moved values instead**: the
 heading readings, heading slugs and block ids that stand on one side of the comparison and not
-the other, each beside the class and path it was written at. The re-decision reaches, by those
-alone, the anchored links whose keys fall in that class or equal that path and which name one
-of those values, as the anchored-link index below holds them. The link-health findings are keyed by
+the other, beside the document's keys. The re-decision reaches, by those alone, the anchored
+links that could name the document and name one of those values, as the anchored-link index
+below holds them. The link-health findings are keyed by
 either kind of key, and the changeset that discards them re-decides the links they are about
 and files them again in the same transaction: every link a written document holds, an
 in-place rewrite's included; for each affected class, every link a finding standing under
-the class was about, and every suffix-addressed link whose keys fall in the class; and every
-path-addressed link whose key is an affected path — each judged once. The class discard runs
+the class was about, and every suffix-addressed link whose keys fall in the class; every
+path-addressed link whose key is an affected path; every path-addressed link beneath a
+directory whose mark the changeset files or ends; and, last, every anchored link naming a moved
+value. Each link is judged once, but for one case the anchor arm below names. The class discard runs
 inside the re-decision, a chunk of the class's findings at a time, and judges each link one
 of them was about that no key of an affected class reaches: a finding keyed under the class
 only through a candidate's naming class. A class's walk seeks a partial index holding suffix
 keys alone, so a path key spelled under a folder named like the class's stem is never read.
 A link-health finding carries every key its link is held under, so the discard reaching any
-of them takes it before its link is judged again.
+of them takes it before its link is judged again. Only the store files a link-health finding
+or a finding about a link: a caller's door refuses both, and refuses a discard or a
+replacement whose scope reaches a link-health kind.
 
 **The anchored-link index holds each anchored link under its keys and its anchor values
 together.** `link_anchor_keys` holds one row for each key in `link_keys` of a link that carries
 an anchor, and each value that anchor is matched by: the anchor's text reading and its marked
 reading, of kind `reading`, which a heading's reading matches; the anchor as written, of kind
 `slug`, which a heading's slug matches; and a block reference, of kind `block`, which a block's
-identifier matches. A marked reading equal to the text reading is one row. Each row copies the
-key's `segments` and the holding document, and goes with its key: its rows are the key row's, by
-a foreign key that cascades from `link_keys`. Two partial indexes split the rows by key space as
-`link_keys_suffix_key` and `link_keys_path_key` do, each ordered `(kind, value, key, document,
-link)`, so the links reaching a class that name one value are a range seek over the class's
-suffix keys after an equality on the value, and those spelling a path are equality seeks
-throughout. The value leads with the key beside it, never alone: a common heading such as
-`Introduction` is named by links to many documents, and a seek by value across the vault would
-read them all. The index is built when a from-zero build's Structure step ends, beside the link
-index; no from-zero build reads it, since no changeset during one writes an in-place rewrite.
+identifier matches. Its primary key is `(link, key, kind, value)`, so a marked reading equal
+to the text reading is one row, and its rows are the key row's: a foreign key on `(link, key)`
+cascades from `link_keys`, and the primary key leads with the columns that cascade seeks, so a
+re-derivation's delete of a document's links reaches their anchor rows by seek, as it reaches
+their keys through `link_keys_link`. One index, `link_anchor_keys_value`, orders the rows
+`(kind, value, key, link)`. The keys that could name one document are a handful — each
+segment-aligned prefix of its suffix key, and its path key, the same keys a links-to seek
+reads — so the links that could name it and name one value are an equality seek at each of
+them. A suffix key ends in the separator and a path key never does, so one index holds both
+kinds without a partial predicate, and a seek never reads a key of the other kind. The value
+leads with the key beside it, never alone: a common heading such as `Introduction` is named by
+links to many documents, and a seek by value across the vault would read them all; and the key
+is sought by equality, never as a class range, which would read the links naming the value in
+every document the class holds. The primary key stands through a from-zero build, as
+`link_keys_link` does; `link_anchor_keys_value` is built when the Structure step ends, beside
+the link index, since no from-zero build reads it: no changeset during one writes an in-place
+rewrite.
 
-**The anchor arm runs last.** For each class and path an anchor-moving rewrite names, in order,
-and each moved value under it, in kind and value order, the re-decision seeks the anchored links
-that reach the class or path and name the value, and judges each link at the first such seek
-that reaches it: one whose document the changeset wrote, one holding a suffix key in an affected
-class, and one holding a path key among the affected paths were judged by their own arms and are
-skipped, and which seek is first is a predicate over the link's own keys and anchor values. A
-chunk of the arm first discards the link-health findings about its own links, each by its
-holding document's path and ordinal, as a from-zero build's judgment does, because no class or
-path discard reached them: their names did not move. Running last, after every other arm has
-filed, the discard also takes the finding of a link an earlier arm judged through a candidate's
-naming class alone; judging it again files the same finding, a superset the narrowing admits. Only the store files a link-health finding
-or a finding about a link: a caller's door refuses both, and refuses a discard or a
-replacement whose scope reaches a link-health kind.
+**The anchor arm runs last.** It walks, in order, each key an anchor-moving rewrite names —
+the prefixes and path key of each document whose anchor values moved — and under each key each
+value moved at a document holding that key, in kind and value order, and seeks the anchored
+links held under that key that name that value. A link is judged at the first such seek that
+reaches it, which is a predicate over the link's own keys and anchor values. A link whose
+document the changeset wrote, one holding a suffix key in an affected class, one holding a path
+key among the affected paths, and one holding a path key beneath a directory whose mark the
+changeset files or ends were judged by their own arms and are skipped. A chunk of the arm first
+discards the link-health findings about its own links, each by its holding document's path and
+ordinal, as a from-zero build's judgment does, because no class or path discard reached them:
+their names did not move. That discard is what keeps the one case exact where a link is judged
+twice: a link an earlier arm judged only because a finding about it stood under a candidate's
+naming class, which nothing in its own facts records. The anchor arm takes that finding and
+files the same one again, a superset the narrowing admits.
 
 **The re-decision holds a chunk and the keys the last chunk held.** It reads, judges and files
 a chunk of links at a time, and after each chunk forgets what every key that chunk's links do
