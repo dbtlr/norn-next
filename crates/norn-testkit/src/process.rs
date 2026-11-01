@@ -1332,6 +1332,33 @@ mod tests {
         );
     }
 
+    /// Memory the hungry child below touches, in one buffer it fills.
+    const CHILD_TOUCHES: u64 = 64 * 1024 * 1024;
+
+    /// **A run's peak is at least what the child touched.** `dd` with one
+    /// block of this size fills a buffer of exactly that size, so a reading
+    /// below it lost part of the child's own memory on the way out — a unit
+    /// misread, or a reading scaled on its way through the report.
+    #[test]
+    fn a_runs_peak_is_at_least_the_memory_its_child_touched() {
+        let sandbox = sandbox("touched");
+        let hungry = Run::new(&sandbox, "dd")
+            .args([
+                "if=/dev/zero".to_string(),
+                "of=/dev/null".to_string(),
+                format!("bs={CHILD_TOUCHES}"),
+                "count=1".to_string(),
+            ])
+            .wait()
+            .expect("running dd");
+        hungry.assert_success();
+        assert!(
+            hungry.peak_rss_bytes >= CHILD_TOUCHES,
+            "a child that filled {CHILD_TOUCHES} bytes reported a peak of {}",
+            hungry.peak_rss_bytes
+        );
+    }
+
     /// Resident memory this test process holds at its peak, larger than the
     /// hungry child below ever needs.
     const PARENT_BALLAST: usize = 256 * 1024 * 1024;
