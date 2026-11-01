@@ -165,8 +165,8 @@ fn optimized_skip_gate(level: &str, flags: &str) -> bool {
 /// A `RUSTC_WRAPPER` or `RUSTC_WORKSPACE_WRAPPER` (or the matching config keys)
 /// that injects optimization flags is not seen either: wrappers such as sccache
 /// are ordinary, so they are not refused, and measurement runs must not use one
-/// that alters codegen. A `.cargo` directory under a hidden directory inside the
-/// workspace is not walked.
+/// that alters codegen. A `.cargo` directory under a hidden directory or under a
+/// directory named `target` inside the workspace is not walked.
 pub fn check_current_unoptimized() -> Result<(), String> {
     let overrides = with_recorded_rustflags(
         provenance::current_overrides(),
