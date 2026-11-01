@@ -481,6 +481,8 @@ fn requeue_taken(
     });
     ops.evidence.count_requeue_read_steps(steps);
     result?;
+    #[cfg(feature = "induced-failure")]
+    ops.loading_boundary(LoadingBoundary::RequeueCommitted);
     publisher.publish_requeued(taken);
     #[cfg(feature = "induced-failure")]
     ops.loading_boundary(LoadingBoundary::Requeued);

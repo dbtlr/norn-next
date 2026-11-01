@@ -29,6 +29,8 @@ pub enum LoadingBoundary {
     /// outside `requeue`, so how `requeue` takes cannot change the count.
     RequeueCalled,
     RequeueStarted,
+    /// A take has read and committed its roots and not yet published them.
+    RequeueCommitted,
     Requeued,
     QueryEstablished,
     QueryBuilt,

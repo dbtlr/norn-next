@@ -4232,3 +4232,122 @@ fn a_writer_inside_every_take_never_outnumbers_the_requeue_calls() {
         "a writer inside and after every take",
     );
 }
+
+/// ADR 0048: a take publishes only what it read. A path renamed and recreated
+/// after Relations' closing take read it, before that take publishes, stays
+/// outstanding: Gets of both names and a Find wait for `Ready` instead of
+/// answering with the bytes the take read, while a Get the facts do not touch
+/// is served; and the store at `Ready` equals a from-scratch build.
+#[test]
+fn a_rename_after_a_takes_read_waits_for_ready() {
+    let fixture = Fixture::new("rename-after-take-read");
+    let probe = Probe::new([
+        LoadingBoundary::StepComplete(Step::Structure),
+        LoadingBoundary::RequeueStarted,
+        LoadingBoundary::RequeueCommitted,
+        LoadingBoundary::Published(Step::Relations),
+        LoadingBoundary::Reconciling,
+    ]);
+    let ops = fixture.ops(probe.clone());
+    let account = ops.account();
+    let host = fixture.host_over(ops, norn_host::READ_SETTLE_BOUND);
+    std::thread::scope(|scope| {
+        let _release = Release(&probe);
+        let _demand = host.demand(&name()).unwrap();
+        probe.wait(LoadingBoundary::StepComplete(Step::Structure));
+        // A fact pending for Relations' closing take to take.
+        fixture.add("first.md", "# Before take\n");
+        fact_recorded(&account, 0);
+        probe.release();
+        // Inside that take, before it reads: the bytes the take derives.
+        probe.wait(LoadingBoundary::RequeueStarted);
+        let before = account.read().build_facts_recorded;
+        fixture.add("first.md", "# During take\n");
+        fact_recorded(&account, before);
+        probe.release();
+        // Past the take's read and commit, before it publishes.
+        probe.wait(LoadingBoundary::RequeueCommitted);
+        let before = account.read().build_facts_recorded;
+        std::fs::rename(fixture.root.join("first.md"), fixture.root.join("moved.md")).unwrap();
+        norn_fs::watch::settle_prior_changes(fixture.scratch.root(), BUDGET.work()).unwrap();
+        fact_recorded(&account, before);
+        let before = account.read().build_facts_recorded;
+        fixture.add("first.md", "# Recreated\n[[moved]] #newtag\n");
+        fact_recorded(&account, before);
+        probe.release();
+        probe.wait(LoadingBoundary::Published(Step::Relations));
+        let start = host.read_evidence().settle_waits;
+        let first = spawn_get(scope, &host, get("/first"));
+        let moved = spawn_get(scope, &host, get("/moved"));
+        let all = spawn_find(scope, &host, find());
+        let early = first.recv_timeout(Duration::from_millis(300));
+        assert!(
+            early.is_err(),
+            "a Get of the recreated path answered early: {early:?}"
+        );
+        waits(&host, start + 3);
+        assert!(
+            moved.try_recv().is_err(),
+            "a Get of the renamed path answered early"
+        );
+        assert!(all.try_recv().is_err(), "a Find answered early");
+        assert!(host.get(&get("/doc02")).is_ok(), "an untouched Get waits");
+        probe.release();
+        probe.wait(LoadingBoundary::Reconciling);
+        assert!(first.try_recv().is_err());
+        assert!(moved.try_recv().is_err());
+        assert!(all.try_recv().is_err());
+        probe.release();
+        let first = first.recv_timeout(BUDGET.work()).unwrap().unwrap();
+        let moved = moved.recv_timeout(BUDGET.work()).unwrap().unwrap();
+        let first = serde_json::to_string(&first.answer.report).unwrap();
+        let moved = serde_json::to_string(&moved.answer.report).unwrap();
+        assert!(first.contains("Recreated"), "/first answered {first}");
+        assert!(moved.contains("During take"), "/moved answered {moved}");
+        assert!(all.recv_timeout(BUDGET.work()).unwrap().is_ok());
+    });
+    ready(&host);
+    drop(host);
+    project(&fixture.store_path(), &fixture.root).assert_equivalent(
+        &from_scratch(&fixture, "reference"),
+        "a rename and recreate after a take's read",
+    );
+}
+
+/// A take derives every page of the documents it requeues: five documents
+/// created before Relations' closing take, more than one page of the build's
+/// changeset size, are all derived by that take, and the store at `Ready`
+/// equals a from-scratch build.
+#[test]
+fn a_closing_take_derives_every_page_of_its_documents() {
+    let fixture = Fixture::new("closing-take-pages");
+    let probe = Probe::new([
+        LoadingBoundary::LinkHealthChunk,
+        LoadingBoundary::Published(Step::Relations),
+    ]);
+    let ops = fixture.ops(probe.clone());
+    let account = ops.account();
+    let host = fixture.host_over(ops, norn_host::READ_SETTLE_BOUND);
+    let _release = Release(&probe);
+    let _demand = host.demand(&name()).unwrap();
+    probe.wait(LoadingBoundary::LinkHealthChunk);
+    for n in 0..5 {
+        let before = account.read().build_facts_recorded;
+        fixture.add(&format!("new{n}.md"), format!("# New {n}\n[[first]]\n"));
+        fact_recorded(&account, before);
+    }
+    probe.release();
+    probe.wait(LoadingBoundary::Published(Step::Relations));
+    assert_eq!(
+        account.read().requeued_documents,
+        5,
+        "the closing take derived every created document"
+    );
+    probe.release();
+    ready(&host);
+    drop(host);
+    project(&fixture.store_path(), &fixture.root).assert_equivalent(
+        &from_scratch(&fixture, "reference"),
+        "five documents taken by the closing take",
+    );
+}
