@@ -24,8 +24,11 @@
 //! Every band below is the pinned toolchain's unoptimized build, peak resident
 //! set as the kernel accounted it to the generator process. Repeated local
 //! readings cover **linux-arm64** under docker and **macos-arm64** natively;
-//! the first `ubuntu-latest` **x86_64-glibc** run measured the `realistic`
-//! profile at 3.50–3.62 MiB with a 1.20 flatness ratio. The scheduled soak
+//! on `ubuntu-latest` **x86_64-glibc**, `full memory invariant` runs 41323116407,
+//! 41324737076 and 41329840687 at PR #423 head 5dd80988b read the gate peak
+//! at 3.77, 3.54 and 3.60 MiB, and the pair at 3.00 against 3.76 MiB (1.25),
+//! 2.80 against 3.54 (1.26), and 2.89 against 3.53 (1.21), respectively.
+//! The macOS readings below predate NORN-443. The scheduled soak
 //! profile's bands remain the two repeated local sets stated below.
 //!
 //! Two integration binaries compile this module — `memory.rs` for the per-PR
