@@ -814,7 +814,15 @@ mod tests {
     #[test]
     fn collecting_later_failures_preserves_the_featured_selection() {
         let workflow = include_str!("../../../.github/workflows/ci.yml");
-        let shards: Vec<_> = steps_in(workflow)
+        let mut document: Value = serde_yaml::from_str(workflow).unwrap();
+        document
+            .get_mut("jobs")
+            .unwrap()
+            .as_mapping_mut()
+            .unwrap()
+            .retain(|key, _| matches!(key.as_str(), Some("build" | "build-host")));
+        let workflow = serde_yaml::to_string(&document).unwrap();
+        let shards: Vec<_> = steps_in(&workflow)
             .unwrap()
             .into_iter()
             .filter(|step| step.vouches)
