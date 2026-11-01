@@ -11,10 +11,12 @@ pub(super) fn optimization_flag<'a>(args: impl IntoIterator<Item = &'a str>) -> 
         if arg == "-O" {
             level = Some("3");
         } else {
-            let option = if arg == "-C" {
+            let option = if matches!(arg, "-C" | "--codegen") {
                 args.next().unwrap_or("")
             } else {
-                arg.strip_prefix("-C").unwrap_or("")
+                arg.strip_prefix("-C")
+                    .or_else(|| arg.strip_prefix("--codegen="))
+                    .unwrap_or("")
             };
             if let Some(value) = option.strip_prefix("opt-level=") {
                 level = Some(value);
@@ -203,6 +205,8 @@ mod tests {
     fn optimization_spellings_are_refused_but_linker_flags_are_accepted() {
         for args in [
             vec!["-O"],
+            vec!["--codegen", "opt-level=3"],
+            vec!["--codegen=opt-level=3"],
             vec!["-C", "opt-level=0"],
             vec!["-Copt-level=s"],
             vec!["-C", "opt-level", "3"],
