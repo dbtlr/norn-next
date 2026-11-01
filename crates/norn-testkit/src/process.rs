@@ -31,10 +31,14 @@
 //!   in whichever suite happens to be running. The copy is written by a child
 //!   process, so no fork of the test process can carry a writer to it and
 //!   make its exec fail with `ETXTBSY`.
-//! - **The direct child's peak resident set is measured**, by reaping it through
+//! - **The child's own peak resident set is measured**, by reaping it through
 //!   `wait4` and reading the kernel's accounting rather than sampling. This
 //!   measurement includes descendants that the child waited on. It does not
-//!   include a grandchild that the child left running.
+//!   include a grandchild that the child left running. The child is started
+//!   and reaped by a measuring launcher — a fresh image of the binary that
+//!   starts the run — because on Linux a child spawned directly from a test
+//!   process inherits that process's peak as a floor under its own; the
+//!   `measured` module records the mechanism.
 //! - **Every run owns one process group.** The direct child leads it. The
 //!   harness sends `SIGKILL` to the complete group on every end, reaps the
 //!   leader, and returns an [`Outcome`] only after the group no longer exists.
@@ -80,6 +84,7 @@ use crate::scratch::Scratch;
 
 mod group;
 mod identity;
+mod measured;
 mod recovery;
 mod registry;
 mod signals;
@@ -308,34 +313,65 @@ impl<'a> Run<'a> {
     }
 
     /// Run to completion and report what happened.
+    ///
+    /// The program is started by the measuring launcher rather than by this
+    /// process, so the peak in the [`Outcome`] is the child's own and not a
+    /// floor carried over from this process; the `measured` module says why.
     #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // Harness scaffolding: the run's own output files.
     pub fn wait(self) -> io::Result<Outcome> {
         let serial = self.sandbox.next_run();
         let out_path = self.sandbox.tree.join(format!("run-{serial}.stdout"));
         let err_path = self.sandbox.tree.join(format!("run-{serial}.stderr"));
+        let report_path = self.sandbox.tree.join(format!("run-{serial}.usage"));
 
         // Output goes to files rather than pipes: a pipe nobody is reading
         // fills and stops the child, and the harness has to wait on the child
         // to measure it.
-        let mut command = Command::new(&self.program);
+        let mut command = Command::new(measured::image()?);
         command
+            .arg(&self.program)
             .args(&self.args)
             .current_dir(self.sandbox.work_dir())
             .env_clear()
             .envs(&self.environment)
+            .env(measured::REPORT_VARIABLE, &report_path)
             .stdin(Stdio::null())
             .stdout(Stdio::from(std::fs::File::create(&out_path)?))
             .stderr(Stdio::from(std::fs::File::create(&err_path)?));
 
         let ended = group::OwnedProcessGroup::spawn(&mut command)?.wait(self.deadline)?;
-        let status = decoded(ended.pid, ended.status)?;
+        let launcher = decoded(ended.pid, ended.status)?;
+        let (status, max_rss) = match measured::read_report(&report_path)? {
+            Some(measured::Report::NotStarted(errno)) => {
+                let error = io::Error::from_raw_os_error(errno);
+                return Err(io::Error::new(
+                    error.kind(),
+                    format!("starting {}: {error}", self.program.display()),
+                ));
+            }
+            Some(measured::Report::Ended { status, max_rss }) => {
+                (decoded(ended.pid, status)?, max_rss)
+            }
+            // The launcher was signalled before the child ended — the
+            // harness's own kill at the deadline, or a signal sent to the
+            // whole group — so the child has no reading to report.
+            None if matches!(launcher, RunStatus::Signaled(_)) => (launcher, 0),
+            None => {
+                let (stderr, _) = capture(&err_path, self.capture_limit)?;
+                return Err(io::Error::other(format!(
+                    "the measuring launcher for {} ended {launcher:?} without a report: {}",
+                    self.program.display(),
+                    String::from_utf8_lossy(&stderr).trim()
+                )));
+            }
+        };
         let status = match status {
             RunStatus::Signaled(libc::SIGKILL) if ended.timed_out => RunStatus::TimedOut {
                 after: self.deadline,
             },
             status => status,
         };
-        let max_rss = ended.usage.ru_maxrss.max(0) as u64;
+        let max_rss = max_rss.max(0) as u64;
         let peak_rss_bytes = if MAX_RSS_IN_BYTES {
             max_rss
         } else {
@@ -376,9 +412,18 @@ pub enum RunStatus {
 /// What a run did, and what it cost.
 pub struct Outcome {
     pub status: RunStatus,
-    /// The direct child's peak resident set, in bytes, as the kernel accounted
-    /// it: the spawned process and every descendant it waited on. For a run
-    /// that reports [`RunStatus::TimedOut`], this is the peak at cleanup.
+    /// The child's peak resident set, in bytes, as the kernel accounted it:
+    /// the program the run names and every descendant it waited on.
+    ///
+    /// The reading is the child's own. It is taken by the measuring launcher,
+    /// so it carries no floor from the process that started the run; the
+    /// floor it does carry is the launcher's freshly loaded image, a few
+    /// megabytes, which bounds how small a reading can be rather than how
+    /// large.
+    ///
+    /// It is zero when the run produced no reading of its own: a run that
+    /// reports [`RunStatus::TimedOut`], or one whose whole process group was
+    /// signalled before the child ended, ended the launcher with the child.
     pub peak_rss_bytes: u64,
     pub stdout: Vec<u8>,
     /// Whether the child wrote more to stdout than the capture limit, so what
@@ -529,6 +574,41 @@ mod tests {
             lines.next(),
             Some(sandbox.root().join("home").to_string_lossy().as_ref())
         );
+    }
+
+    /// The variable that makes the launcher a launcher stops there: a child
+    /// that saw it would be one more process on its way to becoming one.
+    #[test]
+    fn a_runs_child_does_not_see_the_launchers_report_variable() {
+        let sandbox = sandbox("launcher-variable");
+        let outcome = shell(
+            &sandbox,
+            &format!("echo \"${{{}:-absent}}\"", measured::REPORT_VARIABLE),
+        );
+        outcome.assert_success();
+        assert_eq!(outcome.stdout_text().trim(), "absent");
+    }
+
+    /// A program that cannot be started is an error from the wait, as it
+    /// was when the run spawned it directly, not a run that ended somehow.
+    #[test]
+    fn a_program_that_does_not_exist_is_a_not_found_error() {
+        let sandbox = sandbox("missing-program");
+        let error = Run::new(&sandbox, sandbox.root().join("no-such-program"))
+            .wait()
+            .err()
+            .expect("a run of a missing program");
+        assert_eq!(error.kind(), io::ErrorKind::NotFound, "{error}");
+    }
+
+    /// A signal sent to the whole group ends the launcher with the child, so
+    /// the run reports the signal and no reading of its own.
+    #[test]
+    fn a_run_whose_group_is_signalled_reports_the_signal_and_no_peak() {
+        let sandbox = sandbox("group-signal");
+        let outcome = shell(&sandbox, "kill -TERM 0; sleep 10");
+        assert_eq!(outcome.status, RunStatus::Signaled(libc::SIGTERM));
+        assert_eq!(outcome.peak_rss_bytes, 0);
     }
 
     /// The allowlist is the contract, so the environment is exactly it, `PATH`,
@@ -1061,11 +1141,13 @@ mod tests {
              and within reach of the {BOUND:?} this test holds"
         );
         // What the child wrote before it hung is a file, so the timeout hands
-        // it back, and the accounting is the kernel's own as of the kill.
+        // it back. Its peak is not: the measuring launcher that reaps the
+        // child was killed with it, so the run has no reading of its own, and
+        // a reading that was not the child's would be the harness's floor.
         assert_eq!(outcome.stdout_text(), "hang");
-        assert!(
-            outcome.peak_rss_bytes > 0,
-            "a killed run reported no peak resident set"
+        assert_eq!(
+            outcome.peak_rss_bytes, 0,
+            "a killed run reported a peak nobody measured"
         );
     }
 
@@ -1120,6 +1202,46 @@ mod tests {
         assert!(
             hungry.peak_rss_bytes > idle.peak_rss_bytes + 8 * 1024 * 1024,
             "an idle run reported {} bytes and a hungry one {}",
+            idle.peak_rss_bytes,
+            hungry.peak_rss_bytes
+        );
+    }
+
+    /// Resident memory this test process holds at its peak, larger than the
+    /// hungry child below ever needs.
+    const PARENT_BALLAST: usize = 256 * 1024 * 1024;
+
+    /// **A run's peak is its own, not the spawning process's.** The parent
+    /// here first reaches a resident peak well above anything either child
+    /// needs, and releases it, and only then spawns. A reading that carried
+    /// the parent's peak would put the idle child and the hungry one at the
+    /// same floor, and a memory gate comparing two children would compare
+    /// two copies of its own test process.
+    #[test]
+    fn a_runs_peak_is_its_own_after_the_spawning_process_peaked_higher() {
+        let ballast = vec![1_u8; PARENT_BALLAST];
+        std::hint::black_box(&ballast);
+        drop(ballast);
+
+        let sandbox = sandbox("inherited-peak");
+        let idle = shell(&sandbox, "exit 0");
+        idle.assert_success();
+        let hungry = shell(
+            &sandbox,
+            "big=$(head -c 64000000 /dev/zero | tr '\\0' 'a'); echo ${#big}",
+        );
+        hungry.assert_success();
+        assert_eq!(hungry.stdout_text().trim(), "64000000");
+
+        assert!(
+            idle.peak_rss_bytes < (PARENT_BALLAST / 4) as u64,
+            "an idle child reported {} bytes after its parent peaked above {PARENT_BALLAST}",
+            idle.peak_rss_bytes
+        );
+        assert!(
+            hungry.peak_rss_bytes > idle.peak_rss_bytes + 32 * 1024 * 1024,
+            "after a parent peak above {PARENT_BALLAST} bytes, an idle run reported {} \
+             bytes and a hungry one {}",
             idle.peak_rss_bytes,
             hungry.peak_rss_bytes
         );
