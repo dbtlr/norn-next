@@ -695,9 +695,9 @@ mod tests {
     #[test]
     fn the_word_table_is_the_tokenizers_for_every_code_point() {
         let probe = Probe::new();
-        // SQL now encodes each character with char(), rather than Rust's
-        // char::from_u32 followed by to_string(). Both encode the same Unicode
-        // scalar value as UTF-8: this sweep excludes surrogates and NUL.
+        // One statement probes every Unicode scalar value except NUL: SQLite's
+        // char() encodes each code point as the same UTF-8 a Rust `char` would,
+        // and the range excludes the surrogates, which are no `char` at all.
         let mut statement = probe
             .store
             .connection()
@@ -741,9 +741,13 @@ mod tests {
                 .take(8)
                 .map(|code| format!("U+{code:04X}"))
                 .collect();
+            let table: String = read
+                .iter()
+                .map(|(first, last)| format!("    ({first:#06X}, {last:#06X}),\n"))
+                .collect();
             format!(
                 "the tokenizer reads words at other code points than `WORD_STARTS` states; \
-                 first differing code points: {}",
+                 first differing code points: {}; the table it reads now is:\n{table}",
                 differences.join(", ")
             )
         });
