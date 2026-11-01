@@ -120,15 +120,11 @@ pub const MANIFEST_FILES: &[ManifestFile] = &[
     },
     ManifestFile {
         path: "crates/norn-testkit/src/build_provenance.rs",
-        why: "the compiler provenance and profile override discovery used by measurement guards",
+        why: "the runtime profile override discovery used by measurement guards",
     },
     ManifestFile {
-        path: "crates/norn-host/build.rs",
-        why: "the host measured executable's provenance carrier",
-    },
-    ManifestFile {
-        path: "crates/norn-fixtures/build.rs",
-        why: "the generator measured executable's provenance carrier",
+        path: "crates/norn-testkit/build.rs",
+        why: "the shared workspace optimization level used by measurement guards",
     },
     ManifestFile {
         path: "rust-toolchain.toml",
