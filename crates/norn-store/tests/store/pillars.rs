@@ -3995,7 +3995,13 @@ fn a_folded_prune_scope_holds_the_subjects_its_fold_reaches() {
     let mut store = scratch.open();
     let mut request = store.begin_request();
     let kinds = &[FindingKind::BodyBytesNotUtf8];
-    for at in ["One", "One/Gone.md", "one/deep/gone.md", "two/gone.md"] {
+    for at in [
+        "One",
+        "One/Gone.md",
+        "one/deep/gone.md",
+        "two/gone.md",
+        "Two/Gone.md",
+    ] {
         request
             .record_finding(&violation(at))
             .expect("recording a finding");
@@ -4027,6 +4033,27 @@ fn a_folded_prune_scope_holds_the_subjects_its_fold_reaches() {
             &norn_store::DirectoryPrefix::new("ONE").expect("a directory")
         )),
         ["one/deep/gone.md", "One/Gone.md"]
+    );
+    // Two subjects that fold together are two places, each its own group, in
+    // the bytewise tie-break's order — on one page as across two.
+    assert_eq!(
+        drained_subjects(norn_store::SubjectScope::Subtree(&path("two"))),
+        ["Two/Gone.md", "two/gone.md"]
+    );
+    assert_eq!(
+        request
+            .finding_subjects_without_rows_after(
+                norn_store::SubjectScope::Subtree(&path("two")),
+                kinds,
+                None,
+                16,
+                norn_store::StoredPathOrder::AsciiCaseInsensitive,
+            )
+            .expect("a page")
+            .iter()
+            .map(|subject| subject.as_str())
+            .collect::<Vec<&str>>(),
+        ["Two/Gone.md", "two/gone.md"]
     );
 }
 
