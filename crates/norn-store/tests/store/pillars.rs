@@ -1076,6 +1076,7 @@ fn barred_by(statement: ExplainedStatement<'_>) -> &'static str {
         ExplainedStatement::LinkHealthLinks
         | ExplainedStatement::LinkHealthClassLinks
         | ExplainedStatement::LinkHealthPathLinks
+        | ExplainedStatement::LinkHealthAnchoredLinks
         | ExplainedStatement::LinkHealthHeads
         | ExplainedStatement::LinkHealthTotals
         | ExplainedStatement::LinkHealthSuffixes
@@ -1845,6 +1846,7 @@ fn point_read_bar(statement: ExplainedStatement<'_>) -> Option<PointReadBar> {
         | ExplainedStatement::LinkHealthLinks
         | ExplainedStatement::LinkHealthClassLinks
         | ExplainedStatement::LinkHealthPathLinks
+        | ExplainedStatement::LinkHealthAnchoredLinks
         | ExplainedStatement::LinkHealthHeads
         | ExplainedStatement::LinkHealthTotals
         | ExplainedStatement::LinkHealthSuffixes

@@ -173,6 +173,9 @@ impl<'a> Request<'a> {
             ExplainedStatement::LinkHealthLinks => health::links_sql(key, Selected::Documents),
             ExplainedStatement::LinkHealthClassLinks => health::links_sql(key, Selected::Class),
             ExplainedStatement::LinkHealthPathLinks => health::links_sql(key, Selected::Path),
+            ExplainedStatement::LinkHealthAnchoredLinks => {
+                health::links_sql(key, Selected::Anchored)
+            }
             ExplainedStatement::LinkHealthHeads => health::heads_sql(key),
             ExplainedStatement::LinkHealthTotals => health::totals_sql(key),
             ExplainedStatement::LinkHealthSuffixes => explained_suffixes()?.0,
@@ -380,6 +383,16 @@ impl<'a> Request<'a> {
                     LINK_HEALTH_CHUNK,
                 )),
             ),
+            ExplainedStatement::LinkHealthAnchoredLinks => database.emitted_plan(
+                &sql,
+                params_from_iter(health::anchored_parameters(
+                    EXPLAINED_PAGE_CURSOR_LEAF,
+                    crate::anchor::AnchorKind::Reading,
+                    "explained heading",
+                    &explained_after(EXPLAINED_PAGE_CURSOR_LEAF),
+                    LINK_HEALTH_CHUNK,
+                )),
+            ),
             ExplainedStatement::LinkHealthJudgedDiscard => database.emitted_plan(
                 &sql,
                 params_from_iter(health::judged_discard_parameters(
@@ -523,6 +536,12 @@ pub enum ExplainedStatement<'a> {
     ConstructionFrontmatterTags,
     /// One selected document's stored structure input, by path and TEMP progress.
     ConstructionStructureDocument,
+    /// The links a judgment judges selected by one key and one anchor value:
+    /// a page of the anchored links held under exactly that key whose anchor
+    /// that value matches, beside every key each is held under — the anchor
+    /// arm of the re-decision [`Request::apply_increment`] runs for an
+    /// in-place rewrite that moved an anchor value.
+    LinkHealthAnchoredLinks,
     /// The last document id in a bounded full-text batch.
     FullTextLast,
     /// Index stored bodies by document-id cursor without reading them into Rust.
@@ -726,7 +745,7 @@ pub const POINT_READS: usize = 13;
 ///
 /// It is the length of [`ExplainedStatement::all`], which is the enumeration
 /// every other census is checked against.
-pub const STATEMENTS: usize = 56;
+pub const STATEMENTS: usize = 57;
 
 impl<'a> ExplainedStatement<'a> {
     /// Every statement this seam names, in slot order, each bound to a subject
@@ -815,6 +834,7 @@ impl<'a> ExplainedStatement<'a> {
             Self::ConstructionStructurePage,
             Self::ConstructionFrontmatterTags,
             Self::ConstructionStructureDocument,
+            Self::LinkHealthAnchoredLinks,
         ]
     }
 
@@ -883,6 +903,7 @@ impl<'a> ExplainedStatement<'a> {
             Self::ConstructionStructurePage => 53,
             Self::ConstructionFrontmatterTags => 54,
             Self::ConstructionStructureDocument => 55,
+            Self::LinkHealthAnchoredLinks => 56,
         };
         assert!(
             slot < STATEMENTS,
@@ -961,6 +982,7 @@ impl<'a> ExplainedStatement<'a> {
             | Self::LinkHealthLinks
             | Self::LinkHealthClassLinks
             | Self::LinkHealthPathLinks
+            | Self::LinkHealthAnchoredLinks
             | Self::LinkHealthHeads
             | Self::LinkHealthTotals
             | Self::LinkHealthSuffixes

@@ -66,8 +66,10 @@ pub enum Change {
     /// readings, heading slugs and block ids before it discards them, and
     /// where they equal the ones it writes it moves nothing a link in another
     /// document reads: the changeset re-decides only the links it holds
-    /// ([`IncrementOutcome::affected_classes`]). Every other upsert moves the
-    /// names at its path.
+    /// ([`IncrementOutcome::affected_classes`]). Where some differ, it
+    /// re-decides beside them only the anchored links that could name the
+    /// document and name a value that entered or left it. Every other upsert
+    /// moves the names at its path.
     ///
     /// **It clears the path's tombstone.** A path being derived is a path that
     /// is alive, so the death it may have outlived goes with the write, and
@@ -235,9 +237,10 @@ pub struct IncrementOutcome {
     /// holding the same heading readings, heading slugs and block ids. No
     /// link another document holds reads anything such a rewrite moved, so
     /// the class's standing findings are the ones a re-decision would file
-    /// again. A rewrite that moves an anchor value names its class, as a
-    /// names move does, until the index reaching an anchored link by the
-    /// value it names is built.
+    /// again. A rewrite that moves an anchor value names no class either: no
+    /// name moved, and the store re-decided the anchored links that could
+    /// name its document and name a moved value, which the anchored-link
+    /// index reaches by key and value.
     ///
     /// The subject axis carries no field beside it: the paths whose findings
     /// went are the changeset's own entries, which the caller processed one by

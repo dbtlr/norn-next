@@ -2375,12 +2375,32 @@ const ANCHOR_LINES: [&str; 6] = [
     "## Nope",
 ];
 
+/// Links naming the values [`ANCHOR_LINES`] holds, in each way a link is
+/// read: by suffix and by path, by text reading and by slug, by block id, and
+/// within the holding document — so a moved anchor value reaches some link
+/// in most scripts.
+const ANCHORED_LINKS: [&str; 12] = [
+    "[[t#Nope]]",
+    "[[t#nope]]",
+    "[[t#Setup]]",
+    "[[x/t#setup]]",
+    "[[t#^b2]]",
+    "[p](./t.md#Nope)",
+    "[p](../t.md#Intro)",
+    "[[vault://t#Setup]]",
+    "[[h#Intro]]",
+    "[[#Nope]]",
+    "[[#^b2]]",
+    "[[a#^blk]]",
+];
+
 /// The lines a body's rewritable rest is made of: [`LINES`] without its
-/// anchors, and plain prose.
+/// anchors, [`ANCHORED_LINKS`], and plain prose.
 fn rest_line(rng: &mut Rng) -> &'static str {
     loop {
-        let line = match rng.below(4) {
+        let line = match rng.below(5) {
             0 => rng.pick(&["Plain words.", "Other words.", "A third remark."]),
+            1 => rng.pick(&ANCHORED_LINKS),
             _ => rng.pick(&LINES),
         };
         if !ANCHOR_LINES.contains(&line) && !LINES[..5].contains(&line) {
@@ -2482,17 +2502,19 @@ fn mixed_spelling(order: StoredPathOrder, held: &MixedHeld, at: &str) -> Option<
 
 /// One changeset of exactly `size` entries over the paths `held` holds on a
 /// root under `order`, weighted toward rewrites in place: a live document's
-/// body rewritten with its anchors kept, or with one anchor moved; a fresh
-/// write; a death; a rename; a readable document left with its names alone;
-/// and a names-only row read again.
+/// body rewritten with its anchors kept, or as often with one anchor moved; a
+/// fresh write; a death; a rename; a readable document left with its names
+/// alone; and a names-only row read again. Beside the changes it hands back
+/// the path key of each readable document whose anchor it moved in place.
 fn mixed_step(
     rng: &mut Rng,
     order: StoredPathOrder,
     held: &mut MixedHeld,
     size: usize,
-) -> (Vec<Change>, String) {
+) -> (Vec<Change>, String, BTreeSet<String>) {
     let mut changes = Vec::new();
     let mut said = Vec::new();
+    let mut anchors_moved = BTreeSet::new();
     while changes.len() < size {
         let live: Vec<String> = held.keys().cloned().collect();
         let pick_live = |rng: &mut Rng| live[rng.below(live.len())].clone();
@@ -2508,13 +2530,17 @@ fn mixed_step(
             }
             3..=12 => {
                 let at = pick_live(rng);
+                let readable = held[&at].is_some();
                 let mut composed = held[&at].clone().unwrap_or_else(|| Composed::random(rng));
-                if roll <= 9 {
+                if roll <= 7 {
                     composed.rewrite_rest(rng);
                     said.push(format!("rewrite {at} in place {:?}", composed.body()));
                 } else {
                     composed.move_an_anchor(rng);
                     said.push(format!("move an anchor of {at} {:?}", composed.body()));
+                    if readable {
+                        anchors_moved.insert(path(&at).path_key().to_string());
+                    }
                 }
                 changes.push(Change::Upsert(derived(&at, &composed.body())));
                 held.insert(at, Some(composed));
@@ -2553,7 +2579,7 @@ fn mixed_step(
             }
         }
     }
-    (changes, said.join("; "))
+    (changes, said.join("; "), anchors_moved)
 }
 
 /// **Narrowing in-place rewrites leaves the findings a rebuild files**
@@ -2565,8 +2591,9 @@ fn mixed_step(
 /// is applied to one store, and after every changeset a store built from
 /// zero out of the same paths, in one changeset, equals it under the
 /// testkit's comparator, finding order included, on both roots. The script
-/// is held to reaching the narrowing: some changesets name fewer paths than
-/// they write.
+/// is held to reaching both narrowings: some changesets name fewer paths than
+/// they write, and some name no path at a document whose anchor they moved in
+/// place, which the anchored-link index then reached.
 ///
 /// `NORN_IN_PLACE_SEEDS` and `NORN_IN_PLACE_STEPS` lengthen the run.
 #[test]
@@ -2574,6 +2601,7 @@ fn narrowed_rewrites_equal_a_rebuild_at_every_changeset_size() {
     let seeds = script_bound("NORN_IN_PLACE_SEEDS", 3);
     let steps = script_bound("NORN_IN_PLACE_STEPS", 12);
     let mut narrowed: BTreeMap<usize, u64> = BTreeMap::new();
+    let mut anchors_narrowed: BTreeMap<usize, u64> = BTreeMap::new();
     let mut runs: BTreeMap<usize, u64> = BTreeMap::new();
     for size in [1, 2, 5, 16] {
         for order in [Sensitive, Folding] {
@@ -2605,7 +2633,8 @@ fn narrowed_rewrites_equal_a_rebuild_at_every_changeset_size() {
                             apply_under(&mut store, chunk.to_vec(), schema, &subject(&script));
                         }
                     } else {
-                        let (changes, said) = mixed_step(&mut rng, order, &mut held, size);
+                        let (changes, said, anchors_moved) =
+                            mixed_step(&mut rng, order, &mut held, size);
                         script.push(said);
                         let written: BTreeSet<String> = changes
                             .iter()
@@ -2641,6 +2670,9 @@ fn narrowed_rewrites_equal_a_rebuild_at_every_changeset_size() {
                         if named.len() < written.len() {
                             *narrowed.entry(size).or_insert(0) += 1;
                         }
+                        if anchors_moved.iter().any(|moved| !named.contains(moved)) {
+                            *anchors_narrowed.entry(size).or_insert(0) += 1;
+                        }
                     }
                     let subject = subject(&script);
                     let rebuilt_scratch = Scratch::new(&format!("{label}-rebuilt-{at}"));
@@ -2661,12 +2693,17 @@ fn narrowed_rewrites_equal_a_rebuild_at_every_changeset_size() {
         }
     }
     eprintln!(
-        "in-place script: seeds run per size and root {runs:?}, narrowed changesets {narrowed:?}"
+        "in-place script: seeds run per size and root {runs:?}, narrowed changesets \
+         {narrowed:?}, anchor moves narrowed {anchors_narrowed:?}"
     );
     for size in [1, 2, 5, 16] {
         assert!(
             narrowed.get(&size).is_some_and(|count| *count > 0),
             "changesets of {size} never reached an in-place rewrite: {narrowed:?}"
+        );
+        assert!(
+            anchors_narrowed.get(&size).is_some_and(|count| *count > 0),
+            "changesets of {size} never narrowed an anchor move: {anchors_narrowed:?}"
         );
     }
 }
