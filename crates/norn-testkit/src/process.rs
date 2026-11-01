@@ -727,11 +727,7 @@ mod tests {
                 .stdin(Stdio::null())
                 .output()
                 .expect("starting this binary as a launcher");
-            assert_eq!(
-                output.status.code(),
-                Some(127),
-                "{arguments:?}: {output:?}"
-            );
+            assert_eq!(output.status.code(), Some(127), "{arguments:?}: {output:?}");
             assert!(output.stdout.is_empty(), "{arguments:?}: the tests ran");
         }
     }
