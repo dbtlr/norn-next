@@ -24,6 +24,9 @@ pub enum LoadingBoundary {
     FullTextBatch,
     CanonicalComplete,
     Reconciling,
+    /// A requeue call that could take, before it takes: one per call, whether
+    /// or not anything is pending.
+    RequeueCalled,
     RequeueStarted,
     Requeued,
     QueryEstablished,

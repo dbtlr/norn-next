@@ -309,6 +309,8 @@ pub(super) fn requeue(
         return Ok(());
     }
     ops.evidence.count_requeue_call();
+    #[cfg(feature = "induced-failure")]
+    ops.loading_boundary(LoadingBoundary::RequeueCalled);
     let Some(taken) = subscription.take_build_roots() else {
         return Ok(());
     };

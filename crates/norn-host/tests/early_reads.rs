@@ -4039,28 +4039,78 @@ fn a_directory_relisted_during_step_four_rejudges_the_links_beneath_it() {
     );
 }
 
-/// Rewrites one note `per_take` times inside every take of the build, waiting
-/// for each rewrite to be accepted, so a new fact always lands mid-take. The
-/// first content page seeds the chain. It stops writing after `cap` takes, so
-/// a build that takes again within one requeue ends and fails its assertions
-/// instead of running forever.
+/// A build's requeue calls and takes, counted at their own boundaries rather
+/// than by the evidence counters `requeue` keeps, so a test can hold those
+/// counters to an independent count.
+#[derive(Default)]
+struct RequeueCount {
+    calls: std::sync::atomic::AtomicU64,
+    takes: std::sync::atomic::AtomicU64,
+}
+
+impl RequeueCount {
+    /// Count `boundary`, returning how many takes began before it.
+    fn count(&self, boundary: LoadingBoundary) -> u64 {
+        use std::sync::atomic::Ordering;
+        match boundary {
+            LoadingBoundary::RequeueCalled => {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                self.takes.load(Ordering::SeqCst)
+            }
+            LoadingBoundary::RequeueStarted => self.takes.fetch_add(1, Ordering::SeqCst),
+            _ => self.takes.load(Ordering::SeqCst),
+        }
+    }
+    fn read(&self) -> (u64, u64) {
+        use std::sync::atomic::Ordering;
+        (
+            self.calls.load(Ordering::SeqCst),
+            self.takes.load(Ordering::SeqCst),
+        )
+    }
+}
+
+impl LoadingProbe for RequeueCount {
+    fn at(&self, boundary: LoadingBoundary) {
+        self.count(boundary);
+    }
+}
+
+/// Keeps a fact pending at every requeue call of the build, and lands facts
+/// on both sides of each take's read:
+///
+/// - the first content page seeds `hot`, so the first call has a fact;
+/// - inside every take, before it reads, `hot` is rewritten `per_take` times,
+///   so a take that loops would never run out of facts;
+/// - after every take, past its read and commit, `hot` is rewritten once, a
+///   fact only the next call or the reconcile can carry into the store;
+/// - once Structure publishes, past every ordinary read of `hot`, it is
+///   rewritten once, so a take still runs after no ordinary pass would read
+///   `hot` again and the fact it leaves can only reach the store as a fact;
+/// - once Relations publishes, past its closing take, `late` is rewritten, a
+///   fact only the reconcile can carry.
+///
+/// Each rewrite waits for the watcher to accept it. Writing inside takes stops
+/// after `cap` takes, so a build that takes again within one requeue ends and
+/// fails its assertions instead of running forever.
 struct HotWriter {
-    path: PathBuf,
+    hot: PathBuf,
+    late: PathBuf,
     per_take: u64,
     cap: u64,
     account: std::sync::OnceLock<Arc<norn_host::JobEvidence>>,
     version: std::sync::atomic::AtomicU64,
-    takes: std::sync::atomic::AtomicU64,
+    count: RequeueCount,
 }
 
 impl HotWriter {
-    fn rewrite(&self) {
+    fn rewrite(&self, path: &Path, times: u64) {
         use std::sync::atomic::Ordering;
         let account = self.account.get().expect("the account is bound first");
-        for _ in 0..self.per_take {
+        for _ in 0..times {
             let before = account.read().build_facts_recorded;
             let version = self.version.fetch_add(1, Ordering::SeqCst) + 1;
-            std::fs::write(&self.path, format!("# Version {version}\n")).unwrap();
+            std::fs::write(path, format!("# Version {version}\n")).unwrap();
             fact_recorded(account, before);
         }
     }
@@ -4069,35 +4119,72 @@ impl HotWriter {
 impl LoadingProbe for HotWriter {
     fn at(&self, boundary: LoadingBoundary) {
         use std::sync::atomic::Ordering;
+        let began = self.count.count(boundary);
         match boundary {
             LoadingBoundary::CanonicalPage if self.version.load(Ordering::SeqCst) == 0 => {
-                self.rewrite()
+                self.rewrite(&self.hot, self.per_take)
             }
-            LoadingBoundary::RequeueStarted
-                if self.takes.fetch_add(1, Ordering::SeqCst) < self.cap =>
-            {
-                self.rewrite()
+            LoadingBoundary::RequeueStarted if began < self.cap => {
+                self.rewrite(&self.hot, self.per_take)
             }
+            LoadingBoundary::Requeued if began <= self.cap => self.rewrite(&self.hot, 1),
+            LoadingBoundary::Published(Step::Structure) => self.rewrite(&self.hot, 1),
+            LoadingBoundary::Published(Step::Relations) => self.rewrite(&self.late, 1),
             _ => {}
         }
     }
 }
 
-/// ADR 0048: each requeue takes once. A writer that lands a fact inside every
-/// take never lets the build's takes outnumber its requeue calls, and the
-/// store it reaches `Ready` with equals a from-scratch build of the last bytes.
+/// The requeue calls a from-zero build of `fixture`'s tree makes with nothing
+/// written during it, after checking the build's evidence counts each of them
+/// once and took nothing.
+fn quiet_requeue_calls(fixture: &Fixture) -> u64 {
+    let dirs = ConfigDirs::new(
+        fixture.scratch.join("quiet-config"),
+        fixture.scratch.join("quiet-data"),
+    )
+    .unwrap();
+    let count = Arc::new(RequeueCount::default());
+    let ops = ProductionEntryOps::new(dirs, ProductionPolicy::new(2, 2).unwrap())
+        .with_loading_probe(count.clone());
+    let account = ops.account();
+    {
+        let host = fixture.host_over(ops, norn_host::READ_SETTLE_BOUND);
+        let _demand = host.demand(&name()).unwrap();
+        ready(&host);
+    }
+    let spent = account.read();
+    let (calls, takes) = count.read();
+    assert!(calls > 0, "a quiet build makes requeue calls");
+    assert_eq!(takes, 0, "a quiet build takes nothing");
+    assert_eq!(
+        spent.requeue_calls, calls,
+        "the evidence counts each quiet requeue call once"
+    );
+    assert_eq!(spent.requeue_drains, 0, "the evidence counts no quiet take");
+    calls
+}
+
+/// ADR 0048: each requeue takes once. A build's requeue calls are bounded by
+/// the vault's shape, so a writer that keeps a fact pending at every call
+/// adds no call, and each call makes exactly the one take; and no fact is
+/// lost, whether it lands before a take's read, after it, or after Relations'
+/// closing take, so the store reaching `Ready` equals a from-scratch build of
+/// the last bytes.
 #[test]
 fn a_writer_inside_every_take_never_outnumbers_the_requeue_calls() {
     const PER_TAKE: u64 = 20;
     const CAP: u64 = 400;
     let fixture = Fixture::new("hot-writer");
+    let quiet = quiet_requeue_calls(&fixture);
     let writer = Arc::new(HotWriter {
-        path: fixture.root.join("doc00.md"),
+        hot: fixture.root.join("doc00.md"),
+        late: fixture.root.join("doc01.md"),
         per_take: PER_TAKE,
         cap: CAP,
         account: std::sync::OnceLock::new(),
         version: std::sync::atomic::AtomicU64::new(0),
-        takes: std::sync::atomic::AtomicU64::new(0),
+        count: RequeueCount::default(),
     });
     let ops = fixture.ops(writer.clone());
     let account = ops.account();
@@ -4108,14 +4195,31 @@ fn a_writer_inside_every_take_never_outnumbers_the_requeue_calls() {
         ready(&host);
     }
     let spent = account.read();
-    let calls = spent.requeue_calls;
-    let takes = spent.requeue_drains;
+    let (calls, takes) = writer.count.read();
     let facts = spent.build_facts_recorded;
-    eprintln!("requeue calls {calls}, takes {takes}, facts accepted {facts}");
-    assert!(takes > 0, "the writer's facts are taken");
+    eprintln!(
+        "quiet calls {quiet}; calls {calls} (evidence {}), takes {takes} (evidence {}), \
+         facts accepted {facts}",
+        spent.requeue_calls, spent.requeue_drains
+    );
+    // Pulling the hot document ahead takes it out of the ordinary passes, so
+    // they can page fewer chunks than the quiet build's, never more.
+    assert!(
+        calls <= quiet,
+        "the writer raised the requeue calls from {quiet} to {calls}"
+    );
+    assert_eq!(
+        spent.requeue_calls, calls,
+        "the evidence counts each requeue call once"
+    );
     assert!(
         takes <= calls,
         "{takes} takes outnumber {calls} requeue calls"
+    );
+    assert_eq!(takes, calls, "a call left the fact pending at it untaken");
+    assert_eq!(
+        spent.requeue_drains, takes,
+        "the evidence counts each completed take once"
     );
     assert!(
         facts >= 10 * calls,
@@ -4124,6 +4228,6 @@ fn a_writer_inside_every_take_never_outnumbers_the_requeue_calls() {
     drop(host);
     project(&fixture.store_path(), &fixture.root).assert_equivalent(
         &from_scratch(&fixture, "reference"),
-        "a writer inside every take",
+        "a writer inside and after every take",
     );
 }
