@@ -609,10 +609,11 @@ mod tests {
 
     /// Start a measuring launcher directly, as a run would, with `inherit`
     /// applied to the signal state it starts with, and return its report and
-    /// what the child wrote. A run cannot give the measuring launcher such
-    /// state: the standard library empties the signal mask of every child it
-    /// starts, and a disposition set in this process would reach every
-    /// concurrent test.
+    /// what the child wrote. A run passes its thread's signal mask through
+    /// (the standard library keeps the caller's mask, which
+    /// `a_run_passes_its_threads_blocked_signals_to_the_child` checks through
+    /// `Run`), but a disposition set in this process would reach every
+    /// concurrent test, so inherited state is applied to the launcher alone.
     #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // Harness scaffolding: starting this binary as a launcher.
     fn launch_inheriting(
         label: &str,

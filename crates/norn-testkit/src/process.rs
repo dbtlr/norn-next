@@ -685,6 +685,36 @@ mod tests {
     /// group — profiling and resource-limit signals, and the realtime range
     /// on Linux — are numbered here rather than derived, so a shield that
     /// misses one fails.
+    /// **A signal blocked on the calling thread stays blocked for the
+    /// child**, as it would with no measuring launcher between: the standard
+    /// library keeps the caller's mask, and the launcher passes on the mask it
+    /// inherited. The mask belongs to this test's thread alone, so setting it
+    /// here touches no concurrent test.
+    #[test]
+    fn a_run_passes_its_threads_blocked_signals_to_the_child() {
+        // SAFETY: the sets are this function's own; `pthread_sigmask` changes
+        // only the calling thread's mask, and the previous mask is restored.
+        let previous = unsafe {
+            let mut set: libc::sigset_t = std::mem::zeroed();
+            let mut previous: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut set);
+            libc::sigaddset(&mut set, libc::SIGUSR1);
+            assert_eq!(
+                libc::pthread_sigmask(libc::SIG_BLOCK, &set, &mut previous),
+                0
+            );
+            previous
+        };
+        let sandbox = sandbox("blocked-signal");
+        let outcome = shell(&sandbox, "kill -USR1 $$; echo survived; exit 3");
+        // SAFETY: restores the mask saved above on the same thread.
+        unsafe {
+            libc::pthread_sigmask(libc::SIG_SETMASK, &previous, std::ptr::null_mut());
+        }
+        assert_eq!(outcome.status, RunStatus::Exited(3));
+        assert_eq!(outcome.stdout_text(), "survived\n");
+    }
+
     #[test]
     fn a_child_that_ignores_an_uncommon_signal_to_its_group_reports_its_own_exit() {
         #[allow(unused_mut)] // Only Linux adds to it.
