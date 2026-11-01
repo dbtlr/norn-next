@@ -1351,7 +1351,7 @@ fn one_probe_write(label: &str, profile: &norn_fixtures::Profile) -> CounterSnap
 /// The stem the write-work bar's hub write targets. No generated document
 /// shares it, asserted below rather than assumed: a fixture whose word list
 /// ever drew it would put the hub in a populated class at one scale and not
-/// the other, which is a violation of the word list rather than of ADR 0044.
+/// the other, which is a violation of the word list rather than of ADR 0047.
 const HUB_STEM: &str = "hub-gate-hub";
 
 /// The document the write-work bar's hub write derives.
@@ -1361,7 +1361,7 @@ fn hub_path() -> String {
 
 /// How many documents already hold a bare-stem link to the hub, fixed at both
 /// per-PR scales: the claim under test is that a hub's write costs its own
-/// in-links, never the vault around it (ADR 0044's write-work bar).
+/// in-links, never the vault around it (ADR 0047's write-work bar).
 const HUB_IN_LINKS: usize = 20;
 
 /// Plant [`HUB_IN_LINKS`] documents linking the hub by its bare stem into
@@ -1451,7 +1451,7 @@ fn assert_the_hub_stem_is_the_neighborhoods_alone(store: &mut Store) {
     );
 }
 
-/// **The write-work bar over a hub's in-links (ADR 0044).** Writing the
+/// **The write-work bar over a hub's in-links (ADR 0047).** Writing the
 /// document a fixed number of other documents already link by its bare stem
 /// re-decides exactly their links, at both per-PR scales alike: a hub's write
 /// costs its own in-links, never the vault around it.

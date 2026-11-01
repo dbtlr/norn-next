@@ -58,6 +58,17 @@ pub enum Change {
     /// the triggers carry over the body. The row keeps its identity: it is
     /// updated rather than replaced.
     ///
+    /// **Written over a readable row it matches, it is an in-place rewrite.**
+    /// Where the row it replaces is a readable document — neither names alone
+    /// nor provisional — at the same path byte for byte, with the suffix and
+    /// path keys and the admitting count this write gives it, the names at
+    /// the path stay. The entry then reads the replaced document's heading
+    /// readings, heading slugs and block ids before it discards them, and
+    /// where they equal the ones it writes it moves nothing a link in another
+    /// document reads: the changeset re-decides only the links it holds
+    /// ([`IncrementOutcome::affected_classes`]). Every other upsert moves the
+    /// names at its path.
+    ///
     /// **It clears the path's tombstone.** A path being derived is a path that
     /// is alive, so the death it may have outlived goes with the write, and
     /// the two pillars stay disjoint over stored paths: one holds a document
@@ -210,24 +221,38 @@ pub struct IncrementOutcome {
     /// derives the same path counts the death here and leaves no tombstone,
     /// because the document insert's trigger clears it.
     pub tombstones_recorded: u64,
-    /// Every ambiguity class the changed paths are in, normalized by the
-    /// comparison key, which is the space every
-    /// finding in the store is filed in. This is the resolution axis of the
-    /// findings maintenance this changeset implies: the classes whose standing
+    /// Every ambiguity class of a path whose names the changeset moved,
+    /// normalized by the comparison key, which is the space every finding in
+    /// the store is filed in. This is the resolution axis of the findings
+    /// maintenance this changeset implies: the classes whose standing
     /// findings the store discarded and whose suffix-addressed links it
     /// re-decided the link health of, with every link one of those findings
     /// was about.
     ///
+    /// **Every entry names its class but an in-place rewrite that moves no
+    /// anchor value** ([ADR 0047]): a readable document written over a
+    /// readable row it matches in its path, kind, keys and admitting count,
+    /// holding the same heading readings, heading slugs and block ids. No
+    /// link another document holds reads anything such a rewrite moved, so
+    /// the class's standing findings are the ones a re-decision would file
+    /// again. A rewrite that moves an anchor value names its class, as a
+    /// names move does, until the index reaching an anchored link by the
+    /// value it names is built.
+    ///
     /// The subject axis carries no field beside it: the paths whose findings
     /// went are the changeset's own entries, which the caller processed one by
-    /// one to build it.
+    /// one to build it, an in-place rewrite included.
+    ///
+    /// [ADR 0047]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0047-a-write-re-decides-only-the-links-whose-inputs-it-moved.md
     pub affected_classes: BTreeSet<ClassKey>,
-    /// Every changed path as the path key it is, spelled in the same key space
-    /// as [`IncrementOutcome::affected_classes`]: each path the changeset
-    /// writes or kills, a rename's old path included, since a rename is a
-    /// death of the old path beside a write of the new. This is the path axis
-    /// of the findings maintenance this changeset implies — a finding keyed by
-    /// the exact path a path-addressed link spells is reached here and by no
+    /// Every path whose names the changeset moved, as the path key it is,
+    /// spelled in the same key space as
+    /// [`IncrementOutcome::affected_classes`]: each path the changeset writes
+    /// or kills, a rename's old path included, since a rename is a death of
+    /// the old path beside a write of the new, and an in-place rewrite that
+    /// moves no anchor value excepted, as there. This is the path axis of the
+    /// findings maintenance this changeset implies — a finding keyed by the
+    /// exact path a path-addressed link spells is reached here and by no
     /// class, and the store re-decided the link health of the path-addressed
     /// links spelling each.
     pub affected_paths: BTreeSet<PathKey>,
@@ -383,12 +408,12 @@ pub(crate) fn apply(
                             .admitting_segments(path.as_str()) as i64,
                         stamp,
                     ])
-                    .map(|_| ())
+                    .map(|_| Reach::Neighborhood)
                     .map_err(|error| error::sql("writing a vault file", error)),
                 Change::FileDeath { path } => statements
                     .delete_file
                     .execute(params![path.as_str()])
-                    .map(|_| ())
+                    .map(|_| Reach::Neighborhood)
                     .map_err(|error| error::sql("deleting a vault file", error)),
                 Change::Named { path } => {
                     unreadable(&mut statements, stamp, recorded_at, path,
@@ -400,7 +425,7 @@ pub(crate) fn apply(
                             .map_err(|e| error::sql("recording requeued document", e))?;
                     }
                     tally.documents_named += 1;
-                    Ok(())
+                    Ok(Reach::Neighborhood)
                 }
                 Change::Unreadable { path } => unreadable(
                     &mut statements,
@@ -411,7 +436,8 @@ pub(crate) fn apply(
                         .ambiguity_ignore()
                         .admitting_segments(path.as_str()),
                     &mut tally,
-                ),
+                )
+                .map(|()| Reach::Neighborhood),
                 Change::Upsert(facts) => {
                     refuse_typed_values_the_pin_does_not_derive(pinned.as_deref(), facts).and_then(
                         |()| {
@@ -443,7 +469,7 @@ pub(crate) fn apply(
                     let removed = statements.delete_document.query_row([path.as_str()], |_| Ok(())).optional()
                         .map_err(|e| error::sql("deleting a construction document", e))?;
                     tally.documents_deleted += u64::from(removed.is_some());
-                    Ok(())
+                    Ok(Reach::Neighborhood)
                 }
                 Change::Death { path, provenance } => record_death(
                     &mut statements,
@@ -452,14 +478,16 @@ pub(crate) fn apply(
                     path,
                     *provenance,
                     &mut tally,
-                ),
+                )
+                .map(|()| Reach::Neighborhood),
             }
-            .and_then(|()| {
+            .and_then(|reach| {
                 discard_the_subject(
                     &mut statements.discard_subject,
                     subject,
                     &mut tally.directories,
                 )
+                .map(|discarded| (reach, discarded))
             });
             if step.is_some()
                 && let Change::Unreadable { path } = &change
@@ -468,16 +496,23 @@ pub(crate) fn apply(
                         .map_err(|e| error::sql("ending requeue progress", e))?;
                 transaction.execute("DELETE FROM temp.construction_progress WHERE document = (SELECT id FROM documents WHERE path = ?1)", [path.as_str()]).map_err(|e| error::sql("ending broken progress", e))?;
             }
-            tally.findings_discarded +=
+            let (reach, discarded) =
                 applied.map_err(|problem| error::in_entry(index, subject, problem))?;
+            tally.findings_discarded += discarded;
             // A document joining a class and one leaving it both name it, and
-            // a path written and a path killed both name themselves.
-            tally
-                .affected_classes
-                .insert(subject.class_key_in(class_space));
-            tally
-                .affected_paths
-                .insert(subject.path_key_in(class_space));
+            // a path written and a path killed both name themselves. An
+            // in-place rewrite that moved no anchor value names neither: no
+            // link another document holds reads anything it moved, so the
+            // subject discard above and the re-decision of its own links are
+            // all it owes ([`Reach`]).
+            if reach == Reach::Neighborhood {
+                tally
+                    .affected_classes
+                    .insert(subject.class_key_in(class_space));
+                tally
+                    .affected_paths
+                    .insert(subject.path_key_in(class_space));
+            }
 
             // The point a changeset can be torn at, and the only one: between
             // two entries, with the transaction open and nothing committed. A
@@ -591,8 +626,8 @@ pub(crate) fn apply(
 /// What one changeset accumulated, to be reported and counted once it committed.
 ///
 /// It grows with the changeset and with nothing else: the counts are scalars,
-/// the class set holds one key per distinct stem among the changed paths, and
-/// the path set one key per distinct changed path.
+/// the class set holds one key per distinct stem among the paths whose names
+/// moved, and the path set one key per distinct such path.
 #[derive(Default)]
 struct Tally {
     documents: BTreeSet<DocumentPath>,
@@ -644,6 +679,12 @@ pub(crate) struct Statements<'t> {
     discard_vacated: CachedStatement<'t>,
     /// Whether a document row stands at a path.
     row_at: CachedStatement<'t>,
+    /// The row an upsert replaces, and the anchor values of the document it
+    /// held, which tell an in-place rewrite and what it moved.
+    replaced_row: CachedStatement<'t>,
+    replaced_readings: CachedStatement<'t>,
+    replaced_slugs: CachedStatement<'t>,
+    replaced_block_ids: CachedStatement<'t>,
 }
 
 /// The findings discards an increment prepares, each the text of a plan-seam
@@ -741,6 +782,22 @@ impl<'t> Statements<'t> {
                 "preparing a vacated place's findings discard",
             )?,
             row_at: registered(WriteStatement::RowAt, "preparing a row probe")?,
+            replaced_row: registered(
+                WriteStatement::ReplacedRow,
+                "preparing the read of a replaced row",
+            )?,
+            replaced_readings: registered(
+                WriteStatement::ReplacedReadings,
+                "preparing the read of replaced heading readings",
+            )?,
+            replaced_slugs: registered(
+                WriteStatement::ReplacedSlugs,
+                "preparing the read of replaced heading slugs",
+            )?,
+            replaced_block_ids: registered(
+                WriteStatement::ReplacedBlockIds,
+                "preparing the read of replaced block ids",
+            )?,
         })
     }
 }
@@ -768,7 +825,7 @@ fn upsert(
     facts: &DocumentFacts,
     admitting: usize,
     tally: &mut Tally,
-) -> Result<(), StoreError> {
+) -> Result<Reach, StoreError> {
     #[cfg(feature = "induced-failure")]
     let _timing = norn_db::profiling::span("store.upsert");
     refuse_a_document_that_does_not_add_up(facts)?;
@@ -777,10 +834,30 @@ fn upsert(
     let projection_hash = projection.as_deref().map(hash::sub_fingerprint);
 
     // Path is row identity: an edit at a standing path changes no stem.
-    let stood: bool = statements
-        .row_at
-        .query_row(params![facts.path.as_str()], |row| row.get(0))
-        .map_err(|error| error::sql("probing a document row", error))?;
+    let replaced = statements
+        .replaced_row
+        .query_row(params![facts.path.as_str()], |row| {
+            Ok(Replaced {
+                document: row.get(0)?,
+                suffix_key: row.get(1)?,
+                path_key: row.get(2)?,
+                admitting: row.get(3)?,
+                readable: row.get(4)?,
+            })
+        })
+        .optional()
+        .map_err(|error| error::sql("reading the row an upsert replaces", error))?;
+    let stood = replaced.is_some();
+    // The comparison reads the replaced document's own rows, before the
+    // discard below takes them, and only where its names stay.
+    let reach = match &replaced {
+        Some(row)
+            if row.in_place(facts, admitting) && anchors_kept(statements, row.document, facts)? =>
+        {
+            Reach::OwnLinks
+        }
+        _ => Reach::Neighborhood,
+    };
 
     let document: i64 = {
         // This includes parameter evaluation and SQLite's triggers, so it is
@@ -843,7 +920,100 @@ fn upsert(
     if projection.is_some() {
         tally.projections += 1;
     }
-    Ok(())
+    Ok(reach)
+}
+
+/// What a link another document holds may read of one entry's write, and so
+/// which links the changeset re-decides for it ([ADR 0047]).
+///
+/// [ADR 0047]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0047-a-write-re-decides-only-the-links-whose-inputs-it-moved.md
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Reach {
+    /// The entry moved the names at its path, or an anchor value of the
+    /// document there, or cannot tell: the changeset discards the findings
+    /// under its class and path and re-decides every link they reach.
+    ///
+    /// An anchor move reaches as far as a names move until the index that
+    /// reaches an anchored link by the anchor value it names is built.
+    Neighborhood,
+    /// An in-place rewrite that moved no anchor value: every link another
+    /// document holds reads the same inputs before and after it, so its
+    /// standing finding is the one a re-decision would file again. Only the
+    /// written document's own links are re-decided.
+    OwnLinks,
+}
+
+/// The row an upsert replaces, as [`WriteStatement::ReplacedRow`] reads it.
+struct Replaced {
+    document: i64,
+    suffix_key: String,
+    path_key: String,
+    admitting: i64,
+    /// Whether it holds a body and its content hash: neither a names-only
+    /// row nor a provisional one.
+    readable: bool,
+}
+
+impl Replaced {
+    /// Whether writing `facts` under `admitting` over this row is an
+    /// **in-place rewrite**: a readable document replacing a readable
+    /// document that matches it in every fact a row is matched by. The path
+    /// matched it byte for byte already, since the row was sought by it; a
+    /// respelling only a folding comparison calls the same path seeks no row
+    /// and is a birth.
+    fn in_place(&self, facts: &DocumentFacts, admitting: usize) -> bool {
+        self.readable
+            && self.suffix_key == facts.path.suffix_key()
+            && self.path_key == facts.path.path_key()
+            && usize::try_from(self.admitting).is_ok_and(|stored| stored == admitting)
+    }
+}
+
+/// Whether `facts` holds exactly the anchor values the stored `document`
+/// holds: the same heading readings, heading slugs and block ids, each read
+/// as a set.
+///
+/// The anchor predicate ([`crate::anchor`]) is an equality over these three
+/// sets alone, so while the body stays known no link's missing-anchor verdict
+/// can move unless one of them does. The cost is the written document's rows,
+/// one index seek each, and the comparison stops at the first set that
+/// differs.
+fn anchors_kept(
+    statements: &mut Statements<'_>,
+    document: i64,
+    facts: &DocumentFacts,
+) -> Result<bool, StoreError> {
+    let kept = |statement: &mut CachedStatement<'_>,
+                written: BTreeSet<&str>|
+     -> Result<bool, StoreError> {
+        let held: BTreeSet<String> = statement
+            .query_map(params![document], |row| row.get(0))
+            .and_then(|rows| rows.collect())
+            .map_err(|error| error::sql("reading the anchor values an upsert replaces", error))?;
+        // Both sets iterate in order, so equal sequences are equal sets.
+        Ok(held.iter().map(String::as_str).eq(written))
+    };
+    let headings = &facts.headings;
+    Ok(kept(
+        &mut statements.replaced_readings,
+        headings
+            .iter()
+            .map(|heading| heading.reading.as_str())
+            .collect(),
+    )? && kept(
+        &mut statements.replaced_slugs,
+        headings
+            .iter()
+            .map(|heading| heading.slug.as_str())
+            .collect(),
+    )? && kept(
+        &mut statements.replaced_block_ids,
+        facts
+            .blocks
+            .iter()
+            .map(|block| block.block_id.as_str())
+            .collect(),
+    )?)
 }
 
 /// The from-zero content and structure steps in NORN-467 append facts through

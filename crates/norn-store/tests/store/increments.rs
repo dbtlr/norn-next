@@ -1187,12 +1187,9 @@ fn a_changeset_discards_the_findings_in_the_classes_its_paths_are_in() {
 
     write_documents(
         &mut request,
-        &[
-            document("docs/norn/glossary.md", "hash-1", "a body\n"),
-            document("docs/index.md", "hash-1", "a body\n"),
-        ],
+        &[document("docs/index.md", "hash-1", "a body\n")],
     );
-    // In the class a changed `**/glossary.md` affects — including one about a
+    // In the class a `**/glossary.md` born affects — including one about a
     // longer suffix inside that class, which the same range reaches.
     request
         .record_finding(&path_names_no_document_in_class(
@@ -1230,7 +1227,7 @@ fn a_changeset_discards_the_findings_in_the_classes_its_paths_are_in() {
     let outcome = request
         .apply_increment(
             IncrementProvenance::Derived,
-            [upsert("docs/norn/glossary.md", "hash-2", "another body\n")],
+            [upsert("docs/norn/glossary.md", "hash-1", "a body\n")],
             &[],
             &norn_store::ContentModel::none(),
         )
@@ -1277,8 +1274,8 @@ fn a_changeset_discards_the_findings_in_the_classes_its_paths_are_in() {
     assert!(left[0].class_keys.is_empty());
 
     // It is reachable on the other axis, and only there. Re-deriving the
-    // document it is about discards it, from a changeset naming a class it is
-    // not in.
+    // document it is about discards it, from a changeset naming no class at
+    // all: a rewrite in place that moves no anchor value moves no name.
     let subject = request
         .apply_increment(
             IncrementProvenance::Derived,
@@ -1287,7 +1284,8 @@ fn a_changeset_discards_the_findings_in_the_classes_its_paths_are_in() {
             &norn_store::ContentModel::none(),
         )
         .expect("applying a changeset");
-    assert_eq!(subject.affected_classes, classes(&["index/"]));
+    assert_eq!(subject.affected_classes, classes(&[]));
+    assert_eq!(subject.affected_paths, path_keys(&[]));
     assert_eq!(
         subject.invalidated.findings_discarded, 1,
         "a re-derivation kept the findings read off the facts it replaced"
@@ -1366,9 +1364,10 @@ fn a_changeset_discards_the_findings_recorded_about_every_path_it_names() {
         )
         .expect("applying a changeset");
 
+    // The rewrite in place names no class, and the death names its own.
     assert_eq!(
         outcome.affected_classes,
-        classes(&["derived/", "die/"]),
+        classes(&["die/"]),
         "the changeset names the class the findings are in, so the axes are not told apart"
     );
     assert_eq!(
@@ -1455,7 +1454,7 @@ fn a_finding_stands_beside_the_document_row_at_its_subject() {
 }
 
 /// **A finding both axes reach leaves once.** The subject discard runs first and
-/// the class range then finds it gone, so a changeset that re-derives the
+/// the class range then finds it gone, so a changeset that derives the
 /// document a finding is written in *and* names the class that finding is about
 /// reports one departure rather than two.
 #[test]
@@ -1465,12 +1464,9 @@ fn a_finding_both_axes_reach_is_counted_once() {
     let mut request = store.begin_request();
 
     // The finding is written in `glossary.md` and about the class `glossary/`,
-    // which is the class `glossary.md` itself is in — so re-deriving that one
-    // document reaches it on both axes.
-    write_document(
-        &mut request,
-        &document("docs/glossary.md", "hash-1", "a body\n"),
-    );
+    // which is the class `glossary.md` itself is in — so deriving that one
+    // document where no row stood, which moves the class's names, reaches it
+    // on both axes.
     request
         .record_finding(&path_names_no_document_in_class(
             "docs/glossary.md",
@@ -1484,7 +1480,7 @@ fn a_finding_both_axes_reach_is_counted_once() {
     let outcome = request
         .apply_increment(
             IncrementProvenance::Derived,
-            [upsert("docs/glossary.md", "hash-2", "another body\n")],
+            [upsert("docs/glossary.md", "hash-1", "a body\n")],
             &[],
             &norn_store::ContentModel::none(),
         )
@@ -1952,10 +1948,11 @@ fn a_composed_changeset_recomputes_nothing_it_was_handed() {
     // The whole of what a Composed changeset moved: rows written, rows
     // discarded, deaths recorded, the projections that encoded supplied
     // frontmatter for storage, and the store's own link-health judgment —
-    // seven links re-decided over the two changesets, two keys resolved to
-    // the one document each names, and the four missing anchors filed, two of
-    // them replacing the two the second changeset discarded. Nothing handed
-    // over was re-derived.
+    // six links re-decided over the two changesets, the second re-deciding
+    // only the two its rewrite in place holds, two keys resolved to the one
+    // document each names, and three missing anchors filed, one of them
+    // replacing the one the second changeset discarded. Nothing handed over
+    // was re-derived.
     assert_eq!(
         composed.nonzero(),
         vec![
@@ -1963,14 +1960,14 @@ fn a_composed_changeset_recomputes_nothing_it_was_handed() {
             ("documents_upserted", 3),
             ("fact_rows_discarded", 12),
             ("field_rows_written", 12),
-            ("findings_discarded", 2),
-            ("findings_written", 4),
+            ("findings_discarded", 1),
+            ("findings_written", 3),
             ("frontmatter_projections", 3),
             ("heading_rows_written", 6),
             ("link_health_candidates_read", 2),
             ("link_health_keys_resolved", 2),
             ("link_rows_written", 6),
-            ("links_redecided", 7),
+            ("links_redecided", 6),
             ("tag_rows_written", 6),
             ("tombstones_recorded", 1),
             ("trigram_rows_written", 15),

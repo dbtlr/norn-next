@@ -63,7 +63,7 @@
 //! — name the store's own judgment, which no applier composes: the store
 //! judges the links a changeset reaches, or every link once after a from-zero
 //! build, against the documents it holds
-//! ([ADR 0044]) and files what it finds, identically under either mark. They
+//! ([ADR 0047]) and files what it finds, identically under either mark. They
 //! count its work, so a write-work bar reads how far a write's re-decision
 //! reached rather than a clock.
 //!
@@ -73,7 +73,7 @@
 //! re-deriving under neither, and it is what a suite asserts rather than a
 //! promise a reviewer has to take.
 //!
-//! [ADR 0044]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0044-a-from-zero-build-judges-link-health-once.md
+//! [ADR 0047]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0047-a-write-re-decides-only-the-links-whose-inputs-it-moved.md
 
 /// One derivation counter.
 ///

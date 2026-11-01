@@ -334,7 +334,7 @@ impl<'a> Request<'a> {
     /// # Link health is re-decided and recorded by the store itself
     ///
     /// **Link-health findings are the one family the store judges and
-    /// records** ([ADR 0044]): broken, ambiguous, missing an anchor and vault-scheme, each
+    /// records** ([ADR 0047]): broken, ambiguous, missing an anchor and vault-scheme, each
     /// about one link. After every entry is written, the subject and path
     /// discards have run and the findings handed over are recorded, the store
     /// re-decides every link the changeset reaches — each link a written
@@ -359,7 +359,7 @@ impl<'a> Request<'a> {
     /// from-zero deferral these discards still run, and link health waits for
     /// [`Request::judge_link_health_once`].
     ///
-    /// [ADR 0044]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0044-a-from-zero-build-judges-link-health-once.md
+    /// [ADR 0047]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0047-a-write-re-decides-only-the-links-whose-inputs-it-moved.md
     ///
     /// # Streaming, and what a changeset holds
     ///
@@ -1665,14 +1665,14 @@ impl<'a> Request<'a> {
     /// key once across them ([`KeySummaries`]). A class or path key spelled
     /// outside the store's key space is refused.
     ///
-    /// The re-decision [ADR 0044] rules into [`Request::apply_increment`]
+    /// The re-decision [ADR 0047] rules into [`Request::apply_increment`]
     /// runs this judgment over the links a changeset reaches — its written
     /// documents' links, and the links held under the classes and paths it
     /// changes — and files what it finds in the changeset's transaction. This
     /// door judges and files nothing; a class or a path key is read here a
     /// chunk at a time, as the re-decision reads it.
     ///
-    /// [ADR 0044]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0044-a-from-zero-build-judges-link-health-once.md
+    /// [ADR 0047]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0047-a-write-re-decides-only-the-links-whose-inputs-it-moved.md
     pub fn judge_selected_links(
         &self,
         selection: LinkSelection<'_>,

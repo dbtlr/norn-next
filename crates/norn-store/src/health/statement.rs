@@ -460,9 +460,10 @@ pub(crate) fn discard_sql() -> String {
 /// it until the heal that follows the pin derives it again, as it does
 /// every row the old declaration judged. A schema reload closes the entry's
 /// reader for its length, so no read answers in that window; a re-decision
-/// inside the heal's own changesets may read an old count, and a class is
-/// re-decided by every changeset that writes one of its members, the last of
-/// them after every member is derived under the new set.
+/// inside the heal's own changesets may read an old count, and a row whose
+/// count the new set moves is no in-place rewrite, so the changeset writing
+/// it re-decides its class, the last of them after every member is derived
+/// under the new set; a member whose count stands moved nothing a link reads.
 ///
 /// The rows come back in no stated order: the judgment merges and cuts each
 /// key's head, then merges a link's heads, by [`resolve::ladder_cmp`], the order

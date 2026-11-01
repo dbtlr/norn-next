@@ -1,5 +1,6 @@
 ---
-status: accepted
+status: superseded
+superseded-by: 0047-a-write-re-decides-only-the-links-whose-inputs-it-moved.md
 date: 2026-10-26
 ---
 

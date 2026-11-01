@@ -1810,6 +1810,731 @@ fn a_mass_delete_no_link_reaches_costs_a_constant_per_key() {
     );
 }
 
+// ---- an in-place rewrite ----
+
+/// The hub the in-place cases rewrite: two headings, a block, and two links
+/// of its own — one to a document that stands, one to nothing.
+const HUB: &str = "# Intro\n\n## Intro Two\n\nA paragraph. ^blk\n\n[[own]]\n\n[[nowhere]]\n";
+
+/// [`HUB`] with its first heading, its second and its block written as
+/// given, and `added` between them.
+fn hub_body(intro: &str, two: &str, added: &str, block: &str) -> String {
+    format!("{intro}\n\n{added}{two}\n\nA paragraph. {block}\n\n[[own]]\n\n[[nowhere]]\n")
+}
+
+/// The links [`HUB`] holds.
+const HUB_OWN_LINKS: u64 = 2;
+
+/// What each holder `h/NNN.md` links the hub by: by its stem, with a heading
+/// it lacks, with a heading and the block it holds, by its path, bare and
+/// with a heading it lacks, and by its stem with the second heading's slug.
+/// The path link with the heading it lacks files a missing anchor keyed by
+/// the path `hub.md` and, through its candidate's name `hub`, under the class
+/// `hub/`, which no key of the link reaches.
+const IN_LINKS: &str = "[[hub]]\n\n[[hub#Nope]]\n\n[[hub#Intro]]\n\n[[hub#^blk]]\n\n\
+                        [p](../hub.md)\n\n[q](../hub.md#Nope)\n\n[[hub#intro-two]]\n";
+
+/// The links [`IN_LINKS`] holds.
+const IN_LINKS_PER_HOLDER: u64 = 7;
+
+/// A vault under `order` holding `hub.md` as [`HUB`], `own.md`, and
+/// `holders` documents `h/NNN.md` each holding [`IN_LINKS`], beside the
+/// documents it holds.
+fn hub_vault(
+    label: &str,
+    order: StoredPathOrder,
+    holders: usize,
+) -> (Vault, BTreeMap<String, String>) {
+    let mut vault = Vault::new(label, order);
+    let mut held: BTreeMap<String, String> = BTreeMap::from([
+        ("hub.md".to_string(), HUB.to_string()),
+        ("own.md".to_string(), "own\n".to_string()),
+    ]);
+    held.extend((0..holders).map(|at| (format!("h/{at:03}.md"), IN_LINKS.to_string())));
+    vault.apply(
+        held.iter()
+            .map(|(at, body)| Change::Upsert(derived(at, body)))
+            .collect::<Vec<_>>(),
+    );
+    (vault, held)
+}
+
+/// Every finding `store` holds at a path other than `except`, as the
+/// testkit's comparator reads them.
+fn findings_beside(
+    store: &mut Store,
+    except: &str,
+) -> Vec<norn_testkit::equivalence::ProjectedFinding> {
+    StoreProjection::read(store)
+        .expect("a projection")
+        .findings()
+        .iter()
+        .filter(|finding| finding.path != except)
+        .cloned()
+        .collect()
+}
+
+/// Apply `changes` to `vault` as one changeset, and hand back what it
+/// derived and the steps its re-decision took.
+fn measured(vault: &mut Vault, changes: Vec<Change>) -> (DerivationCounters, u64) {
+    let mut request = vault.store.begin_request();
+    request
+        .apply_increment(IncrementProvenance::Derived, changes, &[], &declared())
+        .unwrap_or_else(|refusal| panic!("{:?}: a changeset: {refusal}", vault.order));
+    let steps = request.read_steps();
+    (request.finish(), steps)
+}
+
+/// **An in-place rewrite that moves no anchor value re-decides only its own
+/// links** (ADR 0047). `hub.md` is linked by every holder six ways — by its
+/// stem and by its path, with anchors it holds and lacks, one of them a path
+/// link whose missing anchor is filed under the class `hub/` through its
+/// candidate's name. Rewriting its body with its heading and block kept, and
+/// its own links changed, re-decides exactly its own three links, discards
+/// only the finding standing at its own path, and leaves every holder's
+/// findings as they stood — which are the findings a rebuild files. The
+/// write's work is the same beside twenty holders as beside two hundred.
+#[test]
+fn an_in_place_rewrite_that_moves_no_anchor_redecides_only_its_own_links() {
+    for order in [Sensitive, Folding] {
+        let mut steps = BTreeMap::new();
+        for holders in [20, 200] {
+            let label = format!("redecide-in-place-{order:?}-{holders}");
+            let (mut vault, mut held) = hub_vault(&label, order, holders);
+            let before = findings_beside(&mut vault.store, "hub.md");
+            assert!(
+                before.iter().any(|finding| {
+                    finding.path == "h/000.md"
+                        && finding.kind == FindingKind::MissingAnchor.as_str()
+                        && finding.path_keys.contains("hub.md")
+                        && finding.class_keys.contains("hub/")
+                }),
+                "{order:?}: no holder's path link carries a finding under its candidate's class: \
+                 {before:#?}"
+            );
+            assert_eq!(vault.findings("hub.md"), [broken(1)], "{order:?}");
+
+            let rewritten = "# Intro\n\nA line before the second heading.\n\n## Intro Two\n\n\
+                             The paragraph, reworded. ^blk\n\n[[own]]\n\n[[nowhere]]\n\n\
+                             [[elsewhere]]\n";
+            held.insert("hub.md".to_string(), rewritten.to_string());
+            let (counters, taken) = measured(
+                &mut vault,
+                vec![Change::Upsert(derived("hub.md", rewritten))],
+            );
+            let at = format!("{order:?} beside {holders} holders");
+            assert_eq!(counted(&counters, "links_redecided"), 3, "{at}");
+            assert_eq!(counted(&counters, "findings_discarded"), 1, "{at}");
+            assert_eq!(counted(&counters, "findings_written"), 2, "{at}");
+            assert_eq!(
+                findings_beside(&mut vault.store, "hub.md"),
+                before,
+                "{at}: a holder's findings moved"
+            );
+            assert_eq!(vault.findings("hub.md"), [broken(1), broken(2)], "{at}");
+            assert_rebuilds(&mut vault.store, order, &held, &at);
+            steps.insert(holders, taken);
+        }
+        assert_eq!(
+            steps[&20], steps[&200],
+            "{order:?}: ten times the holders moved an in-place rewrite's work: {steps:?}"
+        );
+    }
+}
+
+/// **An in-place rewrite that moves an anchor value still reaches every link
+/// to the document** (ADR 0047): until the anchored-link index is built, it
+/// re-decides every link its class and path reach, beside its own. Each
+/// rewrite here moves one value — a heading renamed, a heading added, a
+/// heading's reading moved where its slug stays, a slug moved where its
+/// reading stays, a block id renamed — and the next restores it, so each
+/// missing anchor it moves is filed and ended once each way, each time at the
+/// link's one place, and the store equals a rebuild after every step. A
+/// heading respelled only in case moves neither its reading nor its slug, so
+/// it is an in-place rewrite that re-decides its own links alone.
+#[test]
+fn an_in_place_rewrite_that_moves_an_anchor_reaches_every_link_to_it() {
+    const HOLDERS: usize = 20;
+    let reach = HUB_OWN_LINKS + IN_LINKS_PER_HOLDER * HOLDERS as u64;
+    // The ordinals of the holder's links missing their anchor: the two naming
+    // `Nope` unless `nope`, and each other anchored link named.
+    let holder_with = |nope: bool, missing: &[u64]| {
+        let mut ordinals: Vec<u64> = missing.to_vec();
+        if !nope {
+            ordinals.extend([1, 5]);
+        }
+        ordinals.sort();
+        ordinals
+            .into_iter()
+            .map(|ordinal| missing_anchor(ordinal, "hub.md"))
+            .collect::<Vec<Filed>>()
+    };
+    let standing = holder_with(false, &[]);
+    let hub = |intro: &str, two: &str, added: &str, block: &str| hub_body(intro, two, added, block);
+    let script: [(&str, String, u64, Vec<Filed>); 11] = [
+        (
+            "the heading renamed",
+            hub("# Other", "## Intro Two", "", "^blk"),
+            reach,
+            holder_with(false, &[2]),
+        ),
+        (
+            "the heading restored",
+            HUB.to_string(),
+            reach,
+            standing.clone(),
+        ),
+        (
+            "a heading added",
+            hub("# Intro", "## Intro Two", "## Nope\n\n", "^blk"),
+            reach,
+            holder_with(true, &[]),
+        ),
+        (
+            "the heading removed",
+            HUB.to_string(),
+            reach,
+            standing.clone(),
+        ),
+        (
+            "a reading moved where the slug stays",
+            hub("# Intro!", "## Intro Two", "", "^blk"),
+            reach,
+            holder_with(false, &[2]),
+        ),
+        (
+            "the reading restored",
+            HUB.to_string(),
+            reach,
+            standing.clone(),
+        ),
+        (
+            "a slug moved where the reading stays",
+            hub("# Intro", "## Intro  Two", "", "^blk"),
+            reach,
+            holder_with(false, &[6]),
+        ),
+        (
+            "the slug restored",
+            HUB.to_string(),
+            reach,
+            standing.clone(),
+        ),
+        (
+            "the block renamed",
+            hub("# Intro", "## Intro Two", "", "^b2"),
+            reach,
+            holder_with(false, &[3]),
+        ),
+        (
+            "the block restored",
+            HUB.to_string(),
+            reach,
+            standing.clone(),
+        ),
+        (
+            "a heading respelled only in case",
+            hub("# INTRO", "## intro two", "", "^blk"),
+            HUB_OWN_LINKS,
+            standing.clone(),
+        ),
+    ];
+    for order in [Sensitive, Folding] {
+        let label = format!("redecide-in-place-anchor-{order:?}");
+        let (mut vault, mut held) = hub_vault(&label, order, HOLDERS);
+        assert_eq!(vault.findings("h/000.md"), standing, "{order:?}");
+        for (said, body, redecided, expected) in &script {
+            let at = format!("{order:?}: {said}");
+            held.insert("hub.md".to_string(), body.clone());
+            let (counters, _) = measured(&mut vault, vec![Change::Upsert(derived("hub.md", body))]);
+            assert_eq!(counted(&counters, "links_redecided"), *redecided, "{at}");
+            for holder in ["h/000.md", "h/019.md"] {
+                assert_eq!(&vault.findings(holder), expected, "{at}: {holder}");
+            }
+            assert_rebuilds(&mut vault.store, order, &held, &at);
+        }
+    }
+}
+
+/// **A write that is not an in-place rewrite moves its names and reaches
+/// every link to them** (ADR 0047): a birth, a death, a rename, a respelling
+/// only a folding comparison calls the same path, a readable document
+/// becoming names alone and a names-only row becoming readable — with the
+/// same anchors on both sides, and with none, where only whether the body is
+/// known moved. Each re-decides every link the hub's class and path reach,
+/// and the store equals a rebuild after every step.
+#[test]
+fn a_write_that_is_not_in_place_reaches_every_link_to_its_names() {
+    const HOLDERS: u64 = 20;
+    let in_links = IN_LINKS_PER_HOLDER * HOLDERS;
+    let in_suffix = (IN_LINKS_PER_HOLDER - 1) * HOLDERS;
+    for order in [Sensitive, Folding] {
+        let label = format!("redecide-not-in-place-{order:?}");
+        let (mut vault, mut held) = hub_vault(&label, order, HOLDERS as usize);
+        let names_alone = || {
+            vec![Change::Unreadable {
+                path: path("hub.md"),
+            }]
+        };
+        let script: [(&str, Vec<Change>, u64, usize); 10] = [
+            ("the hub's names alone", names_alone(), in_links, 0),
+            (
+                "the hub readable again",
+                upserts(&[("hub.md", HUB)]),
+                in_links + HUB_OWN_LINKS,
+                2,
+            ),
+            ("the hub's names alone again", names_alone(), in_links, 0),
+            (
+                "the hub readable with no anchor",
+                upserts(&[("hub.md", "")]),
+                in_links,
+                5,
+            ),
+            (
+                "the hub as it was",
+                upserts(&[("hub.md", HUB)]),
+                in_links + HUB_OWN_LINKS,
+                2,
+            ),
+            (
+                "the hub respelled by case",
+                vec![death("hub.md"), Change::Upsert(derived("Hub.md", HUB))],
+                in_links + HUB_OWN_LINKS,
+                2,
+            ),
+            (
+                "the hub respelled back",
+                vec![Change::Upsert(derived("hub.md", HUB)), death("Hub.md")],
+                in_links + HUB_OWN_LINKS,
+                2,
+            ),
+            // A birth elsewhere in the class reaches the holders' suffix links
+            // and the path link whose finding names its candidate in the class,
+            // and no other path link.
+            (
+                "a second hub born",
+                upserts(&[("x/hub.md", "")]),
+                in_suffix,
+                2,
+            ),
+            ("the second hub dead", vec![death("x/hub.md")], in_suffix, 2),
+            // Renamed out of its path, the hub breaks both path links, and its
+            // stem still names it.
+            (
+                "the hub renamed",
+                vec![death("hub.md"), Change::Upsert(derived("y/hub.md", HUB))],
+                in_links + HUB_OWN_LINKS,
+                3,
+            ),
+        ];
+        let mut readable = true;
+        for (said, changes, reach, filed) in script {
+            let at = format!("{order:?}: {said}");
+            for change in &changes {
+                match change {
+                    Change::Upsert(facts) => {
+                        readable = true;
+                        held.insert(facts.path.as_str().to_string(), facts.body.clone());
+                    }
+                    Change::Death { path, .. } => {
+                        held.remove(path.as_str());
+                    }
+                    Change::Unreadable { .. } => readable = false,
+                    other => unreachable!("{other:?}"),
+                }
+            }
+            let (counters, _) = measured(&mut vault, changes);
+            assert_eq!(counted(&counters, "links_redecided"), reach, "{at}");
+            assert_eq!(vault.findings("h/000.md").len(), filed, "{at}");
+            // A names-only row is written by its own entry, which a rebuild
+            // of readable documents does not carry; the script under
+            // `narrowed_rewrites_equal_a_rebuild_at_every_changeset_size` does.
+            if readable {
+                assert_rebuilds(&mut vault.store, order, &held, &at);
+            }
+        }
+    }
+}
+
+/// **A row whose admitting count a re-pin moves is not rewritten in place**
+/// (ADR 0047). `[[hub]]` names `a/hub.md` alone while `archive/**` keeps
+/// `archive/hub.md` out of the class, and both alone once a schema declaring
+/// no glob is pinned. The heal after the pin writes the holder first, which
+/// judges its link against the count the old glob left on `archive/hub.md`,
+/// and `a/hub.md`, whose count stays, in place; writing `archive/hub.md` moves
+/// its count, so it reaches the holder's link, which is ambiguous, as a
+/// rebuild under the new schema files it. Pinning the glob back converges the
+/// same way.
+#[test]
+fn a_row_whose_admitting_count_moved_reaches_every_link_to_it() {
+    for order in [Sensitive, Folding] {
+        let label = format!("redecide-admitting-{order:?}");
+        let scratch = Scratch::new(&label);
+        let mut store = scratch.open_under(order);
+        pin_schema(&mut store, 0);
+        let held: BTreeMap<String, String> = BTreeMap::from([
+            ("holder.md".to_string(), "[[hub]]\n".to_string()),
+            ("a/hub.md".to_string(), "a\n".to_string()),
+            ("archive/hub.md".to_string(), "archived\n".to_string()),
+        ]);
+        apply_under(
+            &mut store,
+            held.iter()
+                .map(|(at, body)| Change::Upsert(derived(at, body)))
+                .collect(),
+            0,
+            &label,
+        );
+        assert_eq!(filed(&mut store, "holder.md"), [], "{order:?}");
+        for (schema, after) in [
+            (2, vec![ambiguous(0, &["a/hub.md", "archive/hub.md"], 2)]),
+            (0, Vec::new()),
+        ] {
+            let at = format!("{order:?} under {}", SCHEMAS[schema].0);
+            pin_schema(&mut store, schema);
+            for (written, reach) in [("holder.md", 1), ("a/hub.md", 0), ("archive/hub.md", 1)] {
+                let mut request = store.begin_request();
+                request
+                    .apply_increment(
+                        IncrementProvenance::Derived,
+                        [Change::Upsert(derived(written, &held[written]))],
+                        &[],
+                        &declared_by(schema),
+                    )
+                    .unwrap_or_else(|refusal| panic!("{at}: {refusal}"));
+                assert_eq!(
+                    counted(&request.finish(), "links_redecided"),
+                    reach,
+                    "{at}: writing {written}"
+                );
+            }
+            assert_eq!(filed(&mut store, "holder.md"), after, "{at}");
+            let rebuilt_scratch = Scratch::new(&format!("{label}-rebuilt-{schema}"));
+            let mut rebuilt = rebuilt_scratch.open_under(order);
+            pin_schema(&mut rebuilt, schema);
+            apply_under(
+                &mut rebuilt,
+                held.iter()
+                    .map(|(at, body)| Change::Upsert(derived(at, body)))
+                    .collect(),
+                schema,
+                &at,
+            );
+            assert_same(&mut store, &mut rebuilt, &at);
+        }
+    }
+}
+
+// ---- incremental equals rebuild over in-place rewrites ----
+
+/// The lines a document's anchors are made of in [`mixed_step`]: headings,
+/// one a case twin of another, and paragraphs carrying block ids.
+const ANCHOR_LINES: [&str; 6] = [
+    "# Intro",
+    "## Setup",
+    "# intro",
+    "A paragraph. ^blk",
+    "An item. ^b2",
+    "## Nope",
+];
+
+/// The lines a body's rewritable rest is made of: [`LINES`] without its
+/// anchors, and plain prose.
+fn rest_line(rng: &mut Rng) -> &'static str {
+    loop {
+        let line = match rng.below(4) {
+            0 => rng.pick(&["Plain words.", "Other words.", "A third remark."]),
+            _ => rng.pick(&LINES),
+        };
+        if !ANCHOR_LINES.contains(&line) && !LINES[..5].contains(&line) {
+            return line;
+        }
+    }
+}
+
+/// One document as [`mixed_step`] holds it: its anchor lines in order, and
+/// the rest of its lines, each placed after the anchor line it follows.
+#[derive(Clone, Debug)]
+struct Composed {
+    anchors: Vec<&'static str>,
+    rest: Vec<(usize, &'static str)>,
+}
+
+impl Composed {
+    fn random(rng: &mut Rng) -> Self {
+        let anchors: Vec<&'static str> =
+            (0..rng.below(4)).map(|_| rng.pick(&ANCHOR_LINES)).collect();
+        let mut composed = Composed {
+            anchors,
+            rest: Vec::new(),
+        };
+        composed.rewrite_rest(rng);
+        composed
+    }
+
+    /// Its rest drawn again, its anchor lines kept in order: a rewrite in
+    /// place that moves no anchor value.
+    fn rewrite_rest(&mut self, rng: &mut Rng) {
+        let mut rest: Vec<(usize, &'static str)> = (0..rng.below(6))
+            .map(|_| (rng.below(self.anchors.len() + 1), rest_line(rng)))
+            .collect();
+        rest.sort_by_key(|(after, _)| *after);
+        self.rest = rest;
+    }
+
+    /// One anchor line added, removed or replaced, its rest kept.
+    fn move_an_anchor(&mut self, rng: &mut Rng) {
+        match (rng.below(3), self.anchors.is_empty()) {
+            (0, _) | (_, true) => {
+                let at = rng.below(self.anchors.len() + 1);
+                self.anchors.insert(at, rng.pick(&ANCHOR_LINES));
+            }
+            (1, false) => {
+                self.anchors.remove(rng.below(self.anchors.len()));
+            }
+            _ => {
+                let at = rng.below(self.anchors.len());
+                self.anchors[at] = rng.pick(&ANCHOR_LINES);
+            }
+        }
+        let last = self.anchors.len();
+        for (after, _) in &mut self.rest {
+            *after = (*after).min(last);
+        }
+    }
+
+    fn body(&self) -> String {
+        let mut body = String::new();
+        let mut rest = self.rest.iter().peekable();
+        for at in 0..=self.anchors.len() {
+            while let Some((_, line)) = rest.next_if(|(after, _)| *after == at) {
+                body.push_str(line);
+                body.push_str("\n\n");
+            }
+            if let Some(anchor) = self.anchors.get(at) {
+                body.push_str(anchor);
+                body.push_str("\n\n");
+            }
+        }
+        body
+    }
+}
+
+/// What a path holds in [`mixed_step`]'s script: a readable document, or its
+/// names alone.
+type MixedHeld = BTreeMap<String, Option<Composed>>;
+
+/// The change writing what `held` holds at `at`.
+fn mixed_change(at: &str, held: &Option<Composed>) -> Change {
+    match held {
+        Some(composed) => Change::Upsert(derived(at, &composed.body())),
+        None => Change::Unreadable { path: path(at) },
+    }
+}
+
+/// The spelling `held` already holds of the path `at` names under `order`.
+fn mixed_spelling(order: StoredPathOrder, held: &MixedHeld, at: &str) -> Option<String> {
+    match order {
+        Sensitive => held.contains_key(at).then(|| at.to_string()),
+        Folding => held
+            .keys()
+            .find(|spelled| spelled.eq_ignore_ascii_case(at))
+            .cloned(),
+    }
+}
+
+/// One changeset of exactly `size` entries over the paths `held` holds on a
+/// root under `order`, weighted toward rewrites in place: a live document's
+/// body rewritten with its anchors kept, or with one anchor moved; a fresh
+/// write; a death; a rename; a readable document left with its names alone;
+/// and a names-only row read again.
+fn mixed_step(
+    rng: &mut Rng,
+    order: StoredPathOrder,
+    held: &mut MixedHeld,
+    size: usize,
+) -> (Vec<Change>, String) {
+    let mut changes = Vec::new();
+    let mut said = Vec::new();
+    while changes.len() < size {
+        let live: Vec<String> = held.keys().cloned().collect();
+        let pick_live = |rng: &mut Rng| live[rng.below(live.len())].clone();
+        let roll = if live.is_empty() { 0 } else { rng.below(20) };
+        match roll {
+            0..=2 => {
+                let at = rng.pick(&PLACES).to_string();
+                let at = mixed_spelling(order, held, &at).unwrap_or(at);
+                let composed = Composed::random(rng);
+                said.push(format!("write {at} {:?}", composed.body()));
+                changes.push(Change::Upsert(derived(&at, &composed.body())));
+                held.insert(at, Some(composed));
+            }
+            3..=12 => {
+                let at = pick_live(rng);
+                let mut composed = held[&at].clone().unwrap_or_else(|| Composed::random(rng));
+                if roll <= 9 {
+                    composed.rewrite_rest(rng);
+                    said.push(format!("rewrite {at} in place {:?}", composed.body()));
+                } else {
+                    composed.move_an_anchor(rng);
+                    said.push(format!("move an anchor of {at} {:?}", composed.body()));
+                }
+                changes.push(Change::Upsert(derived(&at, &composed.body())));
+                held.insert(at, Some(composed));
+            }
+            13 | 14 => {
+                let at = pick_live(rng);
+                said.push(format!("kill {at}"));
+                changes.push(death(&at));
+                held.remove(&at);
+            }
+            15 | 16 => {
+                let at = pick_live(rng);
+                said.push(format!("{at} unreadable"));
+                changes.push(Change::Unreadable { path: path(&at) });
+                held.insert(at, None);
+            }
+            _ => {
+                let from = pick_live(rng);
+                let to = rng.pick(&PLACES).to_string();
+                if from == to
+                    || mixed_spelling(order, held, &to).is_some_and(|existing| existing != from)
+                    || changes.len() + 2 > size
+                {
+                    continue;
+                }
+                let kept = held.remove(&from).expect("a live path");
+                said.push(format!("rename {from} to {to}"));
+                if rng.below(2) == 0 || from.eq_ignore_ascii_case(&to) {
+                    changes.push(death(&from));
+                    changes.push(mixed_change(&to, &kept));
+                } else {
+                    changes.push(mixed_change(&to, &kept));
+                    changes.push(death(&from));
+                }
+                held.insert(to, kept);
+            }
+        }
+    }
+    (changes, said.join("; "))
+}
+
+/// **Narrowing in-place rewrites leaves the findings a rebuild files**
+/// (ADR 0047). A seeded script of changesets of exactly one, two, five and
+/// sixteen entries — mostly bodies rewritten with their anchors kept, beside
+/// anchors moved, fresh writes, deaths, renames, documents left with their
+/// names alone and read again, and now and then a pin that moves the
+/// ambiguity-ignore globs followed by a heal in changesets of the same size —
+/// is applied to one store, and after every changeset a store built from
+/// zero out of the same paths, in one changeset, equals it under the
+/// testkit's comparator, finding order included, on both roots. The script
+/// is held to reaching the narrowing: some changesets name fewer paths than
+/// they write.
+///
+/// `NORN_IN_PLACE_SEEDS` and `NORN_IN_PLACE_STEPS` lengthen the run.
+#[test]
+fn narrowed_rewrites_equal_a_rebuild_at_every_changeset_size() {
+    let seeds = script_bound("NORN_IN_PLACE_SEEDS", 3);
+    let steps = script_bound("NORN_IN_PLACE_STEPS", 12);
+    let mut narrowed: BTreeMap<usize, u64> = BTreeMap::new();
+    let mut runs: BTreeMap<usize, u64> = BTreeMap::new();
+    for size in [1, 2, 5, 16] {
+        for order in [Sensitive, Folding] {
+            for seed in 0x0460_0000..0x0460_0000 + seeds {
+                let mut rng = Rng(seed ^ ((size as u64) << 32));
+                let label = format!("redecide-in-place-script-{size}-{order:?}-{seed:x}");
+                let scratch = Scratch::new(&label);
+                let mut store = scratch.open_under(order);
+                let mut schema = 0;
+                pin_schema(&mut store, schema);
+                let mut held = MixedHeld::new();
+                let mut script: Vec<String> = Vec::new();
+                for at in 0..steps {
+                    let subject = |script: &[String]| {
+                        format!("size {size} {order:?} seed {seed:#x}: {script:#?}")
+                    };
+                    if rng.below(10) == 0 && !held.is_empty() {
+                        schema = (schema + 1 + rng.below(2)) % SCHEMAS.len();
+                        script.push(format!("pin {} and heal", SCHEMAS[schema].0));
+                        pin_schema(&mut store, schema);
+                        let mut entries: Vec<Change> = held
+                            .iter()
+                            .map(|(written, kept)| mixed_change(written, kept))
+                            .collect();
+                        for at in (1..entries.len()).rev() {
+                            entries.swap(at, rng.below(at + 1));
+                        }
+                        for chunk in entries.chunks(size) {
+                            apply_under(&mut store, chunk.to_vec(), schema, &subject(&script));
+                        }
+                    } else {
+                        let (changes, said) = mixed_step(&mut rng, order, &mut held, size);
+                        script.push(said);
+                        let written: BTreeSet<String> = changes
+                            .iter()
+                            .map(|change| match change {
+                                Change::Upsert(facts) => facts.path.path_key().to_string(),
+                                Change::Death { path, .. } | Change::Unreadable { path } => {
+                                    path.path_key().to_string()
+                                }
+                                other => unreachable!("{other:?}"),
+                            })
+                            .collect();
+                        let outcome = store
+                            .begin_request()
+                            .apply_increment(
+                                IncrementProvenance::Derived,
+                                changes,
+                                &[],
+                                &declared_by(schema),
+                            )
+                            .unwrap_or_else(|refusal| {
+                                panic!("{}: a changeset: {refusal}", subject(&script))
+                            });
+                        let named: BTreeSet<String> = outcome
+                            .affected_paths
+                            .iter()
+                            .map(|key| key.as_str().to_string())
+                            .collect();
+                        assert!(
+                            named.is_subset(&written),
+                            "{}: named {named:?} beyond {written:?}",
+                            subject(&script)
+                        );
+                        if named.len() < written.len() {
+                            *narrowed.entry(size).or_insert(0) += 1;
+                        }
+                    }
+                    let subject = subject(&script);
+                    let rebuilt_scratch = Scratch::new(&format!("{label}-rebuilt-{at}"));
+                    let mut rebuilt = rebuilt_scratch.open_under(order);
+                    pin_schema(&mut rebuilt, schema);
+                    apply_under(
+                        &mut rebuilt,
+                        held.iter()
+                            .map(|(written, kept)| mixed_change(written, kept))
+                            .collect(),
+                        schema,
+                        &subject,
+                    );
+                    assert_same(&mut store, &mut rebuilt, &subject);
+                }
+                *runs.entry(size).or_insert(0_u64) += 1;
+            }
+        }
+    }
+    eprintln!(
+        "in-place script: seeds run per size and root {runs:?}, narrowed changesets {narrowed:?}"
+    );
+    for size in [1, 2, 5, 16] {
+        assert!(
+            narrowed.get(&size).is_some_and(|count| *count > 0),
+            "changesets of {size} never reached an in-place rewrite: {narrowed:?}"
+        );
+    }
+}
+
 // ---- a tear inside the re-decision ----
 
 /// The environment variable that puts this suite's own binary in the child
@@ -2023,7 +2748,7 @@ fn comparison_twins_rejudge_link_health_when_created_and_removed() {
 }
 
 /// **Link health re-decides a suffix link when a document appears or
-/// disappears at its exact vault path** (ADR 0040, ADR 0044), in both
+/// disappears at its exact vault path** (ADR 0040, ADR 0047), in both
 /// families. Creating `a/x.md` beside `deep/a/x.md` and `other/a/x.md` turns
 /// `[[a/x]]` and `[x](a/x.md)` from ambiguous to naming it alone, and
 /// deleting it restores the ambiguity. `[[b/y]]`, naming `deep/b/y.md` alone,

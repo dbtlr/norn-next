@@ -17,7 +17,8 @@
 //!
 //! The increment's prepared statements — the document upsert, the per-table fact
 //! discards and inserts, the stem-trigram insert a newly created row takes, the
-//! document delete, the tombstone record and the row probe — the findings
+//! document delete, the tombstone record, the row probe and the reads of the
+//! row and anchor values an upsert replaces — the findings
 //! writes and directory-mark probe, the rule-set writes a finding citing rules makes, the generation and
 //! pinned-scalar writes, and the discard a schema pin runs over findings
 //! stamped under another fingerprint. One registered
@@ -111,6 +112,16 @@ registry! {
     RecordTombstone,
     /// Whether a document row stands at a path.
     RowAt,
+    /// The row an upsert replaces, read before it is written: its identity,
+    /// the facts a row is matched by — its keys and its admitting count — and
+    /// whether it is readable, so the increment can tell an in-place rewrite.
+    ReplacedRow,
+    /// The heading readings of the document an in-place rewrite replaces.
+    ReplacedReadings,
+    /// The heading slugs of the document an in-place rewrite replaces.
+    ReplacedSlugs,
+    /// The block ids of the document an in-place rewrite replaces.
+    ReplacedBlockIds,
     /// Whether a directory's unreadable finding already stands at its subject.
     DirectoryMarkAt,
     /// One finding row, stamped with the generation and fingerprint it lands
@@ -277,6 +288,16 @@ impl WriteStatement {
                 "INSERT INTO document_trigrams (trigram, document) VALUES (?1, ?2)"
             }
             Self::RowAt => "SELECT EXISTS (SELECT 1 FROM documents WHERE path = ?1)",
+            // A readable row holds a body and its content hash; a names-only
+            // or provisional row holds neither.
+            Self::ReplacedRow => {
+                "SELECT id, suffix_key, path_key, admitting_segments,
+                        body IS NOT NULL AND content_hash IS NOT NULL
+                 FROM documents WHERE path = ?1"
+            }
+            Self::ReplacedReadings => "SELECT reading FROM headings WHERE document = ?1",
+            Self::ReplacedSlugs => "SELECT slug FROM headings WHERE document = ?1",
+            Self::ReplacedBlockIds => "SELECT block_id FROM blocks WHERE document = ?1",
             Self::InsertFinding => {
                 "INSERT INTO findings (
                      vault_schema_fingerprint, generation, kind, severity, path, target,
