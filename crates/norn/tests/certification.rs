@@ -1293,6 +1293,13 @@ fn the_fast_gate_keeps_ordinary_functional_coverage() {
     assert_fast_gate(&gate);
     let mut mutants = vec![
         gate.replace("  architecture:", "  missing:"),
+        gate.replace("--exclude norn-host", "--exclude norn-store"),
+        gate.replace(" --exclude norn-host", ""),
+        gate.replace(
+            "--locked -p norn-host -p norn-testkit\n",
+            "--locked -p norn-store\n",
+        ),
+        gate.replace("cargo fmt --all --check", "true"),
         gate.replace(
             "--features induced-failure\n",
             "--features induced-failure --skip ordinary\n",
@@ -1311,6 +1318,21 @@ fn the_fast_gate_keeps_ordinary_functional_coverage() {
             "      - name: Test\n        if: always()\n",
         ),
     ];
+    for command in [
+        "cargo test --locked --workspace --exclude norn-host --exclude norn-testkit",
+        "cargo test --locked -p norn-host -p norn-testkit",
+    ] {
+        for narrowing in [
+            " ordinary",
+            " -- --skip ordinary",
+            " --lib",
+            " --tests",
+            " --retries 1",
+        ] {
+            mutants.push(gate.replace(command, &format!("{command}{narrowing}")));
+        }
+        mutants.push(gate.replace(command, &format!("retry 3 {command}")));
+    }
     for case in NATIVE_CASES {
         mutants.push(
             gate.lines()
@@ -1339,6 +1361,22 @@ fn assert_fast_gate(workflow: &str) {
         ],
     );
     assert_complete_active_matrix(workflow, false);
+    let lines = ci_job(workflow, "build-host");
+    assert_ci_lines(
+        &lines,
+        &[
+            "name: build and test (norn-host and norn-testkit)",
+            "runs-on: ubuntu-latest",
+            "timeout-minutes: 30",
+        ],
+    );
+    assert_job_cannot_skip_or_excuse(&lines);
+    assert_matrix_step_values(
+        workflow,
+        "build-host",
+        &[".github/scripts/flake-tripwire.sh cargo test --locked -p norn-host -p norn-testkit"],
+        false,
+    );
 }
 
 const NATIVE_CASES: &[&str] = &[
@@ -1653,7 +1691,7 @@ fn assert_matrix_step_values(workflow: &str, job: &str, runs: &[&str], full: boo
     );
 }
 
-/// Literal commands establish the plain-workspace authority the generic reader excludes.
+/// Literal commands establish the package-shard pair and full-regression coverage the generic reader excludes.
 fn assert_complete_active_matrix(workflow: &str, full: bool) {
     assert_matrix_mapping_keys(workflow, full);
     assert_eq!(
@@ -1664,7 +1702,14 @@ fn assert_complete_active_matrix(workflow: &str, full: bool) {
         if full {
             FULL_JOB_KEYS
         } else {
-            &["build", "host-functional", "platform", "architecture"]
+            &[
+                "build",
+                "build-host",
+                "lint",
+                "host-functional",
+                "platform",
+                "architecture",
+            ]
         }
     );
     let commands: &[(&str, &str, &[&str])] = &[
@@ -1752,6 +1797,32 @@ fn assert_complete_active_matrix(workflow: &str, full: bool) {
                 ]),
                 _ => {},
             }
+        } else if key == "build" {
+            let lint_runs: Vec<&str> = runs
+                .iter()
+                .copied()
+                .filter(|command| {
+                    command.starts_with("cargo fmt")
+                        || command.starts_with("cargo clippy")
+                        || command.starts_with("cargo doc")
+                        || command.starts_with("python3")
+                })
+                .collect();
+            let lint_lines = ci_job(workflow, "lint");
+            assert_ci_lines(
+                &lint_lines,
+                &[
+                    "name: lint and document",
+                    "runs-on: ubuntu-latest",
+                    "timeout-minutes: 30",
+                ],
+            );
+            assert_job_cannot_skip_or_excuse(&lint_lines);
+            assert_matrix_step_values(workflow, "lint", &lint_runs, false);
+            runs = vec![
+                "cargo build --locked --workspace",
+                ".github/scripts/flake-tripwire.sh cargo test --locked --workspace --exclude norn-host --exclude norn-testkit",
+            ];
         } else if key == "induced-failure" {
             key = "host-functional";
             name = "host functional (induced-failure)";

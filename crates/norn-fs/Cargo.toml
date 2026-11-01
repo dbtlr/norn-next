@@ -58,10 +58,12 @@ notify = { workspace = true }
 rustix = { workspace = true }
 sha2 = { workspace = true }
 
-# This crate is its own dev-dependency, with the feature turned on, because the
-# lockdown suite in `tests/` links against `norn-fs` as an external crate and
-# arms the widened seam through the environment the public entry point reads.
+# This crate is its own dev-dependency for two features. `induced-failure`:
+# the lockdown suite in `tests/` links against `norn-fs` as an external crate
+# and arms the widened seam through the environment the public entry point
+# reads. `test-support`: norn-host's dev-dependency turns it on in a whole-
+# workspace run, and each CI shard must build these tests with that same set.
 [dev-dependencies]
 norn-fixtures = { path = "../norn-fixtures" }
-norn-fs = { path = ".", features = ["induced-failure"] }
+norn-fs = { path = ".", features = ["induced-failure", "test-support"] }
 norn-testkit = { path = "../norn-testkit" }

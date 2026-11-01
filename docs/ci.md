@@ -7,14 +7,23 @@ Clocks and trends belong to the dormant soak tier under
 
 ## PR and full-regression coverage
 
-`ci.yml` runs four jobs on PRs, main pushes and manual runs. Ordinary default
-workspace tests and doctests stay in `build and test`. The whole feature-enabled
+`ci.yml` runs six jobs on PRs, main pushes and manual runs. Ordinary default
+workspace tests and doctests split by package between `build and test` (everything
+except `norn-host` and `norn-testkit`) and
+`build and test (norn-host and norn-testkit)`. The named shard uses `-p norn-host -p norn-testkit`; the catch-all uses `--workspace --exclude norn-host --exclude norn-testkit`.
+Their package lists must match exactly, so new crates join the catch-all and
+every package's doctests run exactly once through ordinary `cargo test`.
+The shard pair preserves whole-workspace test membership, and each shard builds
+tests with the whole-workspace feature set.
+The whole feature-enabled
 `norn-host` package runs in `host functional (induced-failure)`, so current and
 future ordinary targets and cases join PR coverage automatically.
 
 | PR job | Evidence |
 |---|---|
-| Build and test | Format, workspace build, three clippy contexts, denied-warning rustdoc, ordinary default workspace tests and doctests, cheap registry structure and dormancy checks |
+| Build and test | Workspace build, default tests and doctests except norn-host and norn-testkit, cheap registry structure and dormancy checks |
+| Build and test (norn-host and norn-testkit) | Default norn-host and norn-testkit tests and doctests; cargo test builds its selected targets |
+| Lint and document | Format, all five clippy contexts, performance-harness unit tests, denied-warning rustdoc |
 | Host functional (induced-failure) | Complete ordinary feature-enabled host suite, including churn and rolling-heal correctness and work counters |
 | macOS platform | Embedding determinism, filesystem contracts, Obsidian parity, exact case-rename and unreadable-document/subtree cases, folding-root spelling bar |
 | Architecture | Actionlint and the architecture gate |
@@ -122,14 +131,15 @@ stop merges; triage records that classification and what clears it. Diagnose red
 runs before rerunning. A runner failure or missed nightly supplies no positive
 regression evidence. Repairs may dispatch a full run immediately.
 
-The planned required-context set is:
+The `main` ruleset requires these checks:
 
 - `build and test`
+- `build and test (norn-host and norn-testkit)`
+- `lint and document`
 - `host functional (induced-failure)`
 - `determinism and filesystem (macOS ARM64)`
 - `architecture gate`
 - `CodeRabbit`
 
-Retiring the old required contexts and adopting this set is a separate live
-transition. This change does not edit branch protection. Full-run names stay
-distinct so a manual regression run cannot alias a PR-required context.
+Full-run names stay distinct so a manual regression run cannot alias a
+PR-required context.

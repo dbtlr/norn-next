@@ -650,7 +650,8 @@ fn is_count(text: &str) -> bool {
 mod tests {
     use super::{FeaturedRun, Invocation, LANE_FEATURES, Step, invocation, steps_in};
     use crate::regression::Target;
-    use std::collections::BTreeMap;
+    use serde_yaml::Value;
+    use std::collections::{BTreeMap, BTreeSet};
 
     /// One featured run, as the reader reports it.
     fn run(package: &str, target: Option<Target>, feature: &str) -> FeaturedRun {
@@ -758,7 +759,6 @@ mod tests {
                     "induced-failure",
                 )],
             ),
-            ("cargo test --locked -p norn-host", vec![]),
             (
                 "cargo test  --locked  -p norn-host -F induced-failure ",
                 vec![run("norn-host", None, "induced-failure")],
@@ -773,6 +773,40 @@ mod tests {
             });
             assert_eq!(read, tested(expected), "`{command}` read otherwise");
         }
+    }
+
+    #[test]
+    fn the_package_shards_are_complementary() {
+        let workflow = include_str!("../../../.github/workflows/ci.yml");
+        let mut document: Value = serde_yaml::from_str(workflow).unwrap();
+        document
+            .get_mut("jobs")
+            .unwrap()
+            .as_mapping_mut()
+            .unwrap()
+            .retain(|key, _| matches!(key.as_str(), Some("build" | "build-host")));
+        let workflow = serde_yaml::to_string(&document).unwrap();
+        // Certification pins both complete commands; derive only their package selections here.
+        let packages = |selector| -> BTreeSet<String> {
+            steps_in(&workflow)
+                .unwrap()
+                .into_iter()
+                .filter(|step| step.vouches)
+                .filter_map(|step| step.run)
+                .flat_map(|run| {
+                    run.split_whitespace()
+                        .collect::<Vec<_>>()
+                        .windows(2)
+                        .filter(|pair| pair[0] == selector)
+                        .map(|pair| pair[1].to_string())
+                        .collect::<Vec<_>>()
+                })
+                .collect()
+        };
+        let excluded = packages("--exclude");
+        let named = packages("-p");
+        assert!(!excluded.is_empty());
+        assert_eq!(excluded, named);
     }
 
     /// Collecting failures changes neither the target nor its feature selection.
