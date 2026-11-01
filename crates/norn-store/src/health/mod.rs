@@ -708,6 +708,7 @@ pub(crate) struct Redecided {
 /// kept are one per distinct filled key the re-decided links hold.
 ///
 /// [ADR 0047]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0047-a-write-re-decides-only-the-links-whose-inputs-it-moved.md
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn redecide(
     transaction: &Transaction<'_>,
     work: &ReadWork,
