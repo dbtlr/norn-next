@@ -119,8 +119,11 @@ registry states the rest:
 changeset discards every finding standing at a path it writes or kills, every finding filed
 under the class key of a path whose names it moved, and every finding keyed by the exact path
 of such a path, and then re-decides the links those findings were about beside the links the
-re-decided set names. A finding keyed only by classes and paths whose names the changeset did
-not move stands, because nothing its verdict reads moved. The class discard predates ADR
+re-decided set names. An in-place rewrite that moves an anchor value discards the standing
+finding of every link it re-decides for that move: until the anchored-link index is built, by
+the same class and exact-path discard a names move runs at the written path, and once it is
+built, by each re-decided link's own place. Any other finding stands, because nothing its
+verdict reads moved. The class discard predates ADR
 0021, which neither admitted nor forbade it; the path-key axis beside it, and the re-decision
 that files the findings again in the same act, were ruled by ADR 0027 and are built.
 
@@ -155,7 +158,8 @@ another time, as the next section rules.
 - every path-addressed link whose key equals a path whose names the changeset moved,
   including the old path of a rename;
 - every anchored link whose keys reach a document whose anchor values an in-place rewrite
-  moved, and that names one of the values moved there, as the next section defines;
+  moved, and that names one of the values moved there, as the next section defines — a
+  superset of the links resolving to that document alone, which the superset rule admits;
 - every path-addressed link whose key lies beneath a directory whose unreadable-directory
   finding the act files or ends, re-decided in the transaction that files or ends that
   finding, so a link left unjudged under a marked directory is judged once it lists again.
@@ -185,7 +189,9 @@ message, target, span and ordinal are the holding document's.
 **Exactly one kind of entry is narrowed: an in-place rewrite.** An entry is an **in-place
 rewrite** where it writes a readable document at a path that held a readable document before
 the entry, and the row it writes matches the row it replaces in every fact a row is matched
-by — kind, suffix and path keys, and admitting count; the row keeps its identity. Every other
+by — its path byte for byte, its kind, its suffix and path keys, and its admitting count; the
+row keeps its identity. A respelling that only a folding comparison calls the same path is a
+death and a birth. Every other
 entry **moves the names** at every path it reaches and re-decides by them, as ADR 0044 ruled:
 a birth, a death, a rename (a death of the old path beside a birth of the new), a vault
 file's birth or death, a provisional name written during a from-zero build's names step, a
@@ -270,15 +276,16 @@ documents link to.
 **Every schema pin owes the vault a link-health re-decision over every link.** Link-health
 findings are keyed by the vault schema fingerprint, as every finding is, and a pin discards
 every finding keyed by the fingerprint it replaced — whether or not the schema changed
-anything link health reads. The existing re-derivation does not cover this: a pin re-derives
-unchanged rows only where the schema declares a reporting tag vocabulary or a field whose
-type does not order as text, so a vault holding a broken link whose schema edit adds one
-text-typed field would lose that finding while a rebuild files it. The mechanism that
-discharges the obligation is left open, and its cost has a floor: every link in the vault
-is re-decided, chunked as a heal is. Link health reads only stored per-document facts, so
-the re-decision needs no document to be read again; a mechanism that re-reads every
-document to reach it pays a heal's cost on every pin as well. Schema edits are rare, and
-exactness is kept. This obligation is not yet built.
+anything link health reads. Today the walk after a pin discharges it by deriving every row
+stamped at or below the pin's generation again, under every schema: the changeset that writes
+a document re-decides the links it holds, and a row whose admitting count the new
+`paths.ambiguity_ignore` globs change is not an in-place rewrite, so it moves its names and
+re-decides every link its class and path reach, including one a chunk already judged against
+the old count. The obligation's cost has a floor: every link in the vault is re-decided,
+chunked as a heal is. Link health reads only stored per-document facts, so the re-decision
+needs no document to be read again; the walk that re-reads every document pays a heal's cost
+on every pin as well. A mechanism meeting the floor is not built; schema edits are rare, and
+exactness is kept.
 
 **The store's contract changes at one point.** Before ADR 0027 the store recorded only the
 findings the host handed it with a changeset, and decided none. Link-health findings are the
@@ -474,7 +481,7 @@ built, every link reaching its class and path, as every write to it did before; 
 it costs the links naming a value it moved. A glossary that 2,000 `[[glossary#Term]]` links
 name pays for the links naming the term it changed.
 
-**Every write pays a bounded comparison.** A readable document rewritten in place reads its
+**Every in-place rewrite pays a bounded comparison.** A readable document rewritten in place reads its
 old heading readings, slugs and block identifiers and compares them with what it writes, a
 cost that follows the written document. A write whose names move skips the comparison: it
 re-decides by its names regardless.
