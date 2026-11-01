@@ -21844,38 +21844,80 @@ mod tests {
         ops.detach(&name, attachment);
     }
 
+    /// ADR 0048: each requeue takes once, so an attach finishes under a file
+    /// that never stops changing. Its requeue calls are bounded by the vault's
+    /// shape, measured by a quiet attach of the same tree, not by the edit
+    /// rate; and the store converges on the writer's last bytes, so no fact
+    /// the build left behind is lost.
     #[test]
     fn one_pass_attach_completes_while_watcher_events_continue() {
         let f = Fixture::new("continuous-attach");
         for index in 0..200 {
             fs::write(f.vault().join(format!("note-{index:03}.md")), "body").unwrap();
         }
+        let hot = f.vault().join("hot.md");
+        fs::write(&hot, "start").unwrap();
+        let quiet = {
+            let dirs =
+                ConfigDirs::new(f.root.join("quiet-config"), f.root.join("quiet-data")).unwrap();
+            let ops = ProductionEntryOps::new(dirs, ProductionPolicy::new(2, 2).unwrap());
+            let attachment = ops
+                .attach(&f.registration(), &ProgressReporter::disconnected())
+                .unwrap();
+            let spent = ops.evidence.read();
+            ops.detach(&f.registration().name, attachment);
+            assert!(
+                spent.requeue_calls > 0,
+                "a quiet attach makes requeue calls"
+            );
+            assert_eq!(spent.requeue_drains, 0, "a quiet attach takes nothing");
+            spent.requeue_calls
+        };
         let running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
         let writer_running = std::sync::Arc::clone(&running);
-        let hot = f.vault().join("hot.md");
-        // A writer held near 1 kHz keeps this an end-to-end check whose
-        // runtime follows the build, not the host's load.
+        // A writer held near 1 kHz keeps the event rate, not the host's load,
+        // the thing this attach outlasts; the load still stretches its runtime.
         let writer = thread::spawn(move || {
             let mut generation = 0;
             while writer_running.load(std::sync::atomic::Ordering::SeqCst) {
-                fs::write(&hot, generation.to_string()).unwrap();
                 generation += 1;
+                fs::write(&hot, generation.to_string()).unwrap();
                 thread::sleep(Duration::from_millis(1));
             }
+            generation
         });
         let (ops, name) = f.ops(2);
-        let attachment = ops
-            .attach(&f.registration(), &ProgressReporter::disconnected())
-            .unwrap();
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
         running.store(false, std::sync::atomic::Ordering::SeqCst);
-        writer.join().unwrap();
-        // ADR 0048: each requeue takes once, whatever the event rate.
+        let last = writer.join().unwrap();
         let spent = ops.evidence.read();
+        // Pulling hot.md ahead takes it out of the ordinary passes, so they
+        // page no more chunks than the quiet attach's.
+        assert!(
+            spent.requeue_calls <= quiet,
+            "the writer raised the requeue calls from {quiet} to {}",
+            spent.requeue_calls
+        );
         assert!(
             spent.requeue_drains <= spent.requeue_calls,
             "{} takes outnumber {} requeue calls",
             spent.requeue_drains,
             spent.requeue_calls
+        );
+        let last = norn_fs::ContentHash::of(last.to_string().as_bytes()).to_string();
+        reconcile_until(
+            &ops,
+            &name,
+            &mut attachment,
+            &progress,
+            "hot.md to converge on the writer's last bytes",
+            |attachment, _| match stored(attachment, "hot.md") {
+                Some(row) if row.content_hash.as_deref() == Some(last.as_str()) => {
+                    Observed::Met(())
+                }
+                row => Observed::pending(format!("hot.md is {:?}", row.map(|r| r.content_hash))),
+            },
         );
         ops.detach(&name, attachment);
     }
