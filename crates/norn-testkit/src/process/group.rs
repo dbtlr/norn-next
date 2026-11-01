@@ -18,13 +18,25 @@
 //! scan because `killpg` on a group that holds only the unreaped zombie leader
 //! still succeeds, so without it every clean exit paid the full window.
 //!
-//! The scan cannot miss a member that could escape. A member it misses either
-//! ended during the scan or was forked during it, and the scan runs only after
-//! a `SIGKILL` reached every member: the kernel fails a `fork` in a process
-//! with that signal pending, and a group signal sent during a `fork` reaches
-//! the new child too. Whatever doubt the scan meets keeps the full window, and
-//! ending the window early skips none of the leader reaping or the final
-//! `ESRCH` proof that follows it.
+//! Ending the window early lets no member escape that the full window would
+//! have killed. The scan runs only after a group `SIGKILL` succeeded, and on
+//! Linux that means the signal was delivered to at least one member (the
+//! zombie leader always accepts it), not to every member. Every member the
+//! signal could reach now has `SIGKILL` pending, so it cannot fork, call
+//! `setpgid` or run user code again, and a `fork` in flight when the signal was
+//! sent hands it to the new child too; whatever the scan sees or misses of
+//! those members, none of them can act. A member the signal could not reach
+//! (one owned by another user, and possibly hidden from `/proc` by `hidepid`)
+//! could not have been killed by the full window either, and the final `ESRCH`
+//! proof keeps reporting it as it did before.
+//!
+//! One narrower gap remains, and the full window had it too. A process that had
+//! left the group before the scan could rejoin it with `setpgid(0, pgid)`
+//! between the scan and the leader's reap, as it could between the window's
+//! last `SIGKILL` and the reap; the final proof still finds and reports it.
+//! Whatever doubt the scan meets keeps the full window, and ending the window
+//! early skips none of the leader reaping or the final `ESRCH` proof that
+//! follows it.
 
 use std::io;
 use std::os::unix::process::CommandExt;
