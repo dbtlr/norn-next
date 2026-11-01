@@ -1294,7 +1294,10 @@ fn the_fast_gate_keeps_ordinary_functional_coverage() {
     let mut mutants = vec![
         gate.replace("  architecture:", "  missing:"),
         gate.replace("--exclude norn-host", "--exclude norn-store"),
-        gate.replace("--locked -p norn-host\n", "--locked -p norn-store\n"),
+        gate.replace(
+            "--locked -p norn-host -p norn-testkit\n",
+            "--locked -p norn-store\n",
+        ),
         gate.replace("cargo fmt --all --check", "true"),
         gate.replace(
             "--features induced-failure\n",
@@ -1315,8 +1318,8 @@ fn the_fast_gate_keeps_ordinary_functional_coverage() {
         ),
     ];
     for command in [
-        "cargo test --locked --workspace --exclude norn-host",
-        "cargo test --locked -p norn-host",
+        "cargo test --locked --workspace --exclude norn-host --exclude norn-testkit",
+        "cargo test --locked -p norn-host -p norn-testkit",
     ] {
         for narrowing in [
             " ordinary",
@@ -1361,7 +1364,7 @@ fn assert_fast_gate(workflow: &str) {
     assert_ci_lines(
         &lines,
         &[
-            "name: build and test (norn-host)",
+            "name: build and test (norn-host and norn-testkit)",
             "runs-on: ubuntu-latest",
             "timeout-minutes: 30",
         ],
@@ -1370,7 +1373,7 @@ fn assert_fast_gate(workflow: &str) {
     assert_matrix_step_values(
         workflow,
         "build-host",
-        &[".github/scripts/flake-tripwire.sh cargo test --locked -p norn-host"],
+        &[".github/scripts/flake-tripwire.sh cargo test --locked -p norn-host -p norn-testkit"],
         false,
     );
 }
@@ -1817,7 +1820,7 @@ fn assert_complete_active_matrix(workflow: &str, full: bool) {
             assert_matrix_step_values(workflow, "lint", &lint_runs, false);
             runs = vec![
                 "cargo build --locked --workspace",
-                ".github/scripts/flake-tripwire.sh cargo test --locked --workspace --exclude norn-host",
+                ".github/scripts/flake-tripwire.sh cargo test --locked --workspace --exclude norn-host --exclude norn-testkit",
             ];
         } else if key == "induced-failure" {
             key = "host-functional";

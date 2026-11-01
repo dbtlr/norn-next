@@ -794,7 +794,6 @@ mod tests {
                     "induced-failure",
                 )],
             ),
-            ("cargo test --locked -p norn-host", vec![]),
             (
                 "cargo test  --locked  -p norn-host -F induced-failure ",
                 vec![run("norn-host", None, "induced-failure")],
@@ -811,9 +810,42 @@ mod tests {
         }
     }
 
-    /// Collecting failures changes neither the target nor its feature selection.
+    /// Package shards preserve complete default coverage; collecting failures preserves features.
     #[test]
     fn collecting_later_failures_preserves_the_featured_selection() {
+        let workflow = include_str!("../../../.github/workflows/ci.yml");
+        let shards: Vec<_> = steps_in(workflow)
+            .unwrap()
+            .into_iter()
+            .filter(|step| step.vouches)
+            .filter_map(|step| invocation(step.run.as_deref()?))
+            .filter_map(|run| match run {
+                Invocation::Shard {
+                    catch_all,
+                    packages,
+                } => Some((catch_all, packages)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(shards.len(), 2);
+        assert!(shards[0].0);
+        assert!(!shards[1].0);
+        assert_eq!(shards[0].1, shards[1].1);
+        for command in [
+            "--locked --workspace --exclude norn-host --exclude norn-testkit",
+            "--locked -p norn-host -p norn-testkit",
+        ] {
+            for suffix in [
+                " ordinary",
+                " -- --skip ordinary",
+                " --lib",
+                " --tests",
+                " --retries 1",
+            ] {
+                let mutant = format!("{command}{suffix}");
+                assert!(default_shard(&mutant.split_whitespace().collect::<Vec<_>>()).is_none());
+            }
+        }
         let command = "cargo test --locked --no-fail-fast -p norn-host --features induced-failure";
         assert_eq!(
             invocation(command),
@@ -1428,47 +1460,5 @@ mod tests {
                 ("B".to_string(), "true".to_string()),
             ])
         );
-    }
-}
-
-#[cfg(test)]
-mod shard_tests {
-    use super::*;
-
-    #[test]
-    fn default_shards_are_complementary_and_cannot_narrow_or_retry() {
-        let workflow = include_str!("../../../.github/workflows/ci.yml");
-        let shards: Vec<_> = steps_in(workflow)
-            .unwrap()
-            .into_iter()
-            .filter(|step| step.vouches)
-            .filter_map(|step| invocation(step.run.as_deref()?))
-            .filter_map(|run| match run {
-                Invocation::Shard {
-                    catch_all,
-                    packages,
-                } => Some((catch_all, packages)),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(shards.len(), 2);
-        assert_eq!(shards[0].0, true);
-        assert_eq!(shards[1].0, false);
-        assert_eq!(shards[0].1, shards[1].1);
-        for command in [
-            "--locked --workspace --exclude norn-host",
-            "--locked -p norn-host",
-        ] {
-            for suffix in [
-                " ordinary",
-                " -- --skip ordinary",
-                " --lib",
-                " --tests",
-                " --retries 1",
-            ] {
-                let mutant = format!("{command}{suffix}");
-                assert!(default_shard(&mutant.split_whitespace().collect::<Vec<_>>()).is_none());
-            }
-        }
     }
 }
