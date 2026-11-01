@@ -221,6 +221,10 @@ jobs:
         run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-embed --test determinism
       - name: Filesystem contracts
         run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-fs
+      # The measuring launcher's pre-main initializer and spawn path are
+      # platform-specific; this runs its process tests on macOS on every PR.
+      - name: Measuring launcher
+        run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-testkit --lib process
       - name: Host library contracts
         run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-host --features induced-failure --lib
       # test-suite.sh judges one libtest target's summary, so each target is its own step.

@@ -1831,6 +1831,7 @@ fn assert_complete_active_matrix(workflow: &str, full: bool) {
             runs = vec![
                 ".github/scripts/flake-tripwire.sh cargo test --locked -p norn-embed --test determinism",
                 ".github/scripts/flake-tripwire.sh cargo test --locked -p norn-fs",
+                ".github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-testkit --lib process",
                 ".github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-host --features induced-failure --lib",
                 ".github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-host --features induced-failure --test early_reads",
                 ".github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-host --features induced-failure --test provisional_registration",
