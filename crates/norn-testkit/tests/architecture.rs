@@ -22,7 +22,7 @@ use norn_testkit::invariants::{
 };
 
 /// One reading of the workspace per selection, shared by every test here:
-/// `cargo metadata` runs once per selection rather than once per assertion.
+/// `cargo metadata` runs once per selection per process rather than once per assertion.
 fn reading() -> &'static MatrixReading {
     static READING: OnceLock<MatrixReading> = OnceLock::new();
     READING

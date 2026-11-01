@@ -96,7 +96,7 @@ jobs:
       - name: Doctests
         run: .github/scripts/flake-tripwire.sh cargo test --locked --workspace --doc
 
-  # Independent required check: add "lint and document" to the ruleset after merge.
+  # `lint and document` is a required check in the `main` ruleset.
   # Its 30-minute timeout is a runaway guard, under the same doctrine above.
   lint:
     name: lint and document

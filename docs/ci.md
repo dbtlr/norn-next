@@ -7,14 +7,15 @@ Clocks and trends belong to the dormant soak tier under
 
 ## PR and full-regression coverage
 
-`ci.yml` runs four jobs on PRs, main pushes and manual runs. Ordinary default
+`ci.yml` runs five jobs on PRs, main pushes and manual runs. Ordinary default
 workspace tests and doctests stay in `build and test`. The whole feature-enabled
 `norn-host` package runs in `host functional (induced-failure)`, so current and
 future ordinary targets and cases join PR coverage automatically.
 
 | PR job | Evidence |
 |---|---|
-| Build and test | Format, workspace build, three clippy contexts, denied-warning rustdoc, ordinary default workspace tests and doctests, cheap registry structure and dormancy checks |
+| Build and test | Workspace build, ordinary default workspace tests through nextest, separate doctests, cheap registry structure and dormancy checks |
+| Lint and document | Format, all five clippy contexts, performance-harness unit tests, denied-warning rustdoc |
 | Host functional (induced-failure) | Complete ordinary feature-enabled host suite, including churn and rolling-heal correctness and work counters |
 | macOS platform | Embedding determinism, filesystem contracts, Obsidian parity, exact case-rename and unreadable-document/subtree cases, folding-root spelling bar |
 | Architecture | Actionlint and the architecture gate |
@@ -122,14 +123,14 @@ stop merges; triage records that classification and what clears it. Diagnose red
 runs before rerunning. A runner failure or missed nightly supplies no positive
 regression evidence. Repairs may dispatch a full run immediately.
 
-The planned required-context set is:
+The `main` ruleset requires these checks:
 
 - `build and test`
+- `lint and document`
 - `host functional (induced-failure)`
 - `determinism and filesystem (macOS ARM64)`
 - `architecture gate`
 - `CodeRabbit`
 
-Retiring the old required contexts and adopting this set is a separate live
-transition. This change does not edit branch protection. Full-run names stay
-distinct so a manual regression run cannot alias a PR-required context.
+Full-run names stay distinct so a manual regression run cannot alias a
+PR-required context.
