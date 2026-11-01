@@ -185,6 +185,11 @@ pub const MANIFEST_FILES: &[ManifestFile] = &[
         why: "the child termination and cleanup verdict behind an accepted test listing",
     },
     ManifestFile {
+        path: "crates/norn-testkit/src/process/measured.rs",
+        why: "the launcher every run starts its child through, whose report is the child's exit \
+              status and peak behind an accepted listing and every child memory reading",
+    },
+    ManifestFile {
         path: "crates/norn-testkit/src/scratch.rs",
         why: "the private directory identity that keeps installed inventory executables isolated",
     },
