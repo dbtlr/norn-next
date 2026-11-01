@@ -5,6 +5,26 @@
 //! its process ID and process-group ID from being reused during cleanup. After the
 //! leader is reaped, this module only observes the group until the kernel says
 //! it no longer exists.
+//!
+//! # The signal-delivery window
+//!
+//! Cleanup sends `SIGKILL` to the group once per poll gap for up to
+//! [`SIGNAL_DELIVERY_WINDOW`], so a member forked while an earlier signal was
+//! in flight is still caught while the pinned leader keeps the group's ID
+//! safe. The window ends early when the group is proved absent (`ESRCH`), on
+//! macOS's zombie-only `EPERM`, and on Linux once nothing in the group can
+//! fork: right after a `SIGKILL` succeeded, `waitid` reports the leader ended
+//! and `/proc` shows no process in the group but that leader. Linux needs the
+//! scan because `killpg` on a group that holds only the unreaped zombie leader
+//! still succeeds, so without it every clean exit paid the full window.
+//!
+//! The scan cannot miss a member that could escape. A member it misses either
+//! ended during the scan or was forked during it, and the scan runs only after
+//! a `SIGKILL` reached every member: the kernel fails a `fork` in a process
+//! with that signal pending, and a group signal sent during a `fork` reaches
+//! the new child too. Whatever doubt the scan meets keeps the full window, and
+//! ending the window early skips none of the leader reaping or the final
+//! `ESRCH` proof that follows it.
 
 use std::io;
 use std::os::unix::process::CommandExt;
@@ -20,6 +40,11 @@ use std::time::{Duration, Instant};
 
 use crate::poll;
 
+#[cfg(target_os = "linux")]
+mod members;
+
+/// The longest cleanup keeps repeating `SIGKILL` while the leader is pinned.
+/// The module documentation says when it ends sooner.
 const SIGNAL_DELIVERY_WINDOW: Duration = Duration::from_millis(100);
 const GROUP_CLEANUP_DEADLINE: Duration = Duration::from_secs(5);
 
@@ -224,7 +249,11 @@ impl OwnedProcessGroup {
             }
             match self.send_group_signal(libc::SIGKILL) {
                 Ok(GroupPresence::Absent) => break,
-                Ok(GroupPresence::Present) => {}
+                Ok(GroupPresence::Present) => {
+                    if self.only_the_exited_leader_remains() {
+                        break;
+                    }
+                }
                 // macOS returns EPERM when the pinned group contains only
                 // zombie members. Reaping plus the ESRCH proof below decides
                 // whether a live inaccessible member also remains.
@@ -339,6 +368,22 @@ impl OwnedProcessGroup {
                 ));
             }
             poll_wait = poll::sleep_gap(poll_wait, left);
+        }
+    }
+
+    // Whether nothing in the group can fork any more: the leader has ended
+    // (with every thread of it, which is when `waitid` reports it) and `/proc`
+    // lists no other process in the group. Any error reads as "not proved".
+    // Linux only; elsewhere the window runs until `killpg` proves the group gone.
+    fn only_the_exited_leader_remains(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            matches!(leader_has_ended(self.pgid), Ok(true))
+                && members::only_the_exited_leader_remains(self.pgid)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            false
         }
     }
 
@@ -668,6 +713,26 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    fn wait_for_leader_end(pgid: libc::pid_t) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !leader_has_ended(pgid).expect("observing the leader") {
+            assert!(Instant::now() < deadline, "leader {pgid} did not exit");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    // The process IDs a shell appended to `path`, one per line. A line cut short
+    // by the kill is skipped.
+    #[allow(clippy::disallowed_methods)] // Harness fault seam: reading its own marker.
+    fn recorded_pids(path: &Path) -> Vec<libc::pid_t> {
+        std::fs::read_to_string(path)
+            .expect("reading recorded process IDs")
+            .lines()
+            .filter_map(|line| line.trim().parse().ok())
+            .collect()
+    }
+
     fn panic_text(payload: Box<dyn std::any::Any + Send>) -> String {
         match payload.downcast::<String>() {
             Ok(message) => *message,
@@ -778,6 +843,8 @@ mod tests {
 
     #[test]
     fn cleanup_repeats_sigkill_during_the_pinned_delivery_window() {
+        // The window's upper bound. The leader is alive and unsignalled through
+        // the two pretended deliveries, so no early end can cut them short.
         assert_eq!(SIGNAL_DELIVERY_WINDOW, Duration::from_millis(100));
         let mut group = sleeping_group();
         let attempts = group.count_group_signals_for_test();
@@ -792,6 +859,95 @@ mod tests {
             attempts.load(Ordering::Relaxed) >= 3,
             "cleanup sent SIGKILL fewer than three times"
         );
+    }
+
+    // Counts signals rather than timing the close: on Linux `killpg` on a group
+    // holding only the exited leader succeeds, so a window that did not end
+    // early sends one SIGKILL per poll gap for its full length (seven or eight,
+    // measured).
+    // One signal is the early end and nothing else, however loaded the host is.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_clean_exit_with_no_descendants_ends_the_delivery_window_after_one_signal() {
+        let mut group = completed_group();
+        let attempts = group.count_group_signals_for_test();
+
+        let ended = group
+            .wait(Duration::from_secs(5))
+            .expect("cleaning the exited group");
+
+        assert!(!ended.timed_out);
+        assert_eq!(attempts.load(Ordering::Relaxed), 1);
+    }
+
+    // The scan is asserted directly while the descendant is known to be alive,
+    // because whether a particular close ends early depends on how fast the
+    // kernel finishes the killed descendant. The decision is what is under test.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_live_descendant_is_a_live_member_and_cleanup_still_kills_it() {
+        let scratch = Scratch::new("process-group-descendant");
+        let marker = scratch.join("descendant.pid");
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", "sleep 3600 & echo $! > \"$MARKER\"; exit 0"])
+            .env("MARKER", &marker)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let group = OwnedProcessGroup::spawn(&mut command).expect("a process group");
+        let pgid = group.pgid_for_test();
+        wait_for_leader_end(pgid);
+        let descendant = recorded_pids(&marker)[0];
+
+        assert!(
+            !members::only_the_exited_leader_remains(pgid),
+            "the scan missed live descendant {descendant}"
+        );
+        assert!(!group.only_the_exited_leader_remains());
+
+        group
+            .wait(Duration::from_secs(5))
+            .expect("cleaning the group");
+
+        assert!(matches!(
+            observe_group(pgid).expect("observing the cleaned group"),
+            GroupPresence::Absent
+        ));
+        assert_ne!(unsafe { libc::getpgid(descendant) }, pgid);
+    }
+
+    #[test]
+    fn a_descendant_forking_through_cleanup_leaves_no_member_behind() {
+        let scratch = Scratch::new("process-group-forker");
+        let pids = scratch.join("forked.pids");
+        let mut command = Command::new("/bin/sh");
+        command
+            .args([
+                "-c",
+                "(while :; do sleep 3600 & echo $! >> \"$PIDS\"; done) & \
+                 while [ ! -s \"$PIDS\" ]; do :; done; exit 0",
+            ])
+            .env("PIDS", &pids)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let group = OwnedProcessGroup::spawn(&mut command).expect("a process group");
+        let pgid = group.pgid_for_test();
+
+        group
+            .wait(Duration::from_secs(5))
+            .expect("cleaning the group");
+
+        assert!(matches!(
+            observe_group(pgid).expect("observing the cleaned group"),
+            GroupPresence::Absent
+        ));
+        let forked = recorded_pids(&pids);
+        assert!(!forked.is_empty(), "the forker recorded no children");
+        for pid in forked {
+            assert_ne!(unsafe { libc::getpgid(pid) }, pgid, "forked {pid} survived");
+        }
     }
 
     #[test]
