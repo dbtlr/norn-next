@@ -1535,10 +1535,11 @@ fn judgment_work_is_links_plus_candidates() {
 // ---- the plan bars ----
 
 /// The statements the judgment runs, each of which the bar below judges.
-pub(crate) const LINK_HEALTH: [ExplainedStatement<'static>; 12] = [
+pub(crate) const LINK_HEALTH: [ExplainedStatement<'static>; 13] = [
     ExplainedStatement::LinkHealthLinks,
     ExplainedStatement::LinkHealthClassLinks,
     ExplainedStatement::LinkHealthPathLinks,
+    ExplainedStatement::LinkHealthAnchoredLinks,
     ExplainedStatement::LinkHealthHeads,
     ExplainedStatement::LinkHealthTotals,
     ExplainedStatement::LinkHealthSuffixes,
@@ -1626,6 +1627,11 @@ fn seeks(statement: ExplainedStatement<'_>, order: StoredPathOrder) -> Vec<Seek>
             "s",
             Access::Index(link_index),
             &format!("({link_key}=? AND (document,link)>(?,?))"),
+        )]),
+        ExplainedStatement::LinkHealthAnchoredLinks => reached(vec![seek(
+            "s",
+            Access::Index("link_anchor_keys_value"),
+            "(kind=? AND value=? AND key=? AND link>?)",
         )]),
         ExplainedStatement::LinkHealthWrittenLinks => reached(vec![
             seek(
@@ -1786,6 +1792,7 @@ fn judge(store: &mut Store, statement: ExplainedStatement<'_>, order: StoredPath
         statement,
         ExplainedStatement::LinkHealthClassLinks
             | ExplainedStatement::LinkHealthPathLinks
+            | ExplainedStatement::LinkHealthAnchoredLinks
             | ExplainedStatement::LinkHealthWrittenLinks
     );
     let details: Vec<&str> = read.rows().iter().map(|row| row.detail.as_str()).collect();

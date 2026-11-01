@@ -19,7 +19,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{StoreError, ddl, error};
 
-// Schema 3 is explicit so a new fact cannot silently escape comparison. Hidden
+// Schema 4 is explicit so a new fact cannot silently escape comparison. Hidden
 // FTS columns are absent from SELECT *, while findings.position is generated.
 const COLUMNS: &[(&str, &str)] = &[
     ("meta", "key value"),
@@ -40,6 +40,7 @@ const COLUMNS: &[(&str, &str)] = &[
         "id document ordinal family embed protocol target title anchor anchor_text anchor_marked block_ref address span_line span_column span_offset field",
     ),
     ("link_keys", "id link document key segments"),
+    ("link_anchor_keys", "link key kind value"),
     (
         "blocks",
         "id document ordinal block_id span_line span_column span_offset",
@@ -282,13 +283,14 @@ fn validate_schema(connection: &Connection) -> Result<(), StoreError> {
     let fingerprint = norn_db::meta::get_meta::<String>(connection, "ddl_fingerprint")?;
     let held_digest = norn_db::meta::get_meta::<String>(connection, "schema_digest")?;
     let current_digest = read(norn_db::schema_digest(connection))?;
-    if version != Some(3)
+    if version != Some(ddl::STORE_SCHEMA_VERSION)
         || fingerprint != Some(ddl::fingerprint())
         || held_digest.as_ref() != Some(&current_digest)
     {
-        return Err(damaged(
-            "startup audit requires the unchanged current store schema 3".into(),
-        ));
+        return Err(damaged(format!(
+            "startup audit requires the unchanged current store schema {}",
+            ddl::STORE_SCHEMA_VERSION
+        )));
     }
     let table_count: usize = read(connection.query_row(
         "SELECT count(*) FROM sqlite_schema WHERE type='table'",
@@ -364,6 +366,11 @@ fn projection(table: &str) -> (Vec<String>, String) {
             "link" if table == "link_keys" => {
                 fields.extend(["ld.path".into(), "l.ordinal".into()]);
                 source.push_str(" JOIN links l ON l.id=t.link AND l.document=t.document JOIN documents ld ON ld.id=l.document");
+            }
+            "link" if table == "link_anchor_keys" => {
+                fields.extend(["ld.path".into(), "l.ordinal".into()]);
+                source
+                    .push_str(" JOIN links l ON l.id=t.link JOIN documents ld ON ld.id=l.document");
             }
             "finding" => {
                 fields.push(finding_identity());
@@ -442,9 +449,11 @@ mod tests {
                 byte_length,body,body_hash,body_offset,frontmatter_diagnostic_count,generation,derived_at)
              VALUES ({a},'a.md','a/','a.md',1,'source-a',6,'alpha\n','body-a',0,0,{generation},{time}),
                     ({b},'b.md','b/','b.md',1,'source-b',5,'beta\n','body-b',0,0,{generation},{time});
-             INSERT INTO links(id,document,ordinal,family,embed,target,address)
-             VALUES ({a},{a},0,'wikilink',0,'beta','vault'),({b},{b},0,'wikilink',0,'alpha','vault');
+             INSERT INTO links(id,document,ordinal,family,embed,target,anchor,anchor_text,address)
+             VALUES ({a},{a},0,'wikilink',0,'beta','Top','top','vault'),({b},{b},0,'wikilink',0,'alpha',NULL,NULL,'vault');
              INSERT INTO link_keys(id,link,document,key,segments) VALUES ({a},{a},{a},'beta/',1);
+             INSERT INTO link_anchor_keys(link,key,kind,value)
+             VALUES ({a},'beta/','reading','top'),({a},'beta/','slug','Top');
              INSERT INTO rule_sets(id,vault_schema_fingerprint,rules)
              VALUES ({a},'fingerprint','[\"rule-a\"]'),({b},'fingerprint','[\"rule-b\"]');
              INSERT INTO findings(id,vault_schema_fingerprint,generation,kind,severity,path,
@@ -600,7 +609,15 @@ mod tests {
             ),
             ("vault_files", "UPDATE vault_files SET path='different.png'"),
             ("links", "UPDATE links SET target='different' WHERE id=1"),
-            ("link_keys", "UPDATE link_keys SET link=2, document=2"),
+            (
+                "link_keys",
+                "PRAGMA foreign_keys=OFF; UPDATE link_keys SET link=2, document=2;
+                 UPDATE link_anchor_keys SET link=2",
+            ),
+            (
+                "link_anchor_keys",
+                "UPDATE link_anchor_keys SET value='different' WHERE kind='slug'",
+            ),
             ("blocks", "UPDATE blocks SET document=2"),
             ("headings", "UPDATE headings SET slug='different'"),
             (
@@ -684,9 +701,10 @@ mod tests {
         for sql in [
             "CREATE TABLE future_facts(fact TEXT)",
             "ALTER TABLE links ADD COLUMN future_fact TEXT",
-            "UPDATE meta SET value=4 WHERE key='store_schema_version'",
+            "UPDATE meta SET value=5 WHERE key='store_schema_version'",
             "PRAGMA foreign_keys=OFF; UPDATE blocks SET document=999",
             "PRAGMA foreign_keys=OFF; UPDATE link_keys SET document=2",
+            "PRAGMA foreign_keys=OFF; UPDATE link_anchor_keys SET link=999",
             "PRAGMA foreign_keys=OFF; UPDATE finding_classes SET finding=999",
             "PRAGMA foreign_keys=OFF; UPDATE findings SET rule_set=999",
         ] {

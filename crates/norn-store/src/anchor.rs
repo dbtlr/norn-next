@@ -26,6 +26,8 @@
 //! the place it names — the judgment every changeset runs over the links it
 //! reaches ([`crate::health`]).
 
+use crate::LinkAnchor;
+
 /// The predicate that the `links` row aliased `link` carries an anchor: a
 /// heading anchor or a block reference.
 ///
@@ -54,6 +56,66 @@ pub(crate) fn anchor_held(link: &str, target: &str) -> String {
           OR EXISTS (SELECT 1 FROM blocks AS hb
                      WHERE hb.document = {target} AND hb.block_id = {link}.block_ref))"
     )
+}
+
+/// Which of a document's anchor values an anchor value is matched against:
+/// a heading's reading, a heading's slug, or a block's identifier. The
+/// anchored-link index stores it as [`AnchorKind::as_str`] spells it, and
+/// the anchor arm of a re-decision walks values in this order.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub(crate) enum AnchorKind {
+    /// A heading's reading, which an anchor's text and marked readings match.
+    Reading,
+    /// A heading's slug, which an anchor as written matches.
+    Slug,
+    /// A block's identifier, which a block reference matches.
+    Block,
+}
+
+impl AnchorKind {
+    /// The kind as `link_anchor_keys.kind` holds it.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            AnchorKind::Reading => "reading",
+            AnchorKind::Slug => "slug",
+            AnchorKind::Block => "block",
+        }
+    }
+}
+
+/// One anchor value: what it is matched against, and the value.
+pub(crate) type AnchorValue = (AnchorKind, String);
+
+/// The anchor values an in-place rewrite moved, under each key that could
+/// name the rewritten document: each segment-aligned prefix of its suffix
+/// key and its path key ([`crate::link::keys_naming`]). A key two rewritten
+/// documents share holds the values moved at either.
+pub(crate) type AnchorMoves =
+    std::collections::BTreeMap<String, std::collections::BTreeSet<AnchorValue>>;
+
+/// The values `anchor` is matched by, each once and in [`AnchorValue`]
+/// order: a heading anchor's text reading and its marked reading against a
+/// heading's reading, the anchor as written against a heading's slug, and a
+/// block reference against a block's identifier. A link with no anchor is
+/// matched by none.
+pub(crate) fn values_of(
+    anchor: Option<&LinkAnchor>,
+) -> std::collections::BTreeSet<(AnchorKind, &str)> {
+    let mut values = std::collections::BTreeSet::new();
+    match anchor {
+        Some(LinkAnchor::Heading { written, readings }) => {
+            values.insert((AnchorKind::Reading, readings.text.as_str()));
+            if let Some(marked) = &readings.marked {
+                values.insert((AnchorKind::Reading, marked.as_str()));
+            }
+            values.insert((AnchorKind::Slug, written.as_str()));
+        }
+        Some(LinkAnchor::Block { id }) => {
+            values.insert((AnchorKind::Block, id.as_str()));
+        }
+        None => {}
+    }
+    values
 }
 
 #[cfg(test)]

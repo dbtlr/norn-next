@@ -12,7 +12,7 @@
 
 use norn_db::rusqlite::types::Value;
 
-use crate::anchor::{anchor_held, carries_anchor};
+use crate::anchor::{AnchorKind, anchor_held, carries_anchor};
 use crate::error::StoreError;
 use crate::find::path_list;
 use crate::health::LinkSelection;
@@ -51,6 +51,10 @@ pub(crate) enum Selected {
     Path,
     /// By a directory range of path keys alone.
     Beneath,
+    /// By one key and one anchor value together: an equality seek of the
+    /// anchored-link index, `link_anchor_keys_value`, at the value's kind and
+    /// text and the key. Read a page at a time.
+    Anchored,
     /// By their row ids: an equality seek of `links` per id. Read whole.
     Links,
 }
@@ -207,6 +211,14 @@ pub(crate) fn links_sql(key: SuffixKey, selected: Selected) -> String {
                  WHERE s.{link_key} = ?1 AND (s.document, s.link) > (?3, ?4)
                  ORDER BY s.document, s.link LIMIT ?5"
         ),
+        // `?2` and `?4` are the unused columns of the resume row: the key is
+        // sought by equality, so a page resumes past a link alone.
+        Selected::Anchored => "SELECT s.link AS link, s.key AS after_text, s.link AS after_first,
+                        0 AS after_second
+                 FROM link_anchor_keys AS s
+                 WHERE s.kind = ?6 AND s.value = ?7 AND s.key = ?1 AND s.link > ?3
+                 ORDER BY s.link LIMIT ?5"
+            .to_string(),
     };
     format!(
         "SELECT {columns}, p.after_text, p.after_first, p.after_second, EXISTS(SELECT 1 FROM directory_marks WHERE path_key >= '')
@@ -295,6 +307,24 @@ pub(crate) fn path_parameters(path: &PathKey, after: &After, limit: usize) -> Ve
 /// either.
 pub(crate) fn key_parameters(key: &str, after: &After, limit: usize) -> Vec<Value> {
     paged(Value::Text(key.to_string()), after, limit)
+}
+
+/// The values [`links_sql`] binds over one page of the anchored links held
+/// under exactly `key` whose anchor `value` of `kind` matches: the key, where
+/// the page resumes, its bound, and the value.
+pub(crate) fn anchored_parameters(
+    key: &str,
+    kind: AnchorKind,
+    value: &str,
+    after: &After,
+    limit: usize,
+) -> Vec<Value> {
+    let mut values = paged(Value::Text(key.to_string()), after, limit);
+    values.extend([
+        Value::Text(kind.as_str().to_string()),
+        Value::Text(value.to_string()),
+    ]);
+    values
 }
 
 /// A paged shape's values: what it selects by, the three columns of the
