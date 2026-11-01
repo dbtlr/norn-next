@@ -43,7 +43,7 @@ use norn_host::{
 use norn_host::{EvidenceReading, JobEvidence};
 use norn_store::{DocumentPath, Store, StoredDocument, StoredPathOrder};
 use norn_testkit::isolation::{self, Lease};
-use norn_testkit::wait::{Budget, Observed, wait_until};
+use norn_testkit::wait::{Budget, Observed, wait_until, wait_until_with_interval};
 use norn_wire::{
     ErrorDetail, ErrorEnvelope, NotReady, ReasonCode, ReloadParams, TrustState, UntrustedReason,
     VaultAddress, VaultName,
@@ -508,11 +508,15 @@ pub fn attach_and_wait(
 /// Wait until the entry under `name` serves the vault, failing past `limit`.
 ///
 /// It asks for nothing: what is waited on is a convergence some demand or
-/// some job already set going.
+/// some job already set going. Each probe only reads the published state under
+/// the entry's gate, so a one-millisecond interval notices convergence promptly
+/// without sub-millisecond wakeups competing with parallel test work. The
+/// caller's work limit and the state probe bound are unchanged.
 pub fn wait_for_ready(host: &Host<ProductionEntryOps>, name: &VaultName, limit: Duration) {
-    wait_until(
+    wait_until_with_interval(
         &format!("the entry under `{name}` to serve the vault"),
         state_budget(limit),
+        Duration::from_millis(1),
         || match host.state(name) {
             Ok(TrustState::Ready) => Observed::Met(()),
             observed => {

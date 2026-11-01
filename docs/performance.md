@@ -253,8 +253,9 @@ alongside the elapsed clocks. The worker waits for the startup job's bookkeeping
 to finish after observing `Ready`, and reports both boundaries separately:
 `attach_ns` and `observed_ready_ns` end at observed readiness;
 `startup_complete_ns` additionally includes the feature build's bookkeeping wait.
-The worker polls readiness every millisecond instead of using the test helper's
-adaptive backoff, whose maximum interval is 50 milliseconds.
+The worker and the host test readiness helper poll every millisecond. Readiness
+probes read the entry's published state under its gate; they do not query the
+store. Other bounded test waits retain adaptive backoff up to 50 milliseconds.
 
 Timers report inclusive elapsed time and call counts. Parent and child times
 must not be added together. The top-level breakdown partitions document planning,
