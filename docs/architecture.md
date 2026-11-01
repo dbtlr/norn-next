@@ -2437,9 +2437,10 @@ an out-of-service entry, a release or known damage, begins none, and its reads k
 ordinary refusal. A construction begun under the gate replaces any earlier one, retiring
 its pool and waking its waiters; no authority is reused.
 
-The build publishes each step as it ends: names, content and structure after the step's
-last group commits and its deferred indexes are built, relations after the complete link-health
-judgment and re-judgment of every reach its takes requeued, and full text after the closing transaction. Publication binds the claim, the
+The build publishes each step as it ends: names, content and structure once the roots
+the step's closing take took have committed and the step's deferred indexes are built,
+relations after the complete link-health judgment and re-judgment of every reach its
+closing take requeued, and full text after the closing transaction. Publication binds the claim, the
 build, the store epoch and an admitting authority under the entry gate, and a changed
 claim or build, withdrawn authority, park, out-of-service entry, release or known damage
 publishes nothing. It never publishes `Ready` or trust unbroken since `Ready`. `Ready`

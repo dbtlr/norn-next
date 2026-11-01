@@ -679,16 +679,21 @@ real-watcher test lease for minutes.
 
 **Each requeue takes once.** A requeue takes every root accepted up to that instant, the
 same take as before, derives those paths again through every step the build has reached,
-commits and publishes their derivation, and returns. It does not take again. The build
-calls requeue at the chunk boundaries of the content and structure steps and once as each
-of steps 1–4 closes. That last call makes the step's **closing take**, and the step ends
-once the paths it took have run through the step.
+commits and publishes their derivation, and returns. It does not take again. Names calls
+requeue once, as it closes. Content and Structure call it as each group of their normal
+pass opens and closes, at every chunk boundary inside a group, and once more as the step
+closes; only that last call is the step's **closing take**. Relations calls it once, after
+its link-health judgment, and that call is its closing take. A step ends once the paths
+its closing take took have run through the step.
 
-A fact accepted after a step's closing take goes to the next requeue, in the next step,
-which runs its path through the earlier steps again on its way to the current one. A fact
-accepted after step 4's closing take, which closes Relations, is never taken by the
-build: it waits for the reconcile that precedes `Ready`, the same path every fact accepted
-from step 5 on already took. The reconcile receives only untaken facts, as before.
+A fact accepted during a step waits for that step's next requeue. In Content and Structure
+that is usually the next chunk boundary. Relations has only its closing take, so a fact
+accepted early in Relations waits for the whole link-health judgment. A fact accepted
+after a step's closing take goes to the next step's first requeue, which runs its path
+through the earlier steps again on its way to the current one. A fact accepted after
+step 4's closing take, which closes Relations, is never taken by the build: it waits for
+the reconcile that precedes `Ready`, the same path every fact accepted from step 5 on
+already took. The reconcile receives only untaken facts, as before.
 
 A path that no take has derived again stays outstanding. A Get the path touches and every
 vault-wide early capability wait for it, as a request waits for the facts it met; none is
@@ -700,22 +705,34 @@ until `Ready`.
 
 - **`Ready` arrives under continuous edits.** A build's requeue work is bounded by its
   requeue calls, not by the number or rate of facts accepted while it runs. On the
-  200-document test vault, under writers producing 58,000 to 474,000 events during the
-  build, the build made no more takes than its roughly 210 requeue calls. The attach took 0.76 s with an
-  unthrottled writer; with 20 ms injected per take, it took 5.2 s with a writer at 100 Hz
-  and with an unthrottled writer, where under ADR 0045 it never finished.
-- **A hot path waits for `Ready`.** Under continuous edits to one path, a fact accepted
-  after step 4's closing take stays outstanding until `Ready`. A Get of that path waits
-  for `Ready` instead of answering early, and so does every vault-wide early capability
-  — field Find, the step-3 shapes, link health and search — that meets such a fact. A Get the outstanding facts do not touch keeps
-  answering, with link resolution, link health and findings rendered loading while any
-  fact is outstanding at its admission, as before.
+  200-document test vault the build made 210 requeue calls and never more takes than
+  that. With a writer rewriting one note as fast as it could, which produced 50,000 to
+  55,000 accepted facts during the build, the attach took 0.68–0.73 s; with a writer near
+  1 kHz it took 0.73–0.78 s. With 20 ms injected per take, it took 5.1 s with a writer at
+  100 Hz and 5.2–5.3 s with an unthrottled writer, whose 440,000 facts the build
+  accepted; under ADR 0045 those attaches never finished.
+- **One edit after Relations' closing take withholds link health, Find and search until
+  `Ready`.** Any single fact accepted after step 4's closing take stays outstanding until
+  `Ready`, so a path edited even once in that window withholds them, not only a path
+  under continuous edits.
+  A Get of that path waits for `Ready` instead of answering early, and so does every
+  vault-wide early capability that meets such a fact: link health, validate and
+  `HasFinding`, every Find shape, and search. A Get the outstanding facts do not touch
+  keeps answering, with link resolution, link health and findings rendered loading while
+  any fact is outstanding at its admission, as before.
 - **The pre-`Ready` reconcile can carry more.** Facts accepted between step 4's closing take
   and step 5 now reach the reconcile rather than a further take. Its cost follows those
   facts' reach, as it already did for facts accepted from step 5 on.
-- **An invariant pins the rule.** A test drives a from-zero build under a continuous writer
-  and asserts that the number of takes never exceeds the number of requeue calls, whatever
-  the event rate.
+- **An invariant pins the rule.** A take is one call of the build's take that returns
+  a non-empty set of roots. The number of takes never exceeds the number of requeue
+  calls, whatever the event rate. A test rewrites one note twenty times inside every take
+  of a from-zero build, waiting for each rewrite to be accepted, so a new fact always
+  lands mid-take. The build makes 22 requeue calls and 22 takes while about 570 facts are
+  accepted, and the store it reaches `Ready` with equals a from-scratch build of the final
+  bytes. Under ADR 0045's rule the same test took again within one requeue until the
+  writer stopped at its 400-take cap: 401 takes against 24 requeue calls. A second test
+  attaches the 200-document vault under a writer near 1 kHz and asserts the same bound
+  end to end.
 
 ## Whole-vault and semantic readiness
 
