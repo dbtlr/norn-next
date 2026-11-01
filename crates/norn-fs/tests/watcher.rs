@@ -403,9 +403,18 @@ fn a_sync_catch_up_covers_every_path_across_settled_batches() {
     collector.wait_for_roots(&expected, "the sync catch-up to report every changed path");
 }
 
+/// The fixture's own schema write is settled before attaching. FSEvents can
+/// deliver it after [`Collector::start`] has emptied coverage, and that late
+/// delivery sets `schema_dirty` just as the replacement does, so the wait
+/// below could be met by the fixture rather than by the change it asserts.
+/// Settling runs a platform watcher, so the real-watcher lease is taken first
+/// and held through the collection.
 #[test]
 fn external_schema_changes_and_vault_root_loss_are_reported() {
     let scratch = Scratch::new("coverage");
+    let lease = Lease::hold(isolation::REAL_WATCHER, lease_budget());
+    norn_fs::watch::settle_prior_changes(scratch.tree.root(), budget().work())
+        .expect("the fixture's schema write has passed through the backend");
     let schema = scratch.schema();
     let schema_parent = schema.parent().expect("a schema parent");
     let watched_schema = match PathNormalizer::detect(schema_parent)
@@ -417,7 +426,7 @@ fn external_schema_changes_and_vault_root_loss_are_reported() {
         CaseSensitivity::Insensitive => schema_parent.join("SCHEMA.TOML"),
         CaseSensitivity::Sensitive => schema.clone(),
     };
-    let mut collector = Collector::start(&scratch.vault(), &watched_schema);
+    let mut collector = Collector::start_holding(lease, watch, &scratch.vault(), &watched_schema);
 
     let replacement = scratch.tree.join("schema/.schema.toml.new");
     std::fs::write(&replacement, b"version = 2\n").expect("a replacement schema");
@@ -607,6 +616,12 @@ fn a_write_issued_before_synchronization_is_reported_for_its_own_path() {
 /// single boundary a claim about the whole plan rather than about one
 /// filesystem. A plan whose edges sit on different volumes is where that
 /// claim is worth something, so it is the topology this case builds.
+///
+/// The schema's first write is settled before attaching. The case collects
+/// from the moment `watch` returns, and FSEvents can deliver that write on the
+/// live side of the boundary, so it would satisfy the schema half of the wait
+/// without the replacement. The settle sentinel lands in the schema's own
+/// folder, where no delivery for it can mark the schema dirty.
 #[test]
 fn a_plan_spanning_two_volumes_synchronizes_and_reports_from_both() {
     let scratch = Scratch::new("multi-volume");
@@ -623,6 +638,8 @@ fn a_plan_spanning_two_volumes_synchronizes_and_reports_from_both() {
     std::fs::write(&schema, b"version = 1\n").expect("a schema on the second volume");
 
     let lease = Lease::hold(isolation::REAL_WATCHER, lease_budget());
+    norn_fs::watch::settle_prior_changes(volume.mount(), budget().work())
+        .expect("the schema's first write has passed through the backend");
     let (subscription, _own_writes) =
         watch(&scratch.vault(), &schema).expect("watch coverage is active across two volumes");
 
