@@ -45,8 +45,8 @@
 # Dedicated full fault suites, compiled audits, counter matrices and memory
 # bars run only in regression.yml among the active workflows. This gate keeps
 # ordinary functional coverage and focused macOS filesystem evidence, including
-# the folding-root spelling bar. docs/ci.md governs cadence and the separate
-# required-context transition.
+# the folding-root spelling bar. docs/ci.md governs cadence and the required
+# checks in the `main` ruleset.
 name: ci
 
 on:
@@ -66,8 +66,8 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # The workspace compiles clean and its ordinary tests and
-  # doctests pass. The corpus suite is dormant — no command is activated —
+  # The workspace compiles clean; ordinary tests and doctests outside the named
+  # shard pass. The corpus suite is dormant — no command is activated —
   # while its data and the registry's structure remain checked here.
   # Compiled registry carriers and inventory reconciliation run in full
   # regression: keeping that build/listing work there avoids rebuilding and
@@ -91,6 +91,7 @@ jobs:
       - name: Test
         run: .github/scripts/flake-tripwire.sh cargo test --locked --workspace --exclude norn-host --exclude norn-testkit
 
+  # `build and test (norn-host and norn-testkit)` is a required check in the `main` ruleset.
   # The named packages and catch-all exclusions must match exactly. Each package's
   # ordinary tests and doctests run once; new crates join the catch-all automatically.
   build-host:
@@ -170,8 +171,8 @@ jobs:
   # their dedicated fault/recovery targets are adopted wholesale in full
   # regression. Existing ignored counter, memory and soak cases keep their
   # own lanes; ordinary feature-enabled cases elsewhere still run here.
-  # This job runs beside build rather than after it, so the PR critical path
-  # is the longer of the two rather than their sum.
+  # The four Linux build, lint and test jobs run in parallel, so their contribution
+  # to the PR critical path is the longest job rather than their sum.
   host-functional:
     name: host functional (induced-failure)
     runs-on: ubuntu-latest
@@ -184,7 +185,7 @@ jobs:
       - name: Host functional suite
         run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-host --features induced-failure
 
-  # A targeted second-architecture gate. The default build already runs the
+  # A targeted second-architecture gate. The two default test shards cover the
   # full workspace on Linux x86_64; this job holds contracts whose answers can
   # drift with architecture or filesystem behavior without duplicating the
   # complete host suite: embedding determinism, norn-fs contracts, Obsidian

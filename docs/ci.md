@@ -13,6 +13,8 @@ except `norn-host` and `norn-testkit`) and
 `build and test (norn-host and norn-testkit)`. The named shard uses `-p norn-host -p norn-testkit`; the catch-all uses `--workspace --exclude norn-host --exclude norn-testkit`.
 Their package lists must match exactly, so new crates join the catch-all and
 every package's doctests run exactly once through ordinary `cargo test`.
+The shard pair preserves whole-workspace test membership, and each shard builds
+tests with the whole-workspace feature set.
 The whole feature-enabled
 `norn-host` package runs in `host functional (induced-failure)`, so current and
 future ordinary targets and cases join PR coverage automatically.
@@ -129,7 +131,7 @@ stop merges; triage records that classification and what clears it. Diagnose red
 runs before rerunning. A runner failure or missed nightly supplies no positive
 regression evidence. Repairs may dispatch a full run immediately.
 
-The required-context set after merge is:
+The `main` ruleset requires these checks:
 
 - `build and test`
 - `build and test (norn-host and norn-testkit)`
@@ -138,9 +140,6 @@ The required-context set after merge is:
 - `determinism and filesystem (macOS ARM64)`
 - `architecture gate`
 - `CodeRabbit`
-
-The orchestrator adds `lint and document` and `build and test (norn-host and norn-testkit)` to
-the `main` ruleset after merge. This change does not edit repository settings.
 
 Full-run names stay distinct so a manual regression run cannot alias a
 PR-required context.

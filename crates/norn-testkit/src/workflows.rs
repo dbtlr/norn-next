@@ -231,11 +231,6 @@ enum Invocation {
     Lane { package: String, target: String },
     /// `cargo test`, with what it runs under a feature.
     Test(Vec<FeaturedRun>),
-    /// A default-feature package shard, including all targets and doctests.
-    Shard {
-        catch_all: bool,
-        packages: BTreeSet<String>,
-    },
 }
 
 /// What the workflows in `directory` run.
@@ -571,40 +566,9 @@ fn invocation(run: &str) -> Option<Invocation> {
                 target: (*target).to_string(),
             })
         }
-        ["cargo", "test", arguments @ ..] => {
-            default_shard(arguments).or_else(|| featured_runs_of(arguments).map(Invocation::Test))
-        }
+        ["cargo", "test", arguments @ ..] => featured_runs_of(arguments).map(Invocation::Test),
         _ => None,
     }
-}
-
-/// A deliberately closed grammar: no filters, target selectors, features or retries.
-fn default_shard(arguments: &[&str]) -> Option<Invocation> {
-    let ["--locked", rest @ ..] = arguments else {
-        return None;
-    };
-    let (catch_all, selector, rest) = match rest {
-        ["--workspace", rest @ ..] => (true, "--exclude", rest),
-        rest => (false, "-p", rest),
-    };
-    let mut packages = BTreeSet::new();
-    let mut tokens = rest.iter().copied();
-    while let Some(token) = tokens.next() {
-        if token != selector {
-            return None;
-        }
-        let package = tokens.next()?;
-        if package.is_empty() || package.starts_with('-') || !packages.insert(package.to_string()) {
-            return None;
-        }
-    }
-    if packages.is_empty() {
-        return None;
-    }
-    Some(Invocation::Shard {
-        catch_all,
-        packages,
-    })
 }
 
 /// The runs the arguments of one `cargo test` invocation make under a
@@ -684,12 +648,10 @@ fn is_count(text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        FeaturedRun, Invocation, LANE_FEATURES, Step, default_shard, invocation, steps_in,
-    };
+    use super::{FeaturedRun, Invocation, LANE_FEATURES, Step, invocation, steps_in};
     use crate::regression::Target;
     use serde_yaml::Value;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     /// One featured run, as the reader reports it.
     fn run(package: &str, target: Option<Target>, feature: &str) -> FeaturedRun {
@@ -813,9 +775,8 @@ mod tests {
         }
     }
 
-    /// Package shards preserve complete default coverage; collecting failures preserves features.
     #[test]
-    fn collecting_later_failures_preserves_the_featured_selection() {
+    fn the_package_shards_are_complementary() {
         let workflow = include_str!("../../../.github/workflows/ci.yml");
         let mut document: Value = serde_yaml::from_str(workflow).unwrap();
         document
@@ -825,38 +786,32 @@ mod tests {
             .unwrap()
             .retain(|key, _| matches!(key.as_str(), Some("build" | "build-host")));
         let workflow = serde_yaml::to_string(&document).unwrap();
-        let shards: Vec<_> = steps_in(&workflow)
-            .unwrap()
-            .into_iter()
-            .filter(|step| step.vouches)
-            .filter_map(|step| invocation(step.run.as_deref()?))
-            .filter_map(|run| match run {
-                Invocation::Shard {
-                    catch_all,
-                    packages,
-                } => Some((catch_all, packages)),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(shards.len(), 2);
-        assert!(shards[0].0);
-        assert!(!shards[1].0);
-        assert_eq!(shards[0].1, shards[1].1);
-        for command in [
-            "--locked --workspace --exclude norn-host --exclude norn-testkit",
-            "--locked -p norn-host -p norn-testkit",
-        ] {
-            for suffix in [
-                " ordinary",
-                " -- --skip ordinary",
-                " --lib",
-                " --tests",
-                " --retries 1",
-            ] {
-                let mutant = format!("{command}{suffix}");
-                assert!(default_shard(&mutant.split_whitespace().collect::<Vec<_>>()).is_none());
-            }
-        }
+        // Certification pins both complete commands; derive only their package selections here.
+        let packages = |selector| -> BTreeSet<String> {
+            steps_in(&workflow)
+                .unwrap()
+                .into_iter()
+                .filter(|step| step.vouches)
+                .filter_map(|step| step.run)
+                .flat_map(|run| {
+                    run.split_whitespace()
+                        .collect::<Vec<_>>()
+                        .windows(2)
+                        .filter(|pair| pair[0] == selector)
+                        .map(|pair| pair[1].to_string())
+                        .collect::<Vec<_>>()
+                })
+                .collect()
+        };
+        let excluded = packages("--exclude");
+        let named = packages("-p");
+        assert!(!excluded.is_empty());
+        assert_eq!(excluded, named);
+    }
+
+    /// Collecting failures changes neither the target nor its feature selection.
+    #[test]
+    fn collecting_later_failures_preserves_the_featured_selection() {
         let command = "cargo test --locked --no-fail-fast -p norn-host --features induced-failure";
         assert_eq!(
             invocation(command),

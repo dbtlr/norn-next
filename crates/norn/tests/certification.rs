@@ -1294,6 +1294,7 @@ fn the_fast_gate_keeps_ordinary_functional_coverage() {
     let mut mutants = vec![
         gate.replace("  architecture:", "  missing:"),
         gate.replace("--exclude norn-host", "--exclude norn-store"),
+        gate.replace(" --exclude norn-host", ""),
         gate.replace(
             "--locked -p norn-host -p norn-testkit\n",
             "--locked -p norn-store\n",
@@ -1690,7 +1691,7 @@ fn assert_matrix_step_values(workflow: &str, job: &str, runs: &[&str], full: boo
     );
 }
 
-/// Literal commands establish the plain-workspace authority the generic reader excludes.
+/// Literal commands establish the package-shard pair and full-regression coverage the generic reader excludes.
 fn assert_complete_active_matrix(workflow: &str, full: bool) {
     assert_matrix_mapping_keys(workflow, full);
     assert_eq!(
