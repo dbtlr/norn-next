@@ -53,7 +53,10 @@ mod tests {
 
     #[test]
     fn unoptimized_without_overrides_matches_authored_subject() {
-        assert_eq!(BuildSubject::new("0", "").check_unoptimized(), Ok(()));
+        assert_eq!(
+            BuildSubject::new("0", "").check_unoptimized_with(true),
+            Ok(())
+        );
     }
 
     #[test]
