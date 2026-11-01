@@ -701,6 +701,12 @@ mod tests {
             ),
             tested(vec![run("norn-host", None, "induced-failure")])
         );
+        assert_eq!(
+            invocation(
+                "cargo nextest run --locked --no-fail-fast -p norn-host --features induced-failure"
+            ),
+            None
+        );
         for option in [
             "--retries 1",
             "--retries 2",

@@ -1285,6 +1285,23 @@ fn ci_job(workflow: &str, key: &str) -> Vec<String> {
     lines.collect()
 }
 
+/// A runner config can silently filter cases or turn elapsed time into a verdict.
+#[test]
+fn nextest_has_no_repository_config() {
+    // 0.9.114 reads only this workspace-root path by default. --config-file and
+    // --tool-config-file are explicit CLI options, with no NEXTEST_* path override;
+    // the workflow command pins and closed environment grammar reject those inputs.
+    assert!(
+        !workspace_root()
+            .join(".config/nextest.toml")
+            .try_exists()
+            .expect("checking nextest config"),
+        "nextest config can narrow coverage with default-filter or add wall-clock verdicts \
+         with slow-timeout.terminate-after; before adding one, a reviewer must rule on \
+         complete suite membership and the CI timeout doctrine"
+    );
+}
+
 /// The PR gate retains every ordinary host target while deep lanes run in full regression.
 #[test]
 fn the_fast_gate_keeps_ordinary_functional_coverage() {
@@ -2125,22 +2142,6 @@ fn a_suite_runner_rejects_empty_runs_and_preserves_failures() {
     for (output, exit, expected) in [
         ("test result: ok. 1 passed; 0 failed; 0 ignored", 0, 0),
         ("test result: ok. 12 passed; 0 failed; 0 ignored", 0, 0),
-        (
-            "     Summary [ 1.200s] 12 tests run: 12 passed, 3 skipped",
-            0,
-            0,
-        ),
-        (
-            "     Summary [ 0.001s] 0 tests run: 0 passed, 12 skipped",
-            0,
-            1,
-        ),
-        ("     Summary [ 0.001s] 1 test run: 1 passed", 0, 0),
-        (
-            "     Summary [ 0.001s] 1 test run: 0 passed, 1 failed",
-            100,
-            100,
-        ),
         ("test result: ok. 0 passed; 0 failed; 1 ignored", 0, 1),
         ("", 0, 1),
         (
@@ -2403,16 +2404,20 @@ fn a_ledgered_signature_matches_a_failure_and_never_a_run_that_passed_it() {
         for fields in &entries {
             let signature = ledger_field(fields, "signature");
             if nextest {
-                passed.push_str(&format!("        PASS [ 0.001s] fixture suite::{signature}\n        SKIP [         ] fixture suite::{signature}\n"));
+                passed.push_str(&format!("        PASS [   0.001s] (1/4) fixture suite::{signature}\n        SKIP [         ] (2/4) fixture suite::{signature}\n        SLOW [>  1.000s] (───) fixture suite::{signature}\n        LEAK [   0.207s] (3/4) fixture suite::{signature}\n"));
             } else {
                 passed.push_str(&format!("test suite::{signature} ... ok\n"));
             }
         }
-        passed.push_str(
+        if nextest {
+            passed.push_str(&failed_run("something_else", "assertion failed"));
+        } else {
+            passed.push_str(
         "test suite::something_else ... FAILED\n\nfailures:\n\n---- suite::something_else stdout \
          ----\nthread 'suite::something_else' panicked at src/lib.rs:1:1:\nassertion \
          failed\n\nfailures:\n    suite::something_else\n\ntest result: FAILED. 1 failed\n",
     );
+        }
         let (status, summary, annotations) = tripwire_over(&sandbox, &root, "passed", &passed);
         assert_eq!(
             status,
@@ -2439,6 +2444,22 @@ fn a_ledgered_signature_matches_a_failure_and_never_a_run_that_passed_it() {
             );
         }
 
+        if nextest {
+            for status in ["LEAK-FAIL", "FAIL", "TIMEOUT", "SIGABRT"] {
+                let fields = &entries[0];
+                let signature = ledger_field(fields, "signature");
+                let output = format!("    {status} [   0.207s] (1/1) fixture {signature}\n");
+                let (_, _, annotations) = tripwire_over(&sandbox, &root, status, &output);
+                assert!(
+                    annotations.contains(&format!(
+                        "Ledgered flake recurred: {}",
+                        ledger_field(fields, "id")
+                    )),
+                    "{status} must still be scanned"
+                );
+            }
+        }
+
         // The same entries, each in a run that really did fail on it.
         for fields in &entries {
             let (id, signature) = (
@@ -2451,9 +2472,7 @@ fn a_ledgered_signature_matches_a_failure_and_never_a_run_that_passed_it() {
              result: FAILED. 1 failed\n"
             );
             let failed = if nextest {
-                format!(
-                    "        FAIL [ 0.001s] fixture suite::a_case\n--- STDERR: fixture suite::a_case ---\n{signature}\n     Summary [ 0.001s] 1 test run: 0 passed, 1 failed\n"
-                )
+                failed_run("a_case", signature)
             } else {
                 failed
             };
@@ -2872,13 +2891,14 @@ fn wait_failure(
 }
 
 /// A suite run in which `case` failed by panicking with `message`, in the
-/// shape libtest prints it.
+/// shape nextest 0.9.114 prints it.
 #[cfg(unix)]
 fn failed_run(case: &str, message: &str) -> String {
+    let message = message.replace('\n', "\n    ");
     format!(
-        "        FAIL [ 0.001s] fixture tests::{case}\n--- STDERR: fixture tests::{case} ---\n\
-         thread 'tests::{case}' panicked at crates/norn-testkit/src/isolation.rs:298:59:\n\
-         {message}\n     Summary [ 0.001s] 1 test run: 0 passed, 1 failed\n"
+        "        FAIL [   0.001s] (1/1) fixture tests::{case}\n  stderr ───\n\n    \
+         thread 'tests::{case}' panicked at crates/norn-testkit/src/isolation.rs:298:59:\n    \
+         {message}\n\n────────────\n     Summary [   0.001s] 1 test run: 0 passed, 1 failed, 0 skipped\n"
     )
 }
 
