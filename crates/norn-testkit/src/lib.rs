@@ -115,6 +115,7 @@
 pub mod architecture;
 pub mod attestation;
 pub mod base64;
+pub mod build_subject;
 pub mod certification;
 pub mod churn;
 pub mod corpus;
