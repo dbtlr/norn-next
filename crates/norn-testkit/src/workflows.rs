@@ -58,8 +58,9 @@
 //! arguments that select nothing, or `cargo test` / `cargo nextest run` with
 //! the flags that name a package, a feature and the targets it selects and
 //! the few that change nothing about which tests run. Nextest must explicitly
-//! disable retries with `--retries 0`. `--release` is not among them: it compiles
-//! out every test gated on `debug_assertions`. A command outside that grammar
+//! disable retries with `--retries 0` and run every test with `--no-fail-fast`.
+//! `--release` is not among them: it compiles out every test gated on
+//! `debug_assertions`. A command outside that grammar
 //! runs nothing, so a step this
 //! cannot read fails whatever needed it rather than vouching for a test it may
 //! not run.
@@ -583,7 +584,7 @@ fn invocation(run: &str) -> Option<Invocation> {
                     plain.push(token);
                 }
             }
-            if !retries_off {
+            if !retries_off || !plain.contains(&"--no-fail-fast") {
                 return None;
             }
             featured_runs_of(&plain).map(Invocation::Test)
@@ -701,25 +702,23 @@ mod tests {
             ),
             tested(vec![run("norn-host", None, "induced-failure")])
         );
-        assert_eq!(
-            invocation(
-                "cargo nextest run --locked --no-fail-fast -p norn-host --features induced-failure"
-            ),
-            None
-        );
-        for option in [
-            "--retries 1",
-            "--retries 2",
-            "-E test(foo)",
-            "--run-ignored all",
-            "--no-tests pass",
-            "--profile custom",
+        for policy in [
+            "--no-fail-fast",
+            "--retries 0",
+            "--retries 1 --no-fail-fast",
+            "--retries 2 --no-fail-fast",
+            "--retries 0 --no-fail-fast -E test(foo)",
+            "--retries 0 --no-fail-fast --skip foo",
+            "--retries 0 --no-fail-fast --run-ignored all",
+            "--retries 0 --no-fail-fast --no-tests pass",
+            "--retries 0 --no-fail-fast --profile custom",
         ] {
             assert_eq!(
                 invocation(&format!(
-                    "cargo nextest run --locked -p norn-host --features induced-failure {option}"
+                    "cargo nextest run --locked -p norn-host --features induced-failure {policy}"
                 )),
-                None
+                None,
+                "must reject {policy}"
             );
         }
     }
