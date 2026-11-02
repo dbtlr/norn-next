@@ -40,7 +40,7 @@ const PROFILE: &str = "tiny";
 /// profile's own documents.
 fn a_vault(label: &str, files: &[(&str, &str)]) -> (Sandbox, attach::Vault) {
     let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), label).expect("a sandbox");
-    let vault = attach::Vault::generate(&sandbox.work_dir().join("attached"), PROFILE);
+    let vault = attach::Vault::generate(&sandbox.work_dir().join("attached"), PROFILE).unmeasured();
     for (at, content) in files {
         let path = vault.path().join(at);
         std::fs::create_dir_all(path.parent().expect("a parent")).expect("make the parent");

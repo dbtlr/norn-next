@@ -360,7 +360,7 @@ pub(super) fn child() {
         .into_iter()
         .find(|verb| verb.name() == verb_name)
         .unwrap();
-    let vault = attach::Vault::adopt(&root);
+    let vault = attach::Vault::adopt(&root).unmeasured();
     let host = vault.host();
     let _lease = attach::attach_and_wait(&host, vault.name());
     if std::env::var_os(COMMIT).is_some() {

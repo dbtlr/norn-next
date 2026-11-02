@@ -274,7 +274,7 @@ fn every_statement_a_repair_runs_is_planned_as_an_index_search() {
     induced_failure::record_statements_begun();
     let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), "host-repair-census")
         .expect("a sandbox");
-    let vault = attach::Vault::generate(&sandbox.work_dir().join("attached"), "tiny");
+    let vault = attach::Vault::generate(&sandbox.work_dir().join("attached"), "tiny").unmeasured();
     std::fs::write(vault.path().join(".norn/schema.yaml"), SCHEMA).expect("write the schema");
     let arranged = DOCUMENTS
         .iter()

@@ -16,7 +16,7 @@ fn a_vault_under(
     documents: &[(&str, &str)],
 ) -> (Sandbox, attach::Vault, attach::ServingHost) {
     let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), label).expect("a sandbox");
-    let vault = attach::Vault::generate(&sandbox.work_dir().join("attached"), "tiny");
+    let vault = attach::Vault::generate(&sandbox.work_dir().join("attached"), "tiny").unmeasured();
     for entry in std::fs::read_dir(vault.path()).expect("the fixture tree") {
         let entry = entry.expect("a fixture entry");
         if entry.file_name() == ".norn" {

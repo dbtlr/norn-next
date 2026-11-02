@@ -61,7 +61,7 @@ const DOCUMENTS: [(&str, &str); 8] = [
 /// A sandbox and a vault in it holding [`DOCUMENTS`] under [`SCHEMA`].
 fn a_vault(label: &str) -> (Sandbox, attach::Vault) {
     let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), label).expect("a sandbox");
-    let vault = attach::Vault::generate(&sandbox.work_dir().join("attached"), PROFILE);
+    let vault = attach::Vault::generate(&sandbox.work_dir().join("attached"), PROFILE).unmeasured();
     std::fs::write(vault.path().join(".norn/schema.yaml"), SCHEMA).expect("write the schema");
     for (name, bytes) in DOCUMENTS {
         let at = vault.path().join("zz-repair").join(name);
@@ -141,7 +141,7 @@ fn repair_crash_child() {
     let root = attach::accepted_harness_root(&root, ROOT);
     let plan = std::fs::read(std::env::var_os(PLAN).expect("the plan's file")).expect("the plan");
     let plan: ResolvedPlan = serde_json::from_slice(&plan).expect("a plan");
-    sent(&attach::Vault::adopt(&root), &plan);
+    sent(&attach::Vault::adopt(&root).unmeasured(), &plan);
 }
 
 /// Run a child sending `plan` to the vault under `armed`, and report whether the

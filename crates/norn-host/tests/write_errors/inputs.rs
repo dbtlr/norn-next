@@ -242,7 +242,7 @@ impl Trial {
             Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), "write-input-trial").unwrap();
         let root = sandbox.work_dir().join("attached");
         faults::tree(&root, verb);
-        let vault = attach::Vault::adopt(&root);
+        let vault = attach::Vault::adopt(&root).unmeasured();
         let host = vault.host();
         let lease = attach::attach_and_wait(&host, vault.name());
         let identity = norn_fs::path_identity(vault.path()).unwrap().unwrap();
@@ -296,7 +296,7 @@ pub(super) fn run() {
                             .unwrap();
                     let root = sandbox.work_dir().join("attached");
                     faults::tree(&root, verb);
-                    let vault = attach::Vault::adopt(&root);
+                    let vault = attach::Vault::adopt(&root).unmeasured();
                     let host = vault.host();
                     let _lease = attach::attach_and_wait(&host, vault.name());
                     let mut preview = seed.clone();
