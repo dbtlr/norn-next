@@ -703,7 +703,10 @@ until `Ready`.
 
 ### Consequences
 
-- **`Ready` arrives under continuous edits.** A build's requeue work is bounded by its
+- **Construction ends under continuous edits.** Construction no longer waits for edits to
+  pause: it ends and hands on to the reconcile before `Ready`. That reconcile publishes `Ready`
+  once a turn leaves no fact pending, so under edits that never pause the vault stays
+  `Warming` until they do, as any attached vault does. A build's requeue work is bounded by its
   requeue calls, not by the number or rate of facts accepted while it runs. The calls
   follow the vault's shape: a build under edits makes no more of them than a quiet build
   of the same tree, and can make fewer, because a document pulled ahead leaves its normal
