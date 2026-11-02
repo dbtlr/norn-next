@@ -4435,8 +4435,8 @@ Four contracts inside that flow carry weight:
   is known as the applier's own however long the sync takes. The entry stands until it
   expires, so a second report of the act, which FSEvents can deliver, is known too; a report
   that finds the path changed from what was published ends it. On a root that folds case a
-  repeat report is known only where the folder still stores the published spelling, so a
-  foreign case-only rename after the act is delivered. A move interrupted between its
+  repeat report of a published file is known only where the folder still stores the
+  published spelling, so a foreign case-only rename after the act is delivered. A move interrupted between its
   legs leaves both names holding the document. A folder the removals left empty that cannot
   be removed is left: the plan is still applied, the report's removed folders omit it — the
   wire names no failure for it — and a re-send empties it again.

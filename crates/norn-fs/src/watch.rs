@@ -2387,7 +2387,8 @@ fn hand_over(
 /// what was published is the same write. A report that finds the path changed
 /// ends the entry: what was published no longer stands there.
 ///
-/// **A repeat match on a folding root also asks the volume's spelling.** Two
+/// **A repeat match of a present file on a folding root also asks the
+/// volume's spelling.** Two
 /// spellings are one entry there, so a foreign case-only rename leaves the
 /// bytes the entry compares; a repeat report is the echo only where the
 /// folder still stores the published name. A first match takes the content
@@ -2406,7 +2407,12 @@ fn suppress(root: &Path, ledger: &Arc<Mutex<Ledger>>, mut batch: Batch) -> Batch
             .iter()
             .filter_map(|path| {
                 ledger.entries.get(path).map(|entry| {
-                    let respellable = entry.matched && entry.folds;
+                    // An absent path has no spelling to respell: a foreign
+                    // create at any spelling makes it present, which the
+                    // content comparison already refuses.
+                    let respellable = entry.matched
+                        && entry.folds
+                        && matches!(entry.expected, Expected::Present(_));
                     let published = respellable.then(|| entry.published.clone());
                     (path.clone(), (entry.expected, entry.recorded, published))
                 })
@@ -6188,6 +6194,29 @@ mod tests {
                 "the {delivery} report of an own write was delivered as a change"
             );
         }
+    }
+
+    /// **An own removal reported twice is an echo both times.** An absent path
+    /// has no spelling to ask after, and a foreign create at any spelling makes
+    /// it present, which the content comparison already refuses.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Test arrangement inside Scratch-owned paths.
+    fn an_own_removal_reported_twice_is_suppressed_both_times() {
+        let (scratch, ledger, recorder) = own_write_harness("watch-removed-twice");
+        let path = scratch.place("gone.md", b"gone");
+        std::fs::remove_file(&path).unwrap();
+        recorder.acted(&act(&path, AfterState::Absent)).unwrap();
+        for delivery in ["first", "second"] {
+            let batch = suppress(&recorder.root, &ledger, dirty(&recorder, &["gone.md"]));
+            assert!(
+                batch.vault_roots().is_empty(),
+                "the {delivery} report of an own removal was delivered as a change"
+            );
+        }
+
+        scratch.place("Gone.md", b"theirs");
+        let created = suppress(&recorder.root, &ledger, dirty(&recorder, &["Gone.md"]));
+        assert_eq!(created.vault_roots().len(), 1);
     }
 
     /// **A matched echo leaves the path open to the next foreign change.** The
