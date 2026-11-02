@@ -17,6 +17,14 @@
 //! the tree: every suite here then attaches a vault that declares one, and
 //! reads no advisory it did not arrange.
 //!
+//! **A host built here settles the tree's prior writes first.** On macOS a
+//! fixture written just before attachment can reach FSEvents after the
+//! attachment's history marker, and the heal it starts would be counted beside
+//! whatever the case measures. Every host this module builds waits for those
+//! writes to pass through first, so a case writes its fixture, asks for the
+//! host, and needs no barrier of its own. A write made after the host is built
+//! is the case's to settle.
+//!
 //! Each binary that compiles this module uses part of it — the child harnesses
 //! adopt a tree the parent generated rather than generating one — so an unused
 //! remainder in any of them is the layout rather than a defect.
@@ -397,6 +405,14 @@ impl Vault {
         // the attach the host runs and there is no later moment that is still
         // ahead of it.
         let lease = Lease::hold(isolation::REAL_WATCHER, lease_budget());
+        // A fixture written just before this can reach FSEvents after the
+        // attach reads its history marker, and its late heal would land in a
+        // measured window beside the work a case counts. Settled under the
+        // lease, since the barrier opens a stream of its own, and from the
+        // root above the vault, so its sentinel is no change to the vault.
+        // A write the caller makes after this call is not covered.
+        norn_fs::watch::settle_prior_changes(&self.root, SETTLE_LIMIT)
+            .expect("the fixture's writes settle before attachment");
         let ops = compose(ProductionEntryOps::new(self.dirs(), policy));
         // The host takes the ops by value, so the account is taken here or not
         // at all. Reading an account is behind `induced-failure`, so a build
@@ -430,6 +446,10 @@ impl Vault {
 /// in between is [`READY_LIMIT`] at its widest. One look at the lock is a
 /// syscall, so the probe bound is the syscall's and not the attachment's — the
 /// same separation [`state_budget`] draws, over the same two bounds.
+/// How long a fixture's prior writes may take to pass through FSEvents before
+/// a host is built over them.
+const SETTLE_LIMIT: Duration = Duration::from_secs(30);
+
 fn lease_budget() -> Budget {
     isolation::acquisition_budget(state_budget(READY_LIMIT))
 }
