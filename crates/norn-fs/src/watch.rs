@@ -8,7 +8,9 @@
 //! an omitted change can support a wrong answer.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::{OsStr, OsString};
 use std::fmt;
+use std::os::fd::AsFd as _;
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
@@ -119,7 +121,9 @@ pub const DIRTY_ROOT_CAP: usize = 8192;
 /// The authored bound on pending own-write outcomes. Overflow fails open.
 ///
 /// 4,096 holds two complete 2,000-document realistic-profile rewrites during
-/// the ledger's short lifetime.
+/// the ledger's short lifetime. An outcome stands for [`OWN_WRITE_TTL`] whether
+/// or not a report matched it, and a move records two, so the budget counts
+/// acts within one lifetime; reaching the cap prunes expired outcomes first.
 pub const OWN_WRITE_CAP: usize = 4096;
 
 /// The control-plane state of one watcher subscription.
@@ -1110,19 +1114,33 @@ impl OwnWrites {
         let Some(ledger) = self.ledger.upgrade() else {
             return;
         };
+        let published = path
+            .as_path()
+            .file_name()
+            .map(OsStr::to_os_string)
+            .unwrap_or_default();
+        let folds = self.normalizer.case_sensitivity() == CaseSensitivity::Insensitive;
         let mut ledger = ledger.lock().expect("own-write ledger poisoned");
-        if ledger.entries.len() + usize::from(!ledger.entries.contains_key(&path)) >= OWN_WRITE_CAP
-        {
-            ledger.entries.clear();
-            return;
+        let full = |ledger: &Ledger| {
+            ledger.entries.len() + usize::from(!ledger.entries.contains_key(&path)) >= OWN_WRITE_CAP
+        };
+        if full(&ledger) {
+            // Outcomes stand until they expire, matched or not, and only a
+            // delivered batch prunes them otherwise: an expired outcome
+            // matches nothing, so the cap weighs only the live ones. Pruning
+            // here only at the cap keeps an ordinary record constant.
+            let now = Instant::now();
+            ledger
+                .entries
+                .retain(|_, entry| now.duration_since(entry.recorded) <= OWN_WRITE_TTL);
+            if full(&ledger) {
+                ledger.entries.clear();
+                return;
+            }
         }
-        ledger.entries.insert(
-            path,
-            LedgerEntry {
-                expected,
-                recorded: Instant::now(),
-            },
-        );
+        ledger
+            .entries
+            .insert(path, LedgerEntry::new(expected, published, folds));
     }
 
     fn normalize(&self, path: &Path) -> Result<NormalizedPath, PathError> {
@@ -1728,6 +1746,30 @@ struct Ledger {
 struct LedgerEntry {
     expected: Expected,
     recorded: Instant,
+    /// The final name the act published, as it spelled it.
+    published: OsString,
+    /// Whether the root folds case, so another spelling reaches this entry.
+    folds: bool,
+    /// Whether a report has matched this outcome already.
+    matched: bool,
+}
+
+impl LedgerEntry {
+    fn new(expected: Expected, published: OsString, folds: bool) -> LedgerEntry {
+        LedgerEntry {
+            expected,
+            recorded: Instant::now(),
+            published,
+            folds,
+            matched: false,
+        }
+    }
+
+    #[cfg(test)]
+    fn recorded_at(mut self, at: Instant) -> LedgerEntry {
+        self.recorded = at;
+        self
+    }
 }
 #[derive(Clone, Copy)]
 enum Expected {
@@ -2344,6 +2386,14 @@ fn hand_over(
 /// one write in two deliveries, and the second report of a path still holding
 /// what was published is the same write. A report that finds the path changed
 /// ends the entry: what was published no longer stands there.
+///
+/// **A repeat match on a folding root also asks the volume's spelling.** Two
+/// spellings are one entry there, so a foreign case-only rename leaves the
+/// bytes the entry compares; a repeat report is the echo only where the
+/// folder still stores the published name. A first match takes the content
+/// comparison alone, as it did before entries outlived it, and a volume that
+/// cannot answer a stored name delivers the repeat report, which heals
+/// nothing it should not.
 fn suppress(root: &Path, ledger: &Arc<Mutex<Ledger>>, mut batch: Batch) -> Batch {
     let now = Instant::now();
     let candidates: BTreeMap<_, _> = {
@@ -2355,27 +2405,35 @@ fn suppress(root: &Path, ledger: &Arc<Mutex<Ledger>>, mut batch: Batch) -> Batch
             .vault_roots
             .iter()
             .filter_map(|path| {
-                ledger
-                    .entries
-                    .get(path)
-                    .map(|entry| (path.clone(), (entry.expected, entry.recorded)))
+                ledger.entries.get(path).map(|entry| {
+                    let respellable = entry.matched && entry.folds;
+                    let published = respellable.then(|| entry.published.clone());
+                    (path.clone(), (entry.expected, entry.recorded, published))
+                })
             })
             .collect()
     };
     let mut changed = Vec::new();
+    let mut first_matches = Vec::new();
     batch.vault_roots.retain(|path| {
-        let Some((expected, recorded)) = candidates.get(path) else {
+        let Some((expected, recorded, published)) = candidates.get(path) else {
             return true;
         };
-        let echo = matches_expected(&root.join(path.as_path()), expected);
+        let full = root.join(path.as_path());
+        let echo = matches_expected(&full, expected)
+            && published
+                .as_deref()
+                .is_none_or(|published| stores_the_published_spelling(&full, published));
         if !echo {
             changed.push((path.clone(), *recorded));
+        } else if published.is_none() {
+            first_matches.push((path.clone(), *recorded));
         }
         !echo
     });
-    if !changed.is_empty() {
+    if !changed.is_empty() || !first_matches.is_empty() {
         // An act recorded since the comparison is a newer write, not the one
-        // this report found changed, so only the compared entry ends.
+        // this report compared, so only the compared entry moves.
         let mut ledger = ledger.lock().expect("own-write ledger poisoned");
         for (path, recorded) in changed {
             if ledger
@@ -2386,12 +2444,35 @@ fn suppress(root: &Path, ledger: &Arc<Mutex<Ledger>>, mut batch: Batch) -> Batch
                 ledger.entries.remove(&path);
             }
         }
+        for (path, recorded) in first_matches {
+            if let Some(entry) = ledger.entries.get_mut(&path)
+                && entry.recorded == recorded
+            {
+                entry.matched = true;
+            }
+        }
     }
     batch
         .retired
         .retain(|path| batch.vault_roots.contains(path));
     batch.close();
     batch
+}
+
+/// Whether the folder holding `full` stores its entry under `published`.
+/// A volume that cannot answer, or an entry that cannot be opened, answers no.
+fn stores_the_published_spelling(full: &Path, published: &OsStr) -> bool {
+    let (Some(folder), Some(name)) = (full.parent(), full.file_name()) else {
+        return false;
+    };
+    let Ok(folder) = rustix::fs::open(
+        folder,
+        crate::open::anchor_flags(),
+        rustix::fs::Mode::empty(),
+    ) else {
+        return false;
+    };
+    crate::stored::stored_name_at(folder.as_fd(), name).is_some_and(|stored| stored == published)
 }
 
 #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // norn-fs owns vault handles and stat.
@@ -6132,6 +6213,70 @@ mod tests {
         assert_eq!(removed.vault_roots().len(), 1);
     }
 
+    /// **A foreign respell after an echo is delivered on a folding root.** Both
+    /// spellings are one ledger key and the bytes did not move, so the content
+    /// comparison alone would take the respell for the published write; a
+    /// repeat match also asks the volume which spelling it stores.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Test arrangement inside Scratch-owned paths.
+    fn a_foreign_respell_after_a_suppressed_echo_is_delivered_on_a_folding_root() {
+        let (scratch, ledger, recorder) = own_write_harness("watch-respell-after-echo");
+        if !(cfg!(target_os = "macos")
+            && norn_testkit::churn::runs_where_the_volume_folds(
+                norn_testkit::churn::folding(&scratch.at("")).expect("the scratch volume"),
+                "a foreign respell after an echo",
+            ))
+        {
+            return;
+        }
+        let path = scratch.place("ours.md", b"ours");
+        recorder
+            .acted(&act(&path, AfterState::Present(observed(&path))))
+            .unwrap();
+        let echo = suppress(&recorder.root, &ledger, dirty(&recorder, &["ours.md"]));
+        assert!(echo.vault_roots().is_empty());
+
+        std::fs::rename(&path, scratch.at("Ours.md")).unwrap();
+        let respelled = suppress(&recorder.root, &ledger, dirty(&recorder, &["Ours.md"]));
+        assert_eq!(
+            respelled.vault_roots().len(),
+            1,
+            "a foreign respell of an own write was taken for its echo"
+        );
+    }
+
+    /// **Recording prunes expired outcomes before it weighs the cap.** Matched
+    /// outcomes stand until they expire, so a ledger pruned only by a delivered
+    /// batch would count outcomes nothing can match any longer.
+    #[test]
+    fn recording_prunes_expired_outcomes_before_the_cap() {
+        let (_scratch, ledger, recorder) = own_write_harness("watch-ledger-prune");
+        let expired = Instant::now() - OWN_WRITE_TTL - Duration::from_millis(1);
+        for index in 0..OWN_WRITE_CAP - 1 {
+            let path = recorder
+                .normalizer
+                .normalize(Path::new(&format!("{index}.md")))
+                .unwrap();
+            ledger.lock().unwrap().entries.insert(
+                path,
+                LedgerEntry::new(
+                    Expected::Absent,
+                    OsString::from(format!("{index}.md")),
+                    true,
+                )
+                .recorded_at(expired),
+            );
+        }
+        let fresh = recorder
+            .normalizer
+            .normalize(Path::new("fresh.md"))
+            .unwrap();
+        recorder.record(fresh.clone(), Expected::Absent);
+        let ledger = ledger.lock().unwrap();
+        assert_eq!(ledger.entries.len(), 1, "the expired outcomes were kept");
+        assert!(ledger.entries.contains_key(&fresh));
+    }
+
     /// **A suppressed root takes nothing with it.**
     ///
     /// Suppression drops the roots an own write accounts for, and it is the
@@ -6146,10 +6291,7 @@ mod tests {
         let cover = recorder.normalizer.normalize(Path::new("archive")).unwrap();
         ledger.lock().unwrap().entries.insert(
             cover,
-            LedgerEntry {
-                expected: Expected::Absent,
-                recorded: Instant::now(),
-            },
+            LedgerEntry::new(Expected::Absent, OsString::from("archive"), false),
         );
         let state = Arc::new(Mutex::new(State::new(
             recorder.root.clone(),
@@ -6189,10 +6331,12 @@ mod tests {
         let normalized = recorder.normalize(&path).unwrap();
         ledger.lock().unwrap().entries.insert(
             normalized,
-            LedgerEntry {
-                expected: Expected::Present(observed(&path)),
-                recorded: Instant::now() - OWN_WRITE_TTL - Duration::from_millis(1),
-            },
+            LedgerEntry::new(
+                Expected::Present(observed(&path)),
+                OsString::from("old.md"),
+                false,
+            )
+            .recorded_at(Instant::now() - OWN_WRITE_TTL - Duration::from_millis(1)),
         );
         let batch = suppress(&recorder.root, &ledger, dirty(&recorder, &["old.md"]));
         assert_eq!(batch.vault_roots().len(), 1);
