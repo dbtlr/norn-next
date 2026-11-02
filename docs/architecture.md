@@ -4432,7 +4432,9 @@ Four contracts inside that flow carry weight:
   foreign write between a target's final verification and its rename is overwritten, the
   write protocol's stated residual race. Each publication act is recorded in the own-write
   ledger as it lands, ahead of the folder sync behind it, so the watcher's report of the act
-  is known as the applier's own however long the sync takes. A move interrupted between its
+  is known as the applier's own however long the sync takes. The entry stands until it
+  expires, so a second report of the act, which FSEvents can deliver, is known too; a report
+  that finds the path changed from what was published ends it. A move interrupted between its
   legs leaves both names holding the document. A folder the removals left empty that cannot
   be removed is left: the plan is still applied, the report's removed folders omit it — the
   wire names no failure for it — and a re-send empties it again.

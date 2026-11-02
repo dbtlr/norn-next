@@ -108,7 +108,8 @@ pub fn settle_prior_changes(dir: &Path, budget: Duration) -> Result<(), WatchErr
 pub const QUIET_WINDOW: Duration = Duration::from_millis(50);
 /// The longest a continuous event stream may postpone delivery.
 pub const MAX_BATCH_AGE: Duration = Duration::from_millis(500);
-/// How long an unobserved own-write outcome remains eligible for suppression.
+/// How long an own-write outcome remains eligible for suppression, matched
+/// or not: FSEvents can report one write more than once.
 pub const OWN_WRITE_TTL: Duration = Duration::from_secs(5);
 /// The authored bound on distinct dirty roots retained before widening to a rescan.
 ///
@@ -2338,6 +2339,11 @@ fn hand_over(
 /// the batch no longer carries, and a covering root dropped after it had
 /// subsumed a descendant would take that descendant's fact with it — a fact no
 /// ledger entry was ever about.
+///
+/// **A match keeps its entry until the entry expires.** FSEvents can report
+/// one write in two deliveries, and the second report of a path still holding
+/// what was published is the same write. A report that finds the path changed
+/// ends the entry: what was published no longer stands there.
 fn suppress(root: &Path, ledger: &Arc<Mutex<Ledger>>, mut batch: Batch) -> Batch {
     let now = Instant::now();
     let candidates: BTreeMap<_, _> = {
@@ -2351,17 +2357,36 @@ fn suppress(root: &Path, ledger: &Arc<Mutex<Ledger>>, mut batch: Batch) -> Batch
             .filter_map(|path| {
                 ledger
                     .entries
-                    .remove(path)
-                    .map(|entry| (path.clone(), entry.expected))
+                    .get(path)
+                    .map(|entry| (path.clone(), (entry.expected, entry.recorded)))
             })
             .collect()
     };
+    let mut changed = Vec::new();
     batch.vault_roots.retain(|path| {
-        let Some(expected) = candidates.get(path) else {
+        let Some((expected, recorded)) = candidates.get(path) else {
             return true;
         };
-        !matches_expected(&root.join(path.as_path()), expected)
+        let echo = matches_expected(&root.join(path.as_path()), expected);
+        if !echo {
+            changed.push((path.clone(), *recorded));
+        }
+        !echo
     });
+    if !changed.is_empty() {
+        // An act recorded since the comparison is a newer write, not the one
+        // this report found changed, so only the compared entry ends.
+        let mut ledger = ledger.lock().expect("own-write ledger poisoned");
+        for (path, recorded) in changed {
+            if ledger
+                .entries
+                .get(&path)
+                .is_some_and(|entry| entry.recorded == recorded)
+            {
+                ledger.entries.remove(&path);
+            }
+        }
+    }
     batch
         .retired
         .retain(|path| batch.vault_roots.contains(path));
@@ -6063,6 +6088,48 @@ mod tests {
                 .entries
                 .contains_key(&recorder.normalize(&path).unwrap())
         );
+    }
+
+    /// **An own write reported twice is an echo both times.** FSEvents can
+    /// report one write in two deliveries; while the path still holds what was
+    /// published, the second report is the same write and heals nothing.
+    #[test]
+    fn an_own_write_reported_twice_is_suppressed_both_times() {
+        let (scratch, ledger, recorder) = own_write_harness("watch-reported-twice");
+        let path = scratch.place("ours.md", b"ours");
+        recorder
+            .acted(&act(&path, AfterState::Present(observed(&path))))
+            .unwrap();
+        for delivery in ["first", "second"] {
+            let batch = suppress(&recorder.root, &ledger, dirty(&recorder, &["ours.md"]));
+            assert!(
+                batch.vault_roots().is_empty(),
+                "the {delivery} report of an own write was delivered as a change"
+            );
+        }
+    }
+
+    /// **A matched echo leaves the path open to the next foreign change.** The
+    /// entry outlives its first match, so what keeps a later edit from being
+    /// absorbed is the comparison against what was published.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Test arrangement inside Scratch-owned paths.
+    fn a_foreign_change_after_a_suppressed_echo_is_delivered() {
+        let (scratch, ledger, recorder) = own_write_harness("watch-after-echo");
+        let path = scratch.place("ours.md", b"ours");
+        recorder
+            .acted(&act(&path, AfterState::Present(observed(&path))))
+            .unwrap();
+        let echo = suppress(&recorder.root, &ledger, dirty(&recorder, &["ours.md"]));
+        assert!(echo.vault_roots().is_empty());
+
+        std::fs::write(&path, b"theirs, longer").unwrap();
+        let foreign = suppress(&recorder.root, &ledger, dirty(&recorder, &["ours.md"]));
+        assert_eq!(foreign.vault_roots().len(), 1);
+
+        std::fs::remove_file(&path).unwrap();
+        let removed = suppress(&recorder.root, &ledger, dirty(&recorder, &["ours.md"]));
+        assert_eq!(removed.vault_roots().len(), 1);
     }
 
     /// **A suppressed root takes nothing with it.**
