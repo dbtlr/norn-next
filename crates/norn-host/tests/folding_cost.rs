@@ -24,6 +24,8 @@ use norn_wire::{
 
 const BEFORE: &str = "# Document\n\nstatus draft\n";
 const AFTER: &str = "# Document\n\nstatus final\n";
+/// How long the fixture's prior writes may take to pass through FSEvents.
+const SETTLE_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// A replaced target's spellings cost the same whatever its folder's width.
 /// The host's job account excludes attachment and watcher-thread echo checks.
@@ -66,6 +68,12 @@ fn measure(targets: usize, siblings: usize) {
         );
     }
     let folds = case == Folding::Folded;
+    // The siblings and the case probe's create-and-remove are fixture writes.
+    // FSEvents can deliver them after the attachment's history marker, and
+    // their heal (two stored-name queries per sibling, one for the vanished
+    // probe) would land in the measured window beside the plan's own.
+    norn_fs::watch::settle_prior_changes(&sandbox.work_dir(), SETTLE_BUDGET)
+        .expect("the fixture's writes settle before attachment");
     let vault = attach::Vault::adopt(&root);
     let host = vault.host();
     let _lease = attach::attach_and_wait(&host, vault.name());
