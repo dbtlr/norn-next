@@ -147,8 +147,8 @@ PR-required context.
 ## Review bots
 
 `CodeRabbit` is a required context, but its review is best-effort. A completed
-`CodeRabbit` check run satisfies the ruleset whatever its conclusion, including
-neutral or skipped. A rate-limited CodeRabbit can post no check run at all, and
+`CodeRabbit` check run that concludes success, neutral or skipped satisfies the
+ruleset; a rate-limited review usually posts neutral. A rate-limited CodeRabbit can post no check run at all, and
 the ruleset then refuses the merge. Before calling a PR ready, confirm that the
 head's `statusCheckRollup` holds a `CodeRabbit` entry. If the entry is missing,
 ask once with `@coderabbitai review`, or `@coderabbitai full review` when the
@@ -163,7 +163,7 @@ comments outside the diff.
 ## Local runs
 
 A full local test run leaves a cargo target of roughly 40 GB in its checkout:
-about 73 debug test executables of 100 to 400 MB each, plus incremental state.
+about 100 debug test executables of 100 to 400 MB each, plus incremental state.
 Every checkout keeps its own target, so parallel full runs across checkouts can
 fill a disk. Run one full gate or build at a time on a host, check free space
 before starting, and delete a checkout's `target/` once its PR is pushed and
@@ -186,5 +186,7 @@ hdiutil detach /Volumes/nvcs
 rm /tmp/nvcs.dmg
 ```
 
-The reverse case is already provisioned: `norn-testkit`'s `volume` module mounts
+The suites that build their sandbox under `CARGO_TARGET_TMPDIR` (`lockdown`,
+`watch_lockdown`, `walk_memory` and part of `unreadable`) stay on the checkout's
+volume. The reverse case is already provisioned: `norn-testkit`'s `volume` module mounts
 a case-insensitive HFS+ RAM disk for cases stated only over a folding volume.
