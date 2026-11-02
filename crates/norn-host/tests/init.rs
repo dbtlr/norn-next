@@ -221,7 +221,7 @@ fn an_init_applied_lands_the_starter_and_the_vault_reloads_under_it_findings_unc
 }
 
 /// **An init on a vault nothing has attached runs its first build in the
-/// foreground** (ADR 0045): it waits for the from-zero build its own demand
+/// foreground** (ADR 0048): it waits for the from-zero build its own demand
 /// starts, for as long as that build takes, and answers once the vault is
 /// `Ready` — a preview with the starter over every document, an apply with
 /// the landed write — rather than refusing the vault as still indexing.

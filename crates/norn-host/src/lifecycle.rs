@@ -5689,7 +5689,7 @@ impl<O: EntryOps> Host<O> {
     /// publishes once it stands at anything else with no work under way.
     ///
     /// This is the foreground first build initializing a vault runs (ADR
-    /// 0045): a vault nothing has attached runs its from-zero build under the
+    /// 0048): a vault nothing has attached runs its from-zero build under the
     /// demand made here, for as long as that build takes, where a read would
     /// be refused as still indexing. An entry working — a claim held, its job
     /// scheduled or running, or a release in flight that the lease re-arms —
@@ -20601,7 +20601,7 @@ mod tests {
     /// **A construction that begins over a damage verdict publishes warming,
     /// and over any other untrusted reason leaves it standing.** Only a
     /// rebuild owed under the store-damaged-rebuilding verdict admits early
-    /// reads by beginning its construction (ADR 0045); another reason stays
+    /// reads by beginning its construction (ADR 0048); another reason stays
     /// the entry's answer, even beside an owed rebuild.
     #[cfg(unix)]
     #[test]

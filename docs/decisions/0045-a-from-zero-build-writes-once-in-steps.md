@@ -1,5 +1,6 @@
 ---
-status: accepted
+status: superseded
+superseded-by: 0048-a-build-step-ends-at-its-closing-take.md
 date: 2026-10-26
 ---
 

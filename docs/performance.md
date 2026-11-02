@@ -7,7 +7,7 @@ known-answer fixtures, executable identity, and a self-contained HTML report.
 These measurements describe the selected workflows. They are not acceptance
 thresholds, correctness oracles, CLI measurements, or long-duration leak tests.
 Reads that meet a from-zero build use production early admission under
-[ADR 0045](decisions/0045-a-from-zero-build-writes-once-in-steps.md). The baseline uses an
+[ADR 0048](decisions/0048-a-build-step-ends-at-its-closing-take.md). The baseline uses an
 opt-in integration-test worker, which adds no product dependency or API.
 
 ## Build and run

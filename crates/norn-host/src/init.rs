@@ -34,7 +34,7 @@
 //! schema was deleted while attached, init's reload is what activates that
 //! deletion, and the deleted schema's findings go.
 //!
-//! **Init answers at `Ready`** (ADR 0045). Initializing a vault runs its
+//! **Init answers at `Ready`** (ADR 0048). Initializing a vault runs its
 //! first build in the foreground: past the `schema_elsewhere` answer, init
 //! demands the vault and waits, with no bound, until it is `Ready`, so a
 //! vault nothing has attached runs its from-zero build inside the call

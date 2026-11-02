@@ -165,7 +165,7 @@ may not be added.
   During the first three steps, accepted roots run ahead through the same routines.
   Link health is judged fourth and stored bodies are full-text indexed fifth. The capabilities
   each step completes publish to early reads as it ends, as [ADR
-  0045](decisions/0045-a-from-zero-build-writes-once-in-steps.md) rules.
+  0048](decisions/0048-a-build-step-ends-at-its-closing-take.md) rules.
 - **Corruption, or any state the lower rungs cannot resolve** — at any time, before or after
   release.
 
@@ -1619,7 +1619,7 @@ in which the derived database answers from a stale world. High-fidelity change d
 therefore what buys the right to read SQLite and answer. Canonical warm requests perform
 no filesystem check. An early read of a store under construction additionally checks its
 build's root identity outside entry and watcher locks, as [ADR
-0045](decisions/0045-a-from-zero-build-writes-once-in-steps.md) permits. The heal ladder is why imperfect detection cannot corrupt derived state;
+0048](decisions/0048-a-build-step-ends-at-its-closing-take.md) permits. The heal ladder is why imperfect detection cannot corrupt derived state;
 detection fidelity is why that state is worth reading at all.
 
 Two mechanisms carry trust, and both are contract:
@@ -2424,7 +2424,7 @@ A park keeps its own code. Where the demand is serving, the refusal is reader-un
 which is an entry serving every surface but this one.
 
 **A from-zero build answers each read whose data it has completed, under [ADR
-0045](decisions/0045-a-from-zero-build-writes-once-in-steps.md).** Early reads run on
+0048](decisions/0048-a-build-step-ends-at-its-closing-take.md).** Early reads run on
 the canonical store under construction; a build creates no store beside it. Every
 from-zero route — an attach after a create or an open-time rebuild, inline rung 3, the
 `rebuild` leg, and the recovery or reload over the empty store an undeclarable attach
@@ -2437,9 +2437,10 @@ an out-of-service entry, a release or known damage, begins none, and its reads k
 ordinary refusal. A construction begun under the gate replaces any earlier one, retiring
 its pool and waking its waiters; no authority is reused.
 
-The build publishes each step as it ends: names, content and structure after the step's
-last group commits and its deferred indexes are built, relations after the complete link-health
-judgment and re-judgment of every requeued reach, and full text after the closing transaction. Publication binds the claim, the
+The build publishes each step as it ends: names, content and structure once the roots
+the step's closing take took have committed and the step's deferred indexes are built,
+relations after the complete link-health judgment and re-judgment of every reach its
+closing take requeued, and full text after the closing transaction. Publication binds the claim, the
 build, the store epoch and an admitting authority under the entry gate, and a changed
 claim or build, withdrawn authority, park, out-of-service entry, release or known damage
 publishes nothing. It never publishes `Ready` or trust unbroken since `Ready`. `Ready`
@@ -2461,7 +2462,7 @@ document has passed structure, committed. A Get waiting for its step queues its 
 with the build through a weak reference to its demand lease; duplicates share a slot, an
 expired interest frees its slot, ready or not, and at most 256 distinct live targets are
 held. A Get past that bound, or naming an undeclared field, waits for vault-wide
-structure. The build drains the queue as the content step's first group opens and at
+structure. The build drains the queue as the content and structure steps' first groups open and at
 every content and structure chunk boundary inside an open group, within one budget of a
 host chunk per boundary: per target, candidate resolution and content repeat until the
 class holds no provisional name, then the resolved document runs structure. A target not
@@ -2502,16 +2503,21 @@ open heal window ahead of the ordinary queue. The scoped walk resets touched nam
 the same content and structure routines run them through the current step.
 A taken root beneath a directory marked unlistable derives nothing, as a from-zero
 build never lists there; a root at the directory itself lists it again.
-Each step drains until no roots remain before it ends. Committed derivation
+Each requeue takes the window's roots once and never takes again; a step ends once the
+roots its closing take took have run through it, and roots accepted after that take wait
+for the next step's requeue. Committed derivation
 satisfies the taken sequence and clears touched targets' ready flags, waking
 waiters to resolve candidates again. During Relations, link health stays deferred
 while accepted roots run through the same names, content and structure routines.
 Before publishing each requeue, the store re-judges the changed classes and path
 keys, the rewritten documents' outgoing links, and directory ranges whose marks
 were filed or ended. Writers retain this reach across chunk commits, including
-content and structure findings and relisted directories. The build repeats until
-no roots remain, ends deferral, then publishes Relations. This costs the requeued
-reach rather than the vault. Facts accepted from FullText on remain for the pre-`Ready` reconcile, which receives only untaken facts. An untouched Get keeps answering, including after
+content and structure findings and relisted directories. After Relations' closing take
+the build ends deferral, then publishes Relations. This costs the taken reach rather than
+the vault, and the build's takes never outnumber its requeue calls, whatever the rate of
+facts. Facts accepted after Relations' closing take remain for the pre-`Ready` reconcile,
+which receives only untaken facts; a Get they touch and every vault-wide capability that
+meets them wait for `Ready`. An untouched Get keeps answering, including after
 Relations, with link resolution, health and findings rendered loading while any fact
 is outstanding at admission. A fully published construction retains its authority
 across the claim handoff into pre-`Ready` reconcile, closing at `Ready` or the reconcile's end.
@@ -2540,7 +2546,7 @@ mutation. An early answer carries the warming trust, store epoch and committed g
 of its hold, and a Find cursor continues across `Ready` under ordinary cursor judgment.
 
 **A canonical read that meets a change waits for it, as [ADR
-0045](decisions/0045-a-from-zero-build-writes-once-in-steps.md) rules.** Warming splits
+0048](decisions/0048-a-build-step-ends-at-its-closing-take.md) rules.** Warming splits
 by stance, read under the entry gate beside the published demand: an entry that entered
 warming from `Ready` with no withdrawal of trust in between — a polled batch, a reconcile
 turn, a schema reload — settles. Every other state refuses canonical acquisition at once
@@ -2907,7 +2913,7 @@ Full-text search and the stem trigram index are maintained transactionally insid
 The full-text triggers are the index's only writer on a finished store; a from-zero build
 holds no triggers while it runs and fills the index in committed batches from the stored
 bodies in step 5, installing the triggers in the closing transaction that clears its mark ([ADR
-0045](decisions/0045-a-from-zero-build-writes-once-in-steps.md)).
+0048](decisions/0048-a-build-step-ends-at-its-closing-take.md)).
 The trigram index is a lane-1 projection of the document path alone, invalidated by the
 derivation version. Embeddings are
 lane-2 engine state: eventually consistent, held in the engine's sidecar database rather
@@ -3240,7 +3246,7 @@ rows are discarded and the whole vault is walked again. Unlike the other write v
 `Host::init` answers synchronously rather than with a `PendingApply`, and a vault whose
 standing schema cannot be read answers the entry's untrusted refusal. **Initializing a vault
 runs its first build in the foreground** ([ADR
-0045](decisions/0045-a-from-zero-build-writes-once-in-steps.md)): past the `schema_elsewhere`
+0048](decisions/0048-a-build-step-ends-at-its-closing-take.md)): past the `schema_elsewhere`
 answer, `init` demands the vault and waits, with no bound, until it is `Ready`, holding that
 demand until it answers, so a vault nothing has attached runs its from-zero build inside the
 call rather than refusing as still indexing. A build that ends short of `Ready` — a failure of
