@@ -86,29 +86,97 @@ fn start_identity(pid: libc::pid_t) -> io::Result<StartIdentity> {
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn linux_start_ticks(pid: libc::pid_t, stat: &str) -> io::Result<u64> {
-    let after_name = stat.rsplit_once(')').map(|(_, rest)| rest).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("/proc/{pid}/stat has no closing process-name delimiter"),
-        )
-    })?;
-    let value = after_name
-        .split_whitespace()
-        .nth(19)
-        .ok_or_else(|| {
+    LinuxStat::parse(pid, stat.as_bytes())?.start_ticks()
+}
+
+/// One Linux `/proc/<pid>/stat` line, read as the fields after the command
+/// name. The process registry reads the start time from it, and cleanup's
+/// group-member scan reads the state and process group. Each field is checked
+/// only when it is asked for, so a reader never rejects a line over a field it
+/// does not use.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(super) struct LinuxStat<'a> {
+    pid: libc::pid_t,
+    after_name: &'a str,
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+impl<'a> LinuxStat<'a> {
+    // Field 2 is the command name in parentheses, and the name may itself hold
+    // spaces, parentheses and bytes that are not UTF-8. The kernel writes
+    // nothing after it but the state letter and numbers, so the fields resume
+    // after the last `)`.
+    pub(super) fn parse(pid: libc::pid_t, stat: &'a [u8]) -> io::Result<Self> {
+        let after_name = stat
+            .iter()
+            .rposition(|&byte| byte == b')')
+            .map(|close| &stat[close + 1..])
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("/proc/{pid}/stat has no closing process-name delimiter"),
+                )
+            })?;
+        let after_name = std::str::from_utf8(after_name).map_err(|error| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("/proc/{pid}/stat has no process start field"),
-            )
-        })?
-        .parse()
-        .map_err(|error| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("/proc/{pid}/stat has an invalid process start field: {error}"),
+                format!(
+                    "/proc/{pid}/stat has fields after the process name that are not text: {error}"
+                ),
             )
         })?;
-    Ok(value)
+        Ok(LinuxStat { pid, after_name })
+    }
+
+    /// Field 3, one letter: `Z` is a zombie.
+    pub(super) fn state(&self) -> io::Result<u8> {
+        match self.field(3, "process state")?.as_bytes() {
+            [state] => Ok(*state),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("/proc/{}/stat has an invalid process state field", self.pid),
+            )),
+        }
+    }
+
+    /// Field 5, the process-group ID.
+    pub(super) fn pgrp(&self) -> io::Result<libc::pid_t> {
+        self.number(5, "process group")
+    }
+
+    /// Field 22, the start time in clock ticks since boot.
+    pub(super) fn start_ticks(&self) -> io::Result<u64> {
+        self.number(22, "process start")
+    }
+
+    fn number<T>(&self, field: usize, name: &str) -> io::Result<T>
+    where
+        T: std::str::FromStr,
+        T::Err: std::fmt::Display,
+    {
+        self.field(field, name)?.parse().map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "/proc/{}/stat has an invalid {name} field: {error}",
+                    self.pid
+                ),
+            )
+        })
+    }
+
+    // `field` counts from 1 as proc(5) does; field 3 is the first after the name.
+    fn field(&self, field: usize, name: &str) -> io::Result<&'a str> {
+        self.after_name
+            .split_whitespace()
+            .nth(field - 3)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("/proc/{}/stat has no {name} field", self.pid),
+                )
+            })
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -194,7 +262,7 @@ fn darwin_boot_id() -> io::Result<String> {
 #[cfg(test)]
 mod tests {
     #[cfg(target_os = "linux")]
-    use super::linux_start_ticks;
+    use super::{LinuxStat, linux_start_ticks};
     use super::{Observation, ProcessIdentity, StartIdentity, StartIdentitySource, observe};
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -220,6 +288,43 @@ mod tests {
     fn linux_stat_parser_uses_the_start_field_after_a_name_with_a_closing_parenthesis() {
         let stat = "41 (worker) name) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 987 20";
         assert_eq!(linux_start_ticks(41, stat).unwrap(), 987);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_stat_reads_state_and_group_after_a_name_holding_parentheses() {
+        let stat = b"4242 (a) (b) c)) Z 1 4200 4200 0 -1 4194560 0 0\n";
+        let stat = LinuxStat::parse(4242, stat).unwrap();
+
+        assert_eq!(stat.state().unwrap(), b'Z');
+        assert_eq!(stat.pgrp().unwrap(), 4200);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_stat_reads_fields_after_a_name_that_is_not_text() {
+        let stat = b"4242 (\xff\xfe) S 1 4200 4200";
+        let stat = LinuxStat::parse(4242, stat).unwrap();
+
+        assert_eq!(stat.pgrp().unwrap(), 4200);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_truncated_or_malformed_linux_stat_line_yields_no_state_and_group() {
+        assert!(LinuxStat::parse(4242, b"4242 (sleep").is_err());
+        for stat in [
+            &b"4242 (sleep) S 1"[..],
+            b"4242 (sleep) S 1 x",
+            b"4242 (sleep) SS 1 4200",
+        ] {
+            let stat = LinuxStat::parse(4242, stat).unwrap();
+            assert!(
+                stat.state().is_err() || stat.pgrp().is_err(),
+                "{:?}",
+                stat.after_name
+            );
+        }
     }
 }
 
