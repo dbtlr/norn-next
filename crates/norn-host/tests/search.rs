@@ -64,7 +64,7 @@ fn a_vault_holding<P: AsRef<str>, B: AsRef<str>>(
     if let Some(config) = config {
         std::fs::write(vault.join(".norn/config.toml"), config).expect("the vault config");
     }
-    (sandbox, attach::Vault::adopt(&root))
+    (sandbox, attach::Vault::adopt(&root).unmeasured())
 }
 
 /// A host composing the semantic engine over `vault`, attached and ready.
