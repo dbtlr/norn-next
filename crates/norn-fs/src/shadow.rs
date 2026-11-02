@@ -58,6 +58,18 @@
 //! destroying the document before the write got as far as noticing the
 //! destination already existed.
 //!
+//! # A shadow is disposable: built for speed, never for durability
+//!
+//! After a crash nothing links to a shadow or resumes from one: a re-sent plan
+//! confirms the targets that already landed and stages a fresh shadow for each
+//! target still to publish, and the dead shadow is a sweep's. A shadow's one
+//! sync is of its own bytes at staging, before publication renames it, and that
+//! sync protects the destination rather than the shadow; publication syncs the
+//! destination's folders separately. The shadow home's folder is never synced,
+//! and no record of a shadow is kept for recovery. A design that resumes a shadow across a crash, or adds a sync
+//! or bookkeeping to keep one, contradicts this module rather than extending
+//! it.
+//!
 //! # A leaked shadow is bounded by a sweep, and every shadow is under one
 //!
 //! Nothing reopens a shadow, and a name that is somehow taken is skipped rather

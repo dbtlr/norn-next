@@ -143,3 +143,51 @@ The `main` ruleset requires these checks:
 
 Full-run names stay distinct so a manual regression run cannot alias a
 PR-required context.
+
+## Review bots
+
+`CodeRabbit` is a required context, but its review is best-effort. A completed
+`CodeRabbit` check run that concludes success, neutral or skipped satisfies the
+ruleset; a rate-limited review usually posts neutral. A rate-limited CodeRabbit can post no check run at all, and
+the ruleset then refuses the merge. Before calling a PR ready, confirm that the
+head's `statusCheckRollup` holds a `CodeRabbit` entry. If the entry is missing,
+ask once with `@coderabbitai review`, or `@coderabbitai full review` when the
+head was already reviewed, and do not hold a PR whose own checks and review
+passed for a full review slot.
+
+Kody is not a required context. It skips a PR whose base is not `main` or whose
+check ran while the PR was a draft; `@kody start-review` asks again. Read and
+answer every finding from both bots before merging, including CodeRabbit's
+comments outside the diff.
+
+## Local runs
+
+A full local test run leaves a cargo target of roughly 40 GB in its checkout:
+about 100 debug test executables of 100 to 400 MB each, plus incremental state.
+Every checkout keeps its own target, so parallel full runs across checkouts can
+fill a disk. Run one full gate or build at a time on a host, check free space
+before starting, and delete a checkout's `target/` once its PR is pushed and
+verified. An ad-hoc run that executes no measurement suite can shrink its target
+with `CARGO_INCREMENTAL=0`, `CARGO_PROFILE_DEV_DEBUG=line-tables-only` and
+`CARGO_PROFILE_TEST_DEBUG=line-tables-only`. A measurement suite refuses any
+profile override, so a full gate runs without them.
+
+The default macOS volume (APFS) folds case, so a walk or normalizer test with a
+wrong case-sensitive branch passes on a Mac and fails only on the hosted Linux
+lane. Before opening a PR that touches `norn-fs` path normalization,
+shadow-name reading, exclusions or walk descent, run the `norn-fs` suite once on
+a case-sensitive volume:
+
+```sh
+hdiutil create -size 512m -fs "Case-sensitive APFS" -volname nvcs /tmp/nvcs.dmg
+hdiutil attach /tmp/nvcs.dmg
+TMPDIR=/Volumes/nvcs cargo test -p norn-fs
+hdiutil detach /Volumes/nvcs
+rm /tmp/nvcs.dmg
+```
+
+The suites that build their sandbox under `CARGO_TARGET_TMPDIR` (`lockdown`,
+`watch_lockdown`, `walk_memory` and part of `unreadable`) and the
+`watch::observation_tests` unit tests, which build under `target/guard-scratch`,
+stay on the checkout's volume. The reverse case is already provisioned: `norn-testkit`'s `volume` module mounts
+a case-insensitive HFS+ RAM disk for cases stated only over a folding volume.
