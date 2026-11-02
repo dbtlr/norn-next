@@ -1723,7 +1723,10 @@ pub const APPLY_TARGET_READS_PER_REPLACED_TARGET: u64 = 2;
 /// dirents at all four sizes. Reproduce with `LANE_FEATURES=induced-failure
 /// .github/scripts/lane-suite.sh norn-host folding_cost --nocapture
 /// --test-threads=1` on a folding volume. The job-thread tally excludes
-/// normalization probes and watcher-thread echoes. This bar covers fresh
+/// normalization probes and watcher-thread echoes, and the suite settles its
+/// fixture's writes before attaching: a heal of a late-delivered sibling or
+/// case probe is watcher work (CI run 41250770106 counted 771 before the
+/// suite settled). This bar covers fresh
 /// replacements, not creates, removals, respells or interrupted-plan
 /// reapplication.
 pub const APPLY_NAME_QUERIES_PER_REPLACED_TARGET: u64 = 6;
