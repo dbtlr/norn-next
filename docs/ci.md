@@ -187,6 +187,7 @@ rm /tmp/nvcs.dmg
 ```
 
 The suites that build their sandbox under `CARGO_TARGET_TMPDIR` (`lockdown`,
-`watch_lockdown`, `walk_memory` and part of `unreadable`) stay on the checkout's
-volume. The reverse case is already provisioned: `norn-testkit`'s `volume` module mounts
+`watch_lockdown`, `walk_memory` and part of `unreadable`) and the
+`watch::observation_tests` unit tests, which build under `target/guard-scratch`,
+stay on the checkout's volume. The reverse case is already provisioned: `norn-testkit`'s `volume` module mounts
 a case-insensitive HFS+ RAM disk for cases stated only over a folding volume.
