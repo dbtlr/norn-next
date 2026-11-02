@@ -40,6 +40,11 @@ pub enum LoadingBoundary {
 #[cfg(feature = "induced-failure")]
 pub trait LoadingProbe: Send + Sync {
     fn at(&self, boundary: LoadingBoundary);
+
+    /// The watcher authority this build captured, handed over before
+    /// `AuthorityCaptured`. A probe that changes the vault keeps it to hold the
+    /// build until the watcher has accepted a report at each root it changed.
+    fn authority(&self, _authority: &BuildAuthority) {}
 }
 
 /// The construction a from-zero build publishes its steps into: the claim's
@@ -248,6 +253,10 @@ impl ProductionEntryOps {
             .subscription
             .as_ref()
             .and_then(|subscription| subscription.capture_build_authority(&control));
+        #[cfg(feature = "induced-failure")]
+        if let (Some(probe), Some(authority)) = (&self.loading_probe, &authority) {
+            probe.authority(authority);
+        }
         #[cfg(feature = "induced-failure")]
         self.loading_boundary(LoadingBoundary::AuthorityCaptured);
         if let Some(authority) = &authority {
