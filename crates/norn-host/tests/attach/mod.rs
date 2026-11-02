@@ -23,7 +23,9 @@
 //! whatever the case measures. Every host this module builds waits for those
 //! writes to pass through first, so a case writes its fixture, asks for the
 //! host, and needs no barrier of its own. A write made after the host is built
-//! is the case's to settle.
+//! is the case's to settle. A suite that counts nothing and builds hosts by the
+//! hundred takes an [`Vault::unmeasured`] view instead, whose hosts skip the
+//! barrier and refuse to hand out an account.
 //!
 //! Each binary that compiles this module uses part of it — the child harnesses
 //! adopt a tree the parent generated rather than generating one — so an unused
@@ -228,6 +230,9 @@ pub struct Vault {
     /// retained rather than detected at each open, because a suite reads the
     /// store while the root is gone too.
     order: norn_store::StoredPathOrder,
+    /// Whether a host built from this view settles the tree's prior writes
+    /// before attaching. Only an [`Vault::unmeasured`] view skips it.
+    settles: bool,
 }
 
 impl Vault {
@@ -261,6 +266,7 @@ impl Vault {
             machine: root.to_path_buf(),
             name: VaultName::new(VAULT_NAME).expect("vault name"),
             order,
+            settles: true,
         }
     }
 
@@ -285,6 +291,21 @@ impl Vault {
             machine: machine.to_path_buf(),
             name: self.name.clone(),
             order: self.order,
+            settles: self.settles,
+        }
+    }
+
+    /// This view, served by hosts that skip the prior-write barrier.
+    ///
+    /// The barrier costs one FSEvents round trip per host on macOS. A suite
+    /// that builds hundreds of hosts and reads no account pays that for
+    /// nothing, so it takes this view. A late heal of its fixture can still
+    /// land after attachment, which is why such a host refuses to hand out its
+    /// account: a case that counts work builds its host from a settling view.
+    pub fn unmeasured(self) -> Vault {
+        Vault {
+            settles: false,
+            ..self
         }
     }
 
@@ -411,8 +432,10 @@ impl Vault {
         // lease, since the barrier opens a stream of its own, and from the
         // root above the vault, so its sentinel is no change to the vault.
         // A write the caller makes after this call is not covered.
-        norn_fs::watch::settle_prior_changes(&self.root, SETTLE_LIMIT)
-            .expect("the fixture's writes settle before attachment");
+        if self.settles {
+            norn_fs::watch::settle_prior_changes(&self.root, SETTLE_LIMIT)
+                .expect("the fixture's writes settle before attachment");
+        }
         let ops = compose(ProductionEntryOps::new(self.dirs(), policy));
         // The host takes the ops by value, so the account is taken here or not
         // at all. Reading an account is behind `induced-failure`, so a build
@@ -434,24 +457,27 @@ impl Vault {
             host,
             #[cfg(feature = "induced-failure")]
             account,
+            #[cfg(feature = "induced-failure")]
+            settled: self.settles,
             _watcher_lease: lease,
         }
     }
 }
 
-/// The bound on taking the real-watcher lease here.
-///
-/// The hold window is a whole attachment rather than one wait: the lease is
-/// taken before the host is built and let go when it drops, and what happens
-/// in between is [`READY_LIMIT`] at its widest. One look at the lock is a
-/// syscall, so the probe bound is the syscall's and not the attachment's — the
-/// same separation [`state_budget`] draws, over the same two bounds.
 /// How long a fixture's prior writes may take to pass through FSEvents before
 /// a host is built over them.
 const SETTLE_LIMIT: Duration = Duration::from_secs(30);
 
+/// The bound on taking the real-watcher lease here.
+///
+/// The hold window is a whole attachment rather than one wait: the lease is
+/// taken before the prior-write barrier and let go when the host drops, and
+/// what happens in between is [`SETTLE_LIMIT`] and [`READY_LIMIT`] at its
+/// widest. One look at the lock is a syscall, so the probe bound is the
+/// syscall's and not the attachment's — the same separation [`state_budget`]
+/// draws, over the same two bounds.
 fn lease_budget() -> Budget {
-    isolation::acquisition_budget(state_budget(READY_LIMIT))
+    isolation::acquisition_budget(state_budget(SETTLE_LIMIT.saturating_add(READY_LIMIT)))
 }
 
 /// A host, and the real-watcher lease that covers the watcher it installs.
@@ -476,6 +502,10 @@ pub struct ServingHost {
     /// gates.
     #[cfg(feature = "induced-failure")]
     account: Arc<JobEvidence>,
+    /// Whether this host settled the tree's prior writes before attaching. An
+    /// account read from one that did not could count a late fixture heal.
+    #[cfg(feature = "induced-failure")]
+    settled: bool,
     // Dropped after `host` by declaration order, which is the order that
     // matters: the watcher goes with the host, and the lease covers it.
     _watcher_lease: Lease,
@@ -485,13 +515,24 @@ pub struct ServingHost {
 impl ServingHost {
     /// What this host's jobs have spent and done, as it stands.
     pub fn evidence(&self) -> EvidenceReading {
+        self.counted();
         self.account.read()
     }
 
     /// The file each counted read of this host's jobs read while a
     /// recording stood ([`norn_host::JobEvidence::files_read`]).
     pub fn files_read(&self) -> Vec<norn_fs::reads::FileRead> {
+        self.counted();
         self.account.files_read()
+    }
+
+    /// Refuse an account from a host built over an [`Vault::unmeasured`] view.
+    fn counted(&self) {
+        assert!(
+            self.settled,
+            "a host built from an unmeasured view cannot count work: \
+             build it from a settling view"
+        );
     }
 }
 
