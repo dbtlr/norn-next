@@ -4,7 +4,8 @@
 //! **The lane is kept apart from the shared worker pool**, so long background
 //! work never takes a slot an attach, a reconcile or an apply needs. It runs
 //! background units — an engine's initialization and its feed and reconcile
-//! pages today — which hold no claim and no attachment, so they run
+//! pages, and each store's periodic verification — which hold no claim and
+//! no attachment, so they run
 //! alongside their vault's reconciles and applies and share only CPU with
 //! them. The lane's thread count, `LifecyclePolicy::background_threads`, is
 //! the host-wide background budget and caps that competition.

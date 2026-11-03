@@ -22,10 +22,11 @@ wrote it:
 
 Background work is split by whether it needs the vault's claim. Work that needs no claim
 gets its own threads in `norn-host`, the **background lane**: an engine's initialization
-and feed consumption, and the store's read-only verification. Neither holds a vault claim,
-so neither delays that vault's writes, and long semantic work never takes a slot of the
-shared worker pool. Work that needs the claim stays in maintenance legs on the shared
-worker pool, as today: the rolling-heal slice, the shadow sweep and the full-text check. A
+and feed consumption, and the store's whole periodic verification, whose one write runs
+on a copy of the store. Neither holds a vault claim, so neither delays that vault's
+writes, and long semantic work never takes a slot of the shared worker pool. Work that
+needs the claim stays in maintenance legs on the shared worker pool, as today: the
+rolling-heal slice and the shadow sweep. A
 maintenance leg now also ends at the background turn budget. Both kinds of work start when
 a wake or a deadline says they are owed, and no poll tick starts either. The section
 [Background work runs on its own lane](#background-work-runs-on-its-own-lane) records the
@@ -316,14 +317,14 @@ edit made moments before, so a read in that window can miss that edit. This acce
 observation gap is limited to one maintenance leg. The leg ends when the background turn
 budget runs out, plus the one unit in flight at that moment, or earlier when its work is
 done. Watcher batches drain before another leg starts. A semantic background turn and the
-store's read-only verification hold no claim and open no such window. The bound is not a
+store's verification hold no claim and open no such window. The bound is not a
 promise of wall-clock duration for an individual filesystem operation.
 
 The same leg is what a settling read can now wait behind. A read waiting for the facts it
 met may wait behind one maintenance leg, whether a reconcile leg handed the claim to it or
 a deadline started it. The read waits for the rest of that leg: at most the rest of one
 rolling-heal slice, which ends at its existing work bounds or the budget, whichever it
-reaches first, the full-text check, and one sweep step. That wait is shorter than the
+reaches first, and one sweep step. That wait is shorter than the
 maintenance leg a read could wait behind under ADR 0048, which ran the whole verification
 under the claim. The wait stays inside the read's bound.
 
@@ -858,8 +859,9 @@ hands on no reconcile, starts only at the next dispatcher poll tick whose watche
 finds it due. Its latency then follows the tick interval rather than the work.
 
 The work splits by whether it needs the vault's claim. Semantic work and the store's
-read-only checks need none, and they are the work whose cost can reach seconds. The
-rolling heal, the shadow sweep and the full-text check need the claim, and each runs in
+verification need none, and they are the work whose cost can reach seconds: the
+verification's one write, the full-text check, can run on a copy of the store rather than
+on the store. The rolling heal and the shadow sweep need the claim, and each runs in
 bounded steps. This decision moves the first kind to its own threads and keeps the second
 on the worker pool under a time bound.
 
@@ -872,7 +874,7 @@ is where the lane's scheduling lives. `LifecyclePolicy` has no library default: 
 composition root sets every value, and it sets `background_threads` to 1 in production.
 
 The lane runs **background units**, the background work that needs no claim: an engine's
-initialization, its feed and reconcile pages, and the store's read-only verification. The
+initialization, its feed and reconcile pages, and the store's verification. The
 lane holds the one host-wide background queue: a coalescing set of owed derived stores. A
 derived store, not a vault name or a root, is the key, as it is for the read budget,
 because two registrations over one root have two stores under
@@ -881,7 +883,7 @@ budget is the lane's thread count. No background unit runs anywhere else, and no
 worker-pool job carries one.
 
 The background lane is not a derivation lane. It runs lane-2 work (engine consumption)
-and lane-1 work (the read-only verification of the lane-1 store) alike. The lane adds no
+and lane-1 work (the verification of the lane-1 store) alike. The lane adds no
 crate and no dependency edge.
 
 A thread takes one derived store from the set and runs one **background turn** for it:
@@ -912,28 +914,31 @@ clock, so a budget too small for any unit shows as exactly one unit per backgrou
 A unit is the smallest step that is not interrupted:
 
 - for an engine, its initialization, or one feed page or one reconcile page of its drain;
-- for the store's read-only verification, the whole verification.
+- for the store's verification, the whole verification: its read-only checks, its copy
+  of the store and the full-text check on that copy.
 
 One embedding is never interrupted, and neither is one page. The engine's page size is
 therefore what bounds the overrun of a semantic background turn.
 
-The read-only verification is the one unit not at human scale, because it reads every
-page of the database. Host shutdown interrupts it, and so does the retirement of the store
-lifetime it reads. Either one sets the store lifetime's retirement mark first, and then
-calls `sqlite3_interrupt` on the verification's connection. The verification is several
-statements, and `sqlite3_interrupt` stops only a statement in flight, so the mark covers the
-rest:
+The verification is the one unit not at human scale, because it reads every page of the
+database and writes a copy of it. Host shutdown interrupts it, and so does the retirement
+of the store lifetime it reads. Either one sets the store lifetime's retirement mark first,
+and then calls `sqlite3_interrupt` on the connection the verification is running a
+statement on: a read-only check's, the copy's or the copy's full-text check's. The
+verification is several statements on three connections, and `sqlite3_interrupt` stops
+only a statement in flight, so the mark covers the rest:
 
-- The verification reads the mark before each statement, and between the rows it reads
-  where it recomputes body sub-fingerprints. A set mark ends the verification there.
+- The verification reads the mark before each statement, between the rows it reads where
+  it recomputes body sub-fingerprints, before its copy and before the copy's check. A set
+  mark ends the verification there.
 - The interrupt stops the statement in flight when the mark is set.
 - A statement that starts between the verification's last read of the mark and the
-  interrupt would escape both. The verification's connection therefore carries a progress
-  handler that reads the mark, and a statement stops within one handler interval of the
-  mark being set.
+  interrupt would escape both. Each of the verification's connections therefore carries a
+  progress handler that reads the mark, and a statement stops within one handler interval
+  of the mark being set.
 
-An interrupted verification reaches no verdict. It returns within one handler interval,
-or one document's recompute, after the mark is set.
+An interrupted verification reaches no verdict, and its copy is removed. It returns within
+one handler interval, or one document's recompute, after the mark is set.
 
 A work bound alone does not fit a lane whose unit cost depends on the embedder. A bound
 sized for the stub gives background turns estimated at seconds under a real model. A
@@ -955,9 +960,15 @@ reads the owed flags and due clocks of each derived store:
 
 The deadlines are:
 
-- for the lane, a read-only verification due, hourly for each store;
-- for a maintenance leg, a rolling heal due or a rolling heal pass still in progress, a
-  full-text check due, hourly for each store, and a shadow sweep's age threshold reached.
+- for the lane, a verification due, hourly for each store;
+- for a maintenance leg, a rolling heal due or a rolling heal pass still in progress, and a
+  shadow sweep's age threshold reached.
+
+A lane deadline that has come is owed lane work rather than a deadline, so the ask that
+finds it puts the store in the lane's set and contributes no deadline for it. The unit
+that runs moves the clock on, and the lane thread hands the store's next lane deadline back
+to the scheduler as the background turn ends, so an idle store comes due again with no
+wake.
 
 **The scheduler asks for a maintenance leg through the existing scheduling path.** It
 takes the entry's gate, as the dispatcher's retry does, and reads the entry's background
@@ -985,8 +996,7 @@ after that leg wakes the scheduler to read the clocks again; it clears the mark 
 ask where no claim-bound slice is due**. A scheduled or marked entry contributes no
 claim-bound deadline, so a rolling heal past its due time cannot wake the scheduler again
 and again for the length of a reconcile, and an entry whose mark is cleared contributes
-its next deadline again, so an idle vault keeps its hourly heal, full-text check and
-sweep. The release of the claim on a marked entry wakes the scheduler, which asks again;
+its next deadline again, so an idle vault keeps its hourly heal and its sweep. The release of the claim on a marked entry wakes the scheduler, which asks again;
 the ask on a marked entry runs whether or not a slice is still due, so a leg that reset
 the clock clears the mark. That wake is sent by the claim carrier's own moves that open
 the gate (a release, an open, the end of a poll, the drop of a marker), so no release site
@@ -1154,8 +1164,8 @@ delivery in the same order:
 1. Under the slot lock, mark the delivery or its store lifetime retired, and take out the
    engine and the feed connection.
 2. Release the slot lock, then close the sidecar connection and the feed connection.
-3. Where the store lifetime retires, interrupt a read-only verification running over it,
-   and wait for the verification to return.
+3. Where the store lifetime retires, interrupt a verification running over it, and wait
+   for the verification to return. Its copy is removed before it returns.
 4. Only then go on: a detach releases the store writer and the maintainer lock, and a
    rebuild discards the store.
 
@@ -1199,80 +1209,108 @@ unit's work stays owed. An engine taken out for its sidecar rebuild is abandoned
 as self-disabled. An unwind out of a maintenance leg goes through the
 cleanup that reconciles an unwound worker-pool leg today.
 
-### The store's verification splits in two
+### The store's whole verification runs on the lane, its full-text check on a copy
 
-`Store::verify_integrity` runs read-only checks and one write. This decision splits it
-along that line. Both halves keep its classification of a failure: only a driver error
-that describes the file's own contents is reported as damage, and every other failure is
-reported as the refused operation it was. A verdict of damage is what authorizes
-discarding the database, so the classification decides which failures schedule a rebuild.
+`Store::verify_integrity` runs read-only checks and one write, the full-text check. The
+periodic verification runs all of them as one background unit through read-only
+connections, and runs the write on a copy of the store. Nothing in it holds the claim, the
+attachment or the store's writer. Every check keeps its classification of a failure: only
+a driver error that describes the file's own contents is reported as damage, and every
+other failure is reported as the refused operation it was. A verdict of damage is what
+authorizes discarding the database, so the classification decides which failures schedule
+a rebuild.
 
-**The read-only checks leave the claim.** `PRAGMA integrity_check`, the foreign-key
-check, the `json_valid` scan of the frontmatter projection, the closed vocabularies, the
-rule rows and rule sets, the pillar and quarantine checks and the body sub-fingerprint
-recomputes run as one background unit. That unit reads through its own read connection,
-over one WAL snapshot. It holds no claim and no attachment, so it never blocks the writer,
-and watcher batches keep draining while it runs. `norn-store` mints its source from the
-live store, as it mints the feed source. The connection opens for the verification, sits
-outside the request read budget, and closes when the verification ends.
+**The read-only checks run first, over one snapshot.** `PRAGMA integrity_check`, the
+foreign-key check, the `json_valid` scan of the frontmatter projection, the closed
+vocabularies, the rule rows and rule sets, the pillar and quarantine checks and the body
+sub-fingerprint recomputes read through a read-only connection of the verification's own,
+over one WAL snapshot. `norn-store` mints the verification's source from the live store,
+as it mints the feed source, with no I/O. Its connections open for the verification, sit
+outside the request read budget, and close when the verification ends.
 
-**The full-text check stays on the claim.** `INSERT INTO documents_fts(documents_fts,
-rank) VALUES ('integrity-check', 1)` is a write. It takes the write lock on any connection
-that runs it, so it stays in the maintenance leg on the shared worker pool, hourly, as it
-runs today. It is one claim-bound slice and one unit, never interrupted. The
-implementation measures how long it holds the writer at 10,000 documents. A hold at human
-scale, about 100 ms of write delay or more, is a defect to fix, not an accepted cost.
+**The full-text check runs on a copy.** `INSERT INTO documents_fts(documents_fts, rank)
+VALUES ('integrity-check', 1)` is a write, and it takes the write lock on any connection
+that runs it. Run on the store, it held the writer for about 104 ms at 10,000 documents,
+which is a hold at human scale. The verification therefore copies the store and runs the
+check on the copy:
 
-A damage verdict from either half enters the damage judgment that
+1. A second read-only connection runs `VACUUM INTO` a scratch file. The copy is the store
+   as one snapshot reads it, so writing it never holds the store's writer. Its connection
+   admits that one statement into that one file, and nothing else a sealed read connection
+   refuses.
+2. The full-text check runs on the copy, through a connection to the copy alone. It takes
+   the copy's write lock, which nothing else wants.
+
+A verdict about the copy's index is a verdict about the store lifetime the copy was taken
+from. A `VACUUM INTO` that fails on the store's own contents is damage. A failure of the
+scratch write itself, such as a full disk or a directory that refuses the file, is a
+refused operation and never damage. The copy reads a later snapshot than the read-only
+checks, which is no gap: each verdict is about the lifetime both snapshots read.
+
+**The copy lives beside the store.** It is a file in the vault's derived directory, on the
+store's own machine and filesystem and never in the vault. It is removed on every way out
+of the verification: a verdict, a refusal, an interruption and an unwind. A copy that a
+crash left behind is removed at the next attach, and before the next copy is written. The
+retirement of the derived state removes it with the store.
+
+A damage verdict enters the damage judgment that
 [Source reader acquisition](#source-reader-acquisition) gives damage a read meets. That
 judgment schedules the existing rebuild as correctness work through the claim. A verdict
 counts only for the store epoch it read, so a verdict over a store that was replaced
-during the check schedules nothing. A refused operation, such as an open failure, a busy
-database or descriptor exhaustion, is not a verdict. It schedules no rebuild, and the
-check next comes due at its normal interval.
+during the check schedules nothing. The host's verification slot is bound to the store
+lifetime an attach or a rebuild opened, and a rebuild's discard unbinds it before the store
+goes, so the judgment asks that binding which lifetime is current: the entry's own store
+reading is recorded only where an engine is composed. A refused operation, such as an open
+failure, a busy database or descriptor exhaustion, is not a verdict. It schedules no
+rebuild, and the check next comes due at its normal interval.
 
-The closing check of a rebuild is not a background unit. A rebuild verifies the store it
-built before it clears the under-construction mark, so that check is readiness work, and
-it stays in the rebuild's leg on the worker pool.
+The closing check of a from-zero build and of a rebuild is not a background unit. A build
+verifies the store it built, on the writer it holds, before it clears the
+under-construction mark, so that check is readiness work, and it stays in the build's leg
+on the worker pool.
 
-The read-only verification may hold a lane thread for its whole duration, once an hour
-per attachment. While it runs, the WAL cannot checkpoint past its snapshot. Both costs are
-accepted.
+The verification may hold a lane thread for its whole duration, once an hour per
+attachment. While it reads, the WAL cannot checkpoint past its snapshot. Its copy takes
+about as much disk as the store for the length of the copy's check. These costs are
+accepted. Measured in a release build at 10,000 documents of 2 KiB, the unit takes about
+0.6 s, of which the copy takes about 0.12 s and the copy's check about 0.13 s; the copy is
+about 54 MB; and a second writer waits at most about 1 ms for a write while the unit runs.
+At 2,000 documents the unit takes about 0.13 s and the copy is about 11 MB.
 
 ### Claim-bound slices stay maintenance legs on the worker pool
 
-The rolling heal, the shadow sweep and the full-text check need the vault's claim and its
-attachment. Each runs as a **claim-bound slice** in a maintenance leg on the shared worker
-pool, as today. A slice of the shadow sweep is one sweep of the shadow home, which reads
-one directory. A slice of the full-text check is the check itself. A slice of the rolling
-heal keeps its existing work bounds: 64 enumeration acts, 64 checked entries and 1 MiB of
-hashed content. A leg runs them in today's order: the sweep, then the full-text check,
-then one rolling-heal slice.
+The rolling heal and the shadow sweep need the vault's claim and its attachment. Each runs
+as a **claim-bound slice** in a maintenance leg on the shared worker pool, as today. A
+slice of the shadow sweep is one sweep of the shadow home, which reads one directory. A
+slice of the rolling heal keeps its existing work bounds: 64 enumeration acts, 64 checked
+entries and 1 MiB of hashed content. A leg runs them in today's order: the sweep, then one
+rolling-heal slice. No maintenance leg runs any part of the store's verification.
 
 Their waits stay as they are. A queued apply takes the claim before a maintenance leg
 begins. The rolling-heal slice runs only over a quiet entry: one that publishes `Ready`,
 owes no heal rung, and has no queued apply, no pending watcher facts and no teardown due.
-The shadow sweep and the full-text check do not wait for a quiet entry, because a vault
-under continuous edits is never quiet and neither would run. Today a maintenance leg runs
-each of them whenever its clock is due, quiet or not. The architecture promises that
-shadow cleanup and store verification keep their fairness under sustained watcher traffic.
-The reconcile leg's hand-on to due maintenance, ahead of another reconcile turn, keeps
-that promise, as it does today.
+The shadow sweep does not wait for a quiet entry, because a vault under continuous edits is
+never quiet and the sweep would never run. A maintenance leg runs it whenever its clock is
+due, quiet or not. The architecture promises that shadow cleanup and store verification
+keep their fairness under sustained watcher traffic. The reconcile leg's hand-on to due
+maintenance, ahead of another reconcile turn, keeps that promise for shadow cleanup, as it
+does today. The verification keeps it by running on the lane, which reconciles do not
+hold back.
 
 **A maintenance leg takes the background turn budget.** The leg checks the budget between
-units and always runs at least one. A unit of a maintenance leg is one sweep, the
-full-text check, or one rolling-heal slice, which runs uninterrupted to its own work
-bounds; a leg takes at most one rolling-heal slice. A maintenance leg's units therefore
+units and always runs at least one. A unit of a maintenance leg is one sweep or one
+rolling-heal slice, which runs uninterrupted to its own work bounds; a leg takes at most
+one rolling-heal slice. A maintenance leg's units therefore
 hold the claim and one worker slot for at most its budget plus one unit; the leg holds
 them beyond that only to drain the watcher batches observed meanwhile, as every leg does
-before it releases the claim. The longest unit is the full-text check, whose length the
-implementation measures. The leg counts its units beside its clock, as a background turn
+before it releases the claim. The longest unit is a rolling-heal slice, about 13 ms at
+10,000 documents. The leg counts its units beside its clock, as a background turn
 does. A leg that ends with maintenance still due schedules another, as [Work starts at a
 wake or a deadline](#work-starts-at-a-wake-or-a-deadline-with-no-poll-backstop) rules.
 
 The shared worker pool now runs correctness work, readiness work and these maintenance
 legs. A maintenance leg can therefore take a slot that an attach or a reconcile of another
-vault needs, for at most its budget plus one unit. Long semantic work and the full
+vault needs, for at most its budget plus one unit. Long semantic work and the
 verification never take a slot.
 
 ### Status reports embedding coverage
@@ -1310,7 +1348,7 @@ implementation decides how it keeps the counts. `EngineStatus::On` is
 - **Keep semantic work on the claim.** A real-model page blocks that vault's writes for
   its whole duration. It also widens the window in which a `Ready` vault does not see a
   recent edit to a page of embeddings. Rejected.
-- **Keep semantic work and the read-only verification on the shared worker pool under a
+- **Keep semantic work and the verification on the shared worker pool under a
   cap.** A cap still lets a job that can last seconds occupy a slot that an attach or a
   reconcile of another vault needs. Separate threads isolate the two by construction.
   Rejected. Claim-bound slices stay on the pool because they need the claim, and the time
@@ -1338,8 +1376,16 @@ implementation decides how it keeps the counts. `EngineStatus::On` is
   Taking the slot lock bounds the wait by one sidecar step instead. Rejected.
 - **Let the shadow sweep wait for a quiet entry.** Under continuous edits the sweep would
   never run, which breaks the fairness the architecture promises shadow cleanup. Rejected.
-- **Run the whole verification off the claim.** The full-text check is a write, so it
-  needs the write lock whichever connection runs it. Rejected.
+- **Run the whole verification off the claim.** Chosen. The full-text check is a write,
+  so it needs the write lock of whichever database it runs on; a copy of the store, written
+  by `VACUUM INTO` through a read-only connection, gives it a database of its own, so no
+  part of the verification needs the store's writer.
+- **Keep the full-text check on the claim, as a unit of the maintenance leg.** Measured in a
+  release build at 10,000 documents of 2 KiB, the check took 92 to 140 ms, and a second
+  writer waited 104 ms for a write while it ran: a hold at human scale. Rejected.
+- **Check the index read-only, against a scratch index built from the bodies.** It needs
+  no copy, but comparing the two indexes term by term took 3.8 s at 10,000 documents.
+  Rejected.
 - **Replace `freshness` with `coverage`.** Coverage does not measure lag, and search
   answers and the unfiltered vector rung's margin read lag. Rejected.
 
@@ -1350,7 +1396,7 @@ The implementation lands in four sequential pull requests:
 1. the lane, the background scheduler and their triggers, with maintenance legs started by
    deadline and the budget on maintenance legs;
 2. semantic work off the claim;
-3. verification split, with its read-only half off the claim;
+3. the whole verification off the claim, its full-text check on a copy;
 4. embedding coverage in status.
 
 This decision merges as `Proposed` with the first and becomes `Accepted` with the last. On
@@ -1361,8 +1407,8 @@ change.
 `docs/architecture.md` that describe the behavior it changes:
 
 - Part I, *The heal ladder*: the paragraph on silent damage, which runs the verification as
-  lifecycle maintenance beside the shadow sweep. Its read-only checks become a background
-  unit on the lane, and its full-text check stays in the maintenance leg.
+  lifecycle maintenance beside the shadow sweep. The whole verification becomes a
+  background unit on the lane, with its full-text check on a copy of the store.
 - Part I, *The trust model*: the rolling-heal bullet. Its maintenance slices stay
   maintenance legs, bounded also by the background turn budget and started by a deadline
   or a leg end rather than a poll. Its promise that shadow cleanup and store verification
@@ -1401,9 +1447,12 @@ These consequences are testable:
 - One vault with a large backlog cannot starve another vault's background turns.
 - No worker-pool job runs a background unit.
 - An apply completes while its vault's semantic background turn is in flight.
-- A write completes while its vault's read-only verification runs.
-- Under continuous edits, the full-text check and the shadow sweep each run within one
-  reconcile turn of coming due.
+- A write completes while its vault's verification runs, the copy and the copy's
+  full-text check included.
+- No maintenance leg runs any part of the verification.
+- The verification's copy is removed on every way out of it, and a copy a crash left is
+  removed at the next attach or before the next copy.
+- Under continuous edits, the shadow sweep runs within one reconcile turn of coming due.
 - Each refusal of the install rule holds: a disable, a reload that replaces the section, a
   detach followed by a re-attach, and a store replacement each refuse a late
   initialization.
@@ -1423,11 +1472,13 @@ These costs are accepted:
 
 - Background work and correctness work compete for CPU. The lane's thread count bounds
   that competition.
-- With the production value of one thread, a read-only verification delays every other
-  derived store's background turns for the length of one verification.
+- With the production value of one thread, a verification delays every other derived
+  store's background turns for the length of one verification.
+- Each verification writes a copy of the store into its derived directory, about as large
+  as the store, which stands for the length of the copy's full-text check.
 - Each enabled engine holds one feed connection outside the request read budget.
 - A maintenance leg holds the claim and one worker slot for at most the background turn
-  budget plus one unit. The full-text check is the longest such unit.
+  budget plus one unit. A rolling-heal slice is the longest such unit.
 - A semantic background turn's overrun is one page. The real-model runtime will have to
   size the page so that one page stays within human scale.
 

@@ -4968,8 +4968,8 @@ impl<O: EntryOps> Drop for Host<O> {
         if let Some(engines) = self.shared.ops.semantic() {
             engines.retire_all();
         }
-        // A read-only verification in flight is stopped, not waited out: a
-        // lane thread returns from it within one progress-handler interval.
+        // A verification in flight is stopped, not waited out: a lane thread
+        // returns from it within one progress-handler interval.
         self.shared.ops.retire_background();
         for lane in self.lanes.drain(..) {
             if lane.thread().id() != thread::current().id() {
@@ -8395,9 +8395,9 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     state.withdraw_trust(UntrustedReason::environmental_refusal(detail));
                     next = schedule_due_detach(&mut state, &name);
                 }
-                // Maintenance is where a verification the warm path never runs
-                // asks the database about itself, so this is the arm damage
-                // nothing else meets arrives through.
+                // A maintenance leg's rolling-heal slice writes the store, and
+                // a write can meet damage the warm path has not: the verdict
+                // reaches rung 3 as any leg's does.
                 Err(JobFailure::StoreDamaged(detail)) => {
                     state.coverage.park_by(epoch, attachment);
                     state.withdraw_trust_for_damage(detail);
@@ -18568,9 +18568,10 @@ mod tests {
     }
 
     /// The verdict maintenance reports reaches the same rung, and the entry
-    /// withdraws trust on the way there. Maintenance is where the verification
-    /// the warm path never runs asks the database about itself, so it is the
-    /// leg silent damage arrives through.
+    /// withdraws trust on the way there. A maintenance leg's rolling-heal slice
+    /// writes the store, so it can meet damage the warm path has not; the
+    /// store's own verification runs on the lane and reaches the rung through
+    /// the background damage judgment instead.
     ///
     /// The withdrawal is the middle of the sequence rather than a detail of its
     /// end. The entry blocks inside rung 3 here, and what it publishes while it

@@ -84,11 +84,12 @@ const SKIPPED_LINKS_RETAINED: usize = 16;
 /// working day.
 ///
 /// **What the interval is traded against.** The verification holds a lane
-/// thread for its whole length — about 0.65 s at 10,000 documents — and a
-/// copy of the store on disk while its full-text check runs, and while it
-/// reads, the write-ahead log cannot checkpoint past its snapshot. With the
-/// production value of one lane thread, every other derived store's
-/// background turns wait for it. None of it holds a write.
+/// thread for its whole length — about 0.6 s at 10,000 documents — and a
+/// copy of the store on disk while its full-text check runs, about 54 MB at
+/// 10,000 documents, and while it reads, the write-ahead log cannot
+/// checkpoint past its snapshot. With the production value of one lane
+/// thread, every other derived store's background turns wait for it. None of
+/// it holds a write.
 pub const STORE_VERIFICATION_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
 /// Maximum time one lifecycle worker may wait for watcher coverage to become live.
@@ -115,12 +116,10 @@ pub const READ_SETTLE_BOUND: Duration = Duration::from_secs(5);
 ///
 /// Chosen by `maintenance_unit_release_probe`, a release build over 2,000 and
 /// 10,000 documents of 2 KiB: a shadow sweep takes about 50 µs and the
-/// longest rolling-heal slice about 13 ms at either size, while the store's
-/// verification takes about 85 ms at 2,000 documents and 500 ms at 10,000.
-/// A leg checks the budget between those units, so at 100 ms a write queued
-/// behind a leg waits at most 100 ms plus one unit, which is one rolling
-/// slice except where the verification is the unit. The verification's own
-/// length is what the budget cannot bound while it runs on the claim.
+/// longest rolling-heal slice about 13 ms at either size. A leg checks the
+/// budget between those units, so at 100 ms a write queued behind a leg waits
+/// at most 100 ms plus one rolling slice. The store's verification is no unit
+/// of a leg: it runs on the lane, and holds no claim and no writer.
 ///
 /// `semantic_unit_release_probe` measures the lane's units over the same
 /// corpora with the stub embedder: an initialization takes about 0.6 ms and
@@ -128,13 +127,20 @@ pub const READ_SETTLE_BOUND: Duration = Duration::from_secs(5);
 /// commit, about 21 ms at either size, so a 100 ms turn runs about five pages
 /// and ends within about 120 ms. A real model's page will cost more, and its
 /// runtime will size the page so one page stays within human scale.
+///
+/// The store's verification is the one lane unit the budget cannot bound,
+/// because it is one unit: `verification_unit_release_probe` measures it at
+/// about 0.13 s at 2,000 documents and 0.6 s at 10,000, once an hour per
+/// attached store, which delays other stores' background turns. A second
+/// writer waits at most about 1 ms for a write while it runs.
 pub const BACKGROUND_TURN_BUDGET: Duration = Duration::from_millis(100);
 
 /// The production value of [`crate::LifecyclePolicy::background_threads`]:
 /// one background lane thread per host.
 ///
 /// One thread is enough for the work the lane carries — an engine's
-/// initialization and its feed pages — and it bounds how far that work
+/// initialization and its feed pages, and each store's hourly verification —
+/// and it bounds how far that work
 /// competes with writes, readiness and claim-bound maintenance for CPU at one
 /// core whatever the number of attached vaults. A store with a large backlog
 /// takes one background turn while every other owed store takes one, so one
