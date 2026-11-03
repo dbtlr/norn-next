@@ -11347,15 +11347,17 @@ mod tests {
                     .with_rungs(norn_wire::RungSelection::exactly(
                         norn_wire::RungSet::of([norn_wire::Rung::Lexical]).unwrap(),
                     ));
-            wait_until("the edit to be published", lifecycle_budget(), || {
-                match host
+            wait_until(
+                "the edit to be published",
+                lifecycle_budget(),
+                || match host
                     .search(&params)
                     .map(|answer| answer.answer.report.page.rows.len())
                 {
                     Ok(1) => Observed::Met(()),
                     rows => Observed::Pending(format!("a lexical read found {rows:?}")),
-                }
-            })
+                },
+            )
             .unwrap_or_else(|failure| panic!("{failure}"));
             let state = host.state(&name);
             let (_, engine) = engine_reported(&host, &name);

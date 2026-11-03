@@ -55,9 +55,9 @@ pub enum BackgroundUnit {
     /// One unit ran and was refused by its environment — an open failure, a
     /// busy database, descriptor exhaustion. It is not a verdict: the work
     /// stays owed, and the turn ends so the refusal is not repeated at once.
-    /// The lane asks the scheduler to retry the store after
-    /// [`BACKGROUND_RETRY_AFTER`], so the next ask that finds it owed starts
-    /// it again although no wake comes.
+    /// The lane asks the scheduler to retry the store after a short fixed
+    /// backoff, so the next ask that finds it owed starts it again although
+    /// no wake comes.
     Refused,
     /// One unit ran and its read met damage in the store lifetime `epoch`. The
     /// lane hands the verdict to the entry's damage judgment, which schedules
