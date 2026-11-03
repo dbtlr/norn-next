@@ -356,6 +356,42 @@ impl NormalizedPath {
         let (path, prefix) = (self.key.as_bytes(), root.key.as_bytes());
         path.starts_with(prefix) && matches!(path.get(prefix.len()), None | Some(b'/'))
     }
+
+    /// The length, in bytes, of this path's prefix that ends with its
+    /// outermost dot-led segment, or `None` when no segment leads with a dot.
+    ///
+    /// Folding maps each byte to one byte and leaves `.` and `/` alone, so the
+    /// same length cuts the access spelling and the comparison key at the
+    /// same segment boundary.
+    fn dot_led_prefix_len(&self) -> Option<usize> {
+        let path = self.access.as_os_str().as_bytes();
+        let mut start = 0;
+        for segment in path.split(|byte| *byte == b'/') {
+            if segment.first() == Some(&b'.') {
+                return Some(start + segment.len());
+            }
+            start += segment.len() + 1;
+        }
+        None
+    }
+
+    /// Whether any segment of this path leads with a dot.
+    pub(crate) fn has_dot_led_segment(&self) -> bool {
+        self.dot_led_prefix_len().is_some()
+    }
+
+    /// The ancestor of this path, or the path itself, that ends with its
+    /// outermost dot-led segment: the root every dot-led path beneath it
+    /// shares.
+    pub(crate) fn dot_led_root(&self) -> Option<Self> {
+        let len = self.dot_led_prefix_len()?;
+        let access = &self.access.as_os_str().as_bytes()[..len];
+        let key = &self.key.as_bytes()[..len];
+        Some(Self {
+            access: PathBuf::from(OsStr::from_bytes(access)),
+            key: OsString::from_vec(key.to_vec()),
+        })
+    }
 }
 
 impl PartialEq for NormalizedPath {

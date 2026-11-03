@@ -584,7 +584,10 @@ impl TreeView {
                         format!("`{root}` is a place the vault does not read documents at"),
                         Barrier::Occupied,
                     ),
-                    SkipReason::HostExclusion | SkipReason::Mechanism | SkipReason::Shadow => (
+                    SkipReason::HostExclusion
+                    | SkipReason::Mechanism
+                    | SkipReason::DotLed
+                    | SkipReason::Shadow => (
                         format!("`{root}` is a place the vault does not read documents at"),
                         Barrier::Closed,
                     ),

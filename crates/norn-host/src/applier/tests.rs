@@ -1768,14 +1768,20 @@ impl Fixture {
 }
 
 /// A create at a place the vault does not read documents at — the shadow
-/// fallback beneath `.norn`, or a root the host excludes — is refused whatever
-/// its before-state says, and nothing is made there; so is a removal there.
+/// fallback beneath `.norn`, a root the host excludes, a dot-led folder or a
+/// dotfile name — is refused whatever its before-state says, and nothing is
+/// made there; so is a removal there.
 #[test]
 fn a_target_where_the_vault_reads_no_documents_is_refused() {
     let mut fixture = Fixture::new(&[("a.md", "a\n")]);
     fixture.write("private/p.md", "# P\n");
     fixture.exclusions.push(PathBuf::from("private"));
-    for at in [".norn/tmp/x.md", "private/x.md"] {
+    for at in [
+        ".norn/tmp/x.md",
+        "private/x.md",
+        ".trash/x.md",
+        "notes/.x.md",
+    ] {
         let plan = fixture.by_hand(
             vec![creating(at, "# X\n")],
             vec![norn_wire::Transition::new(

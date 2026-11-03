@@ -1135,8 +1135,8 @@ mod tests {
     /// **The self-ignore outlives every sweep and discard, and the walk reads
     /// none of it**: it carries no shadow's name, so the root sweep, the tree
     /// sweep past the age threshold, a total sweep of the home and the
-    /// home's discard all leave it, and the walk cuts the fallback root as one
-    /// mechanism skip without yielding it as a file.
+    /// home's discard all leave it, and the walk cuts the vault's `.norn` as one
+    /// dot-led skip without yielding the self-ignore as a file.
     #[test]
     fn the_self_ignore_survives_every_sweep_and_the_walk_does_not_yield_it() {
         let scratch = Scratch::new("shadow-self-ignore-kept");
@@ -1168,8 +1168,8 @@ mod tests {
         assert_eq!(
             facts,
             [(
-                PathBuf::from(FALLBACK),
-                Some(crate::walk::SkipReason::Mechanism)
+                PathBuf::from(".norn"),
+                Some(crate::walk::SkipReason::DotLed)
             )]
         );
     }

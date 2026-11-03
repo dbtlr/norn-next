@@ -63,8 +63,8 @@ use norn_wire::{FindingKind, LinkAddressKind, ValidateParams, ValidateReport, Va
 /// The digest the corpus derives to, and the derivation version it was taken
 /// under.
 const PINNED: (DerivationVersion, &str) = (
-    DerivationVersion::new(17),
-    "6dd2e19b78f4fb329facff200f3dc8b743050f6c0f5865f806ebdb1b90870eed",
+    DerivationVersion::new(18),
+    "7ccf06fcbad9b282ac5587d912fdd6ca775c23368297b29b60d13f93ebd31cc1",
 );
 
 /// The vault schema the main corpus is derived under: a field of every
@@ -254,7 +254,8 @@ fn corpus() -> Vec<(&'static str, Vec<u8>)> {
             "cr-only.md",
             b"# CR only\r\rBefore #crtag\r\r```\r#fenced\r```\r\rAfter\r".to_vec(),
         ),
-        // A document under a hidden directory.
+        // A document under a dot-led directory: outside the vault, so it
+        // derives no row, no tag and no link.
         (
             ".hidden/Hidden Note.md",
             b"# Hidden\n\nA #hidden-tag.\n".to_vec(),
@@ -1471,9 +1472,12 @@ fn assert_the_corpus_exercises_every_fact(rows: &DerivedRows) {
         !body.contains('\n') && body.contains("```\r#fenced\r```"),
         "no lone-CR document with a fenced tag marker is exercised"
     );
-    // The walk derives a document under a hidden directory like any other,
-    // and the digest pins that it does.
-    document(".hidden/Hidden Note.md");
+    // The walk reads nothing beneath a dot-led directory, and the digest pins
+    // that it derives no row there.
+    assert!(
+        projection.document(".hidden/Hidden Note.md").is_none(),
+        "a document under a dot-led directory derived a row"
+    );
 
     let kinds: BTreeSet<&str> = projection
         .findings()

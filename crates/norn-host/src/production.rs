@@ -402,7 +402,7 @@ impl Drop for VerificationRetirement {
     }
 }
 
-type WatchEntrypoint = fn(&Path, &Path) -> Result<(Subscription, OwnWrites), WatchError>;
+type WatchEntrypoint = fn(&Path, &Path, &[&Path]) -> Result<(Subscription, OwnWrites), WatchError>;
 
 /// Apply `plan` over `attachment`: the work of [`EntryOps::apply`].
 ///
@@ -1320,7 +1320,11 @@ impl ProductionEntryOps {
         registration: &Registration,
         schema: &Path,
     ) -> Result<(Subscription, OwnWrites), WatchError> {
-        Self::watch_entrypoint(registration)(registration.root.as_path(), schema)
+        Self::watch_entrypoint(registration)(
+            registration.root.as_path(),
+            schema,
+            &[Path::new(norn_config::IN_VAULT_CONFIG_PATH)],
+        )
     }
 
     fn schema_path(registration: &Registration) -> PathBuf {
@@ -14524,7 +14528,7 @@ mod tests {
     fn a_content_step_requeue_settles_a_refused_spelling_before_a_rows_death() {
         let f = Fixture::new("requeue-death-after-refused");
         fs::create_dir(f.vault().join("notes")).unwrap();
-        fs::write(f.vault().join("notes/..md"), "refused spelling").unwrap();
+        fs::write(f.vault().join("notes/x\u{1}.md"), "refused spelling").unwrap();
         fs::write(f.vault().join("notes/a.md"), "# A\n").unwrap();
         fs::write(f.vault().join("kept.md"), "# Kept\n").unwrap();
         norn_fs::watch::settle_prior_changes(f.root.root(), lifecycle_budget().work()).unwrap();
@@ -14598,7 +14602,7 @@ mod tests {
     fn a_content_step_requeue_settles_a_refused_spelling_before_a_vault_files_birth() {
         let f = Fixture::new("verifier-requeue-birth-after-refused");
         fs::create_dir(f.vault().join("notes")).unwrap();
-        fs::write(f.vault().join("notes/..md"), "refused spelling").unwrap();
+        fs::write(f.vault().join("notes/x\u{1}.md"), "refused spelling").unwrap();
         fs::write(f.vault().join("notes/c.md"), "# C\n").unwrap();
         fs::write(f.vault().join("kept.md"), "# Kept\n").unwrap();
         norn_fs::watch::settle_prior_changes(f.root.root(), lifecycle_budget().work()).unwrap();
@@ -14650,14 +14654,14 @@ mod tests {
             for (file, touch) in [
                 ("notes/bad.md", Touch::File),
                 ("notes/bad.md", Touch::Folder),
-                ("notes/..md", Touch::File),
+                ("notes/x\u{1}.md", Touch::File),
             ] {
                 let f = Fixture::new("quarantine-requeued");
                 fs::create_dir(f.vault().join("notes")).unwrap();
                 fs::create_dir(f.vault().join("other")).unwrap();
                 fs::write(f.vault().join("notes/bad.md"), UNDECODABLE).unwrap();
                 fs::write(f.vault().join("other/bad.md"), UNDECODABLE).unwrap();
-                fs::write(f.vault().join("notes/..md"), "refused spelling").unwrap();
+                fs::write(f.vault().join("notes/x\u{1}.md"), "refused spelling").unwrap();
                 fs::write(
                     f.vault().join("notes/good.md"),
                     "---\nbad: [\n---\n# Good\n",
@@ -14693,7 +14697,7 @@ mod tests {
                     "{case}"
                 );
                 // The comparison above reads findings directly under the vault.
-                let refused = DocumentPath::rendered(Path::new("notes/..md"));
+                let refused = DocumentPath::rendered(Path::new("notes/x\u{1}.md"));
                 for path in [
                     "notes/bad.md",
                     "other/bad.md",
@@ -14800,7 +14804,7 @@ mod tests {
         let f = Fixture::new(label);
         for folder in ["notes", "locked"] {
             fs::create_dir(f.vault().join(folder)).unwrap();
-            fs::write(f.vault().join(folder).join("..md"), "refused spelling").unwrap();
+            fs::write(f.vault().join(folder).join("x\u{1}.md"), "refused spelling").unwrap();
         }
         fs::write(f.vault().join("notes/a.md"), "# A\n").unwrap();
         fs::write(f.vault().join("locked/inside.md"), "# Inside\n").unwrap();
@@ -14847,7 +14851,7 @@ mod tests {
         ] {
             let f = refused_spellings_vault("refused-removed");
             let (ops, name) = f.ops(2);
-            let removed = f.vault().join("notes/..md");
+            let removed = f.vault().join("notes/x\u{1}.md");
             let probe = ChangeAt::new(moment, &f, vec![removed.clone()], move || {
                 fs::remove_file(&removed).unwrap()
             });
@@ -14864,7 +14868,7 @@ mod tests {
                 "refused-removed-oracle",
                 ProductionPolicy::new(2, 2).unwrap(),
             );
-            let place = DocumentPath::rendered(Path::new("notes/..md"));
+            let place = DocumentPath::rendered(Path::new("notes/x\u{1}.md"));
             let built = spelling_outcome(&mut attachment.store, &place);
             let oracle = spelling_outcome(&mut scratch, &place);
             if built != oracle
@@ -14993,7 +14997,7 @@ mod tests {
                 ProductionPolicy::new(2, 2).unwrap(),
                 &ProgressReporter::disconnected().healing(),
             );
-            let place = DocumentPath::rendered(Path::new("locked/..md"));
+            let place = DocumentPath::rendered(Path::new("locked/x\u{1}.md"));
             let built = spelling_outcome(&mut attachment.store, &place);
             let oracle = spelling_outcome(&mut ordinary, &place);
             let equal = derived_vault(&mut attachment.store, &f.vault())
@@ -15078,8 +15082,8 @@ mod tests {
     }
 
     /// **A refused spelling that appears beside a quarantined document at its
-    /// place is filed once that document's content settles.** `notes/..md`
-    /// renders onto the place `notes/\u{fffd}..md`, where an undecodable
+    /// place is filed once that document's content settles.** `notes/x\u{1}.md`
+    /// renders onto the place `notes/x\u{fffd}.md`, where an undecodable
     /// document stands. Created after the names walk, the spelling is taken by
     /// a requeue while that document's provisional row still withholds it —
     /// at the end of the names step, or at a content page before the page that
@@ -15107,13 +15111,13 @@ mod tests {
             }
             let notes = f.vault().join("notes");
             fs::create_dir(&notes).unwrap();
-            fs::write(notes.join("\u{fffd}..md"), UNDECODABLE).unwrap();
+            fs::write(notes.join("x\u{fffd}.md"), UNDECODABLE).unwrap();
             fs::write(notes.join("a.md"), "# A\n").unwrap();
             norn_fs::watch::settle_prior_changes(f.root.root(), lifecycle_budget().work()).unwrap();
             let (ops, name) = f.ops(2);
             let folder = notes.clone();
-            let probe = ChangeAt::new(moment, &f, vec![notes.join("..md")], move || {
-                fs::write(folder.join("..md"), b"refused spelling").unwrap();
+            let probe = ChangeAt::new(moment, &f, vec![notes.join("x\u{1}.md")], move || {
+                fs::write(folder.join("x\u{1}.md"), b"refused spelling").unwrap();
             });
             let ops = ops.with_loading_probe(Arc::new(probe));
             let mut attachment = ops
@@ -15128,7 +15132,7 @@ mod tests {
                 "refused-beside-quarantine-oracle",
                 ProductionPolicy::new(2, 2).unwrap(),
             );
-            let place = DocumentPath::rendered(Path::new("notes/..md"));
+            let place = DocumentPath::rendered(Path::new("notes/x\u{1}.md"));
             let mut built = spelling_outcome(&mut attachment.store, &place);
             let mut oracle = spelling_outcome(&mut scratch, &place);
             assert_eq!(
@@ -15602,22 +15606,22 @@ mod tests {
         ops.detach(&name, attachment);
     }
 
-    /// A leaf whose stem the grammar refuses renders with the marker ahead of
-    /// it, and its removal ends its finding the same way. The spelling still
-    /// addresses a range of stored paths beneath it, which is the arm of the
-    /// missing path this case reaches.
+    /// A leaf whose stem the grammar refuses is dot-led, so it is outside the
+    /// vault: the attach files no spelling for it, and a watcher leg that
+    /// reports its removal still leaves nothing filed and a store a build from
+    /// zero agrees with.
     #[cfg(unix)]
     #[test]
-    fn a_watcher_removal_of_a_dot_stem_file_ends_its_finding() {
+    fn a_watcher_removal_of_a_dot_stem_file_has_no_finding_to_end() {
         let f = Fixture::new("watched-dot-stem-removal");
         fs::write(f.vault().join("..md"), "refused stem").unwrap();
         let (ops, name) = f.ops(2);
         let progress = ProgressReporter::disconnected();
         let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
         assert_eq!(
-            spellings_filed_at(&mut attachment.store, "\u{fffd}..md").len(),
-            1,
-            "the attach did not file the spelling, so this proves nothing"
+            finding_total(&mut attachment.store),
+            0,
+            "a dot-led refused stem is outside the vault and files nothing"
         );
 
         fs::remove_file(f.vault().join("..md")).unwrap();
@@ -15960,21 +15964,18 @@ mod tests {
         ops.detach(&name, attachment);
     }
 
-    /// A file whose stem the grammar refuses that becomes a folder leaves its
-    /// own place the same way, though the folder's spelling addresses the
-    /// documents stored beneath it.
+    /// A file whose stem the grammar refuses that becomes a folder stays
+    /// outside the vault, dot-led as a folder too: no finding stands before or
+    /// after, and nothing beneath the folder is stored.
     #[cfg(unix)]
     #[test]
-    fn a_dot_stem_file_that_becomes_a_folder_ends_its_finding() {
+    fn a_dot_stem_file_that_becomes_a_folder_stays_outside_the_vault() {
         let f = Fixture::new("watched-dot-stem-becomes-folder");
         fs::write(f.vault().join("..md"), "refused stem").unwrap();
         let (ops, name) = f.ops(2);
         let progress = ProgressReporter::disconnected();
         let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
-        assert_eq!(
-            spellings_filed_at(&mut attachment.store, "\u{fffd}..md").len(),
-            1
-        );
+        assert_eq!(finding_total(&mut attachment.store), 0);
 
         fs::remove_file(f.vault().join("..md")).unwrap();
         fs::create_dir(f.vault().join("..md")).unwrap();
@@ -15989,7 +15990,7 @@ mod tests {
         );
 
         assert_eq!(finding_total(&mut attachment.store), 0);
-        assert_eq!(stored_paths(&mut attachment.store), ["..md/note.md"]);
+        assert!(stored_paths(&mut attachment.store).is_empty());
         assert_a_build_from_zero_agrees(&f, &mut attachment);
         ops.detach(&name, attachment);
     }
@@ -16038,26 +16039,22 @@ mod tests {
     }
 
     /// **A folder named like a dot-stem file that becomes that file leaves
-    /// nothing beneath it.** `..md` names no document and still addresses the
-    /// stored paths under it, so the rows and findings there go as they go
-    /// for a folder that left, and the file's own spelling is filed.
+    /// nothing in the vault either way.** `..md` is dot-led, so the folder
+    /// holds no stored row and no finding, and the file filed in its place
+    /// files no spelling; the leg that reports the change agrees with a build
+    /// from zero.
     #[cfg(unix)]
     #[test]
-    fn a_dot_stem_folder_that_becomes_a_file_ends_the_rows_and_findings_beneath_it() {
+    fn a_dot_stem_folder_that_becomes_a_file_leaves_nothing_in_the_vault() {
         let f = Fixture::new("watched-dot-stem-folder-becomes-file");
         fs::create_dir(f.vault().join("..md")).unwrap();
         fs::write(f.vault().join("..md/a.md"), "body").unwrap();
-        if !write_or_report(&f.vault().join("..md/x\u{1}.md"), b"body") {
-            return;
-        }
+        fs::write(f.vault().join("kept.md"), "body").unwrap();
         let (ops, name) = f.ops(2);
         let progress = ProgressReporter::disconnected();
         let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
-        assert_eq!(stored_paths(&mut attachment.store), ["..md/a.md"]);
-        assert_eq!(
-            spellings_filed_at(&mut attachment.store, "..md/x\u{fffd}.md").len(),
-            1
-        );
+        assert_eq!(stored_paths(&mut attachment.store), ["kept.md"]);
+        assert_eq!(finding_total(&mut attachment.store), 0);
 
         fs::remove_dir_all(f.vault().join("..md")).unwrap();
         fs::write(f.vault().join("..md"), "refused stem").unwrap();
@@ -16070,18 +16067,8 @@ mod tests {
             &["..md"],
         );
 
-        assert!(
-            stored_paths(&mut attachment.store).is_empty(),
-            "the folder's row outlived it"
-        );
-        assert!(
-            spellings_filed_at(&mut attachment.store, "..md/x\u{fffd}.md").is_empty(),
-            "a finding beneath the folder outlived it"
-        );
-        assert_eq!(
-            spellings_filed_at(&mut attachment.store, "\u{fffd}..md").len(),
-            1
-        );
+        assert_eq!(stored_paths(&mut attachment.store), ["kept.md"]);
+        assert_eq!(finding_total(&mut attachment.store), 0);
         assert_a_build_from_zero_agrees(&f, &mut attachment);
         ops.detach(&name, attachment);
     }
@@ -16369,23 +16356,24 @@ mod tests {
     }
 
     /// **A root the walk refuses takes the place its own spelling stands at,
-    /// which is a rendering wherever the document grammar refuses what the
-    /// directory grammar admits.** `..md` addresses the rows beneath it and
-    /// names no document, so the finding about the path itself stands at
-    /// `\u{fffd}..md`. The name is a link now, which no walk reads through, so a
-    /// derivation from zero renders nothing onto that place and the heal takes
-    /// what was standing there.
+    /// which is a rendering.** `x\u{1}.md` names no document, so the finding
+    /// about the path itself stands at `x\u{fffd}.md`. The name is a link now,
+    /// which no walk reads through, so a derivation from zero renders nothing
+    /// onto that place and the heal takes what was standing there.
+    ///
+    /// A leaf whose stem alone the grammar refuses (`..md`) can no longer stand
+    /// here: it is dot-led, outside the vault.
     #[cfg(unix)]
     #[test]
     fn a_refused_root_the_document_grammar_refuses_takes_its_own_place() {
         use std::os::unix::fs::symlink;
 
         let f = Fixture::new("withheld-rendered-root");
-        fs::write(f.vault().join("..md"), b"body").unwrap();
+        fs::write(f.vault().join("x\u{1}.md"), b"body").unwrap();
         let (ops, name) = f.ops(2);
         let progress = ProgressReporter::disconnected();
         let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
-        let place = "\u{fffd}..md";
+        let place = "x\u{fffd}.md";
         assert_eq!(
             sorted_kinds(&mut attachment.store, place),
             ["document/path-names-no-document"]
@@ -16393,8 +16381,8 @@ mod tests {
 
         // The same name, now reachable only through a link the walk refuses to
         // follow: nothing this walk reads renders onto that place.
-        fs::remove_file(f.vault().join("..md")).unwrap();
-        symlink("elsewhere.md", f.vault().join("..md")).unwrap();
+        fs::remove_file(f.vault().join("x\u{1}.md")).unwrap();
+        symlink("elsewhere.md", f.vault().join("x\u{1}.md")).unwrap();
         heal_the_vault(&ops, &name, &mut attachment, &progress);
 
         assert!(
@@ -17582,9 +17570,9 @@ mod tests {
     }
 
     /// **A scoped leg reads every spelling of the place a refused root stands
-    /// at.** `..md` names no document and still addresses the rows beneath
-    /// it, so the finding about the path itself stands at the rendered place
-    /// `\u{fffd}..md` — a place every sibling whose rendering lands there names
+    /// at.** `x\u{1}.md` names no document, so the finding about the path
+    /// itself stands at the rendered place
+    /// `x\u{fffd}.md` — a place every sibling whose rendering lands there names
     /// too. The leg reads all of them, finds none once the name is a symbolic
     /// link, and ends the finding while it converges the range below, as the
     /// vault heal does.
@@ -17594,22 +17582,22 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let f = Fixture::new("scoped-refused-rendered-root");
-        fs::write(f.vault().join("..md"), b"body").unwrap();
+        fs::write(f.vault().join("x\u{1}.md"), b"body").unwrap();
         let (ops, name) = f.ops(2);
         let progress = ProgressReporter::disconnected();
         let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
-        let place = "\u{fffd}..md";
+        let place = "x\u{fffd}.md";
         assert_eq!(
             sorted_kinds(&mut attachment.store, place),
             ["document/path-names-no-document"]
         );
 
-        fs::remove_file(f.vault().join("..md")).unwrap();
-        symlink("elsewhere.md", f.vault().join("..md")).unwrap();
+        fs::remove_file(f.vault().join("x\u{1}.md")).unwrap();
+        symlink("elsewhere.md", f.vault().join("x\u{1}.md")).unwrap();
         scoped_increment(
             &mut attachment.store,
             f.vault().as_path(),
-            &dirty_path(f.vault().as_path(), "..md"),
+            &dirty_path(f.vault().as_path(), "x\u{1}.md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
             &exclusions(&attachment.registration, &attachment.shadows),
@@ -17866,8 +17854,8 @@ mod tests {
     fn a_file_gone_before_content_is_withdrawn() {
         let f = Fixture::new("step-vanished");
         fs::write(f.vault().join("gone.md"), "gone").unwrap();
-        fs::write(f.vault().join("..md"), "refused spelling").unwrap();
-        let rendered = DocumentPath::rendered(Path::new("..md"));
+        fs::write(f.vault().join("x\u{1}.md"), "refused spelling").unwrap();
+        let rendered = DocumentPath::rendered(Path::new("x\u{1}.md"));
         fs::write(f.vault().join(rendered.as_str()), b"\xff").unwrap();
         fs::write(f.vault().join("stay.md"), "# Stay\n").unwrap();
         let (ops, name) = f.ops(2);
@@ -21050,12 +21038,13 @@ mod tests {
     /// vault heal reads under that subtree.
     ///
     /// The forbidden shape is answering membership against the scope. A vault
-    /// directory holding a `.norn/tmp` of its own is ordinary content: the vault
-    /// heal derives it and the watcher reports on it, so a scoped heal that read
-    /// it as the mechanism root would prune live rows the next watcher event
-    /// puts straight back, and the two would trade the vault back and forth.
+    /// directory holding a `.norn/tmp` of its own is dot-led, so the vault heal
+    /// derives nothing beneath that `.norn` and the watcher drops events there;
+    /// a scoped heal that read the directory any other way would store rows the
+    /// vault heal does not hold, and the two would trade the vault back and
+    /// forth.
     #[test]
-    fn a_scoped_subtree_heal_keeps_the_documents_the_vault_heal_holds_under_it() {
+    fn a_scoped_subtree_heal_holds_exactly_the_documents_the_vault_heal_holds_under_it() {
         let f = Fixture::new("scoped-subtree-mechanism-lookalike");
         fs::create_dir_all(f.vault().join("folder/.norn/tmp")).unwrap();
         fs::write(f.vault().join("folder/.norn/tmp/live.md"), "live").unwrap();
@@ -21064,7 +21053,7 @@ mod tests {
         let progress = ProgressReporter::disconnected();
         let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
         let vault_heal = stored_paths(&mut attachment.store);
-        assert_eq!(vault_heal, ["folder/.norn/tmp/live.md", "folder/ok.md"]);
+        assert_eq!(vault_heal, ["folder/ok.md"]);
 
         scoped_increment(
             &mut attachment.store,
@@ -21080,20 +21069,23 @@ mod tests {
         ops.detach(&name, attachment);
     }
 
-    /// **The bar on the other direction.** The vault's own fallback root is cut
-    /// for a scoped heal rooted at its parent, without the host naming it: this
-    /// placement stages outside the vault and still excludes nothing here.
+    /// **The bar on the other direction.** The vault's `.norn` is dot-led, so a
+    /// scoped heal rooted at it reads nothing beneath it, without the host
+    /// naming any root: this placement stages outside the vault and still
+    /// excludes nothing here.
     ///
-    /// The forbidden shape is a scoped heal reading staged bytes as documents.
-    /// A watcher event on `<vault>/.norn` schedules a heal rooted there, and the
-    /// vault heal holds no row for anything under `.norn/tmp`.
+    /// The forbidden shape is a scoped heal reading staged bytes, or a document
+    /// beside them, as documents. A watcher event on `<vault>/.norn` schedules a
+    /// heal rooted there, and the vault heal holds no row for anything under
+    /// `.norn`.
     #[test]
-    fn a_scoped_subtree_heal_rooted_at_the_mechanism_parent_still_cuts_it() {
+    fn a_scoped_subtree_heal_rooted_at_the_norn_directory_reads_nothing_beneath_it() {
         let f = Fixture::new("scoped-subtree-mechanism-root");
         let staged = f.vault().join(norn_fs::FALLBACK).join("norn-dev/notes");
         fs::create_dir_all(&staged).unwrap();
         fs::write(staged.join("shadow.md"), "staged bytes").unwrap();
         fs::write(f.vault().join(".norn/notes.md"), "a document").unwrap();
+        fs::write(f.vault().join("kept.md"), "a document").unwrap();
         let (ops, name) = f.ops(2);
         let progress = ProgressReporter::disconnected();
         let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
@@ -21103,7 +21095,7 @@ mod tests {
             "this fixture stages outside the vault, so no host root names `.norn/tmp`"
         );
         let vault_heal = stored_paths(&mut attachment.store);
-        assert_eq!(vault_heal, [".norn/notes.md"]);
+        assert_eq!(vault_heal, ["kept.md"]);
 
         scoped_increment(
             &mut attachment.store,
@@ -21627,10 +21619,11 @@ mod tests {
         ops.detach(&name, attachment);
     }
 
-    /// A directory whose own leaf reduces to a stem the grammar refuses still
-    /// holds documents the grammar admits, and the warm path derives them.
+    /// A directory whose own leaf reduces to a stem the grammar refuses is
+    /// dot-led, so the warm path derives nothing beneath it: not a document the
+    /// grammar admits, and not a finding when that document stops decoding.
     #[test]
-    fn a_scoped_increment_derives_documents_under_a_directory_with_a_refused_stem() {
+    fn a_scoped_increment_derives_nothing_under_a_dot_led_directory_with_a_refused_stem() {
         let f = Fixture::new("quarantine-refused-stem-directory");
         let (ops, name) = f.ops(2);
         let progress = ProgressReporter::disconnected();
@@ -21648,12 +21641,9 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(stored_paths(&mut attachment.store), ["..md/note.md"]);
+        assert!(stored_paths(&mut attachment.store).is_empty());
         assert_eq!(finding_total(&mut attachment.store), 0);
 
-        // And one of them that stops decoding loses its row here as it would
-        // anywhere else: the scope has no merge, so the row it prunes is the one
-        // it looked up.
         fs::write(f.vault().join("..md/note.md"), UNDECODABLE).unwrap();
         scoped_increment(
             &mut attachment.store,
@@ -21665,23 +21655,17 @@ mod tests {
         )
         .unwrap();
         assert!(stored_paths(&mut attachment.store).is_empty());
-        assert_eq!(
-            findings_at(&mut attachment.store, "..md/note.md")
-                .iter()
-                .map(|finding| finding.kind.as_str())
-                .collect::<Vec<_>>(),
-            ["document/body-bytes-not-utf8"]
-        );
+        assert_eq!(finding_total(&mut attachment.store), 0);
         ops.detach(&name, attachment);
     }
 
-    /// **A live directory that names no document converges its deletions too.**
-    /// The scoped heal of `..md` merges its walk against the rows the prefix
-    /// addresses, so a child deleted under it loses its row there rather than
-    /// waiting for a vault-wide heal — whether the dirty path is the child or
-    /// the directory that held it.
+    /// **Children coming and going under a dot-led refused-stem directory move
+    /// no row.** The scoped heal of `..md`, or of a child named on its own,
+    /// reads nothing beneath a dot-led name, so the vault's rows stay those of
+    /// the documents outside it.
     #[test]
-    fn a_scoped_increment_prunes_a_child_deleted_under_a_live_refused_stem_directory() {
+    fn a_scoped_increment_stores_nothing_as_children_come_and_go_under_a_dot_led_refused_stem_directory()
+     {
         let f = Fixture::new("quarantine-refused-stem-child-deletion");
         let (ops, name) = f.ops(2);
         let progress = ProgressReporter::disconnected();
@@ -21700,46 +21684,22 @@ mod tests {
             &progress,
         )
         .unwrap();
-        assert_eq!(
-            stored_paths(&mut attachment.store),
-            ["..md/gone.md", "..md/note.md", "keep.md"]
-        );
+        assert_eq!(stored_paths(&mut attachment.store), ["keep.md"]);
 
-        // The directory is still there; only the child left. The dirty path the
-        // watcher reports for that is the directory that held it.
         fs::remove_file(f.vault().join("..md/gone.md")).unwrap();
-        scoped_increment(
-            &mut attachment.store,
-            f.vault().as_path(),
-            &dirty_path(f.vault().as_path(), "..md"),
-            ProductionPolicy::new(2, 2).unwrap(),
-            &progress.healing(),
-            &exclusions(&attachment.registration, &attachment.shadows),
-        )
-        .unwrap();
-
-        assert_eq!(
-            stored_paths(&mut attachment.store),
-            ["..md/note.md", "keep.md"]
-        );
-        assert_eq!(finding_total(&mut attachment.store), 0);
-
-        // And naming the child itself converges the same row through the scope
-        // its own spelling addresses.
         fs::write(f.vault().join("..md/second.md"), "second").unwrap();
-        scoped_increment(
-            &mut attachment.store,
-            f.vault().as_path(),
-            &dirty_path(f.vault().as_path(), "..md/second.md"),
-            ProductionPolicy::new(2, 2).unwrap(),
-            &progress.healing(),
-            &exclusions(&attachment.registration, &attachment.shadows),
-        )
-        .unwrap();
-        assert_eq!(
-            stored_paths(&mut attachment.store),
-            ["..md/note.md", "..md/second.md", "keep.md"]
-        );
+        for dirty in ["..md", "..md/second.md"] {
+            scoped_increment(
+                &mut attachment.store,
+                f.vault().as_path(),
+                &dirty_path(f.vault().as_path(), dirty),
+                ProductionPolicy::new(2, 2).unwrap(),
+                &progress.healing(),
+                &exclusions(&attachment.registration, &attachment.shadows),
+            )
+            .unwrap();
+            assert_eq!(stored_paths(&mut attachment.store), ["keep.md"], "{dirty}");
+        }
 
         fs::remove_file(f.vault().join("..md/second.md")).unwrap();
         scoped_increment(
@@ -21751,21 +21711,17 @@ mod tests {
             &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
-        assert_eq!(
-            stored_paths(&mut attachment.store),
-            ["..md/note.md", "keep.md"]
-        );
+        assert_eq!(stored_paths(&mut attachment.store), ["keep.md"]);
         assert_eq!(finding_total(&mut attachment.store), 0);
         ops.detach(&name, attachment);
     }
 
-    /// **A directory that names no document is still where documents live, so
-    /// its deletion has rows to take.** `..md` reduces to a refused stem while
-    /// `..md/note.md` is an ordinary stored path, and leaving those rows behind
-    /// would serve a deleted document until the next vault-wide heal. The warm
-    /// path prunes them through the prefix instead.
+    /// **Deleting a dot-led directory with a refused stem takes no row.**
+    /// `..md` is outside the vault, so the rows the heal holds are those beside
+    /// it and the warm path leaves them alone when it goes.
     #[test]
-    fn a_scoped_increment_prunes_a_deleted_directory_with_a_refused_stem() {
+    fn a_scoped_increment_leaves_the_vault_as_found_when_a_dot_led_refused_stem_directory_is_deleted()
+     {
         let f = Fixture::new("quarantine-refused-stem-deletion");
         let (ops, name) = f.ops(2);
         let progress = ProgressReporter::disconnected();
@@ -21783,10 +21739,7 @@ mod tests {
             &progress,
         )
         .unwrap();
-        assert_eq!(
-            stored_paths(&mut attachment.store),
-            ["..md/note.md", "keep.md"]
-        );
+        assert_eq!(stored_paths(&mut attachment.store), ["keep.md"]);
 
         fs::remove_dir_all(f.vault().join("..md")).unwrap();
         scoped_increment(
@@ -25010,9 +24963,9 @@ mod tests {
         fs::write(f.vault().join("changed.md"), b"\xffbefore").unwrap();
         fs::write(f.vault().join("gone.md"), b"\xffgone").unwrap();
         fs::write(f.vault().join("MiXeD.md"), b"\xffunchanged").unwrap();
-        fs::write(f.vault().join("..md"), "refused spelling").unwrap();
+        fs::write(f.vault().join("x\u{1}.md"), "refused spelling").unwrap();
         let old = std::time::SystemTime::now() - Duration::from_secs(60);
-        for path in ["changed.md", "gone.md", "..md"] {
+        for path in ["changed.md", "gone.md", "x\u{1}.md"] {
             fs::File::open(f.vault().join(path))
                 .unwrap()
                 .set_times(fs::FileTimes::new().set_modified(old))
@@ -25058,7 +25011,7 @@ mod tests {
         let spellings = [
             b"raw\xff.md".as_slice(),
             b"a/raw\xff.md".as_slice(),
-            b"..md".as_slice(),
+            b"y\x02.md".as_slice(),
             b"bad\\name.md".as_slice(),
             b"bad\x07name.md".as_slice(),
         ];
@@ -25114,8 +25067,8 @@ mod tests {
     #[test]
     fn rolling_windows_restore_missing_findings_and_release_a_rendered_place() {
         let f = Fixture::new("rolling-findings");
-        let rendered = DocumentPath::rendered(Path::new("..md"));
-        fs::write(f.vault().join("..md"), "refused spelling").unwrap();
+        let rendered = DocumentPath::rendered(Path::new("x\u{1}.md"));
+        fs::write(f.vault().join("x\u{1}.md"), "refused spelling").unwrap();
         fs::write(f.vault().join(rendered.as_str()), "readable occupant").unwrap();
         fs::write(f.vault().join("gone.md"), UNDECODABLE).unwrap();
         fs::write(f.vault().join("block.md"), "---\nfield: [\n---\nbody\n").unwrap();

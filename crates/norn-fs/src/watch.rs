@@ -1177,11 +1177,17 @@ impl OwnWrites {
 /// edges were installed is either reported by the stream or already visible to
 /// a read of the tree, so the heal that follows synchronization plus the
 /// batches settling behind it leave no window a change can fall through.
+///
+/// `control` names the vault's in-vault control files besides the schema,
+/// vault-relative: an event at or above one is reported though it lies beneath
+/// a name the vault does not hold, such as `.norn`, so a control file's change
+/// reaches the caller as a dirty root it can recognize.
 pub fn watch(
     vault_root: &Path,
     schema_source: &Path,
+    control: &[&Path],
 ) -> Result<(Subscription, OwnWrites), WatchError> {
-    watch_with(vault_root, schema_source, false)
+    watch_with(vault_root, schema_source, control, false)
 }
 
 /// Starts polling coverage through the same backend-erased watch seam.
@@ -1192,18 +1198,21 @@ pub fn watch(
 pub fn watch_polling(
     vault_root: &Path,
     schema_source: &Path,
+    control: &[&Path],
 ) -> Result<(Subscription, OwnWrites), WatchError> {
-    watch_with(vault_root, schema_source, true)
+    watch_with(vault_root, schema_source, control, true)
 }
 
 fn watch_with(
     vault_root: &Path,
     schema_source: &Path,
+    control: &[&Path],
     poll: bool,
 ) -> Result<(Subscription, OwnWrites), WatchError> {
     establish(
         vault_root,
         schema_source,
+        control,
         poll,
         // The one place the watcher fault seam is widened, and only under the
         // `induced-failure` feature: the bars over refused coverage, a stream
@@ -1221,6 +1230,7 @@ fn watch_with(
 fn establish(
     vault_root: &Path,
     schema_source: &Path,
+    control: &[&Path],
     poll: bool,
     faults: WatchFaults,
 ) -> Result<(Subscription, OwnWrites), WatchError> {
@@ -1240,11 +1250,22 @@ fn establish(
     let normalizer =
         PathNormalizer::detect(&root).map_err(|error| WatchError::Backend(error.to_string()))?;
     let schema = schema_location(&root, &schema_source, &normalizer)?;
+    let control = control
+        .iter()
+        .map(|path| {
+            normalizer.normalize(path).map_err(|error| {
+                WatchError::Backend(format!(
+                    "control file {} names nothing inside the vault: {error}",
+                    path.display()
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     // Every coverage edge is decided before a backend resource exists, so a
     // plan this vault cannot express refuses without a watcher to tear down.
     let plan = coverage_plan(&root, &registered_links, &schema)?;
     let ledger = Arc::new(Mutex::new(Ledger::default()));
-    let shared = Arc::new(Mutex::new(State::new(
+    let mut state = State::new(
         root.clone(),
         registered_root.clone(),
         registered_links,
@@ -1252,7 +1273,9 @@ fn establish(
         normalizer.clone(),
         schema,
         ledger.clone(),
-    )));
+    );
+    state.control = control;
+    let shared = Arc::new(Mutex::new(state));
     let (wake_tx, wake_rx) = mpsc::sync_channel(1);
     // The queue is one delivered batch, the one the worker is handing over
     // behind it, and the bounded shared pending state. A stalled consumer
@@ -1803,6 +1826,10 @@ struct State {
     normalizer: PathNormalizer,
     exclusions: Exclusions,
     schema: SchemaLocation,
+    /// The in-vault control files besides the schema. An event at or above
+    /// one is a dirty root though it lies beneath a name the vault does not
+    /// hold, so the caller still sees the control file change.
+    control: Vec<NormalizedPath>,
     ledger: Arc<Mutex<Ledger>>,
     pending: Option<Pending>,
     build_authority: Arc<BuildProof>,
@@ -1866,6 +1893,7 @@ impl State {
             normalizer,
             exclusions,
             schema,
+            control: Vec::new(),
             ledger,
             pending: None,
             build_authority: Arc::new(BuildProof::new()),
@@ -2143,7 +2171,12 @@ fn classify_path(state: &State, kind: EventKind, path: &Path) -> PathEffect {
         effect.vault_rescan = true;
         return effect;
     };
-    if state.exclusions.excludes(&normalized) {
+    if state.exclusions.excludes(&normalized)
+        && !state
+            .control
+            .iter()
+            .any(|control| control.starts_with(&normalized))
+    {
         return effect;
     }
     effect.dirty_root = Some(normalized);
@@ -2779,7 +2812,7 @@ mod tests {
         let schema = schema_parent.join("vault.yml");
         std::fs::write(&schema, "version: 1\n").unwrap();
 
-        let (subscription, _) = watch_polling(&vault, &schema).unwrap();
+        let (subscription, _) = watch_polling(&vault, &schema, &[]).unwrap();
 
         assert_eq!(subscription.state(), SubscriptionState::Live);
         assert_eq!(subscription.synchronize(Duration::ZERO), Ok(()));
@@ -2793,7 +2826,7 @@ mod tests {
         std::fs::create_dir_all(&vault).unwrap();
         let schema = vault.join("schema.yml");
         std::fs::write(&schema, "version: 1\n").unwrap();
-        let (subscription, _) = watch_polling(&vault, &schema).unwrap();
+        let (subscription, _) = watch_polling(&vault, &schema, &[]).unwrap();
         subscription.begin_heal();
         let observed_root = subscription.state.lock().unwrap().root.clone();
 
@@ -2867,7 +2900,7 @@ mod tests {
         std::fs::create_dir_all(&vault).unwrap();
         let schema = vault.join("schema.yml");
         std::fs::write(&schema, "version: 1\n").unwrap();
-        let (subscription, _) = watch_polling(&vault, &schema).unwrap();
+        let (subscription, _) = watch_polling(&vault, &schema, &[]).unwrap();
         closed_by_the_coalescer(&subscription, "placed.md");
         closed_by_the_coalescer(&subscription, "held.md");
         assert!(subscription.holds_a_settled_batch());
@@ -2963,7 +2996,7 @@ mod tests {
         std::fs::create_dir_all(&vault).unwrap();
         let schema = vault.join("schema.yml");
         std::fs::write(&schema, "version: 1\n").unwrap();
-        let (subscription, _) = watch_polling(&vault, &schema).unwrap();
+        let (subscription, _) = watch_polling(&vault, &schema, &[]).unwrap();
         subscription.state.lock().unwrap().normalizer =
             PathNormalizer::for_sensitivity(CaseSensitivity::Insensitive);
         closed_by_the_coalescer(&subscription, "placed.md");
@@ -3035,7 +3068,7 @@ mod tests {
         std::fs::create_dir_all(&vault).unwrap();
         let schema = vault.join("schema.yml");
         std::fs::write(&schema, "version: 1\n").unwrap();
-        let (subscription, _) = watch_polling(&vault, &schema).unwrap();
+        let (subscription, _) = watch_polling(&vault, &schema, &[]).unwrap();
         let ledger = subscription.state.lock().unwrap().ledger.clone();
         let suppression = ledger.lock().unwrap();
         reported(&subscription, "suppressing.md");
@@ -3154,7 +3187,7 @@ mod tests {
         std::fs::create_dir_all(&vault).unwrap();
         let schema = vault.join("schema.yml");
         std::fs::write(&schema, "version: 1\n").unwrap();
-        let (subscription, _) = watch_polling(&vault, &schema).unwrap();
+        let (subscription, _) = watch_polling(&vault, &schema, &[]).unwrap();
         let ledger = subscription.state.lock().unwrap().ledger.clone();
         let _ = thread::spawn(move || {
             let _held = ledger.lock().unwrap();
@@ -3192,7 +3225,7 @@ mod tests {
         std::fs::create_dir_all(&vault).unwrap();
         let schema = vault.join("schema.yml");
         std::fs::write(&schema, "version: 1\n").unwrap();
-        let (subscription, _) = watch_polling(&vault, &schema).unwrap();
+        let (subscription, _) = watch_polling(&vault, &schema, &[]).unwrap();
         let ledger = subscription.state.lock().unwrap().ledger.clone();
         let (held, holding) = mpsc::channel();
         let (panic_now, told) = mpsc::channel::<()>();
@@ -3250,7 +3283,7 @@ mod tests {
         std::fs::create_dir_all(&vault).unwrap();
         let schema = vault.join("schema.yml");
         std::fs::write(&schema, "version: 1\n").unwrap();
-        let (subscription, _) = watch_polling(&vault, &schema).unwrap();
+        let (subscription, _) = watch_polling(&vault, &schema, &[]).unwrap();
         subscription.state.lock().unwrap().terminal = Some(WatchError::CoverageLost(vault.clone()));
         let _ = subscription.wake.as_ref().unwrap().try_send(());
         norn_testkit::wait::wait_until(
@@ -3284,7 +3317,7 @@ mod tests {
         std::fs::create_dir_all(&vault).unwrap();
         let schema = vault.join("schema.yml");
         std::fs::write(&schema, "version: 1\n").unwrap();
-        let (subscription, _) = watch_polling(&vault, &schema).unwrap();
+        let (subscription, _) = watch_polling(&vault, &schema, &[]).unwrap();
         subscription.begin_heal();
         subscription.state.lock().unwrap().terminal =
             Some(WatchError::Backend("lost during heal".into()));
@@ -3367,7 +3400,7 @@ mod tests {
         std::fs::create_dir_all(&vault).unwrap();
         let schema = vault.join("schema.yml");
         std::fs::write(&schema, "version: 1\n").unwrap();
-        let (subscription, _) = watch_polling(&vault, &schema).unwrap();
+        let (subscription, _) = watch_polling(&vault, &schema, &[]).unwrap();
         let error = ingest(
             &subscription.state,
             Err(
@@ -3479,7 +3512,7 @@ mod tests {
         symlink(&real, &link).unwrap();
         let schema = real.join("schema.yml");
         std::fs::write(&schema, "version: 1\n").unwrap();
-        let (subscription, _) = watch_polling(&link, &schema).unwrap();
+        let (subscription, _) = watch_polling(&link, &schema, &[]).unwrap();
         let covered = subscription.covered_root().to_owned();
         let registered_link = subscription.state.lock().unwrap().registered_links[0].clone();
         subscription.begin_heal();
@@ -3555,7 +3588,7 @@ mod tests {
         std::os::unix::fs::symlink(scratch.path("vault"), parent.join("vault")).unwrap();
         let schema = scratch.path("vault/schema.yml");
         std::fs::write(&schema, "version: 1\n").unwrap();
-        let (mut subscription, _) = watch_polling(&parent.join("vault"), &schema).unwrap();
+        let (mut subscription, _) = watch_polling(&parent.join("vault"), &schema, &[]).unwrap();
         let backend = ingest(
             &subscription.state,
             Err(notify::Error::generic("unrelated backend failure")),
@@ -3596,7 +3629,7 @@ mod tests {
             std::fs::write(&schema, "version: 1\n").unwrap();
             let registered = scratch.path("registered-vault");
             std::os::unix::fs::symlink(&vault, &registered).unwrap();
-            let (mut subscription, _) = watch_polling(&registered, &schema).unwrap();
+            let (mut subscription, _) = watch_polling(&registered, &schema, &[]).unwrap();
             let registered_link = subscription.state.lock().unwrap().registered_links[0].clone();
             subscription.state.lock().unwrap().terminal = Some(WatchError::SynchronizationExpired);
             publish_control(
@@ -3891,7 +3924,7 @@ mod tests {
         std::fs::create_dir_all(&vault).unwrap();
         let schema = vault.join("schema.yml");
         std::fs::write(&schema, "version: 1\n").unwrap();
-        let (subscription, _) = watch_polling(&vault, &schema).unwrap();
+        let (subscription, _) = watch_polling(&vault, &schema, &[]).unwrap();
         // The heal window is where the hazard lives, and it is also what
         // holds the recorded failure still: the coalescer takes no terminal
         // while a heal is open, so `finish_heal` is the one place it surfaces.
@@ -3923,7 +3956,7 @@ mod tests {
         std::fs::create_dir_all(&vault).unwrap();
         let schema = vault.join("schema.yml");
         std::fs::write(&schema, "version: 1\n").unwrap();
-        let (subscription, _) = watch_polling(&vault, &schema).unwrap();
+        let (subscription, _) = watch_polling(&vault, &schema, &[]).unwrap();
         *subscription.control.0.lock().unwrap() = SubscriptionState::Synchronizing;
 
         assert_eq!(
@@ -3960,7 +3993,7 @@ mod tests {
         let schema = vault.join("schema.yml");
         std::fs::write(&schema, "version: 1\n").unwrap();
         std::os::unix::fs::symlink(scratch.path("missing"), vault.join("notes/dangling")).unwrap();
-        let (subscription, _) = watch_polling(&vault, &schema).unwrap();
+        let (subscription, _) = watch_polling(&vault, &schema, &[]).unwrap();
         subscription.begin_heal();
 
         std::fs::write(vault.join("notes/after.md"), "after\n").unwrap();
@@ -4040,6 +4073,7 @@ mod tests {
         let established = establish(
             &vault,
             &schema,
+            &[],
             true,
             WatchFaults::recording_at(&[(Stage::Install, Answer::Refuses)], hits.clone()),
         );
@@ -4091,6 +4125,7 @@ mod tests {
             let (subscription, _) = establish(
                 &vault,
                 &schema,
+                &[],
                 poll,
                 WatchFaults::recording_at(&[(Stage::Barrier, Answer::Expires)], hits.clone()),
             )
@@ -4103,6 +4138,7 @@ mod tests {
             let (control, _) = establish(
                 &control_vault,
                 &control_schema,
+                &[],
                 poll,
                 WatchFaults::default(),
             )
@@ -4180,7 +4216,8 @@ mod tests {
                 norn_testkit::isolation::acquisition_budget(watch_budget()),
             )
         });
-        let (subscription, _) = establish(vault, schema, poll, faults).expect("coverage installs");
+        let (subscription, _) =
+            establish(vault, schema, &[], poll, faults).expect("coverage installs");
         subscription
             .synchronize(watch_budget().work())
             .expect("the backend's own synchronization boundary");
@@ -5792,14 +5829,18 @@ mod tests {
         assert_eq!(paths, [Path::new("first.md"), Path::new("second.md")]);
     }
 
+    /// An event under any dot-led segment, at the vault root or nested, is
+    /// dropped as outside the vault, so only the ordinary path survives.
     #[test]
-    fn only_the_root_mechanism_directory_is_excluded() {
+    fn events_under_any_dot_led_segment_are_dropped_and_ordinary_paths_survive() {
         let state = state();
         ingest(
             &state,
             Ok(Event::new(EventKind::Modify(ModifyKind::Any))
                 .add_path("/vault/.norn/tmp/shadow".into())
-                .add_path("/vault/notes/.norn/tmp/document.md".into())),
+                .add_path("/vault/notes/.norn/tmp/document.md".into())
+                .add_path("/vault/notes/.draft.md".into())
+                .add_path("/vault/notes/document.md".into())),
         );
         let mut locked = state.lock().unwrap();
         let paths: Vec<_> = locked
@@ -5811,7 +5852,41 @@ mod tests {
             .iter()
             .map(|p| p.as_path())
             .collect();
-        assert_eq!(paths, [Path::new("notes/.norn/tmp/document.md")]);
+        assert_eq!(paths, [Path::new("notes/document.md")]);
+    }
+
+    /// **A control file's event survives the dot-led drop.** `.norn` is
+    /// dot-led, yet an event at a control file the watcher was given, or at a
+    /// folder above it, is still a dirty root, so the caller sees the control
+    /// file change; another name beneath `.norn` is still dropped.
+    #[test]
+    fn an_event_at_or_above_a_control_file_survives_the_dot_led_drop() {
+        let state = state();
+        state.lock().unwrap().control = vec![
+            normalizer()
+                .normalize(Path::new(".norn/config.toml"))
+                .unwrap(),
+        ];
+        ingest(
+            &state,
+            Ok(Event::new(EventKind::Modify(ModifyKind::Any))
+                .add_path("/vault/.norn/config.toml".into())
+                .add_path("/vault/.norn".into())
+                .add_path("/vault/.norn/notes.md".into())
+                .add_path("/vault/.trash/note.md".into())),
+        );
+        let mut locked = state.lock().unwrap();
+        let mut paths: Vec<_> = locked
+            .batch()
+            .vault_roots
+            .iter()
+            .map(|p| p.as_path().to_path_buf())
+            .collect();
+        paths.sort();
+        assert_eq!(
+            paths,
+            [PathBuf::from(".norn"), PathBuf::from(".norn/config.toml")]
+        );
     }
 
     /// An event naming only the vault root's own directory entry is a fact
