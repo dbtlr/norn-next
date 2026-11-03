@@ -1269,7 +1269,13 @@ counts only for the store epoch it read, so a verdict over a store that was repl
 during the check schedules nothing. The host's verification slot is bound to the store
 lifetime an attach or a rebuild opened, and a rebuild's discard unbinds it before the store
 goes, so the judgment asks that binding which lifetime is current: the entry's own store
-reading is recorded only where an engine is composed. A refused operation, such as an open
+reading is recorded only where an engine is composed. A verdict of damage over the lifetime
+still bound leaves the check owed: it comes due again after the lane's retry backoff, not
+one interval later. A verdict the judgment takes schedules the rebuild, whose discard
+unbinds the lifetime and its clock with it. A verdict the judgment sets aside, because the
+entry's stance refused while the check ran, is therefore met again once the stance feeds.
+An overflow's reconcile is such a stance, and it keeps the store, so the damage would
+otherwise stand for an interval. A refused operation, such as an open
 failure, a busy database or descriptor exhaustion, is not a verdict. It schedules no
 rebuild, and the check next comes due at its normal interval.
 

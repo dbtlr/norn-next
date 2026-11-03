@@ -407,3 +407,249 @@ fn a_copy_a_crash_left_is_cleared_at_attach() {
     assert_eq!(verifications.reading().runs, 0);
     assert!(!copy.exists(), "the attach left a crash's copy");
 }
+
+/// Production ops whose next watcher poll, once armed, reports an overflow,
+/// and whose next reconcile, once armed, holds its claim until the case lets
+/// it go: the stance an overflow publishes is held for as long as the case
+/// needs it to refuse.
+struct OverflowHeldOpen {
+    inner: ProductionEntryOps,
+    overflow: std::sync::atomic::AtomicBool,
+    hold_reconcile: std::sync::atomic::AtomicBool,
+    reconcile_held: Mutex<mpsc::Sender<()>>,
+    reconcile_released: Mutex<mpsc::Receiver<()>>,
+}
+
+impl EntryOps for OverflowHeldOpen {
+    type Attachment = ProductionAttachment;
+
+    fn attach(
+        &self,
+        registration: &Registration,
+        progress: &ProgressReporter<Self::Attachment>,
+    ) -> Result<Self::Attachment, JobFailure> {
+        self.inner.attach(registration, progress)
+    }
+
+    fn reconcile(
+        &self,
+        name: &VaultName,
+        attachment: &mut Self::Attachment,
+        work: ReconcileWork,
+        progress: &ProgressReporter<Self::Attachment>,
+    ) -> Result<(), JobFailure> {
+        if self
+            .hold_reconcile
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            self.reconcile_held.lock().unwrap().send(()).unwrap();
+            let _ = self
+                .reconcile_released
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(30));
+        }
+        self.inner.reconcile(name, attachment, work, progress)
+    }
+
+    fn recover(
+        &self,
+        name: &VaultName,
+        attachment: &mut Self::Attachment,
+        progress: &ProgressReporter<Self::Attachment>,
+    ) -> Result<(), JobFailure> {
+        self.inner.recover(name, attachment, progress)
+    }
+
+    fn rebuild(
+        &self,
+        name: &VaultName,
+        attachment: Self::Attachment,
+        progress: &ProgressReporter<Self::Attachment>,
+    ) -> Result<Self::Attachment, JobFailure> {
+        self.inner.rebuild(name, attachment, progress)
+    }
+
+    fn poll(
+        &self,
+        name: &VaultName,
+        attachment: &mut Self::Attachment,
+    ) -> Result<Option<norn_fs::Batch>, JobFailure> {
+        let polled = self.inner.poll(name, attachment)?;
+        if self.overflow.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            return Ok(Some(norn_fs::Batch::rescan(RescanScope::Vault)));
+        }
+        Ok(polled)
+    }
+
+    fn maintenance_deadline(&self, attachment: &Self::Attachment) -> Option<Instant> {
+        self.inner.maintenance_deadline(attachment)
+    }
+
+    fn maintain_quiet(
+        &self,
+        name: &VaultName,
+        attachment: &mut Self::Attachment,
+        quiet: bool,
+        turn: &mut MaintenanceTurn,
+        progress: &ProgressReporter<Self::Attachment>,
+    ) -> Result<(), JobFailure> {
+        self.inner
+            .maintain_quiet(name, attachment, quiet, turn, progress)
+    }
+
+    fn rolling_heal(&self, attachment: &Self::Attachment) -> Option<norn_wire::RollingHealStatus> {
+        self.inner.rolling_heal(attachment)
+    }
+
+    fn detach(&self, name: &VaultName, attachment: Self::Attachment) {
+        self.inner.detach(name, attachment);
+    }
+
+    fn discard(&self, name: &VaultName) {
+        self.inner.discard(name);
+    }
+
+    fn count_leg_mint(&self, statements: u64) {
+        self.inner.count_leg_mint(statements);
+    }
+
+    fn background_owed(&self, name: &VaultName) -> bool {
+        self.inner.background_owed(name)
+    }
+
+    fn background_unit(&self, name: &VaultName) -> crate::BackgroundUnit {
+        self.inner.background_unit(name)
+    }
+
+    fn background_deadline(&self, name: &VaultName) -> Option<Instant> {
+        self.inner.background_deadline(name)
+    }
+
+    fn store_lifetime_current(&self, name: &VaultName, epoch: &str) -> bool {
+        self.inner.store_lifetime_current(name, epoch)
+    }
+
+    fn retire_background(&self) {
+        self.inner.retire_background();
+    }
+}
+
+/// Whether `state` is the refusal a watcher overflow publishes.
+fn refuses_for_an_overflow(state: &Result<norn_wire::TrustState, norn_wire::ErrorEnvelope>) -> bool {
+    state.as_ref().is_err_and(|envelope| {
+        matches!(
+            envelope.detail(),
+            norn_wire::ErrorDetail::EntryUntrusted {
+                reason: norn_wire::UntrustedReason::WatcherOverflow,
+                ..
+            }
+        )
+    })
+}
+
+/// **Damage a verification brings back while an overflow's reconcile holds
+/// the entry is rebuilt once that reconcile ends.** The verification is held
+/// with its copy of a damaged store written; a watcher overflow then lands,
+/// so the entry refuses reads while its reconcile — which keeps the store
+/// lifetime the verification read — holds the claim. The verdict the
+/// verification brings back meanwhile is about the store the entry still
+/// stands on, and the reconcile's `Ready` does not answer it: the rebuild
+/// runs, once, and the entry ends `Ready` over the rebuilt store.
+#[test]
+fn damage_a_verification_brings_back_during_an_overflow_is_rebuilt() {
+    let f = Fixture::new("verification-damage-over-overflow");
+    write_a_vault_of_documents(&f, 8);
+    let inner = fixture_ops(&f);
+    let verifications = Arc::clone(&inner.verifications);
+    let (held, holding) = mpsc::channel();
+    let (resume, resumed) = mpsc::channel::<()>();
+    let (held, resumed) = (Mutex::new(Some(held)), Mutex::new(resumed));
+    verifications.run_inside_verifications(move |at, _| {
+        if at != VerificationPoint::CopyCheck {
+            return;
+        }
+        // Only the first verification is held.
+        let Some(held) = held.lock().unwrap().take() else {
+            return;
+        };
+        held.send(()).unwrap();
+        let _ = resumed.lock().unwrap().recv_timeout(Duration::from_secs(30));
+    });
+    let (reconcile_held, reconcile_holding) = mpsc::channel();
+    let (release_reconcile, reconcile_released) = mpsc::channel();
+    let registration = f.registration();
+    let name = registration.name.clone();
+    let host = crate::Host::new(
+        crate::RegistryRead::from_entries([registration]),
+        OverflowHeldOpen {
+            inner,
+            overflow: std::sync::atomic::AtomicBool::new(false),
+            hold_reconcile: std::sync::atomic::AtomicBool::new(false),
+            reconcile_held: Mutex::new(reconcile_held),
+            reconcile_released: Mutex::new(reconcile_released),
+        },
+        crate::LifecyclePolicy {
+            idle_after: Duration::from_secs(60),
+            worker_slots: 1,
+            watch_poll_interval: Duration::from_millis(5),
+            read_settle_bound: crate::READ_SETTLE_BOUND,
+            background_threads: crate::BACKGROUND_THREADS,
+            background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
+        },
+    )
+    .unwrap();
+    norn_fs::watch::settle_prior_changes(f.root.root(), lifecycle_budget().work()).unwrap();
+    let _lease = host.demand(&name).unwrap();
+    wait_state(&host, &name, norn_wire::TrustState::Ready);
+    let rebuilds_before = host.ops().inner.evidence.read().rebuilds_run;
+    damage_the_full_text_index(&f, &name);
+    verification_comes_due(&host, &verifications, &name);
+    holding
+        .recv_timeout(Duration::from_secs(15))
+        .expect("the verification to be held");
+
+    host.ops()
+        .hold_reconcile
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    host.ops()
+        .overflow
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    reconcile_holding
+        .recv_timeout(Duration::from_secs(15))
+        .expect("the overflow's reconcile to hold the entry");
+    assert!(refuses_for_an_overflow(&host.state(&name)));
+
+    let turns = host.lane_reading().turns;
+    resume.send(()).unwrap();
+    wait_until("the verdict to be judged", lifecycle_budget(), || {
+        let (reading, lane) = (verifications.reading(), host.lane_reading());
+        if reading.damaged == 1 && lane.turns > turns {
+            Observed::Met(())
+        } else {
+            Observed::Pending(format!("{reading:?}, {lane:?}"))
+        }
+    })
+    .unwrap_or_else(|failure| panic!("{failure}"));
+    assert!(refuses_for_an_overflow(&host.state(&name)));
+    release_reconcile.send(()).unwrap();
+
+    wait_until("the damage to be rebuilt", lifecycle_budget(), || {
+        let rebuilt = host.ops().inner.evidence.read().rebuilds_run - rebuilds_before;
+        match host.state(&name) {
+            Ok(norn_wire::TrustState::Ready) if rebuilt == 1 => Observed::Met(()),
+            state => Observed::Pending(format!(
+                "{state:?}, {rebuilt} rebuilt, {:?}",
+                verifications.reading()
+            )),
+        }
+    })
+    .unwrap_or_else(|failure| panic!("{failure}"));
+    assert_eq!(
+        host.ops().inner.evidence.read().rebuilds_run - rebuilds_before,
+        1
+    );
+    // The verdict set aside left the verification owed, and it met the
+    // damage again once the reconcile's `Ready` let the lane feed.
+    assert_eq!(verifications.reading().damaged, 2);
+}

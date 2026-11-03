@@ -225,8 +225,21 @@ impl StoreVerifications {
     /// retirement can reach it, and the verdict is taken against the
     /// lifetime the slot is bound to when it returns. A verification that
     /// reached the end of a lifetime still bound moves the clock on one
-    /// interval, whatever it found; one whose lifetime retired leaves the
-    /// clock to the next bind.
+    /// interval, unless it found that lifetime damaged; one whose lifetime
+    /// retired leaves the clock to the next bind.
+    ///
+    /// **A damage verdict leaves the verification owed**, as a feed page that
+    /// meets damage settles nothing and stays owed: the clock comes due again
+    /// after the lane's retry backoff. A verdict the entry takes schedules the
+    /// rebuild, whose discard retires this lifetime and its clock with it, so
+    /// the verification runs again only where the entry set the verdict
+    /// aside — its stance refused while the verdict was in flight, as under
+    /// an overflow's reconcile, which keeps this store — and then only once
+    /// the stance feeds again, when it meets the same damage and the entry
+    /// takes it. Moved on a whole interval, that damage would stand an hour.
+    /// A verdict the entry carries to the end of a claim held under a stance
+    /// that still feeds may be met once more per backoff until that claim
+    /// ends; the entry keeps the verdict it already carries.
     pub(crate) fn unit(&self, vault: &VaultName) -> Option<BackgroundUnit> {
         let slot = self.slot(vault)?;
         let source = {
@@ -254,7 +267,14 @@ impl StoreVerifications {
                 .as_ref()
                 .is_some_and(|bound| Arc::ptr_eq(bound, &source));
             if current {
-                state.due = Some(Instant::now() + self.interval);
+                let damaged =
+                    matches!(&verdict, Verification::Failed(error) if error.damage().is_some());
+                let next = if damaged {
+                    crate::lifecycle::BACKGROUND_RETRY_AFTER
+                } else {
+                    self.interval
+                };
+                state.due = Some(Instant::now() + next);
             }
             current
         };

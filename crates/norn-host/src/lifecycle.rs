@@ -45,6 +45,7 @@ use background::{BackgroundWake, Scheduler};
 pub use background::{MaintenanceReading, MaintenanceTurn, SchedulerReading};
 use claim::{Claim, Coverage, Leg};
 use gate::{EntryGate, GateHold, Stanced};
+pub(crate) use lane::BACKGROUND_RETRY_AFTER;
 #[cfg(test)]
 pub(crate) use lane::LANE_THREAD;
 use lane::Lane;
