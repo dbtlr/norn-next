@@ -10043,6 +10043,15 @@ mod tests {
         block_lane_unit: std::sync::atomic::AtomicBool,
         lane_unit_started: std::sync::atomic::AtomicBool,
         lane_unit_release: std::sync::atomic::AtomicBool,
+        /// While set, the next lane unit is refused by its environment, or
+        /// unwinds, and takes none of the work owed.
+        refuse_lane_unit: std::sync::atomic::AtomicBool,
+        panic_in_lane_unit: std::sync::atomic::AtomicBool,
+        /// The lane units refused or unwound, in the order they ran.
+        lane_units_not_run: AtomicUsize,
+        /// The verdict the next lane unit answers: damage met in the store
+        /// lifetime it names, taking none of the work owed.
+        lane_unit_damage: Mutex<Option<String>>,
         maintenances: AtomicUsize,
         /// The vault whose maintenance waits at the gate until the case sets
         /// `maintenance_release`.
@@ -10702,6 +10711,22 @@ mod tests {
         /// One owed unit, taking `lane_unit_cost`, recorded in the order the
         /// lane ran it.
         fn background_unit(&self, name: &VaultName) -> BackgroundUnit {
+            if self.refuse_lane_unit.swap(false, Ordering::SeqCst) {
+                self.lane_units_not_run.fetch_add(1, Ordering::SeqCst);
+                return BackgroundUnit::Refused;
+            }
+            if self.panic_in_lane_unit.swap(false, Ordering::SeqCst) {
+                self.lane_units_not_run.fetch_add(1, Ordering::SeqCst);
+                panic!("the lane unit unwound");
+            }
+            let damage = self.lane_unit_damage.lock().unwrap().take();
+            if let Some(epoch) = damage {
+                self.lane_units_not_run.fetch_add(1, Ordering::SeqCst);
+                return BackgroundUnit::StoreDamaged {
+                    epoch,
+                    detail: "the feed read met damage".to_string(),
+                };
+            }
             let left = {
                 let mut owed = self.lane_owed.lock().unwrap();
                 let Some(left) = owed.get_mut(name).filter(|left| **left > 0) else {

@@ -39,6 +39,11 @@ struct Signals {
     woken: bool,
     /// The earliest deadline any entry contributed at the last ask.
     earliest: Option<Instant>,
+    /// The earliest retry the lane asked for since the last ask began: a
+    /// store whose unit was refused or whose turn unwound, owed and with no
+    /// wake coming. Kept apart from `earliest`, which each ask overwrites, so
+    /// a retry asked for during an ask is not lost to it.
+    retry: Option<Instant>,
     stopping: bool,
     reading: SchedulerReading,
 }
@@ -68,6 +73,15 @@ impl Scheduler {
         self.ready.notify_all();
     }
 
+    /// Ask again at `at` where nothing asks sooner: the lane's retry of a
+    /// store it left owed with no wake coming.
+    pub(super) fn retry_at(&self, at: Instant) {
+        let mut signals = self.signals();
+        signals.retry = Some(signals.retry.map_or(at, |earlier| earlier.min(at)));
+        drop(signals);
+        self.ready.notify_all();
+    }
+
     /// Stop the scheduler thread at its next turn.
     pub(super) fn stop(&self) {
         self.signals().stopping = true;
@@ -82,16 +96,24 @@ impl Scheduler {
             if signals.stopping {
                 return None;
             }
+            // Every ask asks every entry, a store the lane asked to retry
+            // among them, so an ask that begins answers the retry too.
             if signals.woken {
                 signals.woken = false;
                 signals.earliest = None;
+                signals.retry = None;
                 signals.reading.asks += 1;
                 return Some(());
             }
             let now = Instant::now();
-            match signals.earliest {
+            let next = match (signals.earliest, signals.retry) {
+                (Some(earliest), Some(retry)) => Some(earliest.min(retry)),
+                (earliest, retry) => earliest.or(retry),
+            };
+            match next {
                 Some(at) if at <= now => {
                     signals.earliest = None;
+                    signals.retry = None;
                     signals.reading.deadlines += 1;
                     signals.reading.asks += 1;
                     return Some(());

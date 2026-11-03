@@ -54,14 +54,23 @@ pub enum BackgroundUnit {
     Ran { owed: bool },
     /// One unit ran and was refused by its environment — an open failure, a
     /// busy database, descriptor exhaustion. It is not a verdict: the work
-    /// stays owed, and the turn ends so the refusal is not repeated at once;
-    /// the next ask that finds the store owed starts it again.
+    /// stays owed, and the turn ends so the refusal is not repeated at once.
+    /// The lane asks the scheduler to retry the store after
+    /// [`BACKGROUND_RETRY_AFTER`], so the next ask that finds it owed starts
+    /// it again although no wake comes.
     Refused,
     /// One unit ran and its read met damage in the store lifetime `epoch`. The
     /// lane hands the verdict to the entry's damage judgment, which schedules
     /// the rebuild where the entry still stands on that lifetime.
     StoreDamaged { epoch: String, detail: String },
 }
+
+/// How long a store the lane left owed waits before the scheduler asks for it
+/// again where no wake comes first: after a unit its environment refused, and
+/// after a turn that unwound. Long enough that a refusal or an unwind that
+/// repeats costs a lane thread one unit a second, short enough that owed work
+/// never waits on an unrelated wake or a maintenance deadline an hour away.
+pub(crate) const BACKGROUND_RETRY_AFTER: Duration = Duration::from_secs(1);
 
 /// What the lane's turns ran, counted since the host began: the turns, the
 /// units they ran, and the longest turn's clock beside the most units one
@@ -186,8 +195,10 @@ impl Lane {
 /// stopped or the host is gone.
 ///
 /// **Each turn is caught**, so an unwind out of a unit ends neither the thread
-/// nor any later turn, and the store whose turn unwound is not queued again
-/// until an ask finds it owed.
+/// nor any later turn. The store whose turn unwound is queued again by the
+/// scheduler's retry after [`BACKGROUND_RETRY_AFTER`], where it is still owed,
+/// rather than at once, so a unit that unwinds every time it runs does not
+/// hold a lane thread.
 pub(super) fn spawn<O: EntryOps>(
     shared: Weak<Shared<O>>,
     lane: Arc<Lane>,
@@ -198,8 +209,12 @@ pub(super) fn spawn<O: EntryOps>(
                 lane.finish(&name, false);
                 break;
             };
-            let owed =
-                std::panic::catch_unwind(AssertUnwindSafe(|| turn(&host, &name))).unwrap_or(false);
+            let owed = std::panic::catch_unwind(AssertUnwindSafe(|| turn(&host, &name)))
+                .unwrap_or_else(|_| {
+                    host.scheduler
+                        .retry_at(Instant::now() + BACKGROUND_RETRY_AFTER);
+                    false
+                });
             drop(host);
             lane.finish(&name, owed);
         }
@@ -237,6 +252,9 @@ fn turn<O: EntryOps>(shared: &Arc<Shared<O>>, name: &VaultName) -> bool {
                 }
                 BackgroundUnit::Refused => {
                     owed = false;
+                    shared
+                        .scheduler
+                        .retry_at(Instant::now() + BACKGROUND_RETRY_AFTER);
                     Ok(true)
                 }
                 BackgroundUnit::StoreDamaged { epoch, detail } => {

@@ -242,3 +242,62 @@ fn no_background_turn_feeds_while_the_entry_refuses() {
     assert_eq!(ran.iter().filter(|name| **name == damaged).count(), 5);
     drop((leases, host));
 }
+
+/// Wait until `count` lane units were refused, unwound or met damage.
+fn wait_for_units_not_run(ops: &FakeOps, count: usize) {
+    wait_until("the lane units to fail", lifecycle_wait_budget(), || {
+        let failed = ops.lane_units_not_run.load(Ordering::SeqCst);
+        if failed >= count {
+            Observed::Met(())
+        } else {
+            Observed::pending(format!("{failed} of {count} lane units failed"))
+        }
+    })
+    .unwrap_or_else(|failure| panic!("{failure}"));
+}
+
+/// **A unit its environment refused is retried at a deadline, with no wake.**
+/// The refusal ends the turn and leaves the work owed; nothing but the
+/// scheduler's own retry deadline asks the store again — the watcher poll is
+/// a minute away and no leg commits — and the retried turn runs the unit.
+#[test]
+fn a_refused_unit_is_retried_at_a_deadline_without_a_wake() {
+    let ops = Arc::new(FakeOps::default());
+    let name = VaultName::new("notes").unwrap();
+    let (host, leases) = ready_vaults_under(&ops, &[&name], crate::BACKGROUND_TURN_BUDGET);
+    ops.refuse_lane_unit.store(true, Ordering::SeqCst);
+    owe(&ops, &name, 1);
+    host.wake_background();
+    wait_for_units_not_run(&ops, 1);
+    let wakes = host.scheduler_reading().wakes;
+    wait_for_lane_units(&ops, 1);
+    assert_eq!(
+        host.scheduler_reading().wakes,
+        wakes,
+        "a wake, not the retry deadline, asked the store again"
+    );
+    assert!(host.scheduler_reading().deadlines >= 1);
+    drop((leases, host));
+}
+
+/// **A store whose turn unwound is queued again.** The unwind is caught at
+/// the lane's seam and takes none of the work owed; the store is asked again
+/// at the retry deadline, with no wake, and its unit runs.
+#[test]
+fn a_store_whose_turn_unwound_is_queued_again() {
+    let ops = Arc::new(FakeOps::default());
+    let name = VaultName::new("notes").unwrap();
+    let (host, leases) = ready_vaults_under(&ops, &[&name], crate::BACKGROUND_TURN_BUDGET);
+    ops.panic_in_lane_unit.store(true, Ordering::SeqCst);
+    owe(&ops, &name, 1);
+    host.wake_background();
+    wait_for_units_not_run(&ops, 1);
+    let wakes = host.scheduler_reading().wakes;
+    wait_for_lane_units(&ops, 1);
+    assert_eq!(
+        host.scheduler_reading().wakes,
+        wakes,
+        "a wake, not the retry deadline, asked the store again"
+    );
+    drop((leases, host));
+}
