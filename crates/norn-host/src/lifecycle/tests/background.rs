@@ -437,6 +437,54 @@ fn an_unwind_in_the_schedulers_dispatch_leaves_every_other_vault_scheduled() {
     drop((leases, host));
 }
 
+/// **An unwind out of one vault's dispatch still asks the vaults after it in
+/// the same turn.** Alpha and beta are both due by clock at one wake.
+/// Alpha's dispatch unwinds under its gate, and beta, asked later in that same
+/// turn, starts its leg with no further wake: an unwind caught only at the
+/// turn would end the turn before beta's ask, and with no deadline to wait
+/// for, beta would stall until some unrelated wake.
+#[test]
+fn an_unwind_in_one_vaults_dispatch_still_asks_the_vaults_after_it_in_that_turn() {
+    let ops = Arc::new(FakeOps::default());
+    let alpha = VaultName::new("alpha").unwrap();
+    let beta = VaultName::new("beta").unwrap();
+    let host = Host::new(
+        Roots::Absent(&[&alpha, &beta]).registry(),
+        Arc::clone(&ops),
+        no_ambient_poll_policy(2),
+    )
+    .unwrap();
+    let leases = (host.demand(&alpha).unwrap(), host.demand(&beta).unwrap());
+    for name in [&alpha, &beta] {
+        wait_for_state(&host, name, TrustState::Ready);
+        wait_for_no_claim(&host, name);
+    }
+
+    let entry = host.shared.entries.get(&alpha).unwrap();
+    let gate = Arc::clone(&entry);
+    *ops.when_maintenance_owed_is_read.lock().unwrap() = Some((
+        alpha.clone(),
+        Box::new(move || {
+            gate.gate
+                .run_under_the_next_hold(|_| panic!("a write left for the next hold unwinds"));
+        }),
+    ));
+    // One clock past due stands for both vaults, so both are due at the one
+    // wake and neither has an owed flag a later ask could be woken for.
+    *ops.maintenance_clock.lock().unwrap() = Some(Instant::now());
+    host.wake_background();
+    wait_for_maintenances(&ops, 1);
+    assert!(
+        entry.gate.is_poisoned(),
+        "alpha's dispatch did not unwind, so the case did not test what it names"
+    );
+
+    // The poison is cleared so the case can tear its fixture down: the
+    // host's destruction takes every entry's gate.
+    entry.gate.clear_poison();
+    drop((leases, host));
+}
+
 /// **A scheduler turn that unwinds whole ends no later turn.** The armed ask
 /// unwinds before it reads any entry; the next wake is still asked, and the
 /// maintenance it finds owed starts.

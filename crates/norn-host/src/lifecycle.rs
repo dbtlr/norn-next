@@ -547,14 +547,14 @@ pub trait EntryOps: Send + Sync + 'static {
     /// clock already past is due now — or `None` where it keeps none.
     ///
     /// Read under the entry gate, by the background scheduler's ask and where
-    /// the coverage is installed or a heal rung or reload parks it back, so it
+    /// `install_coverage`, `park_coverage` or `remint_coverage` runs, so it
     /// is cheap and nonblocking and takes no lock. The scheduler sleeps until
     /// the earliest of these across the host, so a clock this does not report
     /// is maintenance no deadline starts.
     ///
     /// **A leg only ever moves a clock later.** The entry keeps the last
-    /// reading while a leg holds the coverage, and a poll, a reconcile or a
-    /// maintenance leg parks it back without reading again; that reading is
+    /// reading while a leg holds the coverage, and most legs park it back
+    /// without reading again; that reading is
     /// safe only because it can be early and never late. A leg that brought a
     /// clock earlier would leave a deadline no ask sees until the next wake.
     ///
@@ -1327,10 +1327,11 @@ struct EntryState<A: SnapshotSource> {
     rolling_heal: Option<norn_wire::RollingHealStatus>,
     /// When the entry's claim-bound background clocks next come due, as
     /// [`EntryOps::maintenance_deadline`] last read them off its coverage:
-    /// where the coverage is installed, parked back by a heal rung or a
-    /// reload, or asked by the background scheduler with the coverage in the
-    /// entry's hand. A poll, a reconcile or a maintenance leg that parks the
-    /// coverage back leaves the reading as it stood.
+    /// where `install_coverage`, `park_coverage` or `remint_coverage` runs, and
+    /// at every ask of the background scheduler with the coverage in the
+    /// entry's hand. Every other leg that parks the coverage back — a poll, a
+    /// reconcile, a maintenance or apply leg, a failed recovery or rebuild,
+    /// and most reload paths — leaves the reading as it stood.
     ///
     /// **The clocks live on the entry, not only on the attachment**, because
     /// the attachment is out with a leg exactly when the claim is held, and
