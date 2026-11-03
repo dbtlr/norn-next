@@ -913,12 +913,15 @@ clock, so a budget too small for any unit shows as exactly one unit per backgrou
 
 A unit is the smallest step that is not interrupted:
 
-- for an engine, its initialization, or one feed page or one reconcile page of its drain;
+- for an engine, its initialization, or one feed page or one reconcile page of its drain,
+  with the census pages read beside that page (see
+  [Status reports embedding coverage](#status-reports-embedding-coverage));
 - for the store's verification, the whole verification: its read-only checks, its copy
   of the store and the full-text check on that copy.
 
-One embedding is never interrupted, and neither is one page. The engine's page size is
-therefore what bounds the overrun of a semantic background turn.
+One embedding is never interrupted, and neither is one page or the census pages read
+beside it. The engine's page size, with the census's page of each feed, is therefore what
+bounds the overrun of a semantic background turn.
 
 The verification is the one unit not at human scale, because it reads every page of the
 database and writes a copy of it. Host shutdown interrupts it, and so does the retirement
@@ -1265,7 +1268,7 @@ retirement of the derived state removes it with the store.
 A damage verdict enters the damage judgment that
 [Source reader acquisition](#source-reader-acquisition) gives damage a read meets. That
 judgment schedules the existing rebuild as correctness work through the claim. A verdict
-counts only for the store epoch it read, so a verdict over a store that was replaced
+counts only for the store lifetime it read, so a verdict over a store that was replaced
 during the check schedules nothing. The host's verification slot is bound to the store
 lifetime an attach or a rebuild opened, and a rebuild's discard unbinds it before the store
 goes, so the judgment asks that binding which lifetime is current: the entry's own store
@@ -1331,13 +1334,15 @@ verification never take a slot.
 ### Status reports embedding coverage
 
 `EngineStatus::On` gains `coverage: { embedded, total }` beside `freshness`. Both counts
-are taken at the store state the unit's page was read from, and written into the slot's
-report as each unit ends, so a status never waits behind a background turn. `coverage` is
-`null` until a background turn has reported, as `freshness` is.
+are taken at one store state, the one the unit's page was read from or, while a count is
+catching up, the one it last counted whole. They are written into the slot's report as each
+unit ends, so a status never waits behind a background turn. `coverage` is `null` until a
+unit has taken both counts whole; `freshness` is `null` until a background turn has
+reported.
 
-- `total` counts the documents the engine would embed at that generation. The names-only
+- `total` counts the documents the engine would embed in that store state. The names-only
   rows of unreadable documents are not among them.
-- `embedded` counts those documents whose content at that generation has embeddings in
+- `embedded` counts those documents whose content in that store state has embeddings in
   the sidecar.
 
 `freshness` stays the lag signal. The two answer different questions. A vault whose every
@@ -1346,13 +1351,18 @@ document is embedded, with one document edited 100 times since, reads as full co
 
 The counts follow the performance posture. A background turn's cost follows the rows it
 moved, so a vault-wide comparison on every background turn is a defect. The engine keeps
-the counts in its sidecar: an embedding-free reader of the two feeds keeps one row per
+the counts in its sidecar through the **census**, an embedding-free reader of the document
+feed and the tombstone feed with positions of its own. The census keeps one row per
 readable document with its body hash, and every row it moves and every embedding the drain
-moves adjusts the two counts in the same transaction. Each unit reads at most one page of
-each feed for the counts. A count that has more rows to read than that, such as the first
-count of a vault or of a new store lifetime, takes several units, and until it is whole the
-status reports the counts it last took whole. `EngineStatus::On` is `#[non_exhaustive]`, so
-the new field is an additive `norn-wire` change.
+moves adjusts the two counts in the same transaction. Each unit reads at most one census
+page of each feed, beside its drain page. A count that has more rows to read than that,
+such as the first count of a vault or the count after a store rebuild, takes several units.
+Until it is whole the status reports the counts the census last took whole, and the sidecar
+records whether its counts are whole, so an engine opened again reports them too. A first
+count has no whole count to report, and neither does a count over a new store epoch: the
+census empties when the store epoch changes, so no count is carried from one database to
+another. `EngineStatus::On` is `#[non_exhaustive]`, so the new field is an additive
+`norn-wire` change.
 
 ### Non-goals
 
@@ -1484,7 +1494,7 @@ These consequences are testable:
   its units.
 - Host shutdown waits for at most one unit for each lane thread, and interrupts a
   verification in flight.
-- `coverage` equals the true counts.
+- `coverage` equals the true counts at the snapshot of the last whole count.
 - A settled drain equals a from-zero recompute.
 
 These costs are accepted:
@@ -1498,8 +1508,15 @@ These costs are accepted:
 - Each enabled engine holds one feed connection outside the request read budget.
 - A maintenance leg holds the claim and one worker slot for at most the background turn
   budget plus one unit. A rolling-heal slice is the longest such unit.
-- A semantic background turn's overrun is one page. The real-model runtime will have to
-  size the page so that one page stays within human scale.
+- A semantic background turn's overrun is one page and the census pages read beside it.
+  The real-model runtime will have to size the page so that one page stays within human
+  scale.
+- The census keeps one sidecar row for each readable document.
+- The census reads both feeds whole, without embedding, at a vault's first drain and after
+  every new store epoch, such as a store rebuild. Measured on the first full drain, that pass
+  adds about 20 ms at 2,000 documents and about 200 ms at 10,000.
+- The census's work for one settled edit is one row. Measured, the unit that drains one
+  settled edit grows from about 0.27 ms to about 0.55 ms.
 
 ## From-zero build prices
 
