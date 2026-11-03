@@ -1256,12 +1256,13 @@ that promise, as it does today.
 **A maintenance leg takes the background turn budget.** The leg checks the budget between
 units and always runs at least one. A unit of a maintenance leg is one sweep, the
 full-text check, or one rolling-heal slice, which runs uninterrupted to its own work
-bounds; a leg takes at most one rolling-heal slice. A maintenance leg therefore holds the
-claim and one worker slot for at most its budget plus one unit. The longest unit is the
-full-text check, whose length the implementation measures. The leg counts its units beside
-its clock, as a background turn does. A leg that ends with maintenance still due schedules
-another, as [Work starts at a wake or a
-deadline](#work-starts-at-a-wake-or-a-deadline-with-no-poll-backstop) rules.
+bounds; a leg takes at most one rolling-heal slice. A maintenance leg's units therefore
+hold the claim and one worker slot for at most its budget plus one unit; the leg holds
+them beyond that only to drain the watcher batches observed meanwhile, as every leg does
+before it releases the claim. The longest unit is the full-text check, whose length the
+implementation measures. The leg counts its units beside its clock, as a background turn
+does. A leg that ends with maintenance still due schedules another, as [Work starts at a
+wake or a deadline](#work-starts-at-a-wake-or-a-deadline-with-no-poll-backstop) rules.
 
 The shared worker pool now runs correctness work, readiness work and these maintenance
 legs. A maintenance leg can therefore take a slot that an attach or a reconcile of another
