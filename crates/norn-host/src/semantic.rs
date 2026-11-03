@@ -534,9 +534,14 @@ impl Tickets {
     }
 
     /// Wait until every ticket up to `last` is served.
-    fn wait_until_served(&self, last: u64) {
+    fn wait_until_served(&self, last: u64, engines: &SemanticEngines) {
         let mut state = tolerant(&self.state);
+        let mut first_wait = true;
         while state.waiting.first().is_some_and(|&first| first <= last) {
+            if std::mem::take(&mut first_wait) {
+                #[cfg(test)]
+                engines.hooks.run_as_the_lane_yields();
+            }
             state = self
                 .served
                 .wait(state)
@@ -545,9 +550,17 @@ impl Tickets {
     }
 
     /// The lane holds the lock: the searches that came after it may go.
-    fn lane_holds(&self) {
-        tolerant(&self.state).lane_after = None;
+    /// Answers whether a ticket issued before the lane came still waits, which
+    /// is a hold taken ahead of a waiting search.
+    fn lane_holds(&self) -> bool {
+        let mut state = tolerant(&self.state);
+        let ahead = state
+            .lane_after
+            .take()
+            .is_some_and(|after| state.waiting.first().is_some_and(|&first| first <= after));
+        drop(state);
         self.served.notify_all();
+        ahead
     }
 
     /// Wait, before the lock, while the lane came to it ahead of `ticket`.
@@ -647,14 +660,13 @@ impl EngineSlot {
     /// for it has held it.
     fn lane_lock(&self, engines: &SemanticEngines) -> MutexGuard<'_, Slot> {
         if let Some(last) = self.tickets.lane_comes() {
-            #[cfg(test)]
-            engines.hooks.run_as_the_lane_yields();
-            self.tickets.wait_until_served(last);
+            self.tickets.wait_until_served(last, engines);
         }
-        let _ = engines;
         let guard = tolerant(&self.slot);
         self.lane_holds.fetch_add(1, Ordering::SeqCst);
-        self.tickets.lane_holds();
+        if self.tickets.lane_holds() {
+            engines.count(|reading| reading.lane_holds_ahead_of_a_waiting_search += 1);
+        }
         guard
     }
 
@@ -740,6 +752,9 @@ pub struct SemanticReading {
     /// The most holds of a slot lock the lane began while one search waited
     /// for that lock.
     pub most_lane_holds_a_search_waited: u64,
+    /// Holds of a slot lock the lane took while a search that took its ticket
+    /// before the lane came to the lock had not yet held it.
+    pub lane_holds_ahead_of_a_waiting_search: u64,
 }
 
 /// The host's set of semantic engines, one delivery per attached vault and a
@@ -1604,8 +1619,9 @@ pub(crate) mod tests {
             *tolerant(&self.hooks.ticket) = Some(Box::new(arranged));
         }
 
-        /// Run `arranged` once, the next time the lane finds a search's
-        /// ticket waiting and yields the slot lock to it, before it waits.
+        /// Run `arranged` once, the next time the lane waits for a search's
+        /// ticket to be served before it takes the slot lock, as it begins
+        /// to wait.
         pub(crate) fn run_as_the_lane_next_yields(&self, arranged: impl FnOnce() + Send + 'static) {
             *tolerant(&self.hooks.lane_yield) = Some(Box::new(arranged));
         }

@@ -11425,24 +11425,25 @@ mod tests {
             });
         }
 
-        /// **A page whose delivery or store lifetime retires while it is
-        /// embedded commits nothing**, whichever retirement it is: a disable,
-        /// a replacing delivery, a detach, or a rebuild's retirement of the
-        /// store lifetime. The unit discards the page, the sidecar stands at
-        /// the revision it had before the page, and the turn owes nothing
-        /// more of the retired delivery.
+        /// **A page whose delivery or store lifetime is no longer current when
+        /// its embedding ends commits nothing**, whichever way it stopped
+        /// being current: a disable, a replacing delivery, a detach, a
+        /// rebuild's retirement of the store lifetime, or a publication beside
+        /// another store lifetime. The unit discards the page, the sidecar
+        /// stands at the revision it had before the page, and a retired
+        /// delivery owes nothing more.
         #[test]
         fn a_page_whose_delivery_or_store_lifetime_retires_while_it_embeds_commits_nothing() {
-            type Retirement = fn(&SemanticEngines, &VaultName);
-            let retirements: [(&str, Retirement); 4] = [
-                ("disabled", |engines, name| {
+            type Retirement = fn(&SemanticEngines, &VaultName, &Path);
+            let retirements: [(&str, Retirement); 5] = [
+                ("disabled", |engines, name, _| {
                     crate::reload::EngineConfigReceiver::receive(
                         engines,
                         name,
                         Some(&engine_section("[engine.semantic]\nenabled = false\n")),
                     );
                 }),
-                ("replaced", |engines, name| {
+                ("replaced", |engines, name, _| {
                     crate::reload::EngineConfigReceiver::receive(engines, name, None);
                     crate::reload::EngineConfigReceiver::receive(
                         engines,
@@ -11450,10 +11451,28 @@ mod tests {
                         Some(&engine_section("[engine.semantic]\n")),
                     );
                 }),
-                ("detached", |engines, name| engines.detach(name)),
-                ("store lifetime retired", |engines, name| {
+                ("detached", |engines, name, _| engines.detach(name)),
+                ("store lifetime retired", |engines, name, _| {
                     engines.retire_store(name);
                 }),
+                // A publication beside another store lifetime, which takes no
+                // engine out: only the unit's own currency check refuses it.
+                (
+                    "republished beside another lifetime",
+                    |engines, name, other_at| {
+                        let mut other = norn_store::Store::open(
+                            other_at,
+                            norn_store::StoredPathOrder::Sensitive,
+                            norn_store::DerivationVersion::new(1),
+                        )
+                        .unwrap();
+                        let feed = other.feed_source();
+                        let mut read = other.feed_read();
+                        let generation = read.write_generation().unwrap();
+                        let reading = norn_store::StoreReading::of(read.epoch(), generation);
+                        engines.publish_delivery(name, Some(&reading), Some(feed));
+                    },
+                ),
             ];
             for (label, retire) in retirements {
                 let f = Fixture::new(&format!("semantic-late-page-{}", label.replace(' ', "-")));
@@ -11479,7 +11498,8 @@ mod tests {
                 .expect("the rescan reconcile");
                 let retiring = Arc::clone(&engines);
                 let retired = name.clone();
-                engines.run_inside_next_embedding(move || retire(&retiring, &retired));
+                let other_at = f.root.join("another.sqlite3");
+                engines.run_inside_next_embedding(move || retire(&retiring, &retired, &other_at));
                 let discarded = engines.reading().pages_discarded;
                 let committed = engines.reading().pages_committed;
 
@@ -11494,15 +11514,21 @@ mod tests {
                     "{label}: the late page was not discarded"
                 );
                 assert_eq!(engines.reading().pages_committed, committed, "{label}");
-                assert!(
-                    !engines.owes_work(&name),
-                    "{label}: a retired delivery owes work"
-                );
-                assert_eq!(
-                    engines.unit(&name),
-                    crate::BackgroundUnit::NothingOwed,
-                    "{label}: the turn went on past the retirement"
-                );
+                if label == "republished beside another lifetime" {
+                    // The delivery stands, and owes the new lifetime its
+                    // drain from a rescan.
+                    assert!(engines.owes_work(&name), "{label}");
+                } else {
+                    assert!(
+                        !engines.owes_work(&name),
+                        "{label}: a retired delivery owes work"
+                    );
+                    assert_eq!(
+                        engines.unit(&name),
+                        crate::BackgroundUnit::NothingOwed,
+                        "{label}: the turn went on past the retirement"
+                    );
+                }
                 ops.detach(&name, attachment);
                 assert_eq!(
                     sidecar_revision(&f, &name),
@@ -11631,15 +11657,30 @@ mod tests {
             ticket_taken
                 .recv_timeout(Duration::from_secs(15))
                 .expect("the search to take its ticket");
-            let (yielding, lane_yields) = std::sync::mpsc::channel();
-            engines.run_as_the_lane_next_yields(move || yielding.send(()).unwrap());
+            let yielded = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let yielding = Arc::clone(&yielded);
+            engines.run_as_the_lane_next_yields(move || {
+                yielding.store(true, std::sync::atomic::Ordering::SeqCst);
+            });
             resume_embedding.send(()).unwrap();
-            let yielded = lane_yields.recv_timeout(Duration::from_secs(15));
+            // The lane comes back for the lock to commit: it either waits for
+            // the held search or takes the lock ahead of it.
+            wait_until("the lane to come to the lock", lifecycle_budget(), || {
+                if yielded.load(std::sync::atomic::Ordering::SeqCst)
+                    || engines.reading().lane_holds_ahead_of_a_waiting_search > 0
+                {
+                    Observed::Met(())
+                } else {
+                    Observed::pending("the lane has not come to the lock")
+                }
+            })
+            .unwrap_or_else(|failure| panic!("{failure}"));
             go.send(()).unwrap();
             search.join().expect("the search");
 
-            assert!(
-                yielded.is_ok(),
+            assert_eq!(
+                engines.reading().lane_holds_ahead_of_a_waiting_search,
+                0,
                 "the lane took the slot lock ahead of a search already waiting"
             );
             let waited = engines.reading().most_lane_holds_a_search_waited;
