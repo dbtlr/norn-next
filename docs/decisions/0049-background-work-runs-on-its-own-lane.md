@@ -960,19 +960,21 @@ The deadlines are:
 **The scheduler asks for a maintenance leg through the existing scheduling path.** It
 takes the entry's gate, as the dispatcher's retry does, and reads the entry's background
 clocks there: they live on the entry rather than on the attachment, because the attachment
-is out with a leg exactly when the claim is held. A detach ends the entry's background
-clocks, so a detached entry contributes no deadline, and the next attach starts them
-again. The scheduler schedules only where the entry's coverage is in hand and no release
-is in flight, as the poll does today. Where a claim-bound slice is due, the claim is free,
-no teardown is due and the entry owes no heal rung, it schedules a maintenance leg under
-the claim's scheduled marker and sends it to the worker pool, as a poll schedules one
-today. Where a full queue refuses the send, the marker stands with the claim held for it,
-and the dispatcher's retry of refused dispatches sends it. That retry sends a leg that was
-already scheduled. It never decides that maintenance is owed. Where the claim is held, a
-release is in flight, a teardown is due or the entry owes a heal rung, the scheduler marks
-the entry as owing maintenance. **At every ask the scheduler either schedules the leg, or
-marks the entry, and it clears the mark otherwise**, including when it schedules the leg
-itself; a leg that hands the claim on to a maintenance leg also clears it. A scheduled or
+is out with a leg exactly when the claim is held. The release that leaves an entry
+unattached ends its background clocks, whether a detach or an unwound leg's discard gave
+the coverage back, so an unattached entry contributes no deadline, and the next attach
+starts them again. The scheduler schedules only where the entry's coverage is in hand and
+no release is in flight, as the poll does today. Where a claim-bound slice is due, the
+claim is free, no teardown is due and the entry owes no heal rung, it schedules a
+maintenance leg under the claim's scheduled marker and sends it to the worker pool, as a
+poll schedules one today. Where a full queue refuses the send, the marker stands with the
+claim held for it, and the dispatcher's retry of refused dispatches sends it. That retry
+sends a leg that was already scheduled. It never decides that maintenance is owed. **At
+every ask where a claim-bound slice is due, the scheduler either schedules the leg or,
+where any condition above stops it (the claim is held, the coverage is not in hand, a
+release is in flight, a teardown is due or a heal rung is owed), marks the entry as owing
+maintenance. It clears the mark only where it schedules the leg or no claim-bound slice is
+due**; a leg that hands the claim on to a maintenance leg also clears it. A scheduled or
 marked entry contributes no claim-bound deadline, so a rolling heal past its due time
 cannot wake the scheduler again and again for the length of a reconcile, and an entry
 whose mark is cleared contributes its next deadline again, so an idle vault keeps its
