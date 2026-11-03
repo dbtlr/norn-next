@@ -27353,6 +27353,16 @@ mod tests {
                 .set_times(fs::FileTimes::new().set_modified(old))
                 .unwrap();
             fs::remove_file(root.join("deleted.md")).unwrap();
+            // The scheduler starts a pass at its deadline, ten milliseconds
+            // after the attach, so a pass may have enumerated the vault before
+            // these edits and miss the file created after it. The next pass,
+            // a period later, counts what that one could not see, so the case
+            // waits for every miss rather than for the first completed pass.
+            let every_miss = norn_wire::WatcherMisses {
+                changed: 1,
+                created: 1,
+                deleted: 1,
+            };
             wait_until(
                 "rolling maintenance completion",
                 lifecycle_wait_budget(),
@@ -27363,7 +27373,7 @@ mod tests {
                         .rolling_heal
                         .expect("attached status");
                     if status.last_completed_unix_seconds.is_some()
-                        && status.watcher_misses.deleted == 1
+                        && status.watcher_misses == every_miss
                     {
                         Observed::Met(status)
                     } else {
@@ -27372,14 +27382,6 @@ mod tests {
                 },
             )
             .map(|status| {
-                assert_eq!(
-                    status.watcher_misses,
-                    norn_wire::WatcherMisses {
-                        changed: 1,
-                        created: 1,
-                        deleted: 1
-                    }
-                );
                 assert!(status.next_due_unix_seconds > 0);
             })
             .unwrap_or_else(|failure| panic!("{failure}"));
