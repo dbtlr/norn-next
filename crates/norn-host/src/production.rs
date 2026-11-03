@@ -358,11 +358,32 @@ pub struct ProductionAttachment {
     /// when it is due again.
     store_verification_due: Instant,
     rolling: rolling::RollingHeal,
+    /// The retirement of the vault's engine delivery, declared just before the
+    /// maintainer lock because fields drop in declaration order: an attachment
+    /// dropped on an unwinding stack retires the delivery before the lock
+    /// goes, so no sidecar commit of this host follows the end of its
+    /// maintainership. [`release`] drops it ahead of the lock as well.
+    engine_retirement: EngineRetirement,
     /// The maintainer lock, declared last because fields drop in declaration
     /// order: an attachment dropped rather than released gives its resources
     /// back in the order [`release`] gives them back, so the lock never ends
     /// while this process's watch over the vault still stands.
     maintainership: Maintainership,
+}
+
+/// Retires a vault's engine delivery where it is dropped: the slot is marked
+/// retired and its engine and feed connection closed, while the delivery's
+/// map entry is left for the name-keyed give-back ([`EntryOps::discard`]) to
+/// remove. Every path that gives an attachment back on purpose gives the
+/// engine back first, so the retirement here finds it gone and does nothing.
+struct EngineRetirement(Option<(Arc<crate::semantic::SemanticEngines>, VaultName)>);
+
+impl Drop for EngineRetirement {
+    fn drop(&mut self) {
+        if let Some((engines, name)) = self.0.take() {
+            engines.retire_delivery(&name);
+        }
+    }
 }
 
 type WatchEntrypoint = fn(&Path, &Path) -> Result<(Subscription, OwnWrites), WatchError>;
@@ -1548,6 +1569,11 @@ impl ProductionEntryOps {
             last_shadow_sweep: Instant::now(),
             store_verification_due: Instant::now() + STORE_VERIFICATION_INTERVAL,
             rolling,
+            engine_retirement: EngineRetirement(
+                self.semantic
+                    .as_ref()
+                    .map(|engines| (Arc::clone(engines), registration.name.clone())),
+            ),
         };
         attachment.read_pinned_model()?;
         if candidate.undeclarable().is_some() {
@@ -1700,6 +1726,7 @@ impl ProductionEntryOps {
             Ok(store) => attachment.store = store,
             Err(error) => {
                 drop(attachment.subscription);
+                drop(attachment.engine_retirement);
                 drop(attachment.maintainership);
                 return Err(store_effect(error));
             }
@@ -1789,6 +1816,7 @@ fn release_owned(
     attachment: ProductionAttachment,
     close_subscription: impl FnOnce(Option<Subscription>) -> Result<(), String>,
 ) -> Vec<String> {
+    drop(attachment.engine_retirement);
     let watcher = close_subscription(attachment.subscription);
     let store = attachment.store.close();
     drop(attachment.maintainership);
@@ -9058,6 +9086,41 @@ mod tests {
                 "the engine outlived the vault"
             );
             assert_eq!(engines.status(&name), SemanticStatus::Off);
+        }
+
+        /// **An attachment lost to an unwinding stack retires its engine's
+        /// delivery as it drops, before its maintainer lock goes**: the slot
+        /// left for the name-keyed give-back runs no unit and answers nothing,
+        /// so no sidecar commit of this host can follow the lock's release.
+        #[test]
+        fn an_attachment_lost_to_an_unwind_retires_its_engine_before_its_lock_goes() {
+            let f = Fixture::new("semantic-unwound-attachment");
+            fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+            fs::write(f.vault().join("alpha.md"), "alpha\n").unwrap();
+            let (engines, ops) = engines_and_ops(&f);
+            let name = f.registration().name;
+            let mut attachment = ops
+                .attach(&f.registration(), &ProgressReporter::disconnected())
+                .expect("an attach with an enabled engine");
+            settle(&engines, &name, &mut attachment);
+            assert!(engines.nearest(&name, "alpha", 5).is_ok());
+
+            drop(attachment);
+            engines.owe(&name);
+
+            assert!(
+                engines.section(&name).is_some(),
+                "the delivery is the give-back's to remove"
+            );
+            assert!(!engines.owes_work(&name), "a retired delivery owes work");
+            assert_eq!(engines.unit(&name), crate::BackgroundUnit::NothingOwed);
+            assert_eq!(
+                engines.nearest(&name, "alpha", 5),
+                Err(SemanticRefusal::Preparing),
+                "the engine outlived its attachment"
+            );
+            ops.discard(&name);
+            assert_eq!(engines.section(&name), None);
         }
 
         /// No section, no engine: the status is off and the refusal says so.

@@ -544,14 +544,14 @@ impl Tickets {
             .then_some(last)
     }
 
-    /// Wait until every ticket up to `last` is served.
-    fn wait_until_served(&self, last: u64, engines: &SemanticEngines) {
+    /// Wait until every ticket up to `last` is served, running `waits` once
+    /// where there is a ticket to wait for.
+    fn wait_until_served(&self, last: u64, waits: impl FnOnce()) {
         let mut state = tolerant(&self.state);
-        let mut first_wait = true;
+        let mut waits = Some(waits);
         while state.waiting.first().is_some_and(|&first| first <= last) {
-            if std::mem::take(&mut first_wait) {
-                #[cfg(test)]
-                engines.hooks.run_as_the_lane_yields();
+            if let Some(waits) = waits.take() {
+                waits();
             }
             state = self
                 .served
@@ -671,7 +671,10 @@ impl EngineSlot {
     /// for it has held it.
     fn lane_lock(&self, engines: &SemanticEngines) -> MutexGuard<'_, Slot> {
         if let Some(last) = self.tickets.lane_comes() {
-            self.tickets.wait_until_served(last, engines);
+            self.tickets.wait_until_served(last, || {
+                #[cfg(test)]
+                engines.hooks.run_as_the_lane_yields();
+            });
         }
         let guard = tolerant(&self.slot);
         self.lane_holds.fetch_add(1, Ordering::SeqCst);
@@ -1336,6 +1339,16 @@ impl SemanticEngines {
     pub(crate) fn detach(&self, vault: &VaultName) {
         let detached = tolerant(&self.vaults).remove(vault);
         if let Some(slot) = detached.and_then(|delivery| delivery.slot) {
+            Self::retire(&slot, Retiring::Delivery);
+        }
+        self.close_displaced();
+    }
+
+    /// Retire `vault`'s delivery in place, leaving its map entry for
+    /// [`Self::detach`] to remove: the retirement an attachment lost to an
+    /// unwinding stack makes before its maintainer lock goes back.
+    pub(crate) fn retire_delivery(&self, vault: &VaultName) {
+        if let Some(slot) = self.slot(vault) {
             Self::retire(&slot, Retiring::Delivery);
         }
         self.close_displaced();
