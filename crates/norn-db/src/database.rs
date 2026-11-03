@@ -613,6 +613,40 @@ pub fn open_read_only(path: &Path) -> ReadOnlyOpen {
     }
 }
 
+/// Open a read-only connection a database verifies its own consistency
+/// through, bound to its file.
+///
+/// It is [`open_read_only`]'s connection, sealed the same way, and admits two
+/// pragmas besides: `integrity_check` and `foreign_key_check`, each asked
+/// with no value. Both read pages and set nothing, so the connection stays
+/// one that can only read: every setting is still refused, and so is a
+/// pragma asked with a value, which is how `integrity_check` would be told
+/// to stop after a count or to check one table only. A read connection a
+/// request is answered on admits neither, because no read answers with them.
+pub fn open_read_only_to_verify(path: &Path) -> Result<Database, DbError> {
+    let database = open_read_only(path).adopted?;
+    let control = Arc::clone(&database.snapshot_control);
+    database
+        .connection
+        .authorizer(Some(move |context: AuthContext<'_>| {
+            verification_verdict(&control, context)
+        }))
+        .map_err(|error| error::sql("sealing the verification connection", error))?;
+    Ok(database)
+}
+
+/// What a verification connection's authorizer answers: the two verification
+/// pragmas, asked with no value, and otherwise [`sealed_verdict`].
+fn verification_verdict(control: &AtomicBool, context: AuthContext<'_>) -> Authorization {
+    match context.action {
+        AuthAction::Pragma {
+            pragma_name: "integrity_check" | "foreign_key_check",
+            pragma_value: None,
+        } => Authorization::Allow,
+        _ => sealed_verdict(control, context),
+    }
+}
+
 /// All SQLite busy waits in a cold open consume the caller's remaining deadline.
 pub fn open_read_only_until(path: &Path, deadline: std::time::Instant) -> ReadOnlyOpen {
     let mut statements = 0;

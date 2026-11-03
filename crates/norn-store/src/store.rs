@@ -86,13 +86,11 @@ use norn_db::EmittedPlan;
 use norn_db::rusqlite::types::Value;
 use norn_db::rusqlite::{self, Connection, OptionalExtension, Row, params, params_from_iter};
 use norn_db::{Adoption, Database, OpenOutcome, RebuildReason, meta};
-use norn_wire::{FindingKind, LinkAddressKind, Severity};
 
 use crate::counters::SnapshotCounters;
 use crate::ddl;
 use crate::error::{self, StoreError};
-use crate::facts::{DerivationVersion, LinkFamily, Provenance, StoredPathOrder, TagSource};
-use crate::hash;
+use crate::facts::{DerivationVersion, StoredPathOrder};
 use crate::read::{Ran, ReadFilter, ReadStatement, StatementFailure, Stepped};
 use crate::request::Request;
 
@@ -1473,142 +1471,15 @@ impl Store {
         Request::new(self)
     }
 
-    /// Hold every copy of a finding's rules equal to the one the wire reports.
-    ///
-    /// A finding's rules are the set its row cites, read back off the set's
-    /// spelling; `finding_rules` holds them a second time, one row per rule,
-    /// for a validate selecting by rule to seek. Nothing structural keeps the
-    /// two equal after the write, so each way they can come apart is damage
-    /// here: a spelling that is no set this crate wrote — not JSON, empty, out
-    /// of order, named twice or spelled other than canonically — a set held
-    /// under another fingerprint than a finding citing it, and a finding whose
-    /// rule rows are not exactly the names of its set, which includes rule rows
-    /// for a finding citing no set and a set's name with no row. And a set no
-    /// finding cites, which `findings_collect_rule_set` deletes with its last
-    /// citer, so only a write out of band leaves one standing.
-    fn verify_rule_sets(&self) -> Result<(), StoreError> {
-        let count = |sql: &str, operation: &'static str| -> Result<i64, StoreError> {
-            self.connection()
-                .query_row(sql, [], |row| row.get(0))
-                .map_err(|error| error::sql(operation, error))
-        };
-        let unreadable = count(
-            "SELECT count(*) FROM rule_sets WHERE json_valid(rules) = 0",
-            "checking the rule sets' spellings",
-        )?;
-        if unreadable != 0 {
-            return Err(StoreError::Damaged {
-                what: format!("{unreadable} rule sets are spelled as something other than JSON"),
-            });
-        }
-        let walked = self
-            .connection()
-            .prepare(&format!(
-                "SELECT rs.id, {} FROM rule_sets AS rs
-                 LEFT JOIN json_each(rs.rules) AS j ORDER BY rs.id",
-                crate::rule_set::walked_columns("rs", "j")
-            ))
-            .and_then(|mut read| {
-                read.query_map([], |row| crate::rule_set::walked(row, 0, 1))?
-                    .collect::<rusqlite::Result<Vec<_>>>()
-            })
-            .map_err(|error| error::sql("reading the rule sets", error))?;
-        crate::rule_set::owned_sets(walked)?;
-
-        let elsewhere = count(
-            "SELECT count(*) FROM findings AS f JOIN rule_sets AS rs ON rs.id = f.rule_set
-             WHERE rs.vault_schema_fingerprint IS NOT f.vault_schema_fingerprint",
-            "checking the fingerprint a rule set is held under",
-        )?;
-        if elsewhere != 0 {
-            return Err(StoreError::Damaged {
-                what: format!(
-                    "{elsewhere} findings cite a rule set held under another fingerprint"
-                ),
-            });
-        }
-
-        let unheld = count(
-            "SELECT count(*) FROM finding_rules AS fr JOIN findings AS f ON f.id = fr.finding
-             WHERE NOT EXISTS (
-                 SELECT 1 FROM rule_sets AS rs, json_each(rs.rules) AS j
-                 WHERE rs.id = f.rule_set AND j.value = fr.rule
-             )",
-            "checking the rule rows against their finding's set",
-        )?;
-        let unrowed = count(
-            "SELECT count(*) FROM findings AS f JOIN rule_sets AS rs ON rs.id = f.rule_set,
-                 json_each(rs.rules) AS j
-             WHERE NOT EXISTS (
-                 SELECT 1 FROM finding_rules AS fr WHERE fr.finding = f.id AND fr.rule = j.value
-             )",
-            "checking a finding's set against its rule rows",
-        )?;
-        if unheld + unrowed != 0 {
-            return Err(StoreError::Damaged {
-                what: format!(
-                    "{unheld} rule rows name a rule their finding's rule set does not hold, and \
-                     {unrowed} rules a finding's set holds have no rule row"
-                ),
-            });
-        }
-
-        let uncited = count(
-            "SELECT count(*) FROM rule_sets AS rs
-             WHERE NOT EXISTS (SELECT 1 FROM findings AS f WHERE f.rule_set = rs.id)",
-            "checking every rule set is cited",
-        )?;
-        if uncited != 0 {
-            return Err(StoreError::Damaged {
-                what: format!("{uncited} rule sets stand that no finding cites"),
-            });
-        }
-        Ok(())
-    }
-
     /// Check the database against itself, and report the first way it is not
-    /// consistent.
+    /// consistent: both halves of the verification, on the store's writer.
     ///
-    /// Ten checks, because a store has ten kinds of consistency to lose:
-    /// the pages themselves, the foreign keys that carry cascade deletion, the
-    /// full-text index against the column it is an index of, the frontmatter
-    /// projection against being JSON at all, the closed vocabularies against
-    /// the values a reader will accept, the rule rows against the findings
-    /// whose key they copy, the rule sets against the findings citing them
-    /// (`verify_rule_sets`: each set's spelling, the fingerprint it
-    /// is held under, its names against its citers' rule rows, and a set no
-    /// finding cites), the document and tombstone pillars against each
-    /// other, each content-quarantined place's hash against the finding it
-    /// stands beside, and each document's sub-fingerprints against the
-    /// columns they are hashes of. The third is what an external-content FTS5
-    /// table can lose without anything else noticing, which is exactly why the
-    /// index is maintained by triggers — and it is asked at **rank 1**, which
-    /// checks the index against `documents.body` rather than only against
-    /// itself. The fourth is the projection's own claim, checked by the JSON1
-    /// reader that will be asked to query it. The fifth closes the gap between
-    /// "the doctor says healthy" and a read that fails: a value outside a
-    /// closed vocabulary is damage the reader reports, so the verification has
-    /// to see it too. The sixth is the copy of a finding's key each rule row
-    /// carries, which the write takes from the finding's own row and nothing
-    /// structural keeps equal after it; a rule row that disagrees would page
-    /// its finding under another kind or place. The seventh holds the names
-    /// a finding reports, read off its set, equal to the rule rows a validate
-    /// selects it by. The eighth is the disjointness the
-    /// `tombstones_clear_on_derive` trigger maintains — nothing structural
-    /// holds it, so it is checked at rest rather than trusted, the same
-    /// ruling the vocabularies get. The ninth is the same ruling over the
-    /// trigger `content_quarantines_end_with_their_finding`: a
-    /// content-quarantined place's hash stands only beside a content finding
-    /// at that place, where no document row stands.
-    ///
-    /// The tenth is a **recompute at rest**, for the reason the stored suffix
-    /// key gets one: a sub-fingerprint is a derived column, and every read that
-    /// would notice one drifting from the column it hashes is a read that has
-    /// already trusted it. A change-feed consumer triages on these values and
-    /// fetches nothing where they match, so a body hash that stopped describing
-    /// its body is a document that stops being re-derived and reports nothing
-    /// wrong. The check reads one row at a time, so what it costs in memory is
-    /// one document rather than the table.
+    /// This is the whole verification a from-zero build and a rebuild close
+    /// with, before the under-construction mark is cleared, and it asks the
+    /// checks in the order the two halves share: the pages and the foreign
+    /// keys, then the full-text check ([`Store::verify_full_text`]), then the
+    /// rest of the read-only half. What each check asks, and why, is
+    /// [`crate::verification`]'s.
     ///
     /// This is a maintenance act rather than a request: it derives nothing, so
     /// it moves no counter.
@@ -1619,237 +1490,21 @@ impl Store {
     /// driver error that describes the file's own contents is reported as damage;
     /// everything else is reported as the refused operation it was.
     pub fn verify_integrity(&self) -> Result<(), StoreError> {
-        let report: String = self
-            .connection()
-            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
-            .map_err(|error| error::sql("checking database integrity", error))?;
-        if report != "ok" {
-            return Err(StoreError::Damaged { what: report });
-        }
-
-        let orphans: i64 = self
-            .connection()
-            .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |row| {
-                row.get(0)
-            })
-            .map_err(|error| error::sql("checking foreign keys", error))?;
-        if orphans != 0 {
-            return Err(StoreError::Damaged {
-                what: format!("{orphans} rows reference a row that is not there"),
-            });
-        }
-
-        self.connection()
-            .execute(
-                "INSERT INTO documents_fts(documents_fts, rank) VALUES ('integrity-check', 1)",
-                [],
-            )
-            .map_err(|error| {
-                if norn_db::is_damaged(&error) {
-                    StoreError::Damaged {
-                        what: format!(
-                            "the full-text index disagrees with the documents it indexes: {error}"
-                        ),
-                    }
-                } else {
-                    error::sql("checking the full-text index", error)
-                }
-            })?;
-
-        let unreadable: i64 = self
-            .connection()
-            .query_row(
-                "SELECT count(*) FROM documents
-                 WHERE frontmatter IS NOT NULL AND json_valid(frontmatter) = 0",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(|error| error::sql("checking the frontmatter projection", error))?;
-        if unreadable != 0 {
-            return Err(StoreError::Damaged {
-                what: format!(
-                    "{unreadable} documents carry a frontmatter projection that is not JSON"
-                ),
-            });
-        }
-
-        for (table, column, vocabulary) in [
-            (
-                "links",
-                "family",
-                quoted(LinkFamily::ALL.iter().map(|value| value.as_str())),
-            ),
-            (
-                "links",
-                "address",
-                quoted(LinkAddressKind::ALL.iter().map(|value| value.as_str())),
-            ),
-            (
-                "document_tags",
-                "source",
-                quoted(TagSource::ALL.iter().map(|value| value.as_str())),
-            ),
-            (
-                "tombstones",
-                "provenance",
-                quoted(Provenance::ALL.iter().map(|value| value.as_str())),
-            ),
-            (
-                "findings",
-                "kind",
-                quoted(FindingKind::ALL.iter().map(FindingKind::as_str)),
-            ),
-            (
-                "findings",
-                "severity",
-                quoted(Severity::ALL.iter().map(Severity::as_str)),
-            ),
-            (
-                "finding_rules",
-                "kind",
-                quoted(FindingKind::ALL.iter().map(FindingKind::as_str)),
-            ),
-            (
-                "finding_rules",
-                "severity",
-                quoted(Severity::ALL.iter().map(Severity::as_str)),
-            ),
-        ] {
-            let outside: i64 = self
-                .connection()
-                .query_row(
-                    &format!("SELECT count(*) FROM {table} WHERE {column} NOT IN ({vocabulary})"),
-                    [],
-                    |row| row.get(0),
-                )
-                .map_err(|error| error::sql("checking a closed vocabulary", error))?;
-            if outside != 0 {
-                return Err(StoreError::Damaged {
-                    what: format!(
-                        "{outside} rows hold a `{table}.{column}` outside the values this schema \
-                         writes"
-                    ),
-                });
-            }
-        }
-
-        // A rule row carries its finding's key so a validate by rule seeks it
-        // in the findings' order; a copy that disagrees with its finding
-        // would page that finding under another kind, severity or place.
-        let strayed: i64 = self
-            .connection()
-            .query_row(
-                "SELECT count(*) FROM finding_rules AS fr JOIN findings AS f ON f.id = fr.finding
-                 WHERE fr.vault_schema_fingerprint IS NOT f.vault_schema_fingerprint
-                    OR fr.kind IS NOT f.kind OR fr.severity IS NOT f.severity
-                    OR fr.path IS NOT f.path OR fr.position IS NOT f.position",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(|error| error::sql("checking the rules findings cite", error))?;
-        if strayed != 0 {
-            return Err(StoreError::Damaged {
-                what: format!("{strayed} rule rows disagree with the finding they cite a rule of"),
-            });
-        }
-        self.verify_rule_sets()?;
-
-        let undead: i64 = self
-            .connection()
-            .query_row(
-                "SELECT count(*) FROM tombstones JOIN documents USING (path)",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(|error| error::sql("checking the pillars are disjoint", error))?;
-        if undead != 0 {
-            return Err(StoreError::Damaged {
-                what: format!("{undead} tombstones stand at a path that holds a document row"),
-            });
-        }
-
-        let unfounded: i64 = self
-            .connection()
-            .query_row(
-                &format!(
-                    "SELECT count(*) FROM content_quarantines
-                     WHERE EXISTS (SELECT 1 FROM documents WHERE documents.path = content_quarantines.path)
-                        OR NOT EXISTS (
-                            SELECT 1 FROM findings
-                            WHERE findings.path = content_quarantines.path AND findings.kind = '{}'
-                        )",
-                    crate::increment::CONTENT_FINDING_KIND.as_str()
-                ),
-                [],
-                |row| row.get(0),
-            )
-            .map_err(|error| error::sql("checking each quarantined hash's finding", error))?;
-        if unfounded != 0 {
-            return Err(StoreError::Damaged {
-                what: format!(
-                    "{unfounded} quarantined hashes stand without their content finding or beside \
-                     a document row"
-                ),
-            });
-        }
-
-        self.recompute_the_sub_fingerprints()
+        crate::verification::whole(self.connection())
     }
 
-    /// Recompute every document's sub-fingerprints from the columns they are
-    /// hashes of, and report the first row that disagrees.
+    /// The full-text check alone: the one check of the verification that
+    /// writes, run on the store's writer.
     ///
-    /// One row at a time, and nothing accumulates: a body is read, hashed and
-    /// dropped before the next row is asked for, so the check costs the widest
-    /// document rather than the table.
-    fn recompute_the_sub_fingerprints(&self) -> Result<(), StoreError> {
-        let operation = "recomputing a document's sub-fingerprints";
-        let mut statement = self
-            .connection()
-            .prepare(
-                "SELECT path, body, body_hash, frontmatter, frontmatter_projection_hash
-                 FROM documents WHERE body IS NOT NULL",
-            )
-            .map_err(|error| error::sql(operation, error))?;
-        let mut rows = statement
-            .query([])
-            .map_err(|error| error::sql(operation, error))?;
-        let read = |row: &rusqlite::Row<'_>| -> rusqlite::Result<RecomputedRow> {
-            Ok((
-                row.get(0)?,
-                row.get(1)?,
-                row.get(2)?,
-                row.get(3)?,
-                row.get(4)?,
-            ))
-        };
-        while let Some(row) = rows.next().map_err(|error| error::sql(operation, error))? {
-            let (path, body, body_hash, frontmatter, projection_hash) =
-                read(row).map_err(|error| error::sql(operation, error))?;
-            if hash::sub_fingerprint(&body) != body_hash {
-                return Err(StoreError::Damaged {
-                    what: format!("`{path}` records a body hash its stored body does not produce"),
-                });
-            }
-            let agrees = match (&frontmatter, &projection_hash) {
-                (None, None) => true,
-                (Some(projection), Some(recorded)) => {
-                    hash::sub_fingerprint(projection) == *recorded
-                }
-                // The `CHECK` on the table refuses this pair, so reaching it is
-                // damage rather than a shape a write produces.
-                (Some(_), None) | (None, Some(_)) => false,
-            };
-            if !agrees {
-                return Err(StoreError::Damaged {
-                    what: format!(
-                        "`{path}` records a frontmatter projection hash its stored projection does \
-                         not produce"
-                    ),
-                });
-            }
-        }
-        Ok(())
+    /// `INSERT INTO documents_fts(documents_fts, rank) VALUES
+    /// ('integrity-check', 1)` takes the write lock on any connection that
+    /// runs it, so it is the half of the verification that stays with the
+    /// writer's holder; the rest reads through a
+    /// [`crate::VerificationSource`]. Its classification is the whole
+    /// verification's: damage only where the driver says the index disagrees
+    /// with the documents it indexes, and the refused operation otherwise.
+    pub fn verify_full_text(&self) -> Result<(), StoreError> {
+        crate::verification::full_text(self.connection())
     }
 
     /// What store schema this database records having been written under.
@@ -1956,10 +1611,6 @@ impl Store {
         Ok(replacement)
     }
 }
-
-/// One row the sub-fingerprint recompute reads: the path a failure names, then
-/// each hashed column beside the hash it has to produce.
-type RecomputedRow = (String, String, String, Option<String>, Option<String>);
 
 /// What a database says about the store schema it was written under.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2254,13 +1905,6 @@ impl StoreClient {
 }
 
 /// A closed vocabulary as an SQL list of quoted literals.
-fn quoted<'a>(values: impl Iterator<Item = &'a str>) -> String {
-    values
-        .map(|value| format!("'{value}'"))
-        .collect::<Vec<String>>()
-        .join(", ")
-}
-
 /// The reason the store owes a rebuild from zero because the build that filled
 /// it never ended, or `None` where it carries no mark.
 ///
