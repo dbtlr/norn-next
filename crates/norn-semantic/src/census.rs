@@ -19,10 +19,10 @@
 //! steps; until it does, the engine answers the counts its last complete
 //! reading left, and the step owes another. Whether the recorded counts are
 //! whole is recorded beside them, so an engine opened afresh answers the last
-//! whole count too. A store lifetime the census was not taken in empties it
-//! and clears that last whole count, so a rescan never carries a count across
-//! two databases: until the new lifetime is counted whole, there is no count
-//! to answer. A sidecar rebuilt from zero starts with an empty census, as it
+//! whole count too. A store epoch the census was not taken in empties it and
+//! clears that last whole count, so a rescan never carries a count across two
+//! databases: until the new epoch is counted whole, there is no count to
+//! answer. A sidecar rebuilt from zero starts with an empty census, as it
 //! starts with empty cursors.
 //!
 //! The census lives in the sidecar because the sidecar is the engine's whole
@@ -202,7 +202,7 @@ fn vector_hash(
 
 /// The feed pages one census step applies, read in the step's snapshot.
 pub(crate) struct Pages {
-    /// The census was taken in another store lifetime, or in none: its rows
+    /// The census was taken in another store epoch, or in none: its rows
     /// and counts are emptied before the pages apply.
     pub(crate) reset: bool,
     /// Each fed document's position, path and body hash, absent where its
@@ -215,7 +215,7 @@ pub(crate) struct Pages {
 impl Pages {
     /// Read the next page of each feed past the census's own positions.
     /// `recorded_epoch` and the two cursors are what the sidecar holds for
-    /// the census; positions recorded in another lifetime are not resumed.
+    /// the census; positions recorded in another epoch are not resumed.
     pub(crate) fn read(
         feed: &mut FeedRead<'_>,
         recorded_epoch: Option<&str>,
@@ -259,7 +259,7 @@ impl Pages {
     }
 
     /// Apply the pages in `transaction`, moving `counts` row by row, and
-    /// record the census's positions, its store lifetime, the counts and
+    /// record the census's positions, its store epoch, the counts and
     /// whether they are now whole. A reset empties the counts, which are then
     /// whole only where this one step read both feeds to their ends.
     pub(crate) fn apply(

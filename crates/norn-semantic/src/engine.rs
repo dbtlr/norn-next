@@ -83,7 +83,7 @@ pub struct Engine {
     /// The counts the census left when it last stopped being whole, which is
     /// what [`Engine::coverage`] answers while it catches up; `None` where it
     /// has been whole in no step since this engine opened, and once a reset
-    /// has emptied it for a new store lifetime. Held in memory only: the
+    /// has emptied it for a new store epoch. Held in memory only: the
     /// recorded counts are the last whole ones where an engine opens over
     /// counts recorded whole, and none are where they were recorded part way.
     last_complete: Option<Coverage>,
@@ -391,7 +391,7 @@ impl Engine {
     /// have been taken whole. A census still catching up over a burst wider
     /// than its page answers what it last counted whole, and so does an
     /// engine reopened over counts recorded whole. A census catching up over
-    /// a new store lifetime or a fresh sidecar has no whole count to answer.
+    /// a new store epoch or a fresh sidecar has no whole count to answer.
     pub fn coverage(&self) -> Option<Coverage> {
         if self.recorded.counts.whole {
             Some(self.recorded.counts.coverage())

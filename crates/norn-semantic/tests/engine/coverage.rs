@@ -227,9 +227,9 @@ fn a_settled_drain_counts_what_a_from_zero_recount_counts() {
     );
 }
 
-/// **A rescan leaves no count from the old store lifetime.** The store is
+/// **A rescan leaves no count from the old store epoch.** The store is
 /// rebuilt from zero holding fewer documents; the census empties and counts
-/// the new lifetime alone, and the embeddings the old lifetime left over the
+/// the new epoch alone, and the embeddings the old epoch left over the
 /// same bodies count as embedded.
 #[test]
 fn a_rescan_leaves_no_stale_count() {
@@ -349,7 +349,7 @@ fn the_census_reads_the_rows_that_moved_and_never_the_vault() {
 }
 
 /// **A census with more left to read than the drain still owes steps until
-/// it is whole.** Its recorded lifetime is cleared out of band over a settled
+/// it is whole.** Its recorded epoch is cleared out of band over a settled
 /// sidecar, so the census starts over across more than one page while the
 /// drain has nothing to do; the drain keeps stepping until the count is whole
 /// again, and the count it lands on is the recount's.
@@ -366,10 +366,10 @@ fn a_census_behind_the_drain_owes_steps_until_it_is_whole() {
         norn_db::Attempt::Connected(connection) => {
             connection
                 .execute(
-                    "UPDATE meta SET value = 'another lifetime' WHERE key = 'census_store_epoch'",
+                    "UPDATE meta SET value = 'another epoch' WHERE key = 'census_store_epoch'",
                     [],
                 )
-                .expect("clearing the census's lifetime");
+                .expect("clearing the census's epoch");
         }
         norn_db::Attempt::Unreadable { detail } => panic!("the sidecar is unreadable: {detail}"),
     }
@@ -411,14 +411,14 @@ fn write_burst(store: &mut Store, count: usize) {
     }
 }
 
-/// **A rescan answers no count until the new store lifetime is counted
+/// **A rescan answers no count until the new store epoch is counted
 /// whole.** The store is rebuilt from zero over more documents than one
-/// census page, so the census's first step in the new lifetime empties it
-/// and reads one page; the old lifetime's whole count describes another
+/// census page, so the census's first step in the new epoch empties it
+/// and reads one page; the old epoch's whole count describes another
 /// database and is never answered for this one, by this engine or by one
 /// reopened over the same sidecar.
 #[test]
-fn a_rescan_answers_no_count_until_the_new_lifetime_is_counted_whole() {
+fn a_rescan_answers_no_count_until_the_new_store_epoch_is_counted_whole() {
     let scratch = Scratch::new("coverage-rescan-wide");
     let mut store = scratch.store();
     write_numbered(&mut store, 1_200);
@@ -433,7 +433,7 @@ fn a_rescan_answers_no_count_until_the_new_lifetime_is_counted_whole() {
     assert_eq!(
         engine.coverage(),
         None,
-        "the new lifetime is not yet counted whole"
+        "the new epoch is not yet counted whole"
     );
     drop(engine);
     let mut engine = scratch.engine(CountingEmbedder::new());
