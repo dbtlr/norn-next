@@ -119,8 +119,15 @@ pub const READ_SETTLE_BOUND: Duration = Duration::from_secs(5);
 /// the time one maintenance leg may hold its vault's claim and a worker slot
 /// before it gives both back.
 ///
-/// MEASUREMENT_PENDING
-pub const BACKGROUND_TURN_BUDGET: Duration = Duration::from_millis(150);
+/// Chosen by `maintenance_unit_release_probe`, a release build over 2,000 and
+/// 10,000 documents of 2 KiB: a shadow sweep takes about 50 µs and the
+/// longest rolling-heal slice about 13 ms at either size, while the store's
+/// verification takes about 85 ms at 2,000 documents and 500 ms at 10,000.
+/// A leg checks the budget between those units, so at 100 ms a write queued
+/// behind a leg waits at most 100 ms plus one unit, which is one rolling
+/// slice except where the verification is the unit. The verification's own
+/// length is what the budget cannot bound while it runs on the claim.
+pub const BACKGROUND_TURN_BUDGET: Duration = Duration::from_millis(100);
 
 /// Resource bounds for the concrete filesystem/store adapter.
 #[derive(Clone, Copy, Debug)]
@@ -23727,6 +23734,57 @@ mod tests {
 
     /// Re-run when changing the rolling budgets. Clocks are evidence, never a
     /// CI threshold; the ordinary slice tests enforce the work bounds.
+    /// The release-build cost of each maintenance unit, which
+    /// [`BACKGROUND_TURN_BUDGET`] is chosen against: the shadow sweep, the
+    /// store's verification and the longest rolling-heal slice, at 2,000
+    /// and 10,000 documents of 2 KiB.
+    #[test]
+    #[ignore = "release-build maintenance unit calibration"]
+    fn maintenance_unit_release_probe() {
+        for count in [2_000, 10_000] {
+            let f = Fixture::new(&format!("unit-calibration-{count}"));
+            fs::create_dir_all(f.vault().join("docs")).unwrap();
+            let mut body = format!(
+                "---\ntitle: Note\n---\n# Heading\n{}",
+                "ordinary body text\n".repeat(110)
+            );
+            body.truncate(2048);
+            for index in 0..count {
+                fs::write(f.vault().join(format!("docs/{index:05}.md")), &body).unwrap();
+            }
+            let (ops, _name) = f.ops(64);
+            let progress = ProgressReporter::disconnected();
+            let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+            attachment.subscription.take();
+            let mut verification = Vec::new();
+            for _ in 0..3 {
+                attachment.store_verification_due = Instant::now();
+                let started = Instant::now();
+                assert!(ops.verification_unit(&mut attachment).unwrap());
+                verification.push(started.elapsed().as_micros());
+            }
+            attachment.last_shadow_sweep =
+                Instant::now() - norn_fs::SHADOW_AGE_THRESHOLD - Duration::from_secs(1);
+            let started = Instant::now();
+            assert!(ops.sweep_unit(&mut attachment));
+            let sweep = started.elapsed().as_micros();
+            let previous = attachment.rolling.last_completed;
+            attachment.rolling.due = Instant::now();
+            let (mut slices, mut longest, mut total) = (0u64, 0u128, 0u128);
+            while attachment.rolling.last_completed == previous {
+                let started = Instant::now();
+                rolling::slice(&mut attachment, ops.policy).unwrap();
+                let took = started.elapsed().as_micros();
+                longest = longest.max(took);
+                total += took;
+                slices += 1;
+            }
+            eprintln!(
+                "UNIT_CALIBRATION docs={count} verification_us={verification:?} sweep_us={sweep} rolling_slices={slices} rolling_longest_us={longest} rolling_total_us={total}"
+            );
+        }
+    }
+
     #[test]
     #[ignore = "release-build rolling budget calibration"]
     fn rolling_budget_release_probe() {
