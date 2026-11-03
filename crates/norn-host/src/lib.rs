@@ -64,11 +64,11 @@ pub fn copied_sources(
     applier::copied_sources(plan, &norn_fs::PathNormalizer::for_sensitivity(sensitivity))
 }
 pub use lifecycle::{
-    ApplyEnd, ApplyEnding, ApplyProgress, Demand, DemandLease, EntryOps, EntryReloadFailure,
-    Established, Healing, HoldReading, Host, HostError, JobFailure, LifecyclePolicy,
-    LifecyclePolicyError, MaintenanceReading, MaintenanceTurn, MintedReader, PendingApply,
-    ProgressReporter, ReadHold, ReadRefusal, ReadSource, ReaderUnavailable, ReconcileWork,
-    SchedulerReading, SnapshotSource,
+    ApplyEnd, ApplyEnding, ApplyProgress, BackgroundUnit, Demand, DemandLease, EntryOps,
+    EntryReloadFailure, Established, Healing, HoldReading, Host, HostError, JobFailure,
+    LaneReading, LifecyclePolicy, LifecyclePolicyError, MaintenanceReading, MaintenanceTurn,
+    MintedReader, PendingApply, ProgressReporter, ReadHold, ReadRefusal, ReadSource,
+    ReaderUnavailable, ReconcileWork, SchedulerReading, SnapshotSource,
 };
 /// One vault's registration: the name it is served under, its root, and where
 /// its schema is read from.
@@ -78,8 +78,9 @@ pub use lifecycle::{
 /// spelling of it.
 pub use norn_config::registry::Entry as Registration;
 pub use production::{
-    BACKGROUND_TURN_BUDGET, MAX_CHANGESET_SIZE, ProductionEntryOps, ProductionPolicy,
-    ProductionPolicyError, READ_SETTLE_BOUND, WATCH_SYNCHRONIZATION_DEADLINE, stored_path_order,
+    BACKGROUND_THREADS, BACKGROUND_TURN_BUDGET, MAX_CHANGESET_SIZE, ProductionEntryOps,
+    ProductionPolicy, ProductionPolicyError, READ_SETTLE_BOUND, WATCH_SYNCHRONIZATION_DEADLINE,
+    stored_path_order,
 };
 pub use read::Answered;
 pub use registry::{AliasConflict, RecordRefusal, RegistryRead, RegistryUnwritable, RetireRefusal};

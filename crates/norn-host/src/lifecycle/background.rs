@@ -13,7 +13,7 @@ use std::sync::{Arc, Condvar, Mutex, PoisonError, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::{Entry, EntryOps, Job, Shared, dispatch_pending};
+use super::{Entry, EntryOps, Job, ReadStance, Shared, dispatch_pending};
 
 /// What the scheduler has received and done, counted since the host began.
 ///
@@ -216,6 +216,11 @@ fn ask_entry<O: EntryOps>(
         state.background_due = None;
         return (None, false);
     }
+    // Lane work needs no claim and no coverage in hand: it is owed wherever
+    // the entry is attached and its stance feeds.
+    if state.read_stance() != ReadStance::Refuse && shared.ops.background_owed(entry.name()) {
+        shared.lane.enqueue(entry.name());
+    }
     if let Some(attachment) = state.coverage.held() {
         state.background_due = shared.ops.maintenance_deadline(attachment);
     }
@@ -321,8 +326,9 @@ impl MaintenanceTurn {
 }
 
 /// [`MaintenanceTurn::run_units`] over a clock the caller reads, so a case can
-/// state the boundary without a wall clock.
-fn run_units_until<E>(
+/// state the boundary without a wall clock. A background turn on the lane runs
+/// its units through it too, under the same budget.
+pub(super) fn run_units_until<E>(
     budget: Duration,
     units: &mut u32,
     elapsed: impl Fn() -> Duration,

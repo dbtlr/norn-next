@@ -34,6 +34,7 @@ mod apply;
 mod background;
 mod claim;
 mod gate;
+mod lane;
 pub(crate) mod loading;
 mod serving;
 
@@ -44,6 +45,8 @@ use background::{BackgroundWake, Scheduler};
 pub use background::{MaintenanceReading, MaintenanceTurn, SchedulerReading};
 use claim::{Claim, Coverage, Leg};
 use gate::{EntryGate, GateHold, Stanced};
+use lane::Lane;
+pub use lane::{BackgroundUnit, LaneReading};
 pub(crate) use serving::ServingRefusal;
 use serving::{CanonicalStoreObservation, ServingSet};
 
@@ -53,6 +56,12 @@ use serving::{CanonicalStoreObservation, ServingSet};
 pub struct LifecyclePolicy {
     pub idle_after: Duration,
     pub worker_slots: usize,
+    /// Threads of the background lane, which runs the background work that
+    /// needs no vault claim, apart from the `worker_slots` that serve writes,
+    /// readiness and claim-bound maintenance. It is the host-wide background
+    /// budget: the count bounds how far background work competes with that
+    /// work for CPU. Production sets one.
+    pub background_threads: usize,
     /// Cadence of the one host-wide nonblocking watcher scan.
     pub watch_poll_interval: Duration,
     /// Longest a read waits for an entry taking in a change, from the read's
@@ -60,9 +69,11 @@ pub struct LifecyclePolicy {
     /// take among them.
     /// Operational containment: past it the read refuses.
     pub read_settle_bound: Duration,
-    /// The time one maintenance leg may take before it gives the claim and
-    /// its worker slot back. The leg checks it only between units and always
-    /// runs at least one, so a leg ends within this budget plus one unit.
+    /// The time one background turn on the lane may take before its thread
+    /// takes the next owed store, and the time one maintenance leg may take
+    /// before it gives the claim and its worker slot back. Each checks it
+    /// only between units and always runs at least one, so each ends within
+    /// this budget plus one unit.
     pub background_turn_budget: Duration,
 }
 
@@ -519,6 +530,37 @@ pub trait EntryOps: Send + Sync + 'static {
     fn semantic(&self) -> Option<&crate::semantic::SemanticEngines> {
         None
     }
+    /// Mint the feed source the engines read `attachment`'s store lifetime
+    /// through, in the gate hold that commits their delivery beside it.
+    ///
+    /// Called under the entry gate, so the mint opens nothing and runs no SQL
+    /// ([`norn_store::Store::feed_source`]); the connection opens on the
+    /// background lane.
+    ///
+    /// The default mints none, which no engine reads.
+    fn mint_feed(&self, _: &Self::Attachment) -> Option<norn_store::FeedSource> {
+        None
+    }
+    /// Whether `name`'s derived store owes the background lane a unit that
+    /// may run now.
+    ///
+    /// Read by the background scheduler under the entry gate, so it is cheap
+    /// and nonblocking and takes no lock an entry gate is ever taken under.
+    ///
+    /// The default owes nothing.
+    fn background_owed(&self, _: &VaultName) -> bool {
+        false
+    }
+    /// Run one background unit of `name`'s derived store, on a lane thread,
+    /// holding no claim, no attachment and no entry gate.
+    ///
+    /// A unit is the smallest step that is not interrupted: an engine's
+    /// initialization, or one feed or reconcile page of its drain.
+    ///
+    /// The default runs none.
+    fn background_unit(&self, _: &VaultName) -> BackgroundUnit {
+        BackgroundUnit::NothingOwed
+    }
     /// Discard damaged derived state and build it from the vault again — heal
     /// rung 3, reached where an implementation reported
     /// [`JobFailure::StoreDamaged`].
@@ -800,13 +842,8 @@ impl<A: SnapshotSource> ProgressReporter<A> {
         })
     }
 
-    /// Publish a result only while this job's claim stands, keeping the
-    /// entry gate from validation through publication. The callback takes
-    /// map and slot locks after this gate; it must not open or close resources.
-    pub(crate) fn publish_if_claimed(&self, publish: impl FnOnce()) {
-        self.with_claimed_state(|_| publish());
-    }
-
+    /// Run `publish` on the entry's state only while this job's claim stands,
+    /// in one hold of the entry gate from the check through the act.
     fn with_claimed_state<T>(&self, publish: impl FnOnce(&mut EntryState<A>) -> T) -> Option<T> {
         let entry = self.entry.upgrade()?;
         let mut state = entry.gate.lock().expect("entry gate poisoned");
@@ -820,7 +857,7 @@ impl<A: SnapshotSource> ProgressReporter<A> {
     ///
     /// Quiet work runs only over an entry that publishes `Ready`: a leg that
     /// committed lane-1 work publishes that, or what is left to derive,
-    /// before any quiet slice — a semantic one above all — may follow it.
+    /// before a rolling-heal slice may follow it.
     pub fn quiet_maintenance_allowed(&self) -> bool {
         self.entry.upgrade().is_some_and(|entry| {
             let state = entry.gate.lock().expect("entry gate poisoned");
@@ -1127,6 +1164,7 @@ impl std::error::Error for HostError {}
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LifecyclePolicyError {
     NoWorkerSlots,
+    NoBackgroundThreads,
     ZeroWatchPollInterval,
 }
 
@@ -1134,6 +1172,9 @@ impl fmt::Display for LifecyclePolicyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NoWorkerSlots => f.write_str("the host requires at least one worker slot"),
+            Self::NoBackgroundThreads => {
+                f.write_str("the host requires at least one background lane thread")
+            }
             Self::ZeroWatchPollInterval => {
                 f.write_str("the host requires a nonzero watcher poll interval")
             }
@@ -2881,6 +2922,49 @@ fn publish_damage_a_read_met<A: SnapshotSource>(
     Some(schedule_demand(state, name))
 }
 
+/// Judge the damage a background unit's read of `name`'s store lifetime
+/// `epoch` met, as damage a request read meets is judged.
+///
+/// **The verdict counts only for the store lifetime the unit read**: an entry
+/// that no longer records `epoch` as the store it stands on — a rebuild
+/// replaced it, or it detached — schedules nothing. Where the entry still
+/// stands on it, the verdict is recorded and published as a read's is: at
+/// once over a free entry, scheduling the rebuild, or at the end of the claim
+/// that holds the entry.
+fn judge_damage_a_background_read_met<O: EntryOps>(
+    shared: &Arc<Shared<O>>,
+    name: &VaultName,
+    epoch: &str,
+    detail: String,
+) {
+    let Some(entry) = shared.entries.get(name) else {
+        return;
+    };
+    if entry.gate.is_poisoned() {
+        return;
+    }
+    let mut state = entry.gate.lock().expect("entry gate poisoned");
+    let current = state
+        .store_reading
+        .as_ref()
+        .is_some_and(|reading| reading.epoch() == epoch);
+    if !current
+        || state.rebuild_required
+        || state.stands_parked()
+        || state.read_stance() == ReadStance::Refuse
+    {
+        return;
+    }
+    if state.damage_met_under_a_claim.is_none() {
+        state.damage_met_under_a_claim = Some(detail);
+    }
+    let scheduled = publish_damage_a_read_met(&mut state, name).is_some();
+    drop(state);
+    if scheduled {
+        let _ = dispatch_pending_where_free(shared, &entry);
+    }
+}
+
 /// Publish the damage a read carried to a leg's hand-on, and hand the claim
 /// on to the rebuild it owes, in that one hold.
 ///
@@ -2985,9 +3069,13 @@ fn record_active_declaration<O: EntryOps>(
     state.plan_ground = ops.plan_ground(attachment).map(Arc::new);
     // The engine delivery is committed beside the store reading the leg
     // recorded: the publication an owed engine initialization waits for.
-    state.delivered_engine = ops
-        .semantic()
-        .and_then(|engines| engines.publish_delivery(name, state.store_reading.as_ref()));
+    state.delivered_engine = ops.semantic().and_then(|engines| {
+        engines.publish_delivery(
+            name,
+            state.store_reading.as_ref(),
+            ops.mint_feed(attachment),
+        )
+    });
     // An engine whose delivery this commits becomes ready to initialize.
     if state.delivered_engine.is_some() {
         state.claim.wake_background();
@@ -4239,6 +4327,8 @@ struct Shared<O: EntryOps> {
     background_turn_budget: Duration,
     /// The background scheduler every entry's wakes reach.
     scheduler: Arc<Scheduler>,
+    /// The background lane the scheduler fills with owed stores.
+    lane: Arc<Lane>,
     /// What this host's maintenance legs ran.
     maintenance: Mutex<MaintenanceReading>,
     /// Root identities claimed by coverage acquisitions while their
@@ -4275,6 +4365,8 @@ pub struct Host<O: EntryOps> {
     dispatcher_stop: mpsc::Sender<()>,
     dispatcher: Option<thread::JoinHandle<()>>,
     scheduler: Option<thread::JoinHandle<()>>,
+    /// The background lane's threads.
+    lanes: Vec<thread::JoinHandle<()>>,
 }
 
 /// One read's hold on a vault entry.
@@ -4841,6 +4933,18 @@ impl<O: EntryOps> Drop for Host<O> {
         let dispatcher = self.dispatcher.take();
         self.shared.scheduler.stop();
         let scheduler = self.scheduler.take();
+        // The lane starts no unit from here, every delivery is retired, and
+        // each lane thread ends the one unit it has in flight: a semantic unit
+        // mid-embedding finishes its embedding and discards its page.
+        self.shared.lane.stop();
+        if let Some(engines) = self.shared.ops.semantic() {
+            engines.retire_all();
+        }
+        for lane in self.lanes.drain(..) {
+            if lane.thread().id() != thread::current().id() {
+                let _ = lane.join();
+            }
+        }
         // Destruction is a teardown per entry, and it names its leg like every
         // other one: an entry with resources still out publishes the releasing
         // phase here and Unattached below, once they are back. The window has a
@@ -5167,6 +5271,9 @@ impl<O: EntryOps> Host<O> {
         if policy.worker_slots == 0 {
             return Err(LifecyclePolicyError::NoWorkerSlots);
         }
+        if policy.background_threads == 0 {
+            return Err(LifecyclePolicyError::NoBackgroundThreads);
+        }
         if policy.watch_poll_interval.is_zero() {
             return Err(LifecyclePolicyError::ZeroWatchPollInterval);
         }
@@ -5197,6 +5304,7 @@ impl<O: EntryOps> Host<O> {
             read_settle_bound: policy.read_settle_bound,
             background_turn_budget: policy.background_turn_budget,
             scheduler,
+            lane: Arc::new(Lane::default()),
             maintenance: Mutex::new(MaintenanceReading::default()),
             attach_gate: Mutex::new(BTreeMap::new()),
             #[cfg(test)]
@@ -5271,12 +5379,16 @@ impl<O: EntryOps> Host<O> {
             }
         });
         let scheduler = background::spawn(Arc::downgrade(&shared), Arc::clone(&shared.scheduler));
+        let lanes = (0..policy.background_threads)
+            .map(|_| lane::spawn(Arc::downgrade(&shared), Arc::clone(&shared.lane)))
+            .collect();
         Ok(Self {
             shared,
             workers,
             dispatcher_stop,
             dispatcher: Some(dispatcher),
             scheduler: Some(scheduler),
+            lanes,
         })
     }
 
@@ -6513,6 +6625,11 @@ impl<O: EntryOps> Host<O> {
     /// What this host's background scheduler has received and asked.
     pub fn scheduler_reading(&self) -> SchedulerReading {
         self.shared.scheduler.reading()
+    }
+
+    /// What this host's background lane has run.
+    pub fn lane_reading(&self) -> LaneReading {
+        self.shared.lane.reading()
     }
 
     /// What this host's maintenance legs have run: the legs, their units, and
@@ -10900,6 +11017,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(2),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_threads: crate::BACKGROUND_THREADS,
                 background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
@@ -10949,6 +11067,7 @@ mod tests {
             worker_slots,
             watch_poll_interval: Duration::from_secs(60),
             read_settle_bound: crate::READ_SETTLE_BOUND,
+            background_threads: crate::BACKGROUND_THREADS,
             background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
         }
     }
@@ -11029,6 +11148,7 @@ mod tests {
                 worker_slots,
                 watch_poll_interval: Duration::from_millis(2),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_threads: crate::BACKGROUND_THREADS,
                 background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
@@ -14086,6 +14206,7 @@ mod tests {
                 worker_slots: 2,
                 watch_poll_interval: Duration::from_millis(2),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_threads: crate::BACKGROUND_THREADS,
                 background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
@@ -19524,6 +19645,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(2),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_threads: crate::BACKGROUND_THREADS,
                 background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
@@ -19623,6 +19745,7 @@ mod tests {
                 worker_slots: 2,
                 watch_poll_interval: Duration::from_millis(2),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_threads: crate::BACKGROUND_THREADS,
                 background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
@@ -19656,6 +19779,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(2),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_threads: crate::BACKGROUND_THREADS,
                 background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
@@ -19687,6 +19811,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(2),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_threads: crate::BACKGROUND_THREADS,
                 background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
@@ -19724,6 +19849,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(2),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_threads: crate::BACKGROUND_THREADS,
                 background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
@@ -19916,6 +20042,7 @@ mod tests {
                 worker_slots: 2,
                 watch_poll_interval: Duration::from_millis(2),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_threads: crate::BACKGROUND_THREADS,
                 background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
@@ -19970,6 +20097,7 @@ mod tests {
                 worker_slots: 2,
                 watch_poll_interval: Duration::from_millis(2),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_threads: crate::BACKGROUND_THREADS,
                 background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
@@ -20019,6 +20147,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(2),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_threads: crate::BACKGROUND_THREADS,
                 background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
@@ -20546,6 +20675,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(2),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_threads: crate::BACKGROUND_THREADS,
                 background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
@@ -20601,6 +20731,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(2),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_threads: crate::BACKGROUND_THREADS,
                 background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
@@ -24348,6 +24479,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: tick,
                 read_settle_bound: bound,
+                background_threads: crate::BACKGROUND_THREADS,
                 background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
@@ -27617,6 +27749,7 @@ mod tests {
                 worker_slots: 2,
                 watch_poll_interval: Duration::from_millis(2),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_threads: crate::BACKGROUND_THREADS,
                 background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )

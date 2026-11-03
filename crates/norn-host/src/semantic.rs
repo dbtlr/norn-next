@@ -76,22 +76,24 @@
 //! sidecar-damage rebuild is abandoned, which every later reader answers as
 //! the self-disabled state.
 
-use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 
 use norn_config::ConfigDirs;
 use norn_config::vault::EngineConfig;
 use norn_embed::{Model, StubEmbedder};
 use norn_semantic::{
-    Engine, NearestWork, Neighbor, Settings, SidecarRevision, SliceBudget, Watermark, Watermarks,
+    DrainStep, Engine, EngineError, NearestWork, Neighbor, Settings, SidecarRevision, Watermark,
+    Watermarks,
 };
-use norn_store::{FeedRead, StoreReading};
+use norn_store::{FeedSource, StoreReading};
 use norn_wire::{
     EngineSection, EngineStatus, ErrorDetail, ErrorEnvelope, Freshness, Rung, RungSkipReason,
     VaultName,
 };
 
+use crate::lifecycle::BackgroundUnit;
 use crate::refusal::engine_refusal_told;
 use crate::reload::EngineConfigReceiver;
 
@@ -409,11 +411,6 @@ impl VectorRefusal {
 struct Delivery {
     section: EngineSection,
     slot: Option<Arc<EngineSlot>>,
-    /// The store lifetime the entry's publishing gate hold committed this
-    /// delivery beside, or `None` until a hold has committed it. An owed
-    /// initialization runs only after that publication, and only over the
-    /// store lifetime it names ([`SemanticEngines::publish_delivery`]).
-    published_store: Option<String>,
 }
 
 /// What one delivery left for a vault, as `vault status` and `doctor` report
@@ -427,8 +424,7 @@ struct Delivery {
 /// the engine the published fingerprints were served beside, never the new
 /// section beside the old fingerprints. It holds the report cell and not the
 /// slot, so what the entry commits keeps no engine open: a slot a delivery
-/// replaced closes when this set lets it go, and the cell it leaves reads as
-/// that slot last stood.
+/// replaced is retired, and the cell it leaves reads as that slot last stood.
 #[derive(Clone, Debug)]
 pub(crate) struct DeliveredEngine {
     section: EngineSection,
@@ -438,7 +434,7 @@ pub(crate) struct DeliveredEngine {
 impl DeliveredEngine {
     /// The section this delivery read, and the report its slot's last act
     /// left, or [`SemanticStatus::Off`] where it opened no slot. The slot's
-    /// own lock is not taken, so this never waits behind a drain.
+    /// own lock is not taken, so this never waits behind a unit.
     pub(crate) fn reading(&self) -> (EngineSection, SemanticStatus) {
         let status = self
             .report
@@ -448,21 +444,129 @@ impl DeliveredEngine {
     }
 }
 
+/// The store lifetime a slot's delivery was committed beside, the feed
+/// source minted with it, and whether the delivery is retired.
+///
+/// **A leaf lock.** The gate hold that commits a delivery takes it under the
+/// map lock and never takes the slot lock, so a publication never waits for
+/// a unit; a unit takes it under the slot lock for its currency check; and no
+/// thread holds it across anything but its own bookkeeping.
+#[derive(Default)]
+struct Binding {
+    /// Set when the delivery retires: a detach, a disable, a replacing
+    /// delivery, host shutdown. A retired slot is never current again.
+    retired: bool,
+    /// Moved at every lifetime the slot is bound to, so a unit that read
+    /// under one lifetime finds it is not current under the next.
+    serial: u64,
+    lifetime: Option<Lifetime>,
+}
+
+/// One store lifetime a slot's delivery is committed beside.
+struct Lifetime {
+    epoch: String,
+    /// The delivery's feed connection over this lifetime. `None` while a unit
+    /// has it out, which it does only inside one hold of the slot lock.
+    feed: Option<FeedSource>,
+}
+
+/// The order a slot's lock is handed out in to searches and to the lane.
+///
+/// A search takes a ticket before it takes the slot lock, and its ticket is
+/// served once it holds the lock, or returns or unwinds before reaching it.
+/// The lane, before it takes the lock, waits until every ticket issued before
+/// it came to the lock is served, and never for a later one. The lock itself
+/// promises no order among its waiters, so this is what keeps a lane thread
+/// that releases it from taking it straight back ahead of a waiting search: a
+/// search waits behind at most one hold of the lane's, and continuous search
+/// delays the lane only by the searches already waiting when it came.
+#[derive(Default)]
+struct Tickets {
+    state: Mutex<TicketState>,
+    served: Condvar,
+}
+
+#[derive(Default)]
+struct TicketState {
+    issued: u64,
+    waiting: BTreeSet<u64>,
+}
+
+/// One search's place in the slot's order, served on its way out whatever
+/// that way is.
+struct Ticket<'a> {
+    tickets: &'a Tickets,
+    number: u64,
+    served: bool,
+}
+
+impl Tickets {
+    fn issue(&self) -> Ticket<'_> {
+        let mut state = tolerant(&self.state);
+        state.issued += 1;
+        let number = state.issued;
+        state.waiting.insert(number);
+        Ticket {
+            tickets: self,
+            number,
+            served: false,
+        }
+    }
+
+    /// The last ticket issued, where one issued up to it still waits: what
+    /// the lane yields to.
+    fn waiting_now(&self) -> Option<u64> {
+        let state = tolerant(&self.state);
+        let last = state.issued;
+        state
+            .waiting
+            .first()
+            .is_some_and(|&first| first <= last)
+            .then_some(last)
+    }
+
+    /// Wait until every ticket up to `last` is served.
+    fn wait_until_served(&self, last: u64) {
+        let mut state = tolerant(&self.state);
+        while state.waiting.first().is_some_and(|&first| first <= last) {
+            state = self
+                .served
+                .wait(state)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+}
+
+impl Ticket<'_> {
+    fn serve(&mut self) {
+        if std::mem::replace(&mut self.served, true) {
+            return;
+        }
+        tolerant(&self.tickets.state).waiting.remove(&self.number);
+        self.tickets.served.notify_all();
+    }
+}
+
+impl Drop for Ticket<'_> {
+    fn drop(&mut self) {
+        self.serve();
+    }
+}
+
 /// One vault's engine slot, and the report of it a status reads.
 ///
-/// **The report is read without the slot's lock.** A drain holds the slot's
-/// lock for the whole drain, re-embedding included, and a status must not wait
-/// behind it. So every act that changes the slot writes the report while it
-/// still holds the slot — a delivery as it makes the slot, and a drain as its
-/// hold ends, however it ends — and a status reads the report alone. What a
-/// status reads is therefore the slot as the last act that held it left it:
-/// during a drain, the slot as it stood before that drain.
+/// **The report is read without the slot's lock.** Every act that changes the
+/// slot writes the report while it still holds the slot — a delivery as it
+/// makes the slot, and a unit as each of its holds ends, however it ends — and
+/// a status reads the report alone. What a status reads is therefore the slot
+/// as the last hold left it: during a unit's embedding, the slot as its read
+/// phase left it.
 ///
 /// **The slot's identity is the delivery's.** A delivery that keeps a slot
-/// keeps this allocation, and one that replaces it makes another, so an
-/// initialization holding this slot installs only while the map still holds
-/// the same one: a detach and a re-attach under the same section and store
-/// deliver a new slot, and a result taken for the old one is refused.
+/// keeps this allocation, and one that replaces it makes another and retires
+/// this one, so a unit holding this slot finds it retired: a detach and a
+/// re-attach under the same section and store deliver a new slot, and a
+/// result taken for the old one is refused.
 struct EngineSlot {
     slot: Mutex<Slot>,
     /// Shared with every [`DeliveredEngine`] an entry committed over this
@@ -471,11 +575,16 @@ struct EngineSlot {
     /// The configuration this slot was delivered, which an initialization
     /// opens the engine under.
     settings: Settings,
-    /// Whether the slot owes a lifecycle slice: the initialization of a
-    /// preparing slot, or feed a leg may have committed past the engine's
-    /// positions. Read without the slot's lock, so the cheap check a
-    /// maintenance clock asks never waits behind a drain.
+    /// Whether the slot owes a unit: the initialization of a preparing slot,
+    /// or feed a leg may have committed past the engine's positions. Read
+    /// without the slot's lock, so the scheduler's cheap check never waits
+    /// behind a unit.
     owed: AtomicBool,
+    binding: Mutex<Binding>,
+    tickets: Tickets,
+    /// Holds of the slot lock the lane has taken, which is what a search's
+    /// wait is counted in.
+    lane_holds: AtomicU64,
 }
 
 impl EngineSlot {
@@ -487,6 +596,9 @@ impl EngineSlot {
             report,
             settings,
             owed,
+            binding: Mutex::new(Binding::default()),
+            tickets: Tickets::default(),
+            lane_holds: AtomicU64::new(0),
         })
     }
 
@@ -494,21 +606,113 @@ impl EngineSlot {
     fn report(&self) -> SemanticStatus {
         tolerant(&self.report).clone()
     }
-}
 
-/// A drain's hold of one slot, which writes the slot's report as the hold
-/// ends — on every path out of the drain, an unwind included, so a panic that
-/// abandoned the engine is reported as the self-disabled state every later
-/// reader of the slot meets.
-struct Draining<'a> {
-    slot: MutexGuard<'a, Slot>,
-    report: &'a Mutex<SemanticStatus>,
-}
-
-impl Drop for Draining<'_> {
-    fn drop(&mut self) {
-        *tolerant(self.report) = read_slot(&self.slot);
+    /// The serial of the store lifetime this slot is current under, or `None`
+    /// where its delivery is retired or committed beside no lifetime yet.
+    fn current(&self) -> Option<u64> {
+        let binding = tolerant(&self.binding);
+        (!binding.retired && binding.lifetime.is_some()).then_some(binding.serial)
     }
+
+    fn retired(&self) -> bool {
+        tolerant(&self.binding).retired
+    }
+
+    /// Take the slot lock for the lane: after every search already waiting
+    /// for it has held it.
+    fn lane_lock(&self, engines: &SemanticEngines) -> MutexGuard<'_, Slot> {
+        if let Some(last) = self.tickets.waiting_now() {
+            #[cfg(test)]
+            engines.hooks.run_as_the_lane_yields();
+            self.tickets.wait_until_served(last);
+        }
+        let _ = engines;
+        let guard = tolerant(&self.slot);
+        self.lane_holds.fetch_add(1, Ordering::SeqCst);
+        guard
+    }
+
+    /// Take the slot lock for a search, behind at most the one hold of the
+    /// lane's already under way or about to begin.
+    fn search_lock(&self, engines: &SemanticEngines) -> MutexGuard<'_, Slot> {
+        let mut ticket = self.tickets.issue();
+        let before = self.lane_holds.load(Ordering::SeqCst);
+        #[cfg(test)]
+        engines.hooks.run_after_a_ticket();
+        let guard = tolerant(&self.slot);
+        ticket.serve();
+        let waited = self.lane_holds.load(Ordering::SeqCst) - before;
+        engines.count(|reading| {
+            reading.most_lane_holds_a_search_waited =
+                reading.most_lane_holds_a_search_waited.max(waited);
+        });
+        guard
+    }
+
+    /// Take the feed source out of the binding for one hold, where the slot
+    /// is current under `serial`.
+    fn take_feed(&self, serial: u64) -> Option<FeedSource> {
+        let mut binding = tolerant(&self.binding);
+        if binding.retired || binding.serial != serial {
+            return None;
+        }
+        binding.lifetime.as_mut()?.feed.take()
+    }
+
+    /// Put `feed` back where the binding is still the lifetime it came out
+    /// of, or hand it back to be closed outside every lock.
+    fn return_feed(&self, serial: u64, feed: FeedSource) -> Option<FeedSource> {
+        let mut binding = tolerant(&self.binding);
+        if binding.retired || binding.serial != serial {
+            return Some(feed);
+        }
+        match binding.lifetime.as_mut() {
+            Some(lifetime) if lifetime.feed.is_none() => {
+                lifetime.feed = Some(feed);
+                None
+            }
+            _ => Some(feed),
+        }
+    }
+}
+
+/// One hold of a slot, which writes the slot's report as the hold ends — on
+/// every path out of it, an unwind included, so a panic that abandoned the
+/// engine is reported as the self-disabled state every later reader of the
+/// slot meets. A retired slot's report is left as the slot last stood: no
+/// reader of a current delivery reads it.
+struct Held<'a> {
+    slot: MutexGuard<'a, Slot>,
+    engine_slot: &'a EngineSlot,
+}
+
+impl Drop for Held<'_> {
+    fn drop(&mut self) {
+        if !self.engine_slot.retired() {
+            *tolerant(&self.engine_slot.report) = read_slot(&self.slot);
+        }
+    }
+}
+
+/// What the host's semantic units have done, counted since the set was made.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SemanticReading {
+    /// Background units that ran: initializations and drain steps.
+    pub units: u64,
+    /// Embedded pages committed to a sidecar.
+    pub pages_committed: u64,
+    /// Embedded pages discarded because their delivery or store lifetime
+    /// retired while they were embedded.
+    pub pages_discarded: u64,
+    /// Initializations that installed an engine, or the self-disabled state
+    /// of one whose sidecar would not open.
+    pub initializations_installed: u64,
+    /// Initializations refused because their delivery or store lifetime was
+    /// no longer current.
+    pub initializations_refused: u64,
+    /// The most holds of a slot lock the lane began while one search waited
+    /// for that lock.
+    pub most_lane_holds_a_search_waited: u64,
 }
 
 /// The host's set of semantic engines, one delivery per attached vault and a
@@ -516,8 +720,13 @@ impl Drop for Draining<'_> {
 pub struct SemanticEngines {
     dirs: ConfigDirs,
     vaults: Mutex<BTreeMap<VaultName, Delivery>>,
-    /// What a case arranged to run inside a drain's hold of its slot and as
-    /// a delivery returns.
+    /// Feed sources a publication displaced without a retirement, closed by
+    /// the next unit or detach outside every lock rather than under the gate
+    /// that displaced them.
+    displaced: Mutex<Vec<FeedSource>>,
+    reading: Mutex<SemanticReading>,
+    /// What a case arranged to run inside a unit's holds and phases, and as a
+    /// delivery returns.
     #[cfg(test)]
     hooks: tests::Hooks,
 }
@@ -551,7 +760,7 @@ fn read_slot(slot: &Slot) -> SemanticStatus {
 
 /// A vault's engine slot as `vault status` and `doctor` report it, judged
 /// against `store`: the lane-1 reading the vault's entry recorded where its
-/// last leg's lane-1 work committed, where that leg owed the engine's slice.
+/// last leg's lane-1 work committed, where that leg owed the engine its work.
 ///
 /// A standing engine's freshness is [`freshness`] — the judgment a search's
 /// vector rung reports against its own snapshot's reading — of its watermarks
@@ -585,6 +794,8 @@ impl SemanticEngines {
         Arc::new(SemanticEngines {
             dirs,
             vaults: Mutex::new(BTreeMap::new()),
+            displaced: Mutex::new(Vec::new()),
+            reading: Mutex::new(SemanticReading::default()),
             #[cfg(test)]
             hooks: tests::Hooks::default(),
         })
@@ -594,6 +805,15 @@ impl SemanticEngines {
     pub fn status(&self, vault: &VaultName) -> SemanticStatus {
         self.slot(vault)
             .map_or(SemanticStatus::Off, |slot| slot.report())
+    }
+
+    /// What this set's units have done.
+    pub fn reading(&self) -> SemanticReading {
+        *tolerant(&self.reading)
+    }
+
+    fn count(&self, counted: impl FnOnce(&mut SemanticReading)) {
+        counted(&mut tolerant(&self.reading));
     }
 
     /// The section reading the last config delivery handed `vault`, or `None`
@@ -606,26 +826,48 @@ impl SemanticEngines {
     }
 
     /// Commit the delivery standing for `vault` as published beside `store`,
-    /// and answer what it left for its entry to commit as what a status
-    /// reports, or `None` where no delivery stands.
+    /// with the feed source minted from it, and answer what it left for its
+    /// entry to commit as what a status reports, or `None` where no delivery
+    /// stands.
     ///
     /// **This is the publication an owed initialization waits for.** It is
     /// called in the gate hold that publishes a leg's declaration, so the
     /// section, the slot's report cell and the store lifetime the entry
-    /// committed are one instant, and an initialization that follows runs for
-    /// this delivery over this store lifetime alone. It takes the map lock
-    /// and no slot lock, and does no I/O.
+    /// committed are one instant, and the units that follow run for this
+    /// delivery over this store lifetime alone. A slot already bound to this
+    /// lifetime keeps the feed connection it holds, and the minted one, never
+    /// opened, is let go. It takes the map lock and the slot's binding, never
+    /// the slot lock, so it never waits for a unit, and does no I/O.
     pub(crate) fn publish_delivery(
         &self,
         vault: &VaultName,
         store: Option<&StoreReading>,
+        feed: Option<FeedSource>,
     ) -> Option<DeliveredEngine> {
-        tolerant(&self.vaults).get_mut(vault).map(|delivery| {
-            delivery.published_store = store.map(|store| store.epoch().to_string());
-            DeliveredEngine {
-                section: delivery.section.clone(),
-                report: delivery.slot.as_ref().map(|slot| Arc::clone(&slot.report)),
+        let vaults = tolerant(&self.vaults);
+        let delivery = vaults.get(vault)?;
+        if let (Some(slot), Some(store), Some(feed)) = (&delivery.slot, store, feed)
+            && feed.epoch() == store.epoch()
+        {
+            let mut binding = tolerant(&slot.binding);
+            let bound = binding
+                .lifetime
+                .as_ref()
+                .is_some_and(|lifetime| lifetime.epoch == store.epoch());
+            if !binding.retired && !bound {
+                binding.serial += 1;
+                let displaced = binding.lifetime.replace(Lifetime {
+                    epoch: store.epoch().to_string(),
+                    feed: Some(feed),
+                });
+                if let Some(feed) = displaced.and_then(|lifetime| lifetime.feed) {
+                    tolerant(&self.displaced).push(feed);
+                }
             }
+        }
+        Some(DeliveredEngine {
+            section: delivery.section.clone(),
+            report: delivery.slot.as_ref().map(|slot| Arc::clone(&slot.report)),
         })
     }
 
@@ -649,9 +891,10 @@ impl SemanticEngines {
     /// a caller composing it over a vault's store — the `search` verb, through
     /// the read seam — gates it by that vault's trust label itself. Runs on the
     /// caller's thread against the engine and its sidecar alone — never the
-    /// vault's store — and serializes with the same vault's drains on the
-    /// slot's lock, which is held across the rows and the reading alike. The
-    /// scan holds at most `limit` scored rows ([`Engine::nearest_among`]).
+    /// vault's store — and takes the slot's lock behind at most one hold of
+    /// the lane's ([`Tickets`]), holding it across the rows and the reading
+    /// alike. The scan holds at most `limit` scored rows
+    /// ([`Engine::nearest_among`]).
     pub fn nearest_among(
         &self,
         vault: &VaultName,
@@ -697,7 +940,6 @@ impl SemanticEngines {
             Some(Delivery {
                 section,
                 slot: None,
-                ..
             }) => {
                 return Err(SemanticRefusal::NoEngine {
                     section: Some(section.clone()),
@@ -707,8 +949,8 @@ impl SemanticEngines {
                 slot: Some(slot), ..
             }) => Arc::clone(slot),
         };
-        let slot = tolerant(&slot.slot);
-        match &*slot {
+        let held = slot.search_lock(self);
+        match &*held {
             Slot::Preparing => Err(SemanticRefusal::Preparing),
             Slot::Running {
                 engine: Some(engine),
@@ -724,183 +966,264 @@ impl SemanticEngines {
     }
 
     /// Record that a leg holding `vault`'s attachment may have committed
-    /// lane-1 work the engine has not drained: the slot owes a slice. No
-    /// semantic work runs here — the slice follows on the lifecycle's quiet
-    /// maintenance, after the leg's own publication.
+    /// lane-1 work the engine has not drained: the slot owes a unit. No
+    /// semantic work runs here — the unit follows on the background lane,
+    /// which the leg's wake starts.
     pub(crate) fn owe(&self, vault: &VaultName) {
         if let Some(slot) = self.slot(vault) {
             slot.owed.store(true, Ordering::Release);
         }
     }
 
-    /// Whether `vault`'s slot owes a slice that may run now: its delivery
-    /// is published and it owes initialization or feed. Cheap and
-    /// nonblocking — the map lock alone, never the slot's.
+    /// Whether `vault`'s slot owes a unit that may run now: its delivery is
+    /// committed beside a store lifetime and not retired, and it owes
+    /// initialization or feed. Cheap and nonblocking — the map lock and the
+    /// slot's binding, never the slot's own lock.
     pub(crate) fn owes_work(&self, vault: &VaultName) -> bool {
         #[cfg(test)]
         if self.hooks.owed_work_held() {
             return false;
         }
         tolerant(&self.vaults).get(vault).is_some_and(|delivery| {
-            delivery.published_store.is_some()
-                && delivery
-                    .slot
-                    .as_ref()
-                    .is_some_and(|slot| slot.owed.load(Ordering::Acquire))
+            delivery
+                .slot
+                .as_ref()
+                .is_some_and(|slot| slot.owed.load(Ordering::Acquire) && slot.current().is_some())
         })
     }
 
-    /// Run one bounded unit of `vault`'s owed semantic work over `feed`, on a
-    /// lifecycle leg that holds the vault's attachment, and answer whether
-    /// work is still owed.
+    /// Run one background unit of `vault`'s owed semantic work, on a lane
+    /// thread, holding no claim, no attachment and no entry gate.
     ///
-    /// The unit is the initialization of a preparing slot — the sidecar open
-    /// or creation, its inspection or rebuild, and the model setup — or one
-    /// drain slice of `budget` for a running engine. Never an error to the
-    /// leg: a drain failure is retained on the slot, an open failure leaves
-    /// it self-disabled, and sidecar damage resolves by the engine's own
-    /// rebuild floor, whose reset cursors the next slice drains.
+    /// The unit is the initialization of a preparing slot — its model setup
+    /// holding no lock, then the sidecar open or creation and its inspection
+    /// or rebuild under the slot lock — or one step of a running engine's
+    /// drain over the delivery's feed connection, in three phases:
     ///
-    /// **An initialization installs only for the delivery, store lifetime and
-    /// claim it began under.** It runs only where the entry's publishing gate
-    /// hold committed this slot's delivery beside `feed`'s store epoch. The
-    /// open runs outside every metadata lock. `publish` validates the claim
-    /// and runs the install under one entry-gate hold, taking map then slot.
-    /// The map must still hold this very slot: disable, replacement and
-    /// detach/re-attach leave another slot or none. Its published store must
-    /// still be `feed`'s. Rejected resources close after publication returns,
-    /// outside the entry gate, map and slot locks.
-    pub(crate) fn work(
-        &self,
-        vault: &VaultName,
-        feed: &mut FeedRead<'_>,
-        budget: SliceBudget,
-        publish: impl FnOnce(&mut dyn FnMut()),
-    ) -> bool {
-        let store_epoch = feed.epoch().to_string();
-        let Some((engine_slot, published)) =
-            tolerant(&self.vaults).get(vault).and_then(|delivery| {
-                delivery
-                    .slot
-                    .clone()
-                    .map(|slot| (slot, delivery.published_store.clone()))
-            })
-        else {
-            return false;
+    /// 1. under the slot lock, check that the delivery and its store lifetime
+    ///    are current, and read one page in one snapshot of the feed — the
+    ///    feed rows, their triage against the sidecar and the bodies to embed;
+    ///    a reconcile or tombstone page, or a document page with nothing to
+    ///    embed, commits here whole;
+    /// 2. holding no lock, embed those bodies;
+    /// 3. under the slot lock again, check currency once more and commit the
+    ///    page and its cursor, or discard it where the delivery or store
+    ///    lifetime retired meanwhile.
+    ///
+    /// Engine trouble never fails a leg: a drain failure is retained on the
+    /// slot, an open failure leaves it self-disabled, and sidecar damage
+    /// resolves by the engine's rebuild floor. Damage the feed read met in
+    /// the store is answered to the lane, which hands it to the entry's
+    /// damage judgment; an environmental refusal of the feed leaves the work
+    /// owed.
+    pub(crate) fn unit(&self, vault: &VaultName) -> BackgroundUnit {
+        self.close_displaced();
+        let Some(engine_slot) = self.slot(vault) else {
+            return BackgroundUnit::NothingOwed;
         };
         if !engine_slot.owed.load(Ordering::Acquire) {
-            return false;
+            return BackgroundUnit::NothingOwed;
         }
-        let preparing = matches!(&*tolerant(&engine_slot.slot), Slot::Preparing);
-        if preparing {
-            if published.as_deref() != Some(store_epoch.as_str()) {
-                // Not yet committed beside this store: the publication that
-                // commits it is what lets the initialization run.
-                return true;
+        let Some(serial) = engine_slot.current() else {
+            return BackgroundUnit::NothingOwed;
+        };
+        let mut held = Held {
+            slot: engine_slot.lane_lock(self),
+            engine_slot: &engine_slot,
+        };
+        match &mut *held.slot {
+            Slot::Preparing => {
+                drop(held);
+                self.count(|reading| reading.units += 1);
+                self.initialize(vault, &engine_slot, serial)
             }
-            self.initialize(vault, &engine_slot, &store_epoch, publish);
-            return engine_slot.owed.load(Ordering::Acquire);
+            Slot::Running {
+                engine: Some(_), ..
+            } => {
+                self.count(|reading| reading.units += 1);
+                self.drain_step(held, serial)
+            }
+            slot @ Slot::Running { engine: None, .. } => {
+                *slot = Slot::SelfDisabled {
+                    detail: ABANDONED.to_string(),
+                };
+                engine_slot.owed.store(false, Ordering::Release);
+                BackgroundUnit::NothingOwed
+            }
+            Slot::SelfDisabled { .. } => {
+                engine_slot.owed.store(false, Ordering::Release);
+                BackgroundUnit::NothingOwed
+            }
         }
-        self.drain_slice(&engine_slot, feed, budget);
-        engine_slot.owed.load(Ordering::Acquire)
     }
 
-    /// Open the engine for `engine_slot` outside every lock, and install it
-    /// where the slot is still the current, published, claimed one.
+    /// Set up the model holding no lock, then open the sidecar under the slot
+    /// lock where the slot is still current under `serial` and preparing, and
+    /// install what the open produced.
+    ///
+    /// **An initialization installs only while its delivery and store
+    /// lifetime are current**: the slot is still the vault's — a disable, a
+    /// replacing delivery, a detach and a re-attach each retire it — and its
+    /// binding is the lifetime the unit read. A refused initialization opens
+    /// nothing, and what its model setup made is let go after the slot lock.
     fn initialize(
         &self,
         vault: &VaultName,
-        engine_slot: &Arc<EngineSlot>,
-        store_epoch: &str,
-        publish: impl FnOnce(&mut dyn FnMut()),
-    ) {
-        let sidecar = self.dirs.derived_dir(vault).join(SIDECAR_FILE);
+        engine_slot: &EngineSlot,
+        serial: u64,
+    ) -> BackgroundUnit {
         // The slot was delivered enabling settings, and the stub is the one
         // embedder this composition opens an engine with.
-        let mut refused = match Engine::open(&sidecar, Arc::new(StubEmbedder::new())) {
-            Ok(engine) => Slot::Running {
-                engine: Some(Box::new(engine)),
-                last_drain_error: None,
-            },
-            Err(error) => Slot::SelfDisabled {
-                detail: format!("the sidecar did not open: {}", engine_refusal_told(&error)),
-            },
-        };
+        let embedder: Arc<dyn norn_embed::Embedder> = Arc::new(StubEmbedder::new());
         #[cfg(test)]
         self.hooks.run_before_install();
-        // Keep resource ownership outside the callback: rejecting a retired
-        // claim must not drop an opened engine under the reporter's gate.
-        publish(&mut || {
-            #[cfg(test)]
-            self.hooks.run_inside_publication();
-            let vaults = tolerant(&self.vaults);
-            let current = vaults.get(vault).is_some_and(|delivery| {
-                delivery
-                    .slot
-                    .as_ref()
-                    .is_some_and(|slot| Arc::ptr_eq(slot, engine_slot))
-                    && delivery.published_store.as_deref() == Some(store_epoch)
-            });
-            let mut slot = tolerant(&engine_slot.slot);
-            if current && matches!(&*slot, Slot::Preparing) {
-                std::mem::swap(&mut *slot, &mut refused);
-                *tolerant(&engine_slot.report) = read_slot(&slot);
+        let sidecar = self.dirs.derived_dir(vault).join(SIDECAR_FILE);
+        let installed = {
+            let mut held = Held {
+                slot: engine_slot.lane_lock(self),
+                engine_slot,
+            };
+            let current =
+                engine_slot.current() == Some(serial) && matches!(&*held.slot, Slot::Preparing);
+            if current {
+                *held.slot = match Engine::open(&sidecar, embedder) {
+                    Ok(engine) => Slot::Running {
+                        engine: Some(Box::new(engine)),
+                        last_drain_error: None,
+                    },
+                    Err(error) => Slot::SelfDisabled {
+                        detail: format!(
+                            "the sidecar did not open: {}",
+                            engine_refusal_told(&error)
+                        ),
+                    },
+                };
                 // A running engine owes the drain that converges it; an
                 // engine that did not open owes nothing until a delivery.
-                engine_slot
-                    .owed
-                    .store(matches!(&*slot, Slot::Running { .. }), Ordering::Release);
+                engine_slot.owed.store(
+                    matches!(&*held.slot, Slot::Running { .. }),
+                    Ordering::Release,
+                );
+            }
+            current
+        };
+        self.count(|reading| {
+            if installed {
+                reading.initializations_installed += 1;
+            } else {
+                reading.initializations_refused += 1;
             }
         });
-        drop(refused);
         #[cfg(test)]
         self.hooks.run_as_install_ends();
+        BackgroundUnit::Ran {
+            owed: installed && engine_slot.owed.load(Ordering::Acquire),
+        }
     }
 
-    /// One drain slice of `engine_slot`'s running engine over `feed`.
-    ///
-    /// The slot's report is written as the slice's hold of the slot ends, on
-    /// every path out of it ([`Draining`]).
-    fn drain_slice(&self, engine_slot: &EngineSlot, feed: &mut FeedRead<'_>, budget: SliceBudget) {
-        let mut draining = Draining {
-            slot: tolerant(&engine_slot.slot),
-            report: &engine_slot.report,
-        };
+    /// One step of a running engine, in the three phases
+    /// [`SemanticEngines::unit`] states, its read phase run in `held`, the
+    /// hold `unit` took.
+    fn drain_step(&self, mut held: Held<'_>, serial: u64) -> BackgroundUnit {
+        let engine_slot = held.engine_slot;
         #[cfg(test)]
         self.hooks.run_inside_drain();
-        let slot = &mut *draining.slot;
+        let Some(mut feed) = engine_slot.take_feed(serial) else {
+            return BackgroundUnit::Ran { owed: false };
+        };
+        let epoch = feed.epoch().to_string();
+        let step = match &mut *held.slot {
+            Slot::Running {
+                engine: Some(running),
+                ..
+            } => match feed.page() {
+                Ok(mut page) => running.step(&mut page),
+                Err(refused) => Err(EngineError::Store(refused)),
+            },
+            _ => Ok(DrainStep::Done(norn_semantic::DrainReport::default())),
+        };
+        let closing = engine_slot.return_feed(serial, feed);
+        let pending = match step {
+            Ok(DrainStep::Embed(pending)) => pending,
+            Ok(DrainStep::Done(report)) => {
+                let ended = self.ended(&mut held.slot, engine_slot, Ok(report.owed), &epoch);
+                drop(held);
+                drop(closing);
+                return ended;
+            }
+            Err(error) => {
+                let ended = self.ended(&mut held.slot, engine_slot, Err(error), &epoch);
+                drop(held);
+                drop(closing);
+                return ended;
+            }
+        };
+        drop(held);
+        drop(closing);
+
+        // Holding no lock: no search, publication or retirement waits for it.
+        #[cfg(test)]
+        self.hooks.run_inside_embedding();
+        let embedded = pending.embed();
+
+        let mut held = Held {
+            slot: engine_slot.lane_lock(self),
+            engine_slot,
+        };
+        let current = engine_slot.current() == Some(serial);
+        let Slot::Running {
+            engine: Some(running),
+            ..
+        } = &mut *held.slot
+        else {
+            self.count(|reading| reading.pages_discarded += 1);
+            return BackgroundUnit::Ran { owed: false };
+        };
+        if !current {
+            // Retired while it embedded: the page commits nothing.
+            self.count(|reading| reading.pages_discarded += 1);
+            return BackgroundUnit::Ran { owed: false };
+        }
+        let committed = embedded.and_then(|page| running.commit(page));
+        if committed.is_ok() {
+            self.count(|reading| reading.pages_committed += 1);
+        }
+        let owed = committed.map(|report| report.owed);
+        self.ended(&mut held.slot, engine_slot, owed, &epoch)
+    }
+
+    /// Record how a step ended on the slot it holds, and answer it to the
+    /// lane: whether more is owed, or the refusal or damage it met.
+    fn ended(
+        &self,
+        slot: &mut Slot,
+        engine_slot: &EngineSlot,
+        ended: Result<bool, EngineError>,
+        epoch: &str,
+    ) -> BackgroundUnit {
         let Slot::Running {
             engine,
             last_drain_error,
-        } = &mut *slot
+        } = slot
         else {
-            engine_slot.owed.store(false, Ordering::Release);
-            return;
+            return BackgroundUnit::Ran { owed: false };
         };
-        let Some(running) = engine.as_mut() else {
-            *slot = Slot::SelfDisabled {
-                detail: ABANDONED.to_string(),
-            };
-            engine_slot.owed.store(false, Ordering::Release);
-            return;
-        };
-        // A failed slice owes nothing more until the next leg commits: the
-        // rows it did not write are still owed by the cursor, and a retry on
-        // every quiet tick would only repeat the refusal.
-        let owed = match running.drain_bounded(feed, budget) {
-            Ok(report) => {
+        let answer = match ended {
+            Ok(owed) => {
                 *last_drain_error = None;
-                report.owed
+                engine_slot.owed.store(owed, Ordering::Release);
+                BackgroundUnit::Ran { owed }
             }
             Err(error) if error.sidecar_damage().is_some() => {
-                let taken = engine.take().expect("the engine this drain ran on");
+                let taken = engine.take().expect("the engine this step ran on");
                 match taken.discard_and_reopen() {
                     Ok(rebuilt) => {
                         *engine = Some(Box::new(rebuilt));
                         *last_drain_error = None;
                         // The rebuilt sidecar's reset cursors are the next
-                        // slice's to drain.
-                        true
+                        // unit's to drain.
+                        engine_slot.owed.store(true, Ordering::Release);
+                        BackgroundUnit::Ran { owed: true }
                     }
                     Err(failed) => {
                         *slot = Slot::SelfDisabled {
@@ -910,32 +1233,118 @@ impl SemanticEngines {
                                 engine_refusal_told(&failed)
                             ),
                         };
-                        false
+                        engine_slot.owed.store(false, Ordering::Release);
+                        BackgroundUnit::Ran { owed: false }
                     }
                 }
             }
+            Err(EngineError::Store(error)) => {
+                *last_drain_error = Some(crate::refusal::store_refusal_told(&error));
+                match error.damage() {
+                    // Not the engine's to heal: the entry judges it, for the
+                    // lifetime this step read.
+                    Some(_) => BackgroundUnit::StoreDamaged {
+                        epoch: epoch.to_string(),
+                        detail: crate::refusal::store_refusal_told(&error),
+                    },
+                    // The environment refused the read: the work stays owed.
+                    None => BackgroundUnit::Refused,
+                }
+            }
+            // A failed step owes nothing more until the next leg commits: the
+            // rows it did not write are still owed by the cursor, and a retry
+            // on every turn would only repeat the refusal.
             Err(error) => {
                 *last_drain_error = Some(engine_refusal_told(&error));
-                false
+                engine_slot.owed.store(false, Ordering::Release);
+                BackgroundUnit::Ran { owed: false }
             }
         };
-        engine_slot.owed.store(owed, Ordering::Release);
         #[cfg(test)]
         self.hooks.run_as_drain_ends();
+        answer
+    }
+
+    /// Close the feed sources a publication displaced, holding no lock.
+    fn close_displaced(&self) {
+        let displaced = std::mem::take(&mut *tolerant(&self.displaced));
+        drop(displaced);
     }
 
     /// Give the vault's engine back with the rest of its entry's resources.
     ///
     /// Called from the lifecycle's detach, so an idled-out or deregistered
-    /// vault holds no open sidecar connection and answers nothing. The
+    /// vault holds no open sidecar or feed connection and answers nothing. The
     /// sidecar file is retained state: the next delivery adopts it, cursors
     /// intact.
     ///
-    /// The delivery is dropped once the map lock is released, so a sidecar
-    /// connection its slot closes is never closed under that lock.
+    /// **The delivery retires before this returns** ([`Self::retire`]), so the
+    /// caller releases the maintainer lock only after no sidecar commit of
+    /// this host can follow. It waits for at most one hold of the slot lock
+    /// by a unit in flight, never for an embedding or a model setup.
     pub(crate) fn detach(&self, vault: &VaultName) {
         let detached = tolerant(&self.vaults).remove(vault);
-        drop(detached);
+        if let Some(slot) = detached.and_then(|delivery| delivery.slot) {
+            Self::retire(&slot, Retiring::Delivery);
+        }
+        self.close_displaced();
+    }
+
+    /// Retire the store lifetime `vault`'s delivery is committed beside, ahead
+    /// of a rebuild's discard of the store: the feed connection and the
+    /// engine close, and the slot prepares again for the lifetime the
+    /// rebuild's publication commits. Waits as [`Self::detach`] does.
+    pub(crate) fn retire_store(&self, vault: &VaultName) {
+        if let Some(slot) = self.slot(vault) {
+            Self::retire(&slot, Retiring::StoreLifetime);
+        }
+        self.close_displaced();
+    }
+
+    /// Retire every delivery, at host shutdown: a unit in flight finishes the
+    /// phase it is in and commits nothing after it.
+    pub(crate) fn retire_all(&self) {
+        let slots: Vec<Arc<EngineSlot>> = tolerant(&self.vaults)
+            .values()
+            .filter_map(|delivery| delivery.slot.clone())
+            .collect();
+        for slot in slots {
+            Self::retire(&slot, Retiring::Delivery);
+        }
+        self.close_displaced();
+    }
+
+    /// Retire `slot`'s delivery or its store lifetime: under the slot lock,
+    /// mark it and take out the engine and the feed connection; then release
+    /// the lock and close both.
+    fn retire(slot: &EngineSlot, retiring: Retiring) {
+        let (engine, feed) = {
+            let mut held = tolerant(&slot.slot);
+            let feed = {
+                let mut binding = tolerant(&slot.binding);
+                if retiring == Retiring::Delivery {
+                    binding.retired = true;
+                }
+                binding.lifetime.take()
+            };
+            let engine = match &mut *held {
+                Slot::Running { engine, .. } => {
+                    let engine = engine.take();
+                    *held = Slot::Preparing;
+                    engine
+                }
+                Slot::Preparing | Slot::SelfDisabled { .. } => None,
+            };
+            if retiring == Retiring::StoreLifetime {
+                *tolerant(&slot.report) = read_slot(&held);
+                if matches!(&*held, Slot::Preparing) {
+                    slot.owed.store(true, Ordering::Release);
+                }
+            }
+            (engine, feed)
+        };
+        drop(engine);
+        drop(feed);
     }
 
     fn slot(&self, vault: &VaultName) -> Option<Arc<EngineSlot>> {
@@ -946,23 +1355,33 @@ impl SemanticEngines {
 
     /// Record what a delivery left for `vault`.
     ///
-    /// The delivery it replaces is dropped once the map lock is released, so
-    /// a sidecar connection the replaced slot closes is never closed under
-    /// that lock.
+    /// The slot it replaces is retired once the map lock is released, so a
+    /// sidecar connection the replaced slot closes is never closed under that
+    /// lock.
     ///
-    /// A new delivery is unpublished until the entry's next publishing gate
-    /// hold commits it.
+    /// A new delivery is bound to no store lifetime until the entry's next
+    /// publishing gate hold commits it.
     fn deliver(&self, vault: &VaultName, section: EngineSection, slot: Option<Arc<EngineSlot>>) {
-        let replaced = tolerant(&self.vaults).insert(
-            vault.clone(),
-            Delivery {
-                section,
-                slot,
-                published_store: None,
-            },
-        );
-        drop(replaced);
+        let kept = slot.clone();
+        let replaced = tolerant(&self.vaults).insert(vault.clone(), Delivery { section, slot });
+        if let Some(replaced) = replaced.and_then(|delivery| delivery.slot)
+            && !kept
+                .as_ref()
+                .is_some_and(|kept| Arc::ptr_eq(kept, &replaced))
+        {
+            Self::retire(&replaced, Retiring::Delivery);
+        }
     }
+}
+
+/// What a retirement retires.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Retiring {
+    /// The delivery itself: the slot is never current again.
+    Delivery,
+    /// The store lifetime the delivery is committed beside: the slot prepares
+    /// again for the next.
+    StoreLifetime,
 }
 
 impl EngineConfigReceiver for SemanticEngines {
@@ -970,18 +1389,18 @@ impl EngineConfigReceiver for SemanticEngines {
         "semantic"
     }
 
-    /// Delivery validates the section and records what it asks for; it no
-    /// longer opens anything.
+    /// Delivery validates the section and records what it asks for; it
+    /// opens nothing.
     ///
     /// A running engine re-delivered the configuration it runs under is kept
     /// as it stands — its sidecar, cursors and diagnostics are retained
     /// state, and re-opening them would say a reload changed something it did
     /// not — and so is a slot still preparing under that configuration. An
     /// enabling section otherwise leaves a preparing slot, whose sidecar open
-    /// and model setup run after the publication that commits it
-    /// (`SemanticEngines::work`). A refused or self-disabled slot is
-    /// re-attempted from scratch, because a delivery is exactly the author's
-    /// next try.
+    /// and model setup run on the background lane after the publication that
+    /// commits it (`SemanticEngines::unit`). A refused or self-disabled slot
+    /// is re-attempted from scratch, because a delivery is exactly the
+    /// author's next try.
     ///
     /// No lock of this set is held across anything but the map's own
     /// bookkeeping, and nothing here touches the filesystem.
@@ -1021,6 +1440,7 @@ impl SemanticEngines {
         }
         if let Some(slot) = self.slot(vault)
             && slot.settings == settings
+            && !slot.retired()
             && matches!(
                 &*tolerant(&slot.slot),
                 Slot::Preparing
@@ -1056,12 +1476,21 @@ pub(crate) mod tests {
     pub(crate) struct Hooks {
         drain: Mutex<Option<Arranged>>,
         drain_end: Mutex<Option<Arranged>>,
+        embedding: Mutex<Option<Arranged>>,
         delivery: Mutex<Option<Arranged>>,
         install: Mutex<Option<Arranged>>,
-        publication: Mutex<Option<Arranged>>,
         install_end: Mutex<Option<Arranged>>,
-        /// While set, no vault's engine owes work, so nothing starts a slice.
+        ticket: Mutex<Option<Arranged>>,
+        lane_yield: Mutex<Option<Arranged>>,
+        /// While set, no vault's engine owes work, so nothing starts a unit.
         owed_work_held: std::sync::atomic::AtomicBool,
+    }
+
+    fn run(arranged: &Mutex<Option<Arranged>>) {
+        let arranged = tolerant(arranged).take();
+        if let Some(arranged) = arranged {
+            arranged();
+        }
     }
 
     impl Hooks {
@@ -1071,50 +1500,40 @@ pub(crate) mod tests {
         }
 
         pub(super) fn run_inside_drain(&self) {
-            let arranged = tolerant(&self.drain).take();
-            if let Some(arranged) = arranged {
-                arranged();
-            }
+            run(&self.drain);
         }
 
         pub(super) fn run_as_drain_ends(&self) {
-            let arranged = tolerant(&self.drain_end).take();
-            if let Some(arranged) = arranged {
-                arranged();
-            }
+            run(&self.drain_end);
         }
 
-        pub(super) fn run_inside_publication(&self) {
-            let arranged = tolerant(&self.publication).take();
-            if let Some(arranged) = arranged {
-                arranged();
-            }
+        pub(super) fn run_inside_embedding(&self) {
+            run(&self.embedding);
         }
 
         pub(super) fn run_as_install_ends(&self) {
-            let arranged = tolerant(&self.install_end).take();
-            if let Some(arranged) = arranged {
-                arranged();
-            }
+            run(&self.install_end);
         }
 
         pub(super) fn run_before_install(&self) {
-            let arranged = tolerant(&self.install).take();
-            if let Some(arranged) = arranged {
-                arranged();
-            }
+            run(&self.install);
         }
 
         pub(super) fn run_after_delivery(&self) {
-            let arranged = tolerant(&self.delivery).take();
-            if let Some(arranged) = arranged {
-                arranged();
-            }
+            run(&self.delivery);
+        }
+
+        pub(super) fn run_after_a_ticket(&self) {
+            run(&self.ticket);
+        }
+
+        pub(super) fn run_as_the_lane_yields(&self) {
+            run(&self.lane_yield);
         }
     }
 
     impl SemanticEngines {
-        /// Answer that no vault's engine owes work from here on, so no slice
+        /// Answer that no vault's engine owes work from here on, so no unit
         /// starts and an enabled engine stays as its delivery left it: a case
         /// reads an engine that is preparing without racing the wake that
         /// starts its initialization.
@@ -1124,34 +1543,37 @@ pub(crate) mod tests {
                 .store(true, std::sync::atomic::Ordering::SeqCst);
         }
 
-        /// Run `arranged` once, inside the next drain of any vault's engine,
-        /// while that drain holds its slot and before it reads the feed.
+        /// Run `arranged` once, inside the next drain step of any vault's
+        /// engine, while that step's read phase holds its slot and before it
+        /// reads the feed.
         pub(crate) fn run_inside_next_drain(&self, arranged: impl FnOnce() + Send + 'static) {
             *tolerant(&self.hooks.drain) = Some(Box::new(arranged));
         }
 
-        /// Run `arranged` once, as the next drain of any vault's engine that
-        /// ran its engine ends: once the drain has recorded its outcome on the
-        /// slot, and while it still holds the slot.
+        /// Run `arranged` once, as the next drain step of any vault's engine
+        /// that ran its engine ends: once the step has recorded its outcome on
+        /// the slot, and while it still holds the slot.
         pub(crate) fn run_as_next_drain_ends(&self, arranged: impl FnOnce() + Send + 'static) {
             *tolerant(&self.hooks.drain_end) = Some(Box::new(arranged));
         }
 
-        /// Run `arranged` once, inside the next initialization of any vault's
-        /// engine: once the engine has opened, before the install is judged,
+        /// Run `arranged` once, inside the next embedding phase of any vault's
+        /// drain: after the page was read, before its bodies are embedded,
         /// with no lock of this set held.
+        pub(crate) fn run_inside_next_embedding(&self, arranged: impl FnOnce() + Send + 'static) {
+            *tolerant(&self.hooks.embedding) = Some(Box::new(arranged));
+        }
+
+        /// Run `arranged` once, inside the next initialization of any vault's
+        /// engine: once the model is set up, before the slot lock is taken to
+        /// open the sidecar and judge the install, with no lock of this set
+        /// held.
         pub(crate) fn run_before_next_install(&self, arranged: impl FnOnce() + Send + 'static) {
             *tolerant(&self.hooks.install) = Some(Box::new(arranged));
         }
 
-        /// Pause after validating the real lifecycle claim, before map/slot
-        /// publication. A valid publication still holds the entry gate here.
-        pub(crate) fn run_inside_next_publication(&self, arranged: impl FnOnce() + Send + 'static) {
-            *tolerant(&self.hooks.publication) = Some(Box::new(arranged));
-        }
-
-        /// Run after initialization accepts or rejects its result, outside
-        /// metadata locks and before returning the attachment to lifecycle.
+        /// Run after initialization installs or refuses its result, outside
+        /// every lock of this set.
         pub(crate) fn run_as_next_install_ends(&self, arranged: impl FnOnce() + Send + 'static) {
             *tolerant(&self.hooks.install_end) = Some(Box::new(arranged));
         }
@@ -1160,6 +1582,18 @@ pub(crate) mod tests {
         /// once what it left is recorded and no lock of this set is held.
         pub(crate) fn run_after_next_delivery(&self, arranged: impl FnOnce() + Send + 'static) {
             *tolerant(&self.hooks.delivery) = Some(Box::new(arranged));
+        }
+
+        /// Run `arranged` once, in the next search to take a ticket for a
+        /// slot's lock: after the ticket is issued, before the lock is taken.
+        pub(crate) fn run_after_next_ticket(&self, arranged: impl FnOnce() + Send + 'static) {
+            *tolerant(&self.hooks.ticket) = Some(Box::new(arranged));
+        }
+
+        /// Run `arranged` once, the next time the lane finds a search's
+        /// ticket waiting and yields the slot lock to it, before it waits.
+        pub(crate) fn run_as_the_lane_next_yields(&self, arranged: impl FnOnce() + Send + 'static) {
+            *tolerant(&self.hooks.lane_yield) = Some(Box::new(arranged));
         }
     }
 }
