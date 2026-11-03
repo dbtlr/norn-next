@@ -547,10 +547,16 @@ pub trait EntryOps: Send + Sync + 'static {
     /// clock already past is due now — or `None` where it keeps none.
     ///
     /// Read under the entry gate, by the background scheduler's ask and where
-    /// a leg hands the coverage back, so it is cheap and nonblocking and takes
-    /// no lock. The scheduler sleeps until the earliest of these across the
-    /// host, so a clock this does not report is maintenance no deadline
-    /// starts.
+    /// the coverage is installed or a heal rung or reload parks it back, so it
+    /// is cheap and nonblocking and takes no lock. The scheduler sleeps until
+    /// the earliest of these across the host, so a clock this does not report
+    /// is maintenance no deadline starts.
+    ///
+    /// **A leg only ever moves a clock later.** The entry keeps the last
+    /// reading while a leg holds the coverage, and a poll, a reconcile or a
+    /// maintenance leg parks it back without reading again; that reading is
+    /// safe only because it can be early and never late. A leg that brought a
+    /// clock earlier would leave a deadline no ask sees until the next wake.
     ///
     /// The default keeps no clock.
     fn maintenance_deadline(&self, _: &Self::Attachment) -> Option<Instant> {
@@ -1321,15 +1327,18 @@ struct EntryState<A: SnapshotSource> {
     rolling_heal: Option<norn_wire::RollingHealStatus>,
     /// When the entry's claim-bound background clocks next come due, as
     /// [`EntryOps::maintenance_deadline`] last read them off its coverage:
-    /// where the coverage is installed or parked back, and at every ask of
-    /// the background scheduler that finds it in the entry's hand.
+    /// where the coverage is installed, parked back by a heal rung or a
+    /// reload, or asked by the background scheduler with the coverage in the
+    /// entry's hand. A poll, a reconcile or a maintenance leg that parks the
+    /// coverage back leaves the reading as it stood.
     ///
     /// **The clocks live on the entry, not only on the attachment**, because
     /// the attachment is out with a leg exactly when the claim is held, and
     /// the scheduler still has to know whether a slice came due behind that
     /// claim. A reading taken before a leg moved a clock later is early, never
     /// late: a leg moves a clock only by running the unit it times, which sets
-    /// it later, so an early reading costs one ask that finds nothing due.
+    /// it later, as [`EntryOps::maintenance_deadline`] obliges, so an early
+    /// reading costs one ask that finds nothing due.
     /// The clocks run while the entry accounts for coverage, and the release
     /// that leaves it accounting for none ends them.
     background_due: Option<Instant>,

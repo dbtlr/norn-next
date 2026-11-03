@@ -961,9 +961,11 @@ The deadlines are:
 takes the entry's gate, as the dispatcher's retry does, and reads the entry's background
 clocks there: the entry keeps a reading of its attachment's earliest background deadline,
 because the attachment is out with a leg exactly when the claim is held. The reading is
-refreshed when the attachment is installed or parked and at each ask with the coverage in
-hand. It can only be early, never late, because a leg moves a clock only by running the
-unit that clock times, which sets it later. The release that leaves an entry unattached
+refreshed where the attachment is installed, parked back by a heal rung or a reload, or
+asked with the coverage in hand; a poll, a reconcile or a maintenance leg that parks the
+coverage back leaves it as it stood. It can only be early, never late, because a leg moves
+a clock only by running the unit that clock times, which sets it later: an implementation
+of the clocks owes that a leg only ever moves one later. The release that leaves an entry unattached
 ends its background clocks, whether a detach, an unwound leg's discard, or the give-back
 after a refusal or a loss gave the coverage back, so an unattached entry contributes no
 deadline, and the next attach starts them again. The scheduler schedules only where the
