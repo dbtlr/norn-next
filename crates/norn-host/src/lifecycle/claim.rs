@@ -58,6 +58,16 @@
 //! `a_refused_follow_up_takes_the_marker_from_work_the_entry_has_left` and
 //! `failed_send_releases_the_marker_after_a_newer_epoch_is_installed`.
 //!
+//! **The release of an entry marked as owing maintenance wakes the background
+//! scheduler.** Carried by [`Claim::wake_where_marked`], which every move that
+//! opens the gate — [`Claim::open`], [`Claim::release`] and
+//! [`Claim::drop_marker`] — calls, so no release site outside the carrier can
+//! omit the wake. The scheduler marks an entry where a claim-bound slice is
+//! due, whether it scheduled the leg or found the claim held, and a marked
+//! entry contributes no deadline until this wake asks it again. Pinned by
+//! `a_due_slice_over_a_held_claim_starts_at_the_claims_release` and
+//! `the_second_deadline_after_attach_starts_a_maintenance_leg_as_the_first_did`.
+//!
 //! **A gate held across a hand-on is an entry nothing takes between the work it
 //! moves on from and the work it moves on to.** Carried by [`Claim::hold`],
 //! reached from [`Claim::hand_on`] alone, and by [`Claim::hand_off`], which
