@@ -27398,22 +27398,31 @@ mod tests {
             .unwrap();
             let lease = host.demand(&name).unwrap();
             wait_for_state(&host, &name, TrustState::Ready);
-            fs::write(root.join("changed.md"), "after!").unwrap();
-            fs::File::open(root.join("changed.md"))
-                .unwrap()
-                .set_times(fs::FileTimes::new().set_modified(old))
-                .unwrap();
-            fs::write(root.join("created.md"), "created").unwrap();
-            fs::File::open(root.join("created.md"))
-                .unwrap()
-                .set_times(fs::FileTimes::new().set_modified(old))
-                .unwrap();
+            // A heal counts a write as a miss only once its mtime is past the
+            // delivery grace, and passes run every ten milliseconds from the
+            // attach, concurrently with these edits. A file written in place
+            // and aged afterwards stands fresh between the two steps, and a
+            // pass that reads it there takes the new bytes uncounted, so no
+            // later pass finds the miss. Each write is aged outside the vault
+            // and renamed in, so the vault only ever holds old-stamped bytes.
+            let staging = scratch.join("staging");
+            fs::create_dir_all(&staging).unwrap();
+            let place_aged = |file: &str, contents: &str| {
+                let staged = staging.join(file);
+                fs::write(&staged, contents).unwrap();
+                fs::File::open(&staged)
+                    .unwrap()
+                    .set_times(fs::FileTimes::new().set_modified(old))
+                    .unwrap();
+                fs::rename(&staged, root.join(file)).unwrap();
+            };
+            place_aged("changed.md", "after!");
+            place_aged("created.md", "created");
             fs::remove_file(root.join("deleted.md")).unwrap();
-            // The scheduler starts a pass at its deadline, ten milliseconds
-            // after the attach, so a pass may have enumerated the vault before
-            // these edits and miss the file created after it. The next pass,
-            // a period later, counts what that one could not see, so the case
-            // waits for every miss rather than for the first completed pass.
+            // A pass may also have enumerated the vault before these edits
+            // and miss the file created after it. The next pass, a period
+            // later, counts what that one could not see, so the case waits
+            // for every miss rather than for the first completed pass.
             let every_miss = norn_wire::WatcherMisses {
                 changed: 1,
                 created: 1,
