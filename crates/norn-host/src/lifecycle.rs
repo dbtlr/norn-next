@@ -1874,7 +1874,7 @@ impl<A: SnapshotSource> EntryState<A> {
     /// entry no longer holds, and [`EntryState::owes_a_rung`] is what every
     /// publisher of `Ready` and every producer of ordinary work reads: an entry
     /// publishing `Ready` while a stale requirement stands is one no watcher
-    /// poll and no maintenance tick ever schedules against again.
+    /// poll and no background scheduler ever schedules against again.
     fn clear_rung_requirements(&mut self) {
         self.clear_recovery();
         self.clear_rebuild();
@@ -3661,9 +3661,10 @@ fn dispatch_taken_job<O: EntryOps>(
     refused
 }
 
-/// One tick of the dispatcher thread: reap the entries idle at `now`, poll
-/// every attached entry's watcher, and send every job a full queue handed
-/// back.
+/// One tick of the dispatcher thread: trim the idle readers, reap the entries
+/// idle at `now`, poll every attached entry's watcher, and send every job a
+/// full queue handed back. None of the four starts background work: the
+/// background scheduler starts maintenance at a wake or a deadline.
 ///
 /// **Each step is caught on its own**, so an unwind in one skips neither the
 /// steps after it in this tick nor any later tick: the thread that catches it
@@ -8005,8 +8006,9 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     } else if state.applies_waiting() {
                         // A queued apply takes the claim ahead of the next
                         // turn and of due maintenance: its intake derives the
-                        // facts this turn left, and the maintenance a later
-                        // poll or turn finds due is still due then.
+                        // facts this turn left. Due maintenance is still due
+                        // then, and the entry the scheduler marked when it came
+                        // due wakes it again at the apply's release.
                         let next = state.claim.hand_on(|epoch| Job::Apply(name.clone(), epoch));
                         drop(state);
                         dispatch_handoff(shared, entry, epoch, next);
@@ -8037,10 +8039,11 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                         // What this turn left is published before the claim
                         // moves on: `Ready` where it left nothing to derive,
                         // exactly as the release below publishes it. The
-                        // maintenance then runs over a serving entry, as a
-                        // poll's does, so no quiet slice it takes — a semantic
-                        // slice the turn's commit owed above all — stands
-                        // between that commit and its publication.
+                        // maintenance then runs over a serving entry, as one
+                        // the background scheduler starts does, so no quiet
+                        // slice it takes — a semantic slice the turn's commit
+                        // owed above all — stands between that commit and its
+                        // publication.
                         state.publish_ready_where_nothing_is_left(handoff_saturated);
                         let next = state
                             .claim
@@ -8089,8 +8092,9 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     return None;
                 }
                 // A queued apply takes the claim before a maintenance scan
-                // would begin; the scan is still due when a later poll or
-                // turn asks.
+                // would begin. The scan is still due, and the entry the
+                // scheduler marked when it came due wakes it again at the
+                // apply's release.
                 if state.applies_waiting() {
                     let next = state.claim.hand_on(|epoch| Job::Apply(name.clone(), epoch));
                     drop(state);

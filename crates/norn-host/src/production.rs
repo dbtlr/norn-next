@@ -779,7 +779,8 @@ impl ProductionEntryOps {
     /// vault's engine owes a slice. No semantic work runs on the leg: the
     /// leg's own publication — its `derived_through` or `Ready` — comes
     /// first, and the owed slice follows on quiet maintenance
-    /// ([`Self::maintain_quiet`]).
+    /// ([`Self::maintain_quiet`]), which the background scheduler starts:
+    /// the owe wakes it.
     ///
     /// The reading is recorded ahead of the slice, so a status taken before
     /// it runs judges the engine against the work this leg committed and
@@ -7159,7 +7160,7 @@ mod tests {
         )
         .unwrap();
         // FSEvents can deliver the fixture's own writes after the watch's
-        // history marker; a batch at attach would schedule maintenance the
+        // history marker; a batch at attach would schedule a reconcile the
         // cases built on this host assert has not run.
         norn_fs::watch::settle_prior_changes(f.root.root(), lifecycle_budget().work()).unwrap();
         let lease = host.demand(&name).unwrap();
@@ -9932,7 +9933,7 @@ mod tests {
             fs::write(f.vault().join("a.md"), "alpha alpha\n").unwrap();
             // Never armed: the watcher's facts are swallowed, so the explicit
             // reload is the only leg that meets the exhausted document open, and
-            // the polls still run the engine's maintenance slices.
+            // the scheduler still starts the engine's maintenance slices.
             let (host, name, _lease, _armed, _) = overflowing_ready_host(&f);
             wait_for_engine(&host, &name, |engine| {
                 *engine == norn_wire::EngineStatus::on(None, Some(Freshness::trailing(0)))
