@@ -1,7 +1,9 @@
 //! The background lane's lifecycle cases: owed lane work starts at a wake, a
 //! background turn is bounded by the background turn budget with one unit as
-//! its floor, one store's backlog cannot starve another's, and no turn feeds
-//! while its entry's read stance is refuse.
+//! its floor, one store's backlog cannot starve another's, no turn feeds
+//! while its entry's read stance is refuse, a store left owed by a refused or
+//! unwound unit is retried at a deadline, and damage a feed read meets is
+//! judged for the store lifetime it read.
 //!
 //! The hosts here run no ambient dispatcher tick inside a case — their watcher
 //! poll is a minute away — so anything that ran did so without one.
@@ -298,6 +300,156 @@ fn a_store_whose_turn_unwound_is_queued_again() {
         host.scheduler_reading().wakes,
         wakes,
         "a wake, not the retry deadline, asked the store again"
+    );
+    drop((leases, host));
+}
+
+/// Record that `name`'s entry stands on the store lifetime `epoch`, as a leg
+/// committing lane-1 work records it.
+fn stand_on(host: &Host<Arc<FakeOps>>, name: &VaultName, epoch: &str) {
+    let entry = host.shared.entries.get(name).unwrap();
+    entry.gate.lock().unwrap().store_reading = Some(norn_store::StoreReading::of(epoch, 3));
+}
+
+/// The state a feed read's damage verdict publishes.
+fn damaged_by_the_feed() -> TrustState {
+    TrustState::untrusted(UntrustedReason::store_damaged_rebuilding(
+        "the feed read met damage",
+    ))
+}
+
+/// Wait until the lane has recorded `count` turns: the judgment of what a
+/// turn's units met runs before its turn is recorded.
+fn wait_for_lane_turns(host: &Host<Arc<FakeOps>>, count: u64) {
+    wait_until("the lane turns to end", lifecycle_wait_budget(), || {
+        let reading = host.lane_reading();
+        if reading.turns >= count {
+            Observed::Met(())
+        } else {
+            Observed::pending(format!("{reading:?}"))
+        }
+    })
+    .unwrap_or_else(|failure| panic!("{failure}"));
+}
+
+/// **Damage a feed read meets is judged for the store lifetime it read, and
+/// schedules the rebuild once.** The entry stands on the lifetime the unit
+/// read: the verdict is published and the rebuild runs, and it runs once.
+#[test]
+fn damage_a_feed_read_meets_schedules_the_rebuild_once() {
+    let ops = Arc::new(FakeOps::default());
+    let name = VaultName::new("notes").unwrap();
+    let (host, leases) = ready_vaults_under(&ops, &[&name], crate::BACKGROUND_TURN_BUDGET);
+    stand_on(&host, &name, "lifetime-a");
+    ops.block_rebuild.store(true, Ordering::SeqCst);
+    *ops.lane_unit_damage.lock().unwrap() = Some("lifetime-a".to_string());
+    owe(&ops, &name, 1);
+    host.wake_background();
+
+    wait_for_flag("rebuild_started", &ops.rebuild_started);
+    assert_eq!(host.state(&name), answered(damaged_by_the_feed()));
+    ops.rebuild_release.store(true, Ordering::SeqCst);
+    wait_for_state(&host, &name, TrustState::Ready);
+    wait_for_lane_units(&ops, 1);
+    assert_eq!(ops.rebuilds.load(Ordering::SeqCst), 1);
+    drop((leases, host));
+}
+
+/// **A verdict over a store lifetime the entry no longer stands on schedules
+/// nothing.** The unit read a lifetime a rebuild has since replaced: its turn
+/// ends with the entry still serving and no rebuild scheduled.
+#[test]
+fn damage_a_feed_read_meets_in_an_old_lifetime_schedules_nothing() {
+    let ops = Arc::new(FakeOps::default());
+    let name = VaultName::new("notes").unwrap();
+    let (host, leases) = ready_vaults_under(&ops, &[&name], crate::BACKGROUND_TURN_BUDGET);
+    stand_on(&host, &name, "lifetime-b");
+    *ops.lane_unit_damage.lock().unwrap() = Some("lifetime-a".to_string());
+    owe(&ops, &name, 1);
+    host.wake_background();
+
+    wait_for_lane_turns(&host, 1);
+    assert_eq!(host.state(&name), answered(TrustState::Ready));
+    assert_eq!(ops.rebuilds.load(Ordering::SeqCst), 0);
+    drop((leases, host));
+}
+
+/// **A verdict a unit in flight brings back after its entry's stance moved to
+/// refuse schedules nothing.** The unit read the lifetime the entry still
+/// stands on, and no rebuild is owed or held: the entry's trust was withdrawn
+/// for an environmental refusal while the unit ran, so only the refusing
+/// stance tells the judgment that the verdict is not this entry's to act on.
+#[test]
+fn damage_a_feed_read_meets_after_the_stance_refuses_schedules_nothing() {
+    let ops = Arc::new(FakeOps::default());
+    let name = VaultName::new("notes").unwrap();
+    let (host, leases) = ready_vaults_under(&ops, &[&name], crate::BACKGROUND_TURN_BUDGET);
+    stand_on(&host, &name, "lifetime-a");
+    ops.block_lane_unit.store(true, Ordering::SeqCst);
+    *ops.lane_unit_damage.lock().unwrap() = Some("lifetime-a".to_string());
+    owe(&ops, &name, 1);
+    host.wake_background();
+    wait_for_flag("lane_unit_started", &ops.lane_unit_started);
+    let refused = TrustState::untrusted(UntrustedReason::environmental_refusal(
+        "the environment refused the store",
+    ));
+    {
+        let entry = host.shared.entries.get(&name).unwrap();
+        let mut state = entry.gate.lock().unwrap();
+        state.trust = refused.clone();
+        assert_eq!(state.read_stance(), ReadStance::Refuse);
+        assert!(!state.owes_a_rung());
+    }
+
+    ops.lane_unit_release.store(true, Ordering::SeqCst);
+    wait_for_lane_turns(&host, 1);
+    assert_eq!(host.state(&name), answered(refused));
+    assert_eq!(ops.rebuilds.load(Ordering::SeqCst), 0);
+    let entry = host.shared.entries.get(&name).unwrap();
+    assert!(
+        entry.gate.lock().unwrap().damage_met_under_a_claim.is_none(),
+        "the verdict was carried for a later publication"
+    );
+    drop((leases, host));
+}
+
+/// **A verdict a unit in flight brings back while the rebuild runs schedules
+/// no second rebuild.** The unit read the lifetime the entry still records —
+/// a rebuild in flight has not yet recorded the store that replaces it — so
+/// only the entry's refusing stance tells the verdict is stale: the rebuild
+/// ends at `Ready`, and it is the only one.
+#[test]
+fn damage_a_feed_read_meets_during_a_rebuild_schedules_no_second_rebuild() {
+    let ops = Arc::new(FakeOps::default());
+    let name = VaultName::new("notes").unwrap();
+    let (host, leases) = ready_vaults_under(&ops, &[&name], crate::BACKGROUND_TURN_BUDGET);
+    stand_on(&host, &name, "lifetime-a");
+    ops.block_lane_unit.store(true, Ordering::SeqCst);
+    *ops.lane_unit_damage.lock().unwrap() = Some("lifetime-a".to_string());
+    owe(&ops, &name, 1);
+    host.wake_background();
+    wait_for_flag("lane_unit_started", &ops.lane_unit_started);
+
+    // A read meets the damage first, and its rebuild is under way.
+    ops.block_rebuild.store(true, Ordering::SeqCst);
+    let hold = host.begin_read(&name).expect("a ready entry answers a read");
+    host.withdraw_for_read_damage(&hold, "the store is damaged".to_string());
+    drop(hold);
+    wait_for_flag("rebuild_started", &ops.rebuild_started);
+
+    ops.lane_unit_release.store(true, Ordering::SeqCst);
+    wait_for_lane_turns(&host, 1);
+    ops.rebuild_release.store(true, Ordering::SeqCst);
+    wait_for_state(&host, &name, TrustState::Ready);
+    assert_eq!(
+        ops.rebuilds.load(Ordering::SeqCst),
+        1,
+        "a stale verdict scheduled a second rebuild"
+    );
+    let entry = host.shared.entries.get(&name).unwrap();
+    assert!(
+        entry.gate.lock().unwrap().damage_met_under_a_claim.is_none(),
+        "a stale verdict is carried to the end of the rebuild"
     );
     drop((leases, host));
 }

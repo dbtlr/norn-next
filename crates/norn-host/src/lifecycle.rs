@@ -10721,6 +10721,10 @@ mod tests {
             }
             let damage = self.lane_unit_damage.lock().unwrap().take();
             if let Some(epoch) = damage {
+                if self.block_lane_unit.swap(false, Ordering::SeqCst) {
+                    self.lane_unit_started.store(true, Ordering::SeqCst);
+                    wait_for_release("lane_unit_release", &self.lane_unit_release);
+                }
                 self.lane_units_not_run.fetch_add(1, Ordering::SeqCst);
                 return BackgroundUnit::StoreDamaged {
                     epoch,
