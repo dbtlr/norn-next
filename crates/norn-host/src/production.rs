@@ -9881,7 +9881,7 @@ mod tests {
             assert_eq!(reported, caught_up_over(3));
         }
 
-        /// **Coverage is `null` until a unit has counted, a status answers
+        /// **Coverage is `null` until a unit has counted whole, a status answers
         /// while a unit holds the engine, and mid-drain `embedded` trails
         /// `total`.** The first drain is held inside its hold of the slot:
         /// the initialization counted nothing, so the status reports no

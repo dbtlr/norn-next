@@ -256,7 +256,7 @@ pub enum EngineStatus {
         freshness: Option<Freshness>,
         /// How many of the documents the engine would embed have embeddings
         /// over their current content, and `null` until a background unit
-        /// has counted. Not a lag: `freshness` says how far behind the store
+        /// has counted both whole. Not a lag: `freshness` says how far behind the store
         /// the engine is, and a vault whose every document is embedded can
         /// still trail an edit.
         coverage: Option<EmbeddingCoverage>,
@@ -284,7 +284,7 @@ impl EngineStatus {
     /// An engine stands, whose last drain refused with `last_drain_error` —
     /// `None` where it did not — whose derived state is at `freshness`,
     /// `None` until the engine reports a watermark, and which has embedded
-    /// `coverage` of what it would embed, `None` until it has counted.
+    /// `coverage` of what it would embed, `None` until it has counted whole.
     pub const fn on(
         last_drain_error: Option<String>,
         freshness: Option<Freshness>,
@@ -309,7 +309,8 @@ impl EngineStatus {
 /// their current content.
 ///
 /// On the wire a coverage is `{"embedded":3,"total":4}`. Both counts describe
-/// one store state, the one the engine's last background unit read. `total`
+/// one store state: the one the engine's last background unit read or, while
+/// a count is catching up, the state it last counted whole. `total`
 /// counts the documents whose content the store read: a document whose names
 /// stand while its content is unreadable has nothing to embed and is not
 /// among them.

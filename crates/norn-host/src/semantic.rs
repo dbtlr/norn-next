@@ -165,8 +165,9 @@ pub enum SemanticStatus {
         /// [`freshness`].
         watermarks: Watermarks,
         /// How many of the documents the engine would embed have embeddings,
-        /// counted at the store state the last unit read; `None` until a
-        /// unit has counted ([`Engine::coverage`]).
+        /// counted at the store state the last unit read, or the one it last
+        /// counted whole while a count catches up; `None` until a unit has
+        /// counted whole ([`Engine::coverage`]).
         coverage: Option<Coverage>,
     },
     SelfDisabled {
@@ -979,7 +980,8 @@ fn read_slot(slot: &Slot) -> SemanticStatus {
 /// which is the wire's own reading of an engine that has reported nothing to
 /// judge. Its coverage is the engine's own count, carried as the last hold of
 /// the slot left it and judged against nothing: it describes the store state
-/// that hold's unit read, and is `None` until a unit has counted. The match
+/// that hold's unit read, or the one it last counted whole while a count
+/// catches up, and is `None` until a unit has counted whole. The match
 /// carries no wildcard, so a status minted without a report does not compile.
 pub(crate) fn engine_status(status: SemanticStatus, store: Option<&StoreReading>) -> EngineStatus {
     match status {
