@@ -164,6 +164,7 @@ mod search;
 pub mod startup_audit;
 mod store;
 mod validate;
+mod verification;
 mod write_path;
 
 pub use construction::{
@@ -225,6 +226,7 @@ pub use read::{
     ReadStatement, SimilarStems, SimilarStemsPlan, SimilarStemsWork, StemCandidate, StemMatches,
     TargetAmbiguity, page_limit,
 };
+pub use verification::{Verification, VerificationPoint, VerificationSource, VerificationStop};
 // The open ceremony's own vocabulary, which is this crate's too: a store is
 // one client of that ceremony, and the rung a disagreement names is the same
 // rung whichever database met it.

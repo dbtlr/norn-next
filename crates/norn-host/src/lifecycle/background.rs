@@ -216,10 +216,7 @@ fn ask<O: EntryOps>(shared: &Arc<Shared<O>>) -> Option<Instant> {
         })) else {
             continue;
         };
-        earliest = match (earliest, deadline) {
-            (Some(earlier), Some(at)) => Some(earlier.min(at)),
-            (earlier, at) => earlier.or(at),
-        };
+        earliest = earlier(earliest, deadline);
     }
     earliest
 }
@@ -253,10 +250,22 @@ fn ask_entry<O: EntryOps>(
         return (None, false);
     }
     // Lane work needs no claim and no coverage in hand: it is owed wherever
-    // the entry is attached and its stance feeds.
+    // the entry is attached and its stance feeds. A lane clock still to come
+    // is a deadline; one already past is owed work, which the lane's turn
+    // hands the clock's next reading back from, and over a stance that
+    // refuses it waits for the wake the stance's return sends.
+    // One reading of the clock, taken before the owed check: a lane clock at
+    // or before it is owed at that later check too, since the clock only moves
+    // on, and one after it is kept as a deadline. Two readings would drop a
+    // clock that came due between them, neither owed nor a deadline.
+    let now = Instant::now();
     if state.read_stance() != ReadStance::Refuse && shared.ops.background_owed(entry.name()) {
         shared.lane.enqueue(entry.name());
     }
+    let lane_deadline = shared
+        .ops
+        .background_deadline(entry.name())
+        .filter(|at| *at > now);
     if let Some(attachment) = state.coverage.held() {
         state.background_due = shared.ops.maintenance_deadline(attachment);
     }
@@ -264,7 +273,7 @@ fn ask_entry<O: EntryOps>(
         || state.background_due.is_some_and(|at| at <= Instant::now());
     if !due {
         state.claim.clear_maintenance_mark();
-        return (state.background_due, false);
+        return (earlier(state.background_due, lane_deadline), false);
     }
     state.claim.mark_owing_maintenance();
     let schedulable = state.coverage.in_hand()
@@ -276,7 +285,15 @@ fn ask_entry<O: EntryOps>(
         let name = entry.name().clone();
         state.claim.schedule(|epoch| Job::Maintenance(name, epoch));
     }
-    (None, schedulable)
+    (lane_deadline, schedulable)
+}
+
+/// The earlier of two deadlines, where either is set.
+pub(super) fn earlier(one: Option<Instant>, other: Option<Instant>) -> Option<Instant> {
+    match (one, other) {
+        (Some(one), Some(other)) => Some(one.min(other)),
+        (one, other) => one.or(other),
+    }
 }
 
 /// The handle an entry sends its wakes through: one per host, cloned into

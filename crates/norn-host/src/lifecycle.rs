@@ -45,6 +45,9 @@ use background::{BackgroundWake, Scheduler};
 pub use background::{MaintenanceReading, MaintenanceTurn, SchedulerReading};
 use claim::{Claim, Coverage, Leg};
 use gate::{EntryGate, GateHold, Stanced};
+pub(crate) use lane::BACKGROUND_RETRY_AFTER;
+#[cfg(test)]
+pub(crate) use lane::LANE_THREAD;
 use lane::Lane;
 pub use lane::{BackgroundUnit, LaneReading};
 pub(crate) use serving::ServingRefusal;
@@ -561,6 +564,39 @@ pub trait EntryOps: Send + Sync + 'static {
     fn background_unit(&self, _: &VaultName) -> BackgroundUnit {
         BackgroundUnit::NothingOwed
     }
+    /// When `name`'s derived store next comes due a lane unit on a clock
+    /// rather than a flag — a clock already past is due now — or `None`
+    /// where it keeps none or a unit on it is in flight.
+    ///
+    /// Read by the background scheduler under the entry gate, whether or not
+    /// the entry holds its coverage, and by a lane thread at the end of the
+    /// store's background turn, so it is cheap and nonblocking and takes no
+    /// lock an entry gate is ever taken under. The scheduler sleeps until the
+    /// earliest of these across the host, so a lane clock this does not
+    /// report is lane work no deadline starts.
+    ///
+    /// The default keeps no clock.
+    fn background_deadline(&self, _: &VaultName) -> Option<Instant> {
+        None
+    }
+    /// Whether `name`'s store lifetime `epoch` is still the one the ops hold
+    /// for it: what a damage verdict a background unit read is judged by,
+    /// beside the entry's own store reading, where the ops keep a binding of
+    /// their own that a rebuild's discard ends before the store goes.
+    ///
+    /// Called under the entry gate, so it takes no lock an entry gate is ever
+    /// taken under.
+    ///
+    /// The default holds none, and answers no.
+    fn store_lifetime_current(&self, _: &VaultName, _: &str) -> bool {
+        false
+    }
+    /// Retire every store lifetime a background unit could be reading, at host
+    /// shutdown, after the lane is stopped and before its threads are joined:
+    /// a unit in flight that can be stopped is stopped rather than waited out.
+    ///
+    /// The default holds none, and does nothing.
+    fn retire_background(&self) {}
     /// Discard damaged derived state and build it from the vault again — heal
     /// rung 3, reached where an implementation reported
     /// [`JobFailure::StoreDamaged`].
@@ -2957,7 +2993,8 @@ fn judge_damage_a_background_read_met<O: EntryOps>(
     let current = state
         .store_reading
         .as_ref()
-        .is_some_and(|reading| reading.epoch() == epoch);
+        .is_some_and(|reading| reading.epoch() == epoch)
+        || shared.ops.store_lifetime_current(name, epoch);
     if !current
         || state.rebuild_required
         || state.stands_parked()
@@ -4932,6 +4969,9 @@ impl<O: EntryOps> Drop for Host<O> {
         if let Some(engines) = self.shared.ops.semantic() {
             engines.retire_all();
         }
+        // A verification in flight is stopped, not waited out: a lane thread
+        // returns from it within one progress-handler interval.
+        self.shared.ops.retire_background();
         for lane in self.lanes.drain(..) {
             if lane.thread().id() != thread::current().id() {
                 let _ = lane.join();
@@ -8356,9 +8396,9 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     state.withdraw_trust(UntrustedReason::environmental_refusal(detail));
                     next = schedule_due_detach(&mut state, &name);
                 }
-                // Maintenance is where a verification the warm path never runs
-                // asks the database about itself, so this is the arm damage
-                // nothing else meets arrives through.
+                // A maintenance leg's rolling-heal slice writes the store, and
+                // a write can meet damage the warm path has not: the verdict
+                // reaches rung 3 as any leg's does.
                 Err(JobFailure::StoreDamaged(detail)) => {
                     state.coverage.park_by(epoch, attachment);
                     state.withdraw_trust_for_damage(detail);
@@ -10062,6 +10102,10 @@ mod tests {
         /// The verdict the next lane unit answers: damage met in the store
         /// lifetime it names, taking none of the work owed.
         lane_unit_damage: Mutex<Option<String>>,
+        /// The store lifetime the ops answer as theirs, where they keep a
+        /// binding of their own: what [`EntryOps::store_lifetime_current`]
+        /// answers by.
+        lifetime_held_by_the_ops: Mutex<Option<String>>,
         maintenances: AtomicUsize,
         /// The vault whose maintenance waits at the gate until the case sets
         /// `maintenance_release`.
@@ -10708,6 +10752,10 @@ mod tests {
 
         fn semantic(&self) -> Option<&crate::semantic::SemanticEngines> {
             self.semantic.as_deref()
+        }
+
+        fn store_lifetime_current(&self, _: &VaultName, epoch: &str) -> bool {
+            self.lifetime_held_by_the_ops.lock().unwrap().as_deref() == Some(epoch)
         }
 
         fn background_owed(&self, name: &VaultName) -> bool {
@@ -18521,9 +18569,10 @@ mod tests {
     }
 
     /// The verdict maintenance reports reaches the same rung, and the entry
-    /// withdraws trust on the way there. Maintenance is where the verification
-    /// the warm path never runs asks the database about itself, so it is the
-    /// leg silent damage arrives through.
+    /// withdraws trust on the way there. A maintenance leg's rolling-heal slice
+    /// writes the store, so it can meet damage the warm path has not; the
+    /// store's own verification runs on the lane and reaches the rung through
+    /// the background damage judgment instead.
     ///
     /// The withdrawal is the middle of the sequence rather than a detail of its
     /// end. The entry blocks inside rung 3 here, and what it publishes while it

@@ -27,6 +27,7 @@ mod search;
 mod semantic;
 mod status;
 mod text;
+mod verification;
 
 pub use apply::PlanGround;
 pub use derivation::DERIVATION_VERSION;
@@ -94,3 +95,4 @@ pub use semantic::{
     freshness,
 };
 pub use status::AttachmentAdvisory;
+pub use verification::VerificationReading;

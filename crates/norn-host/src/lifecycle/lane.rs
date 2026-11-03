@@ -4,7 +4,8 @@
 //! **The lane is kept apart from the shared worker pool**, so long background
 //! work never takes a slot an attach, a reconcile or an apply needs. It runs
 //! background units — an engine's initialization and its feed and reconcile
-//! pages today — which hold no claim and no attachment, so they run
+//! pages, and each store's periodic verification — which hold no claim and
+//! no attachment, so they run
 //! alongside their vault's reconciles and applies and share only CPU with
 //! them. The lane's thread count, `LifecyclePolicy::background_threads`, is
 //! the host-wide background budget and caps that competition.
@@ -191,6 +192,17 @@ impl Lane {
     }
 }
 
+/// The name every lane thread carries, so a unit can be seen to run on one.
+pub(crate) const LANE_THREAD: &str = "norn-background-lane";
+
+/// Start a thread named `name`, as `thread::spawn` starts one.
+fn spawn_named(name: &str, body: impl FnOnce() + Send + 'static) -> thread::JoinHandle<()> {
+    thread::Builder::new()
+        .name(name.to_string())
+        .spawn(body)
+        .expect("failed to spawn thread")
+}
+
 /// Start one lane thread for the host `shared` is. It ends where the lane is
 /// stopped or the host is gone.
 ///
@@ -203,7 +215,7 @@ pub(super) fn spawn<O: EntryOps>(
     shared: Weak<Shared<O>>,
     lane: Arc<Lane>,
 ) -> thread::JoinHandle<()> {
-    thread::spawn(move || {
+    spawn_named(LANE_THREAD, move || {
         while let Some(name) = lane.next() {
             let Some(host) = shared.upgrade() else {
                 lane.finish(&name, false);
@@ -267,6 +279,12 @@ fn turn<O: EntryOps>(shared: &Arc<Shared<O>>, name: &VaultName) -> bool {
     )
     .unwrap_or_else(|never| match never {});
     shared.lane.record(units, began.elapsed());
+    // A unit on a clock moves the clock on, and the scheduler's last ask read
+    // it as owed rather than as a deadline: the clock's next reading is handed
+    // back here, so the store comes due again with no wake.
+    if let Some(at) = shared.ops.background_deadline(name) {
+        shared.scheduler.retry_at(at);
+    }
     owed && !shared.lane.stopping()
 }
 

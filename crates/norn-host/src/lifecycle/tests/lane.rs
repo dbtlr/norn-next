@@ -408,6 +408,29 @@ fn damage_a_feed_read_meets_in_an_old_lifetime_schedules_nothing() {
     drop((leases, host));
 }
 
+/// **Where the entry records no store reading, the ops answer for the
+/// lifetime.** A host that composes no engine records none, and its store's
+/// verification still reads one lifetime: the ops' own binding of it decides.
+/// A verdict over the lifetime the ops hold schedules the rebuild once; one
+/// over another lifetime schedules nothing.
+#[test]
+fn damage_a_unit_meets_is_judged_by_the_ops_lifetime_where_the_entry_records_none() {
+    for (held, rebuilds) in [("lifetime-a", 1), ("lifetime-b", 0)] {
+        let ops = Arc::new(FakeOps::default());
+        let name = VaultName::new("notes").unwrap();
+        let (host, leases) = ready_vaults_under(&ops, &[&name], crate::BACKGROUND_TURN_BUDGET);
+        *ops.lifetime_held_by_the_ops.lock().unwrap() = Some(held.to_string());
+        *ops.lane_unit_damage.lock().unwrap() = Some("lifetime-a".to_string());
+        owe(&ops, &name, 1);
+        host.wake_background();
+
+        wait_for_lane_turns(&host, 1);
+        wait_for_state(&host, &name, TrustState::Ready);
+        assert_eq!(ops.rebuilds.load(Ordering::SeqCst), rebuilds, "held {held}");
+        drop((leases, host));
+    }
+}
+
 /// **A verdict a unit in flight brings back after its entry's stance moved to
 /// refuse schedules nothing.** The unit read the lifetime the entry still
 /// stands on, and no rebuild is owed or held: the entry's trust was withdrawn
