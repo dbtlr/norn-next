@@ -959,33 +959,36 @@ The deadlines are:
 
 **The scheduler asks for a maintenance leg through the existing scheduling path.** It
 takes the entry's gate, as the dispatcher's retry does, and reads the entry's background
-clocks there: they live on the entry rather than on the attachment, because the attachment
-is out with a leg exactly when the claim is held. The release that leaves an entry
-unattached ends its background clocks, whether a detach, an unwound leg's discard, or the
-give-back after a refusal or a loss gave the coverage back, so an unattached entry
-contributes no deadline, and the next attach starts them again. The scheduler schedules
-only where the entry's coverage is in hand and no release is in flight, as the poll does
-today. Where a claim-bound slice is due, the claim is free, no teardown is due and the
-entry owes no heal rung, it schedules a maintenance leg under the claim's scheduled marker
-and sends it to the worker pool, as a poll schedules one today. Where a full queue refuses
-the send, the marker stands with the claim held for it, and the dispatcher's retry of
-refused dispatches sends it. That retry sends a leg that was already scheduled. It never
-decides that maintenance is owed. **At every ask where a claim-bound slice is due, the
-scheduler either schedules the leg or, where any condition above stops it (the claim is
-held, the coverage is not in hand, a release is in flight, a teardown is due or a heal
-rung is owed), marks the entry as owing maintenance. It clears the mark only where it
-schedules the leg or no claim-bound slice is due**; a leg that hands the claim on to a
-maintenance leg also clears it. A scheduled or marked entry contributes no claim-bound
-deadline, so a rolling heal past its due time cannot wake the scheduler again and again
-for the length of a reconcile, and an entry whose mark is cleared contributes its next
-deadline again, so an idle vault keeps its hourly heal, full-text check and sweep. The
-release of the claim on a marked entry wakes the scheduler, which asks again; the ask on a
-marked entry runs whether or not a slice is still due, so a leg that reset the clock
-clears the mark. That wake is sent by the claim carrier's own moves that open the gate (a
-release, an open, the end of a poll, the drop of a marker), so no release site outside the
-carrier can omit it. The entry gate is taken before the scheduler's lock. The scheduler's
-lock and the lock on the lane's set are leaves: no thread holds either across a take of an
-entry gate or across a unit.
+clocks there: the entry keeps a reading of its attachment's earliest background deadline,
+because the attachment is out with a leg exactly when the claim is held. The reading is
+refreshed when the attachment is installed or parked and at each ask with the coverage in
+hand. It can only be early, never late, because a leg moves a clock only by running the
+unit that clock times, which sets it later. The release that leaves an entry unattached
+ends its background clocks, whether a detach, an unwound leg's discard, or the give-back
+after a refusal or a loss gave the coverage back, so an unattached entry contributes no
+deadline, and the next attach starts them again. The scheduler schedules only where the
+entry's coverage is in hand and no release is in flight, as the poll does today. Where a
+claim-bound slice is due, the claim is free, no teardown is due and the entry owes no heal
+rung, it schedules a maintenance leg under the claim's scheduled marker and sends it to
+the worker pool, as a poll schedules one today. Where a full queue refuses the send, the
+marker stands with the claim held for it, and the dispatcher's retry of refused dispatches
+sends it. That retry sends a leg that was already scheduled. It never decides that
+maintenance is owed. **At every ask where a claim-bound slice is due, the scheduler either
+schedules the leg or, where any condition above stops it (the claim is held, the coverage
+is not in hand, a release is in flight, a teardown is due or a heal rung is owed), marks
+the entry as owing maintenance. The mark stands through the scheduling and through a leg's
+hand-on to a maintenance leg, so the claim's release after that leg wakes the scheduler to
+read the clocks again; it clears the mark only at an ask where no claim-bound slice is
+due**. A scheduled or marked entry contributes no claim-bound deadline, so a rolling heal
+past its due time cannot wake the scheduler again and again for the length of a reconcile,
+and an entry whose mark is cleared contributes its next deadline again, so an idle vault
+keeps its hourly heal, full-text check and sweep. The release of the claim on a marked
+entry wakes the scheduler, which asks again; the ask on a marked entry runs whether or not
+a slice is still due, so a leg that reset the clock clears the mark. That wake is sent by
+the claim carrier's own moves that open the gate (a release, an open, the end of a poll,
+the drop of a marker), so no release site outside the carrier can omit it. The entry gate
+is taken before the scheduler's lock. The scheduler's lock and the lock on the lane's set
+are leaves: no thread holds either across a take of an entry gate or across a unit.
 
 **Leg ends keep asking `maintenance_due`, as today.** A reconcile leg that ends with
 maintenance due hands the claim on to a maintenance leg ahead of another reconcile turn,
@@ -1001,9 +1004,9 @@ clocks say what. These sites send one:
 - a commit that leaves an engine owing work;
 - an engine that becomes ready to initialize, which is the publication that commits its
   delivery;
-- a publication that returns an entry's read stance from refuse to serve or settle with
-  the same delivery and store lifetime, such as a recovery that did not rebuild, so the
-  engine of an idle vault resumes feeding without waiting for a commit;
+- a publication that returns an entry's read stance from refuse to serve or settle, such
+  as a recovery that did not rebuild, so the engine of an idle vault resumes feeding
+  without waiting for a commit (a move that also brings a new store costs one extra ask);
 - an attach, which starts the entry's clocks;
 - the release of the claim on an entry marked as owing maintenance.
 
@@ -1250,14 +1253,13 @@ that promise, as it does today.
 
 **A maintenance leg takes the background turn budget.** The leg checks the budget between
 units and always runs at least one. A unit of a maintenance leg is one sweep, the
-full-text check, or one step of a rolling-heal slice, such as one entry of the heal merge.
-The rolling-heal slice ends at its work bounds or at the budget, whichever it reaches
-first. A maintenance leg therefore holds the claim and one worker slot for at most its
-budget plus one unit. The longest unit is the full-text check, whose length the
-implementation measures. The leg counts its units beside its clock, as a background turn
-does. A leg that ends with maintenance still due schedules another, as
-[Work starts at a wake or a deadline](#work-starts-at-a-wake-or-a-deadline-with-no-poll-backstop)
-rules.
+full-text check, or one rolling-heal slice, which runs uninterrupted to its own work
+bounds; a leg takes at most one rolling-heal slice. A maintenance leg therefore holds the
+claim and one worker slot for at most its budget plus one unit. The longest unit is the
+full-text check, whose length the implementation measures. The leg counts its units beside
+its clock, as a background turn does. A leg that ends with maintenance still due schedules
+another, as [Work starts at a wake or a
+deadline](#work-starts-at-a-wake-or-a-deadline-with-no-poll-backstop) rules.
 
 The shared worker pool now runs correctness work, readiness work and these maintenance
 legs. A maintenance leg can therefore take a slot that an attach or a reconcile of another
