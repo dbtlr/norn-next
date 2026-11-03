@@ -10050,6 +10050,18 @@ mod tests {
         /// measured itself.
         longest_maintenance_unit: Mutex<Duration>,
         quiet_maintenances: Mutex<Vec<bool>>,
+        /// Background lane units each vault owes, one taken per unit.
+        lane_owed: Mutex<BTreeMap<VaultName, usize>>,
+        /// The vault of every lane unit run, in the order the lane ran them.
+        lane_ran: Mutex<Vec<VaultName>>,
+        /// What each lane unit takes, and the longest one took as the unit
+        /// measured itself.
+        lane_unit_cost: Mutex<Duration>,
+        longest_lane_unit: Mutex<Duration>,
+        /// While set, the next lane unit holds inside itself until released.
+        block_lane_unit: std::sync::atomic::AtomicBool,
+        lane_unit_started: std::sync::atomic::AtomicBool,
+        lane_unit_release: std::sync::atomic::AtomicBool,
         maintenances: AtomicUsize,
         /// The vault whose maintenance waits at the gate until the case sets
         /// `maintenance_release`.
@@ -10696,6 +10708,37 @@ mod tests {
 
         fn semantic(&self) -> Option<&crate::semantic::SemanticEngines> {
             self.semantic.as_deref()
+        }
+
+        fn background_owed(&self, name: &VaultName) -> bool {
+            self.lane_owed
+                .lock()
+                .unwrap()
+                .get(name)
+                .is_some_and(|owed| *owed > 0)
+        }
+
+        /// One owed unit, taking `lane_unit_cost`, recorded in the order the
+        /// lane ran it.
+        fn background_unit(&self, name: &VaultName) -> BackgroundUnit {
+            let left = {
+                let mut owed = self.lane_owed.lock().unwrap();
+                let Some(left) = owed.get_mut(name).filter(|left| **left > 0) else {
+                    return BackgroundUnit::NothingOwed;
+                };
+                *left -= 1;
+                *left
+            };
+            let began = Instant::now();
+            self.lane_ran.lock().unwrap().push(name.clone());
+            if self.block_lane_unit.swap(false, Ordering::SeqCst) {
+                self.lane_unit_started.store(true, Ordering::SeqCst);
+                wait_for_release("lane_unit_release", &self.lane_unit_release);
+            }
+            thread::sleep(*self.lane_unit_cost.lock().unwrap());
+            let mut longest = self.longest_lane_unit.lock().unwrap();
+            *longest = (*longest).max(began.elapsed());
+            BackgroundUnit::Ran { owed: left > 0 }
         }
 
         fn maintenance_owed(&self, name: &VaultName) -> bool {
@@ -27795,6 +27838,7 @@ mod tests {
 
     mod applies;
     mod background;
+    mod lane;
 
     /// A vault the set gains while the host runs, and a vault it loses.
     ///
