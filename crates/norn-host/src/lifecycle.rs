@@ -9907,6 +9907,9 @@ mod tests {
         /// maintenance.
         #[allow(clippy::type_complexity)]
         when_maintenance_owed_is_read: Mutex<Option<(VaultName, Box<dyn FnOnce() + Send>)>>,
+        /// The engines a case composes into the fake, which a leg's
+        /// publication commits a delivery against; none by default.
+        semantic: Option<Arc<crate::semantic::SemanticEngines>>,
         /// The clock every coverage of this fake reports as its next
         /// maintenance deadline, and the period it restarts with at each
         /// attach and each maintenance leg; `None` for no clock.
@@ -10553,6 +10556,10 @@ mod tests {
                 return Ok(Some(Batch::default()));
             }
             Ok(None)
+        }
+
+        fn semantic(&self) -> Option<&crate::semantic::SemanticEngines> {
+            self.semantic.as_deref()
         }
 
         fn maintenance_owed(&self, name: &VaultName) -> bool {

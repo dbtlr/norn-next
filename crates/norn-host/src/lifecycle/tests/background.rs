@@ -550,3 +550,77 @@ fn no_maintenance_leg_is_scheduled_over_an_entry_whose_teardown_is_due() {
     *ops.block_maintenance_at.lock().unwrap() = None;
     drop(host);
 }
+
+/// **A hold that returns the read stance from refuse to serve wakes the
+/// scheduler**, with no attach and no other wake. Every route back to serve
+/// in this host follows a recovery's rescan with a reconcile, whose end hands
+/// owed maintenance on itself, so the case moves the stance at the gate: one
+/// hold withdraws trust, maintenance comes to be owed with nothing announcing
+/// it, and the hold that publishes `Ready` again is what starts it.
+#[test]
+fn a_hold_returning_the_stance_from_refuse_to_serve_wakes_the_scheduler() {
+    let ops = Arc::new(FakeOps::default());
+    let (host, name, lease) = a_ready_vault(&ops);
+    wait_for_no_claim(&host, &name);
+    let entry = host.shared.entries.get(&name).unwrap();
+    {
+        let mut state = entry.gate.lock().unwrap();
+        state.withdraw_trust(UntrustedReason::environmental_refusal("refused"));
+        assert_eq!(state.read_stance(), ReadStance::Refuse);
+    }
+
+    arrange_for(&ops.maintenance_due_at, &name);
+    let wakes = host.scheduler_reading().wakes;
+    entry.gate.lock().unwrap().trust = TrustState::Ready;
+    assert_eq!(
+        host.scheduler_reading().wakes,
+        wakes + 1,
+        "the return to serve sent no wake"
+    );
+    wait_for_maintenances(&ops, 1);
+    drop((lease, host));
+}
+
+/// **The commit of an engine delivery wakes the scheduler**, with no attach
+/// and no other wake: the engine is ready to initialize from that commit.
+/// Every leg that commits a delivery either installs coverage, which wakes
+/// too, or follows a recovery's rescan with a reconcile, so the case runs the
+/// publishing hold's commit itself, over coverage parked back by the leg the
+/// case stands in for.
+#[test]
+fn the_commit_of_an_engine_delivery_wakes_the_scheduler() {
+    use crate::semantic::SemanticEngines;
+    use crate::reload::EngineConfigReceiver;
+
+    let scratch = std::env::temp_dir().join("norn-host-delivery-wake");
+    let engines = SemanticEngines::new(
+        norn_config::ConfigDirs::new(scratch.join("config"), scratch.join("data")).unwrap(),
+    );
+    let ops = Arc::new(FakeOps {
+        semantic: Some(Arc::clone(&engines)),
+        ..FakeOps::default()
+    });
+    let (host, name, lease) = a_ready_vault(&ops);
+    wait_for_no_claim(&host, &name);
+    engines.receive(&name, None);
+
+    // What the engine owes once its delivery is committed.
+    arrange_for(&ops.maintenance_due_at, &name);
+    let wakes = host.scheduler_reading().wakes;
+    {
+        let entry = host.shared.entries.get(&name).unwrap();
+        let mut state = entry.gate.lock().unwrap();
+        let leg = state.claim.epoch();
+        let coverage = state.coverage.take(leg).expect("the coverage is parked");
+        record_active_declaration(&mut state, &*host.shared.ops, &name, &coverage);
+        state.coverage.park_by(leg, coverage);
+        assert!(state.delivered_engine.is_some(), "no delivery was committed");
+    }
+    assert_eq!(
+        host.scheduler_reading().wakes,
+        wakes + 1,
+        "the delivery's commit sent no wake"
+    );
+    wait_for_maintenances(&ops, 1);
+    drop((lease, host));
+}
