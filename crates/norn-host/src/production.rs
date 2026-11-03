@@ -9634,7 +9634,7 @@ mod tests {
         /// **A vault is `Ready` before its enabled engine is initialized, and
         /// its status says the engine is preparing**: not off, which is a
         /// section that asks for none, and not on. The case holds owed work,
-        /// so no maintenance slice has run, and lexical reads already serve.
+        /// so no background unit has run, and lexical reads already serve.
         #[test]
         fn a_ready_vault_reports_its_enabled_engine_preparing_before_any_slice() {
             let f = Fixture::new("status-engine-preparing");
@@ -9903,7 +9903,7 @@ mod tests {
             fs::write(f.vault().join("a.md"), "alpha alpha\n").unwrap();
             // Never armed: the watcher's facts are swallowed, so the explicit
             // reload is the only leg that meets the exhausted document open, and
-            // the scheduler still starts the engine's maintenance slices.
+            // the background lane still runs the engine's units.
             let (host, name, _lease, _armed, _) = overflowing_ready_host(&f);
             wait_for_engine(&host, &name, |engine| {
                 *engine == norn_wire::EngineStatus::on(None, Some(Freshness::trailing(0)))
@@ -11113,7 +11113,7 @@ mod tests {
             let (host, name, _lease) = polling_ready_host(&f, ops);
             install_entered
                 .recv_timeout(Duration::from_secs(15))
-                .expect("a maintenance slice to initialize the engine");
+                .expect("a background unit to initialize the engine");
 
             let get = host.get(&norn_wire::GetParams::new(
                 norn_wire::VaultAddress::name(name.clone()),
@@ -11311,17 +11311,18 @@ mod tests {
             });
         }
 
-        /// **A reconcile commits the edit before the semantic unit it owes,
-        /// and that unit runs while the entry serves or settles**: an edit's
-        /// reconcile commits lane-1 work and owes the engine its work, and by
-        /// the moment the unit starts the entry answers `Ready` or is settling
-        /// the change — never refusing — and a settling lexical read from
-        /// inside the unit finds the edit. The unit holds no claim, so it may
-        /// start before the reconcile publishes; what it reads is the
-        /// committed store. The unit is the one the edit owes because the
-        /// engine had drained everything before the edit landed.
+        /// **A reconcile records the store reading and the owe before its
+        /// publication, so a status taken before the unit it owes runs reports
+        /// the engine trailing the edit**, and that unit runs while the entry
+        /// serves or settles. The engine had drained everything, and the unit
+        /// the edit owes is held inside its read phase, before it reads the
+        /// feed. Holding no slot lock, the case waits until a lexical read
+        /// finds the edit — the reconcile has published — and reads the
+        /// entry's state and status there: the entry serves or settles, never
+        /// refusing, and the engine trails the store. Released, the unit
+        /// drains the edit.
         #[test]
-        fn a_reconcile_commits_the_edit_before_the_semantic_unit_it_owes() {
+        fn a_reconcile_owes_the_engine_its_edit_before_the_unit_runs() {
             let f = Fixture::new("semantic-slice-after-ready");
             fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
             fs::write(f.vault().join("alpha.md"), "alpha\n").unwrap();
@@ -11330,32 +11331,35 @@ mod tests {
             wait_for_engine(&host, &name, |engine| {
                 *engine == norn_wire::EngineStatus::on(None, Some(Freshness::trailing(0)))
             });
-            let host = Arc::new(host);
-            let watched = Arc::downgrade(&host);
-            let vault = name.clone();
-            let (seen, seen_at_unit) = std::sync::mpsc::channel();
+            let (entered, unit_entered) = std::sync::mpsc::channel();
+            let (resume, unit_resumes) = std::sync::mpsc::channel::<()>();
             engines.run_inside_next_drain(move || {
-                let Some(host) = watched.upgrade() else {
-                    return;
-                };
-                let state = host.state(&vault);
-                let params = norn_wire::SearchParams::new(
-                    norn_wire::VaultAddress::name(vault.clone()),
-                    "beta",
-                )
-                .with_rungs(norn_wire::RungSelection::exactly(
-                    norn_wire::RungSet::of([norn_wire::Rung::Lexical]).unwrap(),
-                ));
-                let rows = host
-                    .search(&params)
-                    .map(|answer| answer.answer.report.page.rows.len());
-                seen.send((state, rows)).unwrap();
+                entered.send(()).unwrap();
+                let _ = unit_resumes.recv_timeout(Duration::from_secs(30));
             });
 
             fs::write(f.vault().join("beta.md"), "beta\n").unwrap();
-            let (state, rows) = seen_at_unit
+            unit_entered
                 .recv_timeout(Duration::from_secs(30))
                 .expect("the semantic unit the edit owes");
+            let params =
+                norn_wire::SearchParams::new(norn_wire::VaultAddress::name(name.clone()), "beta")
+                    .with_rungs(norn_wire::RungSelection::exactly(
+                        norn_wire::RungSet::of([norn_wire::Rung::Lexical]).unwrap(),
+                    ));
+            wait_until("the edit to be published", lifecycle_budget(), || {
+                match host
+                    .search(&params)
+                    .map(|answer| answer.answer.report.page.rows.len())
+                {
+                    Ok(1) => Observed::Met(()),
+                    rows => Observed::Pending(format!("a lexical read found {rows:?}")),
+                }
+            })
+            .unwrap_or_else(|failure| panic!("{failure}"));
+            let state = host.state(&name);
+            let (_, engine) = engine_reported(&host, &name);
+            resume.send(()).unwrap();
 
             assert!(
                 matches!(
@@ -11366,14 +11370,19 @@ mod tests {
                             ..
                         })
                 ),
-                "a semantic unit fed while its entry refused: {state:?}"
+                "the entry refused while the semantic unit was owed: {state:?}"
             );
-            assert_eq!(
-                rows,
-                Ok(1),
-                "a semantic unit ran before the edit was committed"
+            assert!(
+                matches!(
+                    engine,
+                    norn_wire::EngineStatus::On {
+                        freshness: Some(Freshness::Trailing { generations, .. }),
+                        ..
+                    } if generations > 0
+                ),
+                "a status before the unit ran called the engine caught up: {engine:?}"
             );
-            wait_for_engine(&*host, &name, |engine| {
+            wait_for_engine(&host, &name, |engine| {
                 *engine == norn_wire::EngineStatus::on(None, Some(Freshness::trailing(0)))
             });
         }
