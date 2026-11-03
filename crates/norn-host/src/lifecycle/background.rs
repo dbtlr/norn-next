@@ -126,6 +126,11 @@ impl Scheduler {
 
 /// Start the scheduler thread for the host `shared` is, waiting on
 /// `scheduler`. It ends where the scheduler is stopped or the host is gone.
+///
+/// **Each turn is caught**, so an unwind out of one ends neither the thread
+/// nor any later turn: nothing respawns a scheduler, as nothing respawns a
+/// dispatcher. A turn that unwinds whole leaves no deadline, and the next
+/// wake asks every entry again.
 pub(super) fn spawn<O: EntryOps>(
     shared: Weak<Shared<O>>,
     scheduler: Arc<Scheduler>,
@@ -135,7 +140,8 @@ pub(super) fn spawn<O: EntryOps>(
             let Some(shared) = shared.upgrade() else {
                 break;
             };
-            let earliest = ask(&shared);
+            let earliest =
+                std::panic::catch_unwind(AssertUnwindSafe(|| ask(&shared))).unwrap_or(None);
             drop(shared);
             scheduler.sleep_until(earliest);
         }
@@ -146,23 +152,34 @@ pub(super) fn spawn<O: EntryOps>(
 /// where a claim-bound slice is due, and answer the earliest deadline an
 /// entry contributes.
 ///
-/// An unwind out of one entry's ask is caught there, so the entries after it
-/// are asked in this same turn, and an entry whose gate is poisoned is passed
-/// by, as the dispatcher tick passes it by.
+/// An unwind out of one entry's ask or out of the dispatch of the leg it
+/// scheduled is caught there, so the entries after it are asked in this same
+/// turn. An entry whose gate is poisoned — that unwind's own among them — is
+/// passed by, as the dispatcher tick passes it by, so it costs no later turn
+/// anything; a gate poisoned between the check and the take unwinds that one
+/// entry's ask, and the next turn passes the entry by.
 fn ask<O: EntryOps>(shared: &Arc<Shared<O>>) -> Option<Instant> {
+    #[cfg(test)]
+    if shared
+        .panic_in_scheduler_ask
+        .swap(false, std::sync::atomic::Ordering::SeqCst)
+    {
+        panic!("the scheduler's ask unwound before asking any entry");
+    }
     let mut earliest: Option<Instant> = None;
     for entry in shared.entries.snapshot() {
         if entry.gate.is_poisoned() {
             continue;
         }
-        let Ok((deadline, scheduled)) =
-            std::panic::catch_unwind(AssertUnwindSafe(|| ask_entry(shared, &entry)))
-        else {
+        let Ok(deadline) = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            let (deadline, scheduled) = ask_entry(shared, &entry);
+            if scheduled {
+                let _ = dispatch_pending(shared, &entry);
+            }
+            deadline
+        })) else {
             continue;
         };
-        if scheduled {
-            let _ = dispatch_pending(shared, &entry);
-        }
         earliest = match (earliest, deadline) {
             (Some(earlier), Some(at)) => Some(earlier.min(at)),
             (earlier, at) => earlier.or(at),

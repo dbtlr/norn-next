@@ -360,3 +360,89 @@ fn an_empty_plan(name: &VaultName) -> norn_wire::ResolvedPlan {
         Vec::new(),
     )
 }
+
+/// **An unwind out of the scheduler's dispatch of the leg it scheduled leaves
+/// every other vault scheduled.** A write left for alpha's next hold panics,
+/// and it is left from inside the scheduler's own hold of alpha's gate, so
+/// the hold it lands in is the dispatch of the leg that ask scheduled. The
+/// unwind poisons alpha's gate and ends nothing else: beta's owed
+/// maintenance still starts at its wake.
+#[test]
+fn an_unwind_in_the_schedulers_dispatch_leaves_every_other_vault_scheduled() {
+    let ops = Arc::new(FakeOps::default());
+    let alpha = VaultName::new("alpha").unwrap();
+    let beta = VaultName::new("beta").unwrap();
+    let host = Host::new(
+        Roots::Absent(&[&alpha, &beta]).registry(),
+        Arc::clone(&ops),
+        no_ambient_poll_policy(2),
+    )
+    .unwrap();
+    let leases = (host.demand(&alpha).unwrap(), host.demand(&beta).unwrap());
+    for name in [&alpha, &beta] {
+        wait_for_state(&host, name, TrustState::Ready);
+        wait_for_no_claim(&host, name);
+    }
+
+    let entry = host.shared.entries.get(&alpha).unwrap();
+    let gate = Arc::clone(&entry);
+    *ops.when_maintenance_owed_is_read.lock().unwrap() = Some((
+        alpha.clone(),
+        Box::new(move || {
+            gate.gate
+                .run_under_the_next_hold(|_| panic!("a write left for the next hold unwinds"));
+        }),
+    ));
+    arrange_for(&ops.maintenance_due_at, &alpha);
+    host.wake_background();
+    wait_until(
+        "the scheduler's dispatch to unwind under alpha's gate",
+        lifecycle_wait_budget(),
+        || {
+            if entry.gate.is_poisoned() {
+                Observed::Met(())
+            } else {
+                Observed::pending("alpha's gate is not poisoned")
+            }
+        },
+    )
+    .unwrap_or_else(|failure| panic!("{failure}"));
+    assert_eq!(ops.maintenances.load(Ordering::SeqCst), 0);
+
+    arrange_for(&ops.maintenance_due_at, &beta);
+    host.wake_background();
+    wait_for_maintenances(&ops, 1);
+
+    // The poison is cleared so the case can tear its fixture down: the
+    // host's destruction takes every entry's gate.
+    entry.gate.clear_poison();
+    drop((leases, host));
+}
+
+/// **A scheduler turn that unwinds whole ends no later turn.** The armed ask
+/// unwinds before it reads any entry; the next wake is still asked, and the
+/// maintenance it finds owed starts.
+#[test]
+fn a_scheduler_turn_that_unwinds_ends_no_later_turn() {
+    let ops = Arc::new(FakeOps::default());
+    let (host, name, lease) = a_ready_vault(&ops);
+    host.shared
+        .panic_in_scheduler_ask
+        .store(true, Ordering::SeqCst);
+    host.wake_background();
+    wait_until(
+        "the armed ask to unwind",
+        lifecycle_wait_budget(),
+        || {
+            if host.shared.panic_in_scheduler_ask.load(Ordering::SeqCst) {
+                Observed::pending("the armed ask has not run")
+            } else {
+                Observed::Met(())
+            }
+        },
+    )
+    .unwrap_or_else(|failure| panic!("{failure}"));
+    owe_maintenance(&host, &ops, &name);
+    wait_for_maintenances(&ops, 1);
+    drop((lease, host));
+}

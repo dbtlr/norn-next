@@ -4246,6 +4246,9 @@ struct Shared<O: EntryOps> {
     /// Unwind the next retry of refused dispatches before it sends any.
     #[cfg(test)]
     panic_in_dispatch_retry: AtomicBool,
+    /// Unwind the background scheduler's next ask before it asks any entry.
+    #[cfg(test)]
+    panic_in_scheduler_ask: AtomicBool,
     /// Held across every registration change, from the checks it answers on
     /// through the registry write and the serving-set change it makes.
     ///
@@ -5192,6 +5195,8 @@ impl<O: EntryOps> Host<O> {
             panic_in_reap_dispatch: AtomicBool::new(false),
             #[cfg(test)]
             panic_in_dispatch_retry: AtomicBool::new(false),
+            #[cfg(test)]
+            panic_in_scheduler_ask: AtomicBool::new(false),
             registration_gate: Mutex::new(()),
         });
         let mut workers = Vec::with_capacity(policy.worker_slots);
@@ -9897,6 +9902,11 @@ mod tests {
         /// would be run by whichever leg reached it first. A case arranging
         /// it wakes the scheduler, as a commit owing work would.
         maintenance_due_at: Mutex<Option<VaultName>>,
+        /// Work run once, inside the scheduler's own hold of the named
+        /// vault's gate, where its ask next reads whether that vault owes
+        /// maintenance.
+        #[allow(clippy::type_complexity)]
+        when_maintenance_owed_is_read: Mutex<Option<(VaultName, Box<dyn FnOnce() + Send>)>>,
         /// The clock every coverage of this fake reports as its next
         /// maintenance deadline, and the period it restarts with at each
         /// attach and each maintenance leg; `None` for no clock.
@@ -10546,6 +10556,12 @@ mod tests {
         }
 
         fn maintenance_owed(&self, name: &VaultName) -> bool {
+            let mut arranged = self.when_maintenance_owed_is_read.lock().unwrap();
+            if arranged.as_ref().is_some_and(|(vault, _)| vault == name) {
+                let (_, work) = arranged.take().unwrap();
+                drop(arranged);
+                work();
+            }
             stands_for_the_vault(&self.maintenance_due_at, name)
         }
 
