@@ -208,6 +208,70 @@ fn a_source_over_a_store_that_was_replaced_is_refused_and_not_damage() {
     assert_eq!(error.damage(), None, "{error:?}");
 }
 
+/// A store replaced at `scratch`'s path by a rebuild, holding one document,
+/// then damaged behind the store's back by `damage`.
+fn replaced_and_damaged(store: Store, damage: &str) -> Store {
+    let mut rebuilt = store
+        .discard_and_reopen(StoredPathOrder::Sensitive)
+        .expect("a rebuild of the store");
+    write_document(
+        &mut rebuilt.begin_request(),
+        &document("x.md", "hash-1", "a body\n"),
+    );
+    induced_failure::execute_out_of_band(&mut rebuilt, damage).expect("damaging the rebuilt store");
+    rebuilt
+}
+
+/// **Each connection a verification opens is held to the source's
+/// lifetime.** A store replaced before the verification opens, and damaged
+/// where the read-only checks look, is refused at the read-only checks'
+/// connection: their verdict would otherwise be damage about a store the
+/// source was never minted from.
+#[test]
+fn a_store_replaced_before_the_read_only_checks_is_refused_there() {
+    let scratch = Scratch::new("source-replaced-before-checks");
+    let store = a_store_with_a_row_for_every_check(&scratch);
+    let source = store.verification_source();
+    let _rebuilt = replaced_and_damaged(store, "UPDATE documents SET body_hash = 'not a hash'");
+    let Verification::Failed(error) = source.verify(|_| {}) else {
+        panic!("a source over a replaced store reached a verdict");
+    };
+    assert_eq!(error.damage(), None, "{error:?}");
+}
+
+/// **The copy is held to the source's lifetime too.** A store replaced
+/// between the read-only checks and the copy, and damaged where only the
+/// copy's full-text check looks, is refused at the copy connection: a copy
+/// of the replacement would be judged damaged for the source's lifetime.
+#[test]
+fn a_store_replaced_between_the_checks_and_the_copy_is_refused_there() {
+    let scratch = Scratch::new("source-replaced-at-copy");
+    let store = a_store_with_a_row_for_every_check(&scratch);
+    let source = store.verification_source();
+    let (entered, entry) = mpsc::channel();
+    let (resume, resumed) = mpsc::channel::<()>();
+    let verifying = thread::spawn(move || {
+        source.verify(move |at| {
+            if at == VerificationPoint::Copy {
+                entered.send(()).unwrap();
+                resumed.recv_timeout(Duration::from_secs(30)).unwrap();
+            }
+        })
+    });
+    entry
+        .recv_timeout(Duration::from_secs(15))
+        .expect("the verification to reach its copy");
+    let _rebuilt = replaced_and_damaged(
+        store,
+        "INSERT INTO documents_fts (rowid, body) VALUES (99999, 'a body no document holds')",
+    );
+    resume.send(()).unwrap();
+    let Verification::Failed(error) = verifying.join().unwrap() else {
+        panic!("a source over a replaced store reached a verdict");
+    };
+    assert_eq!(error.damage(), None, "{error:?}");
+}
+
 /// **A write commits wherever the verification is.** Held with its snapshot
 /// open, before its copy and with its copy written, the verification lets a
 /// write commit each time, and reads none of it: the damage each write leaves
