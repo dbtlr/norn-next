@@ -75,21 +75,20 @@ const SKIPPED_LINKS_RETAINED: usize = 16;
 /// How long an attachment goes between verifications of its own derived state.
 ///
 /// An authored bound rather than a measured one. `PRAGMA integrity_check` reads
-/// the whole database, so the cadence is what keeps that a background cost
-/// rather than a recurring one: it runs on the bounded lifecycle worker pool,
-/// never on the request path, and an entry pays it once an hour whatever its
-/// query traffic. Shorter would spend a full scan to shorten a window nothing
-/// is racing; longer would leave silent damage standing across a working day.
+/// the whole database, and the full-text check runs on a copy of it, so the
+/// cadence is what keeps that a background cost rather than a recurring one:
+/// it runs as one unit on the background lane, never on the request path and
+/// never on the claim, and an entry pays it once an hour whatever its query
+/// traffic. Shorter would spend a full scan and a copy to shorten a window
+/// nothing is racing; longer would leave silent damage standing across a
+/// working day.
 ///
-/// **What the interval is traded against.** The maintenance leg holds the
-/// entry's coverage while it runs, and an entry whose coverage is out with a
-/// leg drains no watcher batch, so the scan is time the subscription's queue
-/// fills unattended. On a store large enough for one scan to outlast that
-/// queue, the overflow and the full rescan answering it are the accepted cost
-/// of asking the question at all: silent damage that nothing else meets is
-/// worse than a re-read of a vault that is sound. The scan's cost grows with
-/// the database, so a corpus that makes the trade unaffordable is a reason to
-/// measure the scan and move this bound, not to skip it.
+/// **What the interval is traded against.** The verification holds a lane
+/// thread for its whole length — about 0.65 s at 10,000 documents — and a
+/// copy of the store on disk while its full-text check runs, and while it
+/// reads, the write-ahead log cannot checkpoint past its snapshot. With the
+/// production value of one lane thread, every other derived store's
+/// background turns wait for it. None of it holds a write.
 pub const STORE_VERIFICATION_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
 /// Maximum time one lifecycle worker may wait for watcher coverage to become live.
@@ -270,6 +269,9 @@ pub struct ProductionEntryOps {
     /// engine seams the receiver dispatch cannot carry. A second engine is
     /// what generalizes this field into a seam.
     semantic: Option<Arc<crate::semantic::SemanticEngines>>,
+    /// Every attached store's periodic verification: one background unit of
+    /// the lane, bound to the store lifetime an attach or a rebuild opened.
+    verifications: Arc<crate::verification::StoreVerifications>,
 }
 
 pub struct ProductionAttachment {
@@ -345,19 +347,13 @@ pub struct ProductionAttachment {
     /// merged in, or a links-only walk where those merges left it inexact.
     skipped_links: SkippedLinks,
     last_shadow_sweep: Instant,
-    /// When the store is next asked to answer for its own consistency.
-    ///
-    /// Logical damage is silent: a full-text index that stopped agreeing with
-    /// the column it indexes, a value outside a closed vocabulary, a foreign key
-    /// pointing at a row that is gone. None of it fails a read that does not
-    /// touch it, so nothing meets it until a client's query does — which is why
-    /// the question is asked on a schedule instead.
-    ///
-    /// The deadline is carried rather than the last answer, so the one clock
-    /// reading says both whether the question is due and, once it is answered,
-    /// when it is due again.
-    store_verification_due: Instant,
     rolling: rolling::RollingHeal,
+    /// The retirement of the store lifetime's periodic verification, declared
+    /// beside the engine's for the same reason: an attachment dropped on an
+    /// unwinding stack stops a verification in flight over its store, and
+    /// waits for it to return, before the maintainer lock goes.
+    /// [`release`] drops it first.
+    verification_retirement: VerificationRetirement,
     /// The retirement of the vault's engine delivery, declared just before the
     /// maintainer lock because fields drop in declaration order: an attachment
     /// dropped on an unwinding stack retires the delivery before the lock
@@ -382,6 +378,20 @@ impl Drop for EngineRetirement {
     fn drop(&mut self) {
         if let Some((engines, name)) = self.0.take() {
             engines.retire_delivery(&name);
+        }
+    }
+}
+
+/// Retires a vault's periodic verification where it is dropped: a
+/// verification in flight is stopped and has returned, and the vault's slot is
+/// forgotten. Every path that gives an attachment back drops it ahead of the
+/// maintainer lock.
+struct VerificationRetirement(Option<(Arc<crate::verification::StoreVerifications>, VaultName)>);
+
+impl Drop for VerificationRetirement {
+    fn drop(&mut self) {
+        if let Some((verifications, name)) = self.0.take() {
+            verifications.detach(&name);
         }
     }
 }
@@ -745,11 +755,27 @@ impl ProductionEntryOps {
             evidence: Arc::new(JobEvidence::default()),
             engine_config_receivers: Vec::new(),
             semantic: None,
+            verifications: Arc::new(crate::verification::StoreVerifications::new(
+                STORE_VERIFICATION_INTERVAL,
+            )),
         };
         if let Err(error) = ops.sweep_count_orphans() {
             ops.record_cleanup_failure(error);
         }
         ops
+    }
+
+    /// Verify every store this host attaches each `interval` rather than
+    /// hourly, so a case can watch the clock come due again.
+    #[cfg(test)]
+    pub(crate) fn with_verification_interval(mut self, interval: Duration) -> Self {
+        self.verifications = Arc::new(crate::verification::StoreVerifications::new(interval));
+        self
+    }
+
+    /// What the lane's periodic verifications came to since the host began.
+    pub fn verification_reading(&self) -> crate::VerificationReading {
+        self.verifications.reading()
     }
 
     /// The eight most recent cleanup failures, with a dropped count.
@@ -872,31 +898,12 @@ impl ProductionEntryOps {
         true
     }
 
-    /// The store's verification, where its clock is due: answers whether it
-    /// ran.
-    ///
-    /// The store's own consistency is the other maintenance question, and it
-    /// is asked for the same reason the sweep is: it is bounded work off the
-    /// request path. Its clock is read separately from the sweep's, because
-    /// the two acts cost differently: a sweep reads one directory, and this
-    /// reads every page of the database. One leg serving both cadences on
-    /// whichever clock is up would spend the read on the sweep's. A verdict of
-    /// damage is **not** swallowed the way a failed sweep is — a sweep that
-    /// did not run leaves derived state sound, and this is the one caller that
-    /// learns it is not.
-    fn verification_unit(&self, attachment: &mut ProductionAttachment) -> Result<bool, JobFailure> {
-        if Instant::now() < attachment.store_verification_due {
-            return Ok(false);
-        }
-        let _job = self.evidence.attributing();
-        attachment.store.verify_integrity().map_err(store_effect)?;
-        attachment.store_verification_due = Instant::now() + STORE_VERIFICATION_INTERVAL;
-        Ok(true)
-    }
-
     /// One unit of a maintenance leg, answering whether one ran.
     ///
-    /// The sweep and the verification run whether or not the claim is quiet.
+    /// The sweep runs whether or not the claim is quiet. The store's
+    /// verification is no unit of a leg: it runs whole on the background lane,
+    /// through read-only connections, holding neither the claim nor the
+    /// writer.
     /// A leg takes at most one rolling-heal slice, and only over a quiet claim
     /// rechecked before it, so the lifecycle drains watcher batches and hands
     /// on applies, facts and teardown before the next slice, and what a slice
@@ -912,7 +919,7 @@ impl ProductionEntryOps {
         progress: &ProgressReporter<ProductionAttachment>,
     ) -> Result<bool, JobFailure> {
         self.check_maintainership(attachment)?;
-        if self.sweep_unit(attachment) || self.verification_unit(attachment)? {
+        if self.sweep_unit(attachment) {
             return Ok(true);
         }
         if *sliced || !quiet || !attachment.rolling.due() {
@@ -1549,6 +1556,15 @@ impl ProductionEntryOps {
                 .map_err(effect)?,
             self.policy.rolling_period(),
         );
+        // The store lifetime this attach opened comes due its periodic
+        // verification an interval from now; a copy a crash left beside the
+        // store is cleared here.
+        self.verifications
+            .bind(&registration.name, store.verification_source());
+        let verification_retirement = VerificationRetirement(Some((
+            Arc::clone(&self.verifications),
+            registration.name.clone(),
+        )));
         let mut attachment = ProductionAttachment {
             readers: Arc::clone(&self.readers),
             registration: registration.clone(),
@@ -1567,8 +1583,8 @@ impl ProductionEntryOps {
             shadow_advisory,
             skipped_links: SkippedLinks::default(),
             last_shadow_sweep: Instant::now(),
-            store_verification_due: Instant::now() + STORE_VERIFICATION_INTERVAL,
             rolling,
+            verification_retirement,
             engine_retirement: EngineRetirement(
                 self.semantic
                     .as_ref()
@@ -1722,18 +1738,26 @@ impl ProductionEntryOps {
         if let Some(semantic) = &self.semantic {
             semantic.retire_store(&attachment.registration.name);
         }
+        // So does a verification in flight over it: stopped, and returned,
+        // before the store it reads and copies is removed.
+        self.verifications
+            .retire_store(&attachment.registration.name);
         match attachment.store.discard_and_reopen(order) {
             Ok(store) => attachment.store = store,
             Err(error) => {
                 drop(attachment.subscription);
+                drop(attachment.verification_retirement);
                 drop(attachment.engine_retirement);
                 drop(attachment.maintainership);
                 return Err(store_effect(error));
             }
         }
+        self.verifications.bind(
+            &attachment.registration.name,
+            attachment.store.verification_source(),
+        );
         attachment.rolling.reset_after_rebuild();
         attachment.read_pinned_model()?;
-        attachment.store_verification_due = Instant::now() + STORE_VERIFICATION_INTERVAL;
         // Controls a leg held for this rung are the ones the rebuilt store is
         // pinned and derived under.
         if let Some(held) = attachment.held_for_rung_three.take() {
@@ -1816,6 +1840,7 @@ fn release_owned(
     attachment: ProductionAttachment,
     close_subscription: impl FnOnce(Option<Subscription>) -> Result<(), String>,
 ) -> Vec<String> {
+    drop(attachment.verification_retirement);
     drop(attachment.engine_retirement);
     let watcher = close_subscription(attachment.subscription);
     let store = attachment.store.close();
@@ -2426,10 +2451,11 @@ impl EntryOps for ProductionEntryOps {
         Some(attachment.rolling.status())
     }
 
-    /// A leg's units in today's order: the shadow sweep, then the store's
-    /// verification, then one rolling-heal slice, each taken only where its
-    /// clock says it is owed and the leg's budget lasts. Only the rolling-heal
-    /// slice requires a quiet claim.
+    /// A leg's units in today's order: the shadow sweep, then one rolling-heal
+    /// slice, each taken only where its clock says it is owed and the leg's
+    /// budget lasts. Only the rolling-heal slice requires a quiet claim. The
+    /// store's verification is a background unit of the lane, never a unit of
+    /// a leg.
     fn maintain_quiet(
         &self,
         name: &VaultName,
@@ -2442,16 +2468,13 @@ impl EntryOps for ProductionEntryOps {
         turn.run_units(|| self.maintenance_unit(name, attachment, quiet, &mut sliced, progress))
     }
 
-    /// One maintenance leg serves independent cleanup, verification and rolling
-    /// clocks, whichever comes due first. A rolling pass in progress keeps its
-    /// clock past due until the pass completes.
+    /// One maintenance leg serves independent cleanup and rolling clocks,
+    /// whichever comes due first. A rolling pass in progress keeps its clock
+    /// past due until the pass completes. The verification's clock is the
+    /// lane's ([`EntryOps::background_deadline`]).
     fn maintenance_deadline(&self, attachment: &Self::Attachment) -> Option<Instant> {
         let swept_due = attachment.last_shadow_sweep + norn_fs::SHADOW_AGE_THRESHOLD;
-        Some(
-            swept_due
-                .min(attachment.store_verification_due)
-                .min(attachment.rolling.due),
-        )
+        Some(swept_due.min(attachment.rolling.due))
     }
 
     /// The engines read the store lifetime through a source minted here, in
@@ -2462,30 +2485,58 @@ impl EntryOps for ProductionEntryOps {
             .map(|_| attachment.store.feed_source())
     }
 
-    /// The vault's engine owes a unit that may run now: the semantic work a
+    /// The vault's derived store owes a unit that may run now: its periodic
+    /// verification, where its clock is due, or the engine's semantic work a
     /// commit left owed, which the commit's own wake announces, or the
     /// initialization its published delivery owes.
     fn background_owed(&self, name: &VaultName) -> bool {
-        self.semantic
-            .as_ref()
-            .is_some_and(|semantic| semantic.owes_work(name))
+        self.verifications.owed(name)
+            || self
+                .semantic
+                .as_ref()
+                .is_some_and(|semantic| semantic.owes_work(name))
     }
 
-    /// One unit of the vault's engine, on the background lane.
+    /// One unit of the vault's derived store, on the background lane: its
+    /// verification where it is due, and otherwise one unit of its engine.
     fn background_unit(&self, name: &VaultName) -> crate::BackgroundUnit {
-        self.semantic
-            .as_ref()
-            .map_or(crate::BackgroundUnit::NothingOwed, |semantic| {
-                semantic.unit(name)
-            })
+        match self.verifications.unit(name) {
+            Some(crate::BackgroundUnit::Ran { .. }) => crate::BackgroundUnit::Ran {
+                owed: self.background_owed(name),
+            },
+            Some(unit) => unit,
+            None => self
+                .semantic
+                .as_ref()
+                .map_or(crate::BackgroundUnit::NothingOwed, |semantic| {
+                    semantic.unit(name)
+                }),
+        }
     }
 
-    /// The shadow sweep and the store's verification, each where its clock
-    /// is due, as one call outside a leg's budget.
+    /// The verification's clock, which is a lane deadline.
+    fn background_deadline(&self, name: &VaultName) -> Option<Instant> {
+        self.verifications.deadline(name)
+    }
+
+    /// The verification's slot is bound to the store lifetime an attach or a
+    /// rebuild opened, and a rebuild's discard unbinds it before the store
+    /// goes, so it answers for the lifetime whether or not an engine recorded
+    /// the entry's store reading.
+    fn store_lifetime_current(&self, name: &VaultName, epoch: &str) -> bool {
+        self.verifications.is_current(name, epoch)
+    }
+
+    /// A verification in flight is stopped rather than waited out.
+    fn retire_background(&self) {
+        self.verifications.retire_all();
+    }
+
+    /// The shadow sweep, where its clock is due, as one call outside a leg's
+    /// budget.
     fn maintain(&self, _: &VaultName, attachment: &mut Self::Attachment) -> Result<(), JobFailure> {
         self.check_maintainership(attachment)?;
         self.sweep_unit(attachment);
-        self.verification_unit(attachment)?;
         Ok(())
     }
 
@@ -2591,6 +2642,7 @@ impl EntryOps for ProductionEntryOps {
     /// by vault name, so nothing but this call empties it. Its sidecar file is
     /// retained state, as it is on the detach path.
     fn discard(&self, name: &VaultName) {
+        self.verifications.detach(name);
         if let Some(semantic) = &self.semantic {
             semantic.detach(name);
         }
@@ -6843,6 +6895,15 @@ mod tests {
     #[cfg(feature = "induced-failure")]
     mod broken_documents {
         include!("production/broken_tests.rs");
+    }
+
+    /// The store's periodic verification as one background unit of the lane:
+    /// a write is never held behind it, it never runs on a maintenance leg,
+    /// the damage it meets is judged for the store lifetime it read and
+    /// schedules the rebuild once, and a retirement or host shutdown stops it
+    /// rather than waiting it out.
+    mod verification {
+        include!("production/verification_tests.rs");
     }
 
     struct Fixture {
@@ -19321,18 +19382,23 @@ mod tests {
     ///
     /// A full-text index that stopped agreeing with the column it indexes
     /// answers reads about text no document holds. No read fails, so nothing
-    /// else in the warm cycle can report it.
+    /// else in the warm cycle can report it. The verification meets it as a
+    /// background unit of the lane, on its copy of the store, and answers the
+    /// damage for the store lifetime it copied: the one the slot is bound to,
+    /// which the rebuild then replaces.
     ///
-    /// The maintenance leg serves two cadences, so this also pins that the
-    /// store is asked only on its own: a leg the shadow clock brought round
-    /// inside the store interval reads no page of the database.
+    /// The verification is no unit of a maintenance leg, so a leg run with
+    /// the verification due reads no page of the database for it; and the
+    /// verification is asked only on its own clock.
     ///
     /// What the entry publishes between the verdict and the rung is not this
     /// test's subject: these ops are driven directly, with no entry and no
     /// lifecycle state, so the trust withdrawal is stated over the lifecycle
-    /// in `lifecycle::tests::damage_found_by_scheduled_maintenance_reaches_rung_three`.
+    /// in `lifecycle::tests::lane::damage_a_unit_meets_is_judged_by_the_ops_lifetime_where_the_entry_records_none`
+    /// and over a host in
+    /// `verification::damage_the_verification_meets_schedules_the_rebuild_once`.
     #[test]
-    fn scheduled_maintenance_reports_a_full_text_index_that_stopped_agreeing_as_damage() {
+    fn the_scheduled_verification_reports_a_full_text_index_that_stopped_agreeing_as_damage() {
         let f = Fixture::new("silent-damage");
         write_a_vault_of_documents(&f, 8);
         // A document no derivation reads facts out of, so the finding a heal
@@ -19342,9 +19408,17 @@ mod tests {
         let policy = ProductionPolicy::new(64, 2).unwrap();
         let progress = ProgressReporter::disconnected();
         let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
-        attachment.store_verification_due = Instant::now();
-        ops.maintain(&name, &mut attachment)
-            .expect("a store nothing has damaged");
+        assert_eq!(
+            ops.background_unit(&name),
+            crate::BackgroundUnit::NothingOwed,
+            "a verification ran before its clock came due"
+        );
+        ops.verifications.bring_due(&name);
+        assert_eq!(
+            ops.background_unit(&name),
+            crate::BackgroundUnit::Ran { owed: false },
+            "a store nothing has damaged"
+        );
 
         // On a finished store the triggers are the only thing that writes the
         // index, so a body edit behind their back is a disagreement nothing
@@ -19356,24 +19430,41 @@ mod tests {
         )
         .unwrap();
 
-        ops.maintain(&name, &mut attachment).expect(
-            "a maintenance leg inside the store interval asked the database about damage \
-             the verification above had already cleared it of",
+        assert_eq!(
+            ops.background_unit(&name),
+            crate::BackgroundUnit::NothingOwed,
+            "the verification ran again inside its interval"
+        );
+        ops.verifications.bring_due(&name);
+        ops.maintain(&name, &mut attachment)
+            .expect("a maintenance leg verifies nothing");
+        assert_eq!(
+            ops.verification_reading().runs,
+            1,
+            "a leg ran the verification"
         );
 
-        attachment.store_verification_due = Instant::now();
-        let failure = ops
-            .maintain(&name, &mut attachment)
-            .expect_err("a full-text index that stopped agreeing with its column");
-        let JobFailure::StoreDamaged(detail) = &failure else {
-            panic!("the damage was reported as {failure:?} rather than as damaged state");
+        let epoch = attachment.store.epoch().to_string();
+        let crate::BackgroundUnit::StoreDamaged {
+            epoch: judged,
+            detail,
+        } = ops.background_unit(&name)
+        else {
+            panic!("the damage was not reported as damaged state");
         };
+        assert_eq!(judged, epoch, "the verdict names another store lifetime");
+        assert!(ops.store_lifetime_current(&name, &epoch));
         assert!(!detail.is_empty(), "the damage was not named");
 
         // Rung 3, run as the lifecycle runs it, over coverage that stands.
-        let mut attachment = ops
+        let attachment = ops
             .rebuild(&name, attachment, &progress)
             .expect("rung 3 over a damaged store");
+        assert!(
+            !ops.store_lifetime_current(&name, &epoch),
+            "the rebuild left the damaged lifetime current"
+        );
+        let mut attachment = attachment;
         assert_eq!(*attachment.store.open_outcome(), OpenOutcome::Created);
         assert_eq!(
             derived_vault(&mut attachment.store, f.vault().as_path()),
@@ -19385,9 +19476,12 @@ mod tests {
             1,
             "the rebuild derived no finding, so the equality above compared none"
         );
-        attachment.store_verification_due = Instant::now();
-        ops.maintain(&name, &mut attachment)
-            .expect("a store rung 3 rebuilt");
+        ops.verifications.bring_due(&name);
+        assert_eq!(
+            ops.background_unit(&name),
+            crate::BackgroundUnit::Ran { owed: false },
+            "a store rung 3 rebuilt"
+        );
         ops.detach(&name, attachment);
     }
 
@@ -21549,12 +21643,13 @@ mod tests {
         ops.detach(&name, attachment);
     }
 
-    /// Production ops whose attach brings the store's verification or the
-    /// rolling heal due shortly after it, so a case reads what starts the
-    /// leg each clock owes.
+    /// Production ops whose attach brings the store's verification, the
+    /// shadow sweep or the rolling heal due shortly after it, so a case reads
+    /// what starts the unit each clock owes.
     struct DueSoonAfterAttach {
         inner: ProductionEntryOps,
         verification: bool,
+        sweep: bool,
         rolling: bool,
     }
 
@@ -21578,7 +21673,12 @@ mod tests {
             let mut attachment = self.inner.attach(registration, progress)?;
             let soon = Instant::now() + Duration::from_millis(50);
             if self.verification {
-                attachment.store_verification_due = soon;
+                self.inner
+                    .verifications
+                    .bring_due_at(&registration.name, soon);
+            }
+            if self.sweep {
+                attachment.last_shadow_sweep = soon - norn_fs::SHADOW_AGE_THRESHOLD;
             }
             if self.rolling {
                 attachment.rolling.due = soon;
@@ -21640,8 +21740,32 @@ mod tests {
             self.inner.detach(name, attachment);
         }
 
+        fn discard(&self, name: &VaultName) {
+            self.inner.discard(name);
+        }
+
         fn count_leg_mint(&self, statements: u64) {
             self.inner.count_leg_mint(statements);
+        }
+
+        fn background_owed(&self, name: &VaultName) -> bool {
+            self.inner.background_owed(name)
+        }
+
+        fn background_unit(&self, name: &VaultName) -> crate::BackgroundUnit {
+            self.inner.background_unit(name)
+        }
+
+        fn background_deadline(&self, name: &VaultName) -> Option<Instant> {
+            self.inner.background_deadline(name)
+        }
+
+        fn store_lifetime_current(&self, name: &VaultName, epoch: &str) -> bool {
+            self.inner.store_lifetime_current(name, epoch)
+        }
+
+        fn retire_background(&self) {
+            self.inner.retire_background();
         }
     }
 
@@ -21650,6 +21774,7 @@ mod tests {
     fn due_soon_host(
         f: &Fixture,
         verification: bool,
+        sweep: bool,
         rolling: bool,
         budget: Duration,
     ) -> (
@@ -21664,6 +21789,7 @@ mod tests {
             DueSoonAfterAttach {
                 inner: ProductionEntryOps::new(dirs, ProductionPolicy::new(64, 2).unwrap()),
                 verification,
+                sweep,
                 rolling,
             },
             crate::LifecyclePolicy {
@@ -21682,17 +21808,19 @@ mod tests {
         (host, name, lease)
     }
 
-    /// **A due verification starts a maintenance leg without a poll tick.**
-    /// The watcher poll is a minute away and nothing else is due, so the leg
-    /// that runs is the verification's, started at its deadline.
+    /// **A due verification starts on the lane without a poll tick, and no
+    /// maintenance leg runs it.** The watcher poll is a minute away and
+    /// nothing else is due, so the unit that runs is the verification's,
+    /// started at its lane deadline; no leg runs at all.
     #[test]
-    fn a_due_verification_starts_a_maintenance_leg_without_a_poll_tick() {
+    fn a_due_verification_starts_on_the_lane_without_a_poll_tick_and_no_leg() {
         let f = Fixture::new("verification-deadline");
         write_a_vault_of_documents(&f, 4);
-        let (host, _name, _lease) = due_soon_host(&f, true, false, crate::BACKGROUND_TURN_BUDGET);
-        wait_until("the verification's leg to run", lifecycle_budget(), || {
-            let reading = host.maintenance_reading();
-            if reading.units >= 1 {
+        let (host, _name, _lease) =
+            due_soon_host(&f, true, false, false, crate::BACKGROUND_TURN_BUDGET);
+        wait_until("the verification to run", lifecycle_budget(), || {
+            let reading = host.ops().inner.verification_reading();
+            if reading.sound >= 1 {
                 Observed::Met(())
             } else {
                 Observed::Pending(format!("{reading:?}"))
@@ -21700,6 +21828,12 @@ mod tests {
         })
         .unwrap_or_else(|failure| panic!("{failure}"));
         assert!(host.scheduler_reading().deadlines >= 1);
+        assert!(host.lane_reading().units >= 1);
+        assert_eq!(
+            host.maintenance_reading().legs,
+            0,
+            "a maintenance leg ran with nothing but the verification due"
+        );
     }
 
     /// **A due rolling heal starts a maintenance leg without a poll tick,
@@ -21708,7 +21842,8 @@ mod tests {
     fn a_due_rolling_heal_starts_and_completes_without_a_poll_tick() {
         let f = Fixture::new("rolling-deadline");
         write_a_vault_of_documents(&f, 4);
-        let (host, name, _lease) = due_soon_host(&f, false, true, crate::BACKGROUND_TURN_BUDGET);
+        let (host, name, _lease) =
+            due_soon_host(&f, false, false, true, crate::BACKGROUND_TURN_BUDGET);
         wait_until("the rolling pass to complete", lifecycle_budget(), || {
             let rolling = status::status_of(&host, &name).rolling_heal;
             match rolling {
@@ -21720,14 +21855,14 @@ mod tests {
     }
 
     /// **A budget too small for any unit runs exactly one unit per leg.** The
-    /// verification and a rolling pass are both due, so every leg owes more
-    /// than one unit, and each runs exactly one; the leg's end schedules the
-    /// next while maintenance is still due.
+    /// shadow sweep and a rolling pass are both due, so the first leg owes
+    /// more than one unit, and each leg runs exactly one; the leg's end
+    /// schedules the next while maintenance is still due.
     #[test]
     fn a_maintenance_leg_under_a_budget_too_small_for_any_unit_runs_one() {
         let f = Fixture::new("one-unit-legs");
         write_a_vault_of_documents(&f, 4);
-        let (host, name, _lease) = due_soon_host(&f, true, true, Duration::ZERO);
+        let (host, name, _lease) = due_soon_host(&f, false, true, true, Duration::ZERO);
         wait_until("the rolling pass to complete", lifecycle_budget(), || {
             let rolling = status::status_of(&host, &name).rolling_heal;
             match rolling {
@@ -24373,9 +24508,8 @@ mod tests {
     /// Re-run when changing the rolling budgets. Clocks are evidence, never a
     /// CI threshold; the ordinary slice tests enforce the work bounds.
     /// The release-build cost of each maintenance unit, which
-    /// [`BACKGROUND_TURN_BUDGET`] is chosen against: the shadow sweep, the
-    /// store's verification and the longest rolling-heal slice, at 2,000
-    /// and 10,000 documents of 2 KiB.
+    /// [`BACKGROUND_TURN_BUDGET`] is chosen against: the shadow sweep and the
+    /// longest rolling-heal slice, at 2,000 and 10,000 documents of 2 KiB.
     #[test]
     #[ignore = "release-build maintenance unit calibration"]
     fn maintenance_unit_release_probe() {
@@ -24394,13 +24528,6 @@ mod tests {
             let progress = ProgressReporter::disconnected();
             let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
             attachment.subscription.take();
-            let mut verification = Vec::new();
-            for _ in 0..3 {
-                attachment.store_verification_due = Instant::now();
-                let started = Instant::now();
-                assert!(ops.verification_unit(&mut attachment).unwrap());
-                verification.push(started.elapsed().as_micros());
-            }
             attachment.last_shadow_sweep =
                 Instant::now() - norn_fs::SHADOW_AGE_THRESHOLD - Duration::from_secs(1);
             let started = Instant::now();
@@ -24418,8 +24545,111 @@ mod tests {
                 slices += 1;
             }
             eprintln!(
-                "UNIT_CALIBRATION docs={count} verification_us={verification:?} sweep_us={sweep} rolling_slices={slices} rolling_longest_us={longest} rolling_total_us={total}"
+                "UNIT_CALIBRATION docs={count} sweep_us={sweep} rolling_slices={slices} rolling_longest_us={longest} rolling_total_us={total}"
             );
+        }
+    }
+
+    /// The release-build cost of the store's periodic verification, the one
+    /// background unit not at human scale: the whole unit, its read-only
+    /// checks, its copy and the full-text check on the copy, the copy's size
+    /// on disk, and the longest a second writer waits for a write of its own
+    /// while the unit runs, at 2,000 and 10,000 documents of 2 KiB. Clocks are
+    /// evidence, never a CI threshold.
+    #[test]
+    #[ignore = "release-build verification unit calibration"]
+    fn verification_unit_release_probe() {
+        use norn_db::rusqlite::Connection;
+        use norn_store::VerificationPoint;
+        for count in [2_000, 10_000] {
+            let f = Fixture::new(&format!("verification-calibration-{count}"));
+            fs::create_dir_all(f.vault().join("docs")).unwrap();
+            let mut body = format!(
+                "---\ntitle: Note\n---\n# Heading\n{}",
+                "ordinary body text\n".repeat(110)
+            );
+            body.truncate(2048);
+            for index in 0..count {
+                fs::write(f.vault().join(format!("docs/{index:05}.md")), &body).unwrap();
+            }
+            let (ops, name) = f.ops(64);
+            let progress = ProgressReporter::disconnected();
+            let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+            attachment.subscription.take();
+            let store = attachment.store.path().to_path_buf();
+            let copy = store.with_extension("verification-copy");
+            let store_bytes = fs::metadata(&store).unwrap().len();
+            let marks = Arc::new(Mutex::new(Vec::new()));
+            {
+                let marks = Arc::clone(&marks);
+                let copy = copy.clone();
+                ops.verifications.run_inside_verifications(move |at, _| {
+                    let bytes = (at == VerificationPoint::CopyCheck)
+                        .then(|| fs::metadata(&copy).map(|meta| meta.len()).unwrap_or(0));
+                    marks.lock().unwrap().push((at, Instant::now(), bytes));
+                });
+            }
+            Connection::open(&store)
+                .unwrap()
+                .execute_batch("CREATE TABLE IF NOT EXISTS probe_writes(x)")
+                .unwrap();
+            let mut runs = Vec::new();
+            for _ in 0..3 {
+                marks.lock().unwrap().clear();
+                let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let writing = {
+                    let stop = Arc::clone(&stop);
+                    let store = store.clone();
+                    thread::spawn(move || {
+                        let writer = Connection::open(&store).unwrap();
+                        writer.busy_timeout(Duration::from_secs(5)).unwrap();
+                        let (mut worst, mut writes) = (0u128, 0u64);
+                        while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                            let began = Instant::now();
+                            writer
+                                .execute("INSERT INTO probe_writes VALUES (1)", [])
+                                .unwrap();
+                            worst = worst.max(began.elapsed().as_micros());
+                            writes += 1;
+                            thread::sleep(Duration::from_millis(1));
+                        }
+                        (worst, writes)
+                    })
+                };
+                thread::sleep(Duration::from_millis(20));
+                ops.verifications.bring_due(&name);
+                let started = Instant::now();
+                assert_eq!(
+                    ops.background_unit(&name),
+                    crate::BackgroundUnit::Ran { owed: false }
+                );
+                let ended = Instant::now();
+                let unit = (ended - started).as_micros();
+                stop.store(true, std::sync::atomic::Ordering::SeqCst);
+                let (worst_write, writes) = writing.join().unwrap();
+                let marks = marks.lock().unwrap();
+                let at = |kind: VerificationPoint| {
+                    marks.iter().find(|(seen, _, _)| *seen == kind).unwrap()
+                };
+                let (_, copy_began, _) = at(VerificationPoint::Copy);
+                let (_, check_began, copy_bytes) = at(VerificationPoint::CopyCheck);
+                runs.push(format!(
+                    "unit_us={unit} read_only_us={} copy_us={} copy_check_us={} copy_bytes={} worst_write_us={worst_write} writes={writes}",
+                    (*copy_began - started).as_micros(),
+                    (*check_began - *copy_began).as_micros(),
+                    (ended - *check_began).as_micros(),
+                    copy_bytes.unwrap(),
+                ));
+            }
+            assert!(!copy.exists(), "the verification left its copy");
+            eprintln!(
+                "VERIFICATION_CALIBRATION docs={count} store_bytes={store_bytes} reading={:?}",
+                ops.verification_reading()
+            );
+            for run in runs {
+                eprintln!("VERIFICATION_CALIBRATION docs={count} {run}");
+            }
+            ops.detach(&name, attachment);
         }
     }
 
