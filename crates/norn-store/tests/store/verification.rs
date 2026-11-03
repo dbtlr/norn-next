@@ -32,6 +32,7 @@ fn copy_of(scratch: &Scratch) -> PathBuf {
 }
 
 /// Whether anything of a copy at `copy` is left: the file or a journal's.
+#[allow(clippy::disallowed_methods)] // Harness scaffolding: arranging and finding the verification's copy.
 fn copy_left(copy: &Path) -> bool {
     ["", "-wal", "-shm", "-journal"].iter().any(|suffix| {
         let mut name = copy.as_os_str().to_os_string();
@@ -442,6 +443,7 @@ fn an_unwind_out_of_a_verification_leaves_no_copy() {
 /// is cleared before the copy is written, so it is never what the full-text
 /// check reads; and the clearing an attach runs removes it outright.
 #[test]
+#[allow(clippy::disallowed_methods)] // Harness scaffolding: arranging and finding the verification's copy.
 fn a_copy_a_crash_left_is_cleared_before_the_next_copy() {
     let scratch = Scratch::new("source-leftover");
     let store = a_store_with_a_row_for_every_check(&scratch);
@@ -475,6 +477,7 @@ fn a_copy_a_crash_left_is_cleared_before_the_next_copy() {
 /// there — the verification is refused, and the store it never finished
 /// checking is not called damaged.
 #[test]
+#[allow(clippy::disallowed_methods)] // Harness scaffolding: arranging and finding the verification's copy.
 fn a_copy_its_place_refuses_is_refused_rather_than_called_damage() {
     let scratch = Scratch::new("source-copy-refused");
     let store = a_store_with_a_row_for_every_check(&scratch);

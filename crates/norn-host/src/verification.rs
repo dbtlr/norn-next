@@ -94,8 +94,13 @@ pub(crate) struct StoreVerifications {
     /// Runs at each point of a verification at which a stop is met, with the
     /// verification's stop, so a case can hold one in flight.
     #[cfg(test)]
-    inside: Mutex<Option<Arc<dyn Fn(VerificationPoint, &VerificationStop) + Send + Sync>>>,
+    inside: Mutex<Option<InsideVerification>>,
 }
+
+/// A case's hook into every later verification: see
+/// [`StoreVerifications::run_inside_verifications`].
+#[cfg(test)]
+type InsideVerification = Arc<dyn Fn(VerificationPoint, &VerificationStop) + Send + Sync>;
 
 fn tolerant<T>(lock: &Mutex<T>) -> MutexGuard<'_, T> {
     lock.lock().unwrap_or_else(PoisonError::into_inner)

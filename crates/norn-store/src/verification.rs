@@ -6,7 +6,7 @@
 //! frontmatter projection against being JSON at all, the closed vocabularies
 //! against the values a reader will accept, the rule rows against the
 //! findings whose key they copy, the rule sets against the findings citing
-//! them ([`rule_sets`]: each set's spelling, the fingerprint it is held under,
+//! them (`Checks::rule_sets`: each set's spelling, the fingerprint it is held under,
 //! its names against its citers' rule rows, and a set no finding cites), the
 //! document and tombstone pillars against each other, each
 //! content-quarantined place's hash against the finding it stands beside, and
@@ -838,6 +838,7 @@ mod tests {
     /// after the mark is set, past every point the verification reads it at,
     /// is stopped by the connection's own reading of it before it ends.
     #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: a connection with no file behind it.
     fn a_statement_begun_after_the_mark_is_set_is_stopped_by_the_connection() {
         let connection = Connection::open_in_memory().unwrap();
         let mark = Arc::new(StopMark::default());

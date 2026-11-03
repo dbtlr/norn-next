@@ -1094,6 +1094,7 @@ mod tests {
     /// It never copies to another target, never attaches anything, and never
     /// writes the database it copies.
     #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: reading the copy the case wrote.
     fn a_copy_connection_copies_to_its_own_target_alone() {
         let (scratch, sealed) = sealed_database("copy-connection", "trial", "value");
         let path = sealed.path().to_path_buf();

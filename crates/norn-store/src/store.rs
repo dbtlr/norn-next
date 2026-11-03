@@ -1480,8 +1480,8 @@ impl Store {
     /// checks. The full-text check is a write, which the build's holder of the
     /// writer can run in place; the periodic verification of a finished store
     /// runs the same checks without the writer, through
-    /// [`Store::verification_source`]. What each check asks, and why, is
-    /// [`crate::verification`]'s.
+    /// [`Store::verification_source`], whose module states what each check
+    /// asks, and why.
     ///
     /// This is a maintenance act rather than a request: it derives nothing, so
     /// it moves no counter.
