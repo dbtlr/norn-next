@@ -10,6 +10,7 @@ use norn_db::rusqlite::{OptionalExtension, params};
 use norn_embed::{Embedder, Model};
 use norn_store::{DocumentPath, FeedCursor, FeedRead};
 
+use crate::census::{self, Coverage};
 use crate::ddl;
 use crate::error::{self, EngineError};
 use crate::progress::{self, Feed, Recorded, SidecarRevision, Watermark, Watermarks};
@@ -79,6 +80,13 @@ pub struct Engine {
     /// engine opened afresh starts on the document feed, which a step passes
     /// through to the tombstones when it has nothing to present.
     tombstones_turn: bool,
+    /// The census read both feeds to their ends in the snapshot of the last
+    /// step, so the recorded counts are exact there. Held in memory only: an
+    /// engine opened afresh has counted nothing until its first step.
+    census_complete: bool,
+    /// The counts the census left when it last stopped being complete, which
+    /// is what [`Engine::coverage`] answers while it catches up.
+    last_complete: Option<Coverage>,
 }
 
 /// What one drain did, in rows.
@@ -106,6 +114,9 @@ pub struct DrainReport {
     /// Paths whose held rows were retracted because the feed recorded a death
     /// or a document with unreadable content.
     pub retracted: u64,
+    /// Feed rows the census read to keep the coverage counts: the counting's
+    /// own work, which follows the rows that moved in the store.
+    pub censused: u64,
     /// The slice's budget ran out before the reconcile and both feeds were
     /// complete, so the next slice has work to resume from the positions this
     /// one committed.
@@ -138,6 +149,7 @@ impl DrainReport {
         self.skipped_current += step.skipped_current;
         self.deferred += step.deferred;
         self.retracted += step.retracted;
+        self.censused += step.censused;
     }
 }
 
@@ -340,6 +352,8 @@ impl Engine {
             outcome,
             recorded,
             tombstones_turn: false,
+            census_complete: false,
+            last_complete: None,
         })
     }
 
@@ -370,6 +384,20 @@ impl Engine {
     /// [`Watermark`]. Read the way [`Engine::revision`] is.
     pub fn watermarks(&self) -> &Watermarks {
         &self.recorded.watermarks
+    }
+
+    /// How many of the documents the store holds readable have embeddings
+    /// over their current content, counted at the snapshot in which the
+    /// census last read both feeds to their ends; `None` until a step of this
+    /// engine has counted. A census still catching up — over a new store
+    /// lifetime, a fresh sidecar or a burst wider than its page — answers what
+    /// it last counted whole.
+    pub fn coverage(&self) -> Option<Coverage> {
+        if self.census_complete {
+            Some(self.recorded.counts.coverage())
+        } else {
+            self.last_complete
+        }
     }
 
     /// The model this engine embeds with. The sidecar records it — opening
@@ -410,6 +438,8 @@ impl Engine {
             }),
             recorded,
             tombstones_turn: false,
+            census_complete: false,
+            last_complete: None,
         })
     }
 
@@ -550,6 +580,70 @@ impl Engine {
     ) -> Result<(DrainStep, bool, bool), EngineError> {
         let mut report = DrainReport::default();
         let store_epoch = feed.epoch().to_string();
+        let census = self.advance_census(feed, &store_epoch)?;
+        report.censused = census.rows;
+        let (step, counted, completed) =
+            self.drain_step_counted(feed, &store_epoch, report, documents_complete)?;
+        // A census still catching up owes another step, and a step that read
+        // census rows did work a budget counts.
+        let step = match step {
+            DrainStep::Done(mut done) if !census.complete => {
+                done.owed = true;
+                DrainStep::Done(done)
+            }
+            step => step,
+        };
+        Ok((step, counted || census.rows > 0, completed))
+    }
+
+    /// Read the census's next page of each feed in `feed`'s snapshot and
+    /// apply it, moving the counts row by row. A page pair that moves nothing
+    /// commits nothing.
+    fn advance_census(
+        &mut self,
+        feed: &mut FeedRead<'_>,
+        store_epoch: &str,
+    ) -> Result<census::Advance, EngineError> {
+        let recorded_epoch: Option<String> = self.get_meta(ddl::meta::CENSUS_STORE_EPOCH)?;
+        let documents_after = self.read_cursor(ddl::meta::CENSUS_DOCUMENT_CURSOR)?;
+        let tombstones_after = self.read_cursor(ddl::meta::CENSUS_TOMBSTONE_CURSOR)?;
+        let pages = census::Pages::read(
+            feed,
+            recorded_epoch.as_deref(),
+            documents_after,
+            tombstones_after,
+        )?;
+        let advance = pages.advance();
+        if !pages.is_empty() {
+            if self.census_complete && !advance.complete {
+                self.last_complete = Some(self.recorded.counts.coverage());
+            }
+            let model = self.embedder.model().clone();
+            let mut counts = self.recorded.counts;
+            let transaction = self
+                .database
+                .immediate_transaction("advancing the census")?;
+            pages.apply(&transaction, &model, store_epoch, &mut counts)?;
+            let revision = norn_db::meta::next_generation(&transaction)?;
+            transaction
+                .commit()
+                .map_err(|error| error::sql("committing the census", error))?;
+            self.recorded.revision = revision;
+            self.recorded.counts = counts;
+        }
+        self.census_complete = advance.complete;
+        Ok(advance)
+    }
+
+    /// The drain's own half of a step, after the census has read its pages.
+    fn drain_step_counted(
+        &mut self,
+        feed: &mut FeedRead<'_>,
+        store_epoch: &str,
+        mut report: DrainReport,
+        documents_complete: bool,
+    ) -> Result<(DrainStep, bool, bool), EngineError> {
+        let store_epoch = store_epoch.to_string();
         let observed: Option<String> = self.get_meta(ddl::meta::OBSERVED_STORE_EPOCH)?;
         if observed.as_deref() != Some(store_epoch.as_str()) {
             report.rescan = true;
@@ -870,10 +964,13 @@ impl Engine {
             }
         }
 
+        let model = self.embedder.model().clone();
+        let mut counts = self.recorded.counts;
         let transaction = self
             .database
             .immediate_transaction("reconciling the sidecar")?;
         for path in &dead {
+            counts.vector_moves(&transaction, &model, path, None)?;
             transaction
                 .execute(
                     "DELETE FROM document_vectors WHERE path = ?1",
@@ -902,11 +999,13 @@ impl Engine {
                 norn_db::meta::put_meta(&transaction, ddl::meta::RECONCILE_CURSOR, "")?;
             }
         }
+        counts.put(&transaction)?;
         let revision = norn_db::meta::next_generation(&transaction)?;
         transaction
             .commit()
             .map_err(|error| error::sql("committing the reconcile", error))?;
         self.recorded.revision = revision;
+        self.recorded.counts = counts;
         report.reconciled_away += dead.len() as u64;
         Ok((!full, !held.is_empty()))
     }
@@ -946,10 +1045,12 @@ impl Engine {
         completed: Option<Watermark>,
     ) -> Result<u64, EngineError> {
         let model = self.embedder.model().clone();
+        let mut counts = self.recorded.counts;
         let transaction = self
             .database
             .immediate_transaction("committing a drained page")?;
         for (path, input_hash, blob, dimensions) in writes {
+            counts.vector_moves(&transaction, &model, path, Some(input_hash))?;
             transaction
                 .execute(
                     "INSERT INTO document_vectors (
@@ -972,6 +1073,7 @@ impl Engine {
         }
         let mut retracted = 0;
         for path in retractions {
+            counts.vector_moves(&transaction, &model, path, None)?;
             let removed = transaction
                 .execute(
                     "DELETE FROM document_vectors WHERE path = ?1",
@@ -987,6 +1089,7 @@ impl Engine {
             ddl::meta::DOCUMENT_CURSOR,
             encode_cursor(advanced),
         )?;
+        counts.put(&transaction)?;
         let committed = commit_progress(
             transaction,
             "committing a drained page",
@@ -994,6 +1097,7 @@ impl Engine {
             completed.as_ref(),
         )?;
         self.recorded.revision = committed;
+        self.recorded.counts = counts;
         if let Some(watermark) = completed {
             self.recorded.watermarks.set(Feed::Documents, watermark);
         }
@@ -1010,11 +1114,14 @@ impl Engine {
         advanced: &FeedCursor,
         completed: Option<Watermark>,
     ) -> Result<u64, EngineError> {
+        let model = self.embedder.model().clone();
+        let mut counts = self.recorded.counts;
         let transaction = self
             .database
             .immediate_transaction("committing retractions")?;
         let mut retracted = 0_u64;
         for path in paths {
+            counts.vector_moves(&transaction, &model, path, None)?;
             let removed = transaction
                 .execute(
                     "DELETE FROM document_vectors WHERE path = ?1",
@@ -1030,6 +1137,7 @@ impl Engine {
             ddl::meta::TOMBSTONE_CURSOR,
             encode_cursor(advanced),
         )?;
+        counts.put(&transaction)?;
         let committed = commit_progress(
             transaction,
             "committing retractions",
@@ -1037,6 +1145,7 @@ impl Engine {
             completed.as_ref(),
         )?;
         self.recorded.revision = committed;
+        self.recorded.counts = counts;
         if let Some(watermark) = completed {
             self.recorded.watermarks.set(Feed::Tombstones, watermark);
         }
@@ -1143,7 +1252,7 @@ fn commit_progress(
 
 /// `{generation}:{path}` — one scalar, so a position moves atomically. The
 /// generation half cannot hold `:`, so the first `:` is always the seam.
-fn encode_cursor(cursor: &FeedCursor) -> String {
+pub(crate) fn encode_cursor(cursor: &FeedCursor) -> String {
     format!("{}:{}", cursor.generation(), cursor.path().as_str())
 }
 

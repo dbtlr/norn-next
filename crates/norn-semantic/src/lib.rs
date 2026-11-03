@@ -64,9 +64,12 @@
 //! - [`SliceBudget`] — how much one bounded drain may do, in pages.
 //! - [`Watermarks`] and [`SidecarRevision`] — how far the engine has drained
 //!   against the store, and which sidecar state it answers from.
+//! - [`Coverage`] — how many of the documents the engine would embed have
+//!   embeddings over their current content.
 //! - [`DrainReport`] — what one drain did, and [`DrainReport::is_settled`].
 //! - [`SidecarOutcome`] — how an open ended up with its database.
 
+mod census;
 mod ddl;
 mod engine;
 mod error;
@@ -74,6 +77,7 @@ mod progress;
 mod settings;
 mod sidecar;
 
+pub use census::Coverage;
 pub use engine::{
     DrainReport, DrainStep, EmbeddedPage, Engine, Nearest, NearestWork, Neighbor, PendingPage,
     SliceBudget, VectorRow,

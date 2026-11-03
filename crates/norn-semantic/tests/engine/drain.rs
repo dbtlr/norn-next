@@ -288,8 +288,9 @@ fn a_row_superseded_mid_drain_is_deferred_and_converges() {
     write_document(&mut store, &document("docs/b.md", "hash-b1", "bravo\n"));
 
     // b.md is rewritten after the page holding both was read, and before
-    // either is fetched.
-    induced_failure::write_after_feed_pages(1, |store| {
+    // either is fetched. The step's census reads one page of each feed
+    // first, so the drain's own document page is the third.
+    induced_failure::write_after_feed_pages(3, |store| {
         write_document(
             store,
             &document("docs/b.md", "hash-b2", "bravo rewritten\n"),
@@ -340,8 +341,9 @@ fn a_death_mid_drain_defers_and_the_same_drain_retracts_it() {
 
     // b.md dies after the page holding both edits was read, and before
     // either is fetched. Same model, so the reopened engine adopts the
-    // sidecar and its cursors.
-    induced_failure::write_after_feed_pages(1, |store| record_death(store, "docs/b.md"));
+    // sidecar and its cursors. The step's census reads one page of each
+    // feed first, so the drain's own document page is the third.
+    induced_failure::write_after_feed_pages(3, |store| record_death(store, "docs/b.md"));
     let embedder = CountingEmbedder::new();
     let mut engine = scratch.engine(embedder.clone());
     let report = engine.drain(&mut store.feed_read()).expect("a drain");

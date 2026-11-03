@@ -4,6 +4,7 @@
 mod common;
 
 mod convergence;
+mod coverage;
 mod drain;
 mod errors;
 mod firewall;

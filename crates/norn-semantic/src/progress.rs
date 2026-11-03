@@ -16,6 +16,7 @@
 
 use norn_db::rusqlite::Connection;
 
+use crate::census::Counts;
 use crate::ddl;
 use crate::error::EngineError;
 
@@ -124,12 +125,14 @@ fn decode_watermark(key: &str, recorded: &str) -> Result<Watermark, String> {
     })
 }
 
-/// What the sidecar records of its own progress: its revision and the two
-/// watermarks.
+/// What the sidecar records of its own progress: its revision, the two
+/// watermarks and the census counts.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct Recorded {
     pub(crate) revision: i64,
     pub(crate) watermarks: Watermarks,
+    /// The census counts as the last commit left them.
+    pub(crate) counts: Counts,
 }
 
 /// Why the recorded progress could not be read.
@@ -172,9 +175,30 @@ pub(crate) fn read(connection: &Connection) -> Result<Recorded, Unread> {
             Err(error) => return Err(classify(error)),
         }
     }
+    let mut counts = Counts::default();
+    for (key, count) in [
+        (ddl::meta::CENSUS_TOTAL, &mut counts.total),
+        (ddl::meta::CENSUS_EMBEDDED, &mut counts.embedded),
+    ] {
+        match norn_db::meta::read_meta::<i64>(connection, key) {
+            Ok(Some(recorded)) if recorded >= 0 => *count = recorded,
+            Ok(Some(recorded)) => {
+                return Err(Unread::Damaged(format!(
+                    "the recorded `{key}` count {recorded} is below zero"
+                )));
+            }
+            Ok(None) => {
+                return Err(Unread::Damaged(format!(
+                    "the sidecar records no `{key}` count"
+                )));
+            }
+            Err(error) => return Err(classify(error)),
+        }
+    }
     Ok(Recorded {
         revision,
         watermarks,
+        counts,
     })
 }
 
