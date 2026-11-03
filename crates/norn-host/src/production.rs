@@ -11619,6 +11619,39 @@ mod tests {
             }
         }
 
+        /// **No maintenance leg runs a semantic unit.** The engine owes work,
+        /// and a maintenance leg runs over the vault, quiet or not, and the
+        /// shadow sweep and verification beside it: no unit runs, and the
+        /// work is still owed for the background lane.
+        #[test]
+        fn no_maintenance_leg_runs_a_semantic_unit() {
+            let f = Fixture::new("semantic-maintenance-runs-no-unit");
+            fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+            fs::write(f.vault().join("alpha.md"), "alpha alpha\n").unwrap();
+            let (engines, ops) = engines_and_ops(&f);
+            let name = f.registration().name;
+            let progress = ProgressReporter::disconnected();
+            let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+            settle(&engines, &name, &mut attachment);
+            engines.owe(&name);
+            let units = engines.reading().units;
+
+            for quiet in [false, true] {
+                let mut turn = crate::MaintenanceTurn::new(Duration::from_secs(60));
+                ops.maintain_quiet(&name, &mut attachment, quiet, &mut turn, &progress)
+                    .expect("a maintenance leg");
+            }
+            ops.maintain(&name, &mut attachment).expect("the maintenance call");
+
+            assert_eq!(
+                engines.reading().units,
+                units,
+                "a maintenance leg ran a semantic unit"
+            );
+            assert!(engines.owes_work(&name), "the owed work was taken");
+            ops.detach(&name, attachment);
+        }
+
         /// **An unwind in a unit's read phase leaves the engine draining.**
         /// The engine unwinds while its read phase holds the feed source out
         /// of the binding; the engine stays in its slot, the source goes back

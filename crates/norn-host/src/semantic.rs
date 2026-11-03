@@ -724,7 +724,9 @@ impl EngineSlot {
     /// Take the slot lock for the lane: after every search already waiting
     /// for it has held it.
     fn lane_lock(&self, engines: &SemanticEngines) -> MutexGuard<'_, Slot> {
-        if let Some(last) = self.tickets.lane_comes() {
+        if let Some(last) = self.tickets.lane_comes()
+            && !engines.lane_skips_its_yield()
+        {
             self.tickets.wait_until_served(last, || {
                 #[cfg(test)]
                 engines.hooks.run_as_the_lane_yields();
@@ -966,6 +968,20 @@ impl SemanticEngines {
 
     fn count(&self, counted: impl FnOnce(&mut SemanticReading)) {
         counted(&mut tolerant(&self.reading));
+    }
+
+    /// Whether a case arranged for the lane to take a slot lock without
+    /// yielding to the searches waiting for it: the fault the count of lane
+    /// holds taken ahead of a waiting search is kept to catch.
+    fn lane_skips_its_yield(&self) -> bool {
+        #[cfg(test)]
+        {
+            self.hooks.lane_skips_its_yield()
+        }
+        #[cfg(not(test))]
+        {
+            false
+        }
     }
 
     /// The section reading the last config delivery handed `vault`, or `None`
@@ -1673,6 +1689,9 @@ pub(crate) mod tests {
         feed_out: Mutex<Option<Arranged>>,
         /// While set, no vault's engine owes work, so nothing starts a unit.
         owed_work_held: std::sync::atomic::AtomicBool,
+        /// While set, the lane takes a slot lock without yielding to the
+        /// searches already waiting for it.
+        lane_skips_its_yield: std::sync::atomic::AtomicBool,
     }
 
     fn run(arranged: &Mutex<Option<Arranged>>) {
@@ -1685,6 +1704,11 @@ pub(crate) mod tests {
     impl Hooks {
         pub(super) fn owed_work_held(&self) -> bool {
             self.owed_work_held
+                .load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        pub(super) fn lane_skips_its_yield(&self) -> bool {
+            self.lane_skips_its_yield
                 .load(std::sync::atomic::Ordering::SeqCst)
         }
 
@@ -1734,6 +1758,14 @@ pub(crate) mod tests {
             self.hooks
                 .owed_work_held
                 .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        /// Whether the lane, from here on, takes a slot lock without yielding
+        /// to the searches already waiting for it.
+        pub(crate) fn lane_skips_its_yields(&self, skips: bool) {
+            self.hooks
+                .lane_skips_its_yield
+                .store(skips, std::sync::atomic::Ordering::SeqCst);
         }
 
         /// Run `arranged` once, inside the next drain step of any vault's
@@ -1798,6 +1830,68 @@ pub(crate) mod tests {
         pub(crate) fn run_as_the_lane_next_yields(&self, arranged: impl FnOnce() + Send + 'static) {
             *tolerant(&self.hooks.lane_yield) = Some(Box::new(arranged));
         }
+    }
+}
+
+#[cfg(test)]
+mod ticket_tests {
+    //! The order a slot's lock is handed out in, at the slot itself.
+
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use norn_config::ConfigDirs;
+    use norn_semantic::Settings;
+
+    use super::{EngineSlot, SemanticEngines, Slot};
+
+    /// A set no case here opens anything under.
+    fn engines() -> Arc<SemanticEngines> {
+        SemanticEngines::new(ConfigDirs::new("/mock/config", "/mock/data").unwrap())
+    }
+
+    fn slot() -> Arc<EngineSlot> {
+        EngineSlot::new(Slot::Preparing, Settings { enabled: true })
+    }
+
+    /// **A search that unwinds before it reaches the lock leaves the lane
+    /// free.** Its ticket is served on the way out, so the lane, coming to
+    /// the lock, finds no ticket to wait for and takes it.
+    #[test]
+    fn a_search_that_unwinds_before_the_lock_leaves_the_lane_free() {
+        let (engines, slot) = (engines(), slot());
+        engines.run_after_next_ticket(|| panic!("the search unwound before the lock"));
+        let unwound = catch_unwind(AssertUnwindSafe(|| drop(slot.search_lock(&engines))));
+        assert!(unwound.is_err(), "the search did not unwind");
+
+        let (took, taken) = std::sync::mpsc::channel();
+        let (lane_engines, lane_slot) = (Arc::clone(&engines), Arc::clone(&slot));
+        std::thread::spawn(move || {
+            drop(lane_slot.lane_lock(&lane_engines));
+            took.send(()).unwrap();
+        });
+        taken
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the lane waits for a ticket the unwound search left unserved");
+    }
+
+    /// **A lane hold taken ahead of a waiting search is counted.** A search
+    /// holds its ticket and has not reached the lock; a lane arranged to skip
+    /// its yield takes the lock ahead of it, and the count records that hold.
+    /// Once the ticket is served, a lane that yields takes no hold ahead.
+    #[test]
+    fn a_lane_hold_taken_ahead_of_a_waiting_search_is_counted() {
+        let (engines, slot) = (engines(), slot());
+        let waiting = slot.tickets.issue();
+        engines.lane_skips_its_yields(true);
+        drop(slot.lane_lock(&engines));
+        assert_eq!(engines.reading().lane_holds_ahead_of_a_waiting_search, 1);
+
+        drop(waiting);
+        engines.lane_skips_its_yields(false);
+        drop(slot.lane_lock(&engines));
+        assert_eq!(engines.reading().lane_holds_ahead_of_a_waiting_search, 1);
     }
 }
 
