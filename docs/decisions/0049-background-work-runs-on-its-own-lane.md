@@ -963,26 +963,26 @@ clocks there: they live on the entry rather than on the attachment, because the 
 is out with a leg exactly when the claim is held. A detach ends the entry's background
 clocks, so a detached entry contributes no deadline, and the next attach starts them
 again. The scheduler schedules only where the entry's coverage is in hand and no release
-is in flight, as the poll does today. Where the claim is free, no teardown is due and the
-entry owes no heal rung, it schedules a maintenance leg under the claim's scheduled marker
-and sends it to the worker pool, as a poll schedules one today. Where a full queue refuses
-the send, the marker stands with the claim held for it, and the dispatcher's retry of
-refused dispatches sends it. That retry sends a leg that was already scheduled. It never
-decides that maintenance is owed. Where the claim is held, a teardown is due or the entry
-owes a heal rung, the scheduler marks the entry as owing maintenance. **At every ask the
-scheduler either schedules the leg, or marks the entry, and it clears the mark
-otherwise**, including when it schedules the leg itself; a leg that hands the claim on to
-a maintenance leg also clears it. A scheduled or marked entry contributes no claim-bound
-deadline, so a rolling heal past its due time cannot wake the scheduler again and again
-for the length of a reconcile, and an entry whose mark is cleared contributes its next
-deadline again, so an idle vault keeps its hourly heal, full-text check and sweep. The
-release of the claim on a marked entry wakes the scheduler, which asks again; the ask on a
-marked entry runs whether or not a slice is still due, so a leg that reset the clock
-clears the mark. That wake is sent by the claim carrier's own moves that open the gate (a
-release, an open, the end of a poll, the drop of a marker), so no release site outside the
-carrier can omit it. The entry gate is taken before the scheduler's lock. The scheduler's
-lock and the lock on the lane's set are leaves: no thread holds either across a take of an
-entry gate or across a unit.
+is in flight, as the poll does today. Where a claim-bound slice is due, the claim is free,
+no teardown is due and the entry owes no heal rung, it schedules a maintenance leg under
+the claim's scheduled marker and sends it to the worker pool, as a poll schedules one
+today. Where a full queue refuses the send, the marker stands with the claim held for it,
+and the dispatcher's retry of refused dispatches sends it. That retry sends a leg that was
+already scheduled. It never decides that maintenance is owed. Where the claim is held, a
+release is in flight, a teardown is due or the entry owes a heal rung, the scheduler marks
+the entry as owing maintenance. **At every ask the scheduler either schedules the leg, or
+marks the entry, and it clears the mark otherwise**, including when it schedules the leg
+itself; a leg that hands the claim on to a maintenance leg also clears it. A scheduled or
+marked entry contributes no claim-bound deadline, so a rolling heal past its due time
+cannot wake the scheduler again and again for the length of a reconcile, and an entry
+whose mark is cleared contributes its next deadline again, so an idle vault keeps its
+hourly heal, full-text check and sweep. The release of the claim on a marked entry wakes
+the scheduler, which asks again; the ask on a marked entry runs whether or not a slice is
+still due, so a leg that reset the clock clears the mark. That wake is sent by the claim
+carrier's own moves that open the gate (a release, an open, the end of a poll, the drop of
+a marker), so no release site outside the carrier can omit it. The entry gate is taken
+before the scheduler's lock. The scheduler's lock and the lock on the lane's set are
+leaves: no thread holds either across a take of an entry gate or across a unit.
 
 **Leg ends keep asking `maintenance_due`, as today.** A reconcile leg that ends with
 maintenance due hands the claim on to a maintenance leg ahead of another reconcile turn,
@@ -1377,6 +1377,8 @@ These consequences are testable:
 - On a vault no leg touches, the second hourly deadline after attach starts a maintenance
   leg, as the first did.
 - The scheduler runs its ask at most once per wake or deadline it receives.
+- A detached entry, or one whose release is in flight, contributes no deadline and gets no
+  maintenance leg.
 - A watcher poll never schedules a maintenance leg.
 - A background turn ends within its budget plus one unit, and a budget too small for any
   unit runs exactly one unit per background turn.
