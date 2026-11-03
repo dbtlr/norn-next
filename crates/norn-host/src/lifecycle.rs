@@ -27356,10 +27356,15 @@ mod tests {
 
         // One poll that answers with facts and finds maintenance due — the
         // busy vault's poll, driven rather than waited for.
+        // Maintenance comes due without a wake, so the poll is the first
+        // thing to reach the entry: a wake first would let the background
+        // scheduler take the claim for the maintenance, and a poll skips a
+        // held entry, leaving its facts unread with no later poll here.
         ops.off_thread_rescan_poll_batches
             .store(1, Ordering::SeqCst);
-        owe_maintenance(&host, &ops, &name);
+        arrange_for(&ops.maintenance_due_at, &name);
         poll_watchers(&host.shared);
+        host.wake_background();
 
         wait_for_maintenance(&ops);
         wait_for_state(&host, &name, TrustState::Ready);
