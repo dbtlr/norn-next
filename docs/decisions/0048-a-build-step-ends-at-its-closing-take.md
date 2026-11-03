@@ -1,5 +1,6 @@
 ---
-status: accepted
+status: superseded
+superseded-by: 0049-background-work-runs-on-its-own-lane.md
 date: 2026-11-01
 ---
 

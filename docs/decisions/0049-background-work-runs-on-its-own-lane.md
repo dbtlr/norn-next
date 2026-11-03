@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 date: 2026-11-02
 ---
 
@@ -1331,10 +1331,9 @@ verification never take a slot.
 ### Status reports embedding coverage
 
 `EngineStatus::On` gains `coverage: { embedded, total }` beside `freshness`. Both counts
-are taken at the watermark generation of the turn's last page, and written
-into the slot's report as the background turn ends, so a status never waits behind a
-background turn. `coverage` is `null` until a background turn has reported, as `freshness`
-is.
+are taken at the store state the unit's page was read from, and written into the slot's
+report as each unit ends, so a status never waits behind a background turn. `coverage` is
+`null` until a background turn has reported, as `freshness` is.
 
 - `total` counts the documents the engine would embed at that generation. The names-only
   rows of unreadable documents are not among them.
@@ -1346,9 +1345,14 @@ document is embedded, with one document edited 100 times since, reads as full co
 100 generations trailing. Search answers keep carrying `freshness` alone.
 
 The counts follow the performance posture. A background turn's cost follows the rows it
-moved, so a vault-wide comparison on every background turn is a defect. The
-implementation decides how it keeps the counts. `EngineStatus::On` is
-`#[non_exhaustive]`, so the new field is an additive `norn-wire` change.
+moved, so a vault-wide comparison on every background turn is a defect. The engine keeps
+the counts in its sidecar: an embedding-free reader of the two feeds keeps one row per
+readable document with its body hash, and every row it moves and every embedding the drain
+moves adjusts the two counts in the same transaction. Each unit reads at most one page of
+each feed for the counts. A count that has more rows to read than that, such as the first
+count of a vault or of a new store lifetime, takes several units, and until it is whole the
+status reports the counts it last took whole. `EngineStatus::On` is `#[non_exhaustive]`, so
+the new field is an additive `norn-wire` change.
 
 ### Non-goals
 
