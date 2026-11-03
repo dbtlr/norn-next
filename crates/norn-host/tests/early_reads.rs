@@ -256,6 +256,7 @@ impl Fixture {
                 worker_slots: 1,
                 watch_poll_interval: tick,
                 read_settle_bound: bound,
+                background_turn_budget: norn_host::BACKGROUND_TURN_BUDGET,
             },
         )
         .unwrap()
@@ -413,6 +414,7 @@ fn from_scratch(fixture: &Fixture, label: &str) -> norn_testkit::equivalence::St
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(25),
                 read_settle_bound: norn_host::READ_SETTLE_BOUND,
+                background_turn_budget: norn_host::BACKGROUND_TURN_BUDGET,
             },
         )
         .unwrap();
@@ -1418,6 +1420,7 @@ fn a_root_lost_before_the_build_begins_refuses_its_waiter() {
             worker_slots: 1,
             watch_poll_interval: Duration::from_millis(25),
             read_settle_bound: norn_host::READ_SETTLE_BOUND,
+            background_turn_budget: norn_host::BACKGROUND_TURN_BUDGET,
         },
     )
     .unwrap();
@@ -2855,6 +2858,7 @@ fn reference_store(fixture: &Fixture, label: &str) -> PathBuf {
             worker_slots: 1,
             watch_poll_interval: Duration::from_millis(25),
             read_settle_bound: norn_host::READ_SETTLE_BOUND,
+            background_turn_budget: norn_host::BACKGROUND_TURN_BUDGET,
         },
     )
     .unwrap();

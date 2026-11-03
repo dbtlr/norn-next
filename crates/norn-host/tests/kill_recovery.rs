@@ -697,6 +697,7 @@ fn production_host(
             worker_slots: 1,
             watch_poll_interval: Duration::from_millis(5),
             read_settle_bound: norn_host::READ_SETTLE_BOUND,
+            background_turn_budget: norn_host::BACKGROUND_TURN_BUDGET,
         },
     )
     .expect("production host")

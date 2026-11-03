@@ -78,6 +78,7 @@ fn host_over(scratch: &Scratch, pause: Arc<Pause>) -> (VaultName, Host<Productio
             worker_slots: 1,
             watch_poll_interval: Duration::from_millis(25),
             read_settle_bound: Duration::from_secs(5),
+            background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
         },
     )
     .unwrap();
@@ -224,6 +225,7 @@ fn entry_at(epoch: u64) -> Arc<Entry<crate::production::ProductionAttachment>> {
         ),
         epoch,
         CanonicalStoreObservation::Absent,
+        super::super::background::BackgroundWake::unheard(),
     ))
 }
 

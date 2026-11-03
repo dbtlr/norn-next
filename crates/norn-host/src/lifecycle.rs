@@ -31,6 +31,7 @@ use crate::{
 };
 
 mod apply;
+mod background;
 mod claim;
 mod gate;
 pub(crate) mod loading;
@@ -39,6 +40,8 @@ mod serving;
 pub(crate) use apply::{ApplyAnswer, not_run};
 pub use apply::{ApplyEnd, ApplyEnding, ApplyProgress, PendingApply};
 use apply::{ApplyQueue, QueuedApply, RunningApply};
+use background::{BackgroundWake, Scheduler};
+pub use background::{MaintenanceReading, MaintenanceTurn, SchedulerReading};
 use claim::{Claim, Coverage, Leg};
 use gate::{EntryGate, GateHold, Stanced};
 pub(crate) use serving::ServingRefusal;
@@ -57,6 +60,10 @@ pub struct LifecyclePolicy {
     /// take among them.
     /// Operational containment: past it the read refuses.
     pub read_settle_bound: Duration,
+    /// The time one maintenance leg may take before it gives the claim and
+    /// its worker slot back. The leg checks it only between units and always
+    /// runs at least one, so a leg ends within this budget plus one unit.
+    pub background_turn_budget: Duration,
 }
 
 /// Work coalesced behind an entry's capacity-one scheduling marker.
@@ -536,20 +543,60 @@ pub trait EntryOps: Send + Sync + 'static {
         name: &VaultName,
         attachment: &mut Self::Attachment,
     ) -> Result<Option<Batch>, JobFailure>;
-    /// Cheap, nonblocking check for whether worker-scheduled maintenance is due.
-    fn maintenance_due(&self, _: &VaultName, _: &Self::Attachment) -> bool {
+    /// When `attachment`'s claim-bound background clocks next come due — a
+    /// clock already past is due now — or `None` where it keeps none.
+    ///
+    /// Read under the entry gate, by the background scheduler's ask and where
+    /// `install_coverage`, `park_coverage` or `remint_coverage` runs, so it
+    /// is cheap and nonblocking and takes no lock. The scheduler sleeps until
+    /// the earliest of these across the host, so a clock this does not report
+    /// is maintenance no deadline starts.
+    ///
+    /// **A leg only ever moves a clock later.** The entry keeps the last
+    /// reading while a leg holds the coverage, and most legs park it back
+    /// without reading again; that reading is
+    /// safe only because it can be early and never late. A leg that brought a
+    /// clock earlier would leave a deadline no ask sees until the next wake.
+    ///
+    /// The default keeps no clock.
+    fn maintenance_deadline(&self, _: &Self::Attachment) -> Option<Instant> {
+        None
+    }
+    /// Whether claim-bound maintenance is owed on a flag rather than a clock:
+    /// work a leg left owed, which a wake announces rather than a deadline.
+    ///
+    /// Read under the entry gate whether or not the entry holds its coverage,
+    /// so it reads nothing off the attachment, is cheap and nonblocking, and
+    /// takes no lock an entry gate is ever taken under.
+    ///
+    /// The default owes nothing.
+    fn maintenance_owed(&self, _: &VaultName) -> bool {
         false
     }
-    /// Run maintenance with the entry's quietness at the claim boundary.
-    /// Ordinary maintenance retains its fairness under watcher traffic.
+    /// Run one maintenance leg's units under `turn`, with the entry's
+    /// quietness at the claim boundary. Ordinary maintenance retains its
+    /// fairness under watcher traffic.
+    ///
+    /// Every unit runs through [`MaintenanceTurn::run_units`], which checks the
+    /// leg's budget between units, so the leg holds the claim for at most its
+    /// budget plus one unit.
+    ///
+    /// The default runs [`EntryOps::maintain`] as the leg's one unit.
     fn maintain_quiet(
         &self,
         name: &VaultName,
         attachment: &mut Self::Attachment,
         _: bool,
+        turn: &mut MaintenanceTurn,
         _: &ProgressReporter<Self::Attachment>,
     ) -> Result<(), JobFailure> {
-        self.maintain(name, attachment)
+        let mut ran = false;
+        turn.run_units(|| {
+            if std::mem::replace(&mut ran, true) {
+                return Ok(false);
+            }
+            self.maintain(name, attachment).map(|()| true)
+        })
     }
 
     fn rolling_heal(&self, _: &Self::Attachment) -> Option<norn_wire::RollingHealStatus> {
@@ -728,6 +775,22 @@ impl<A: SnapshotSource> ProgressReporter<A> {
         }
     }
 
+    /// Say that this leg left claim-bound background work owed: a commit
+    /// that leaves the vault's engine owing a slice sends this, so the
+    /// background scheduler asks the entry again rather than waiting for a
+    /// deadline. The scheduler marks an entry whose claim this leg still
+    /// holds, and the leg's release wakes it again.
+    pub fn owe_background_work(&self) {
+        if let Some(entry) = self.entry.upgrade() {
+            entry
+                .gate
+                .lock()
+                .expect("entry gate poisoned")
+                .claim
+                .wake_background();
+        }
+    }
+
     /// Whether this job's claim stands at this instant. This reading does
     /// not reserve the claim for a later publication.
     pub fn stands(&self) -> bool {
@@ -862,6 +925,20 @@ fn reporter<A: SnapshotSource>(entry: &Arc<Entry<A>>, epoch: u64) -> ProgressRep
         entry: Arc::downgrade(entry),
         epoch,
     }
+}
+
+/// Whether claim-bound maintenance is due over `attachment`: owed on a flag,
+/// or a clock come due. The background scheduler's ask and every leg end that
+/// asks read this one answer.
+pub(crate) fn maintenance_due<O: EntryOps>(
+    ops: &O,
+    name: &VaultName,
+    attachment: &O::Attachment,
+) -> bool {
+    ops.maintenance_owed(name)
+        || ops
+            .maintenance_deadline(attachment)
+            .is_some_and(|at| at <= Instant::now())
 }
 
 /// A lifecycle job's semantic failure class.
@@ -1090,6 +1167,7 @@ impl<A: SnapshotSource> Entry<A> {
         registration: Registration,
         epoch: u64,
         storage: CanonicalStoreObservation,
+        wake: BackgroundWake,
     ) -> Self {
         let vault = registration.name.clone();
         Self {
@@ -1125,7 +1203,8 @@ impl<A: SnapshotSource> Entry<A> {
                 recovery_generation: 0,
                 recovery_awaits_a_change_from: None,
                 identity_refused: None,
-                claim: Claim::starting_at(epoch),
+                claim: Claim::starting_at(epoch, wake),
+                background_due: None,
                 maintainer_contended: None,
                 duplicate_root: None,
                 last_demand: Instant::now(),
@@ -1246,6 +1325,24 @@ struct EntryState<A: SnapshotSource> {
     /// since this host started carries none.
     advisories: Vec<AttachmentAdvisory>,
     rolling_heal: Option<norn_wire::RollingHealStatus>,
+    /// When the entry's claim-bound background clocks next come due, as
+    /// [`EntryOps::maintenance_deadline`] last read them off its coverage:
+    /// where `install_coverage`, `park_coverage` or `remint_coverage` runs, and
+    /// at every ask of the background scheduler with the coverage in the
+    /// entry's hand. Every other leg that parks the coverage back — a poll, a
+    /// reconcile, a maintenance or apply leg, a failed recovery or rebuild,
+    /// and most reload paths — leaves the reading as it stood.
+    ///
+    /// **The clocks live on the entry, not only on the attachment**, because
+    /// the attachment is out with a leg exactly when the claim is held, and
+    /// the scheduler still has to know whether a slice came due behind that
+    /// claim. A reading taken before a leg moved a clock later is early, never
+    /// late: a leg moves a clock only by running the unit it times, which sets
+    /// it later, as [`EntryOps::maintenance_deadline`] obliges, so an early
+    /// reading costs one ask that finds nothing due.
+    /// The clocks run while the entry accounts for coverage, and the release
+    /// that leaves it accounting for none ends them.
+    background_due: Option<Instant>,
     /// Where the lane-1 store of the coverage the entry holds stood when the
     /// last leg over it committed its lane-1 work or failed, as that leg
     /// recorded it
@@ -1569,6 +1666,16 @@ impl<A: SnapshotSource> Stanced for EntryState<A> {
         }
     }
 
+    /// A publication that returns the entry's read stance from refuse to
+    /// serve or settle — a recovery that did not rebuild among them — wakes
+    /// the background scheduler, so the engine of an idle vault resumes its
+    /// owed work without waiting for a commit.
+    fn stance_moved(&mut self, opened: ReadStanding) {
+        if opened.stance == ReadStance::Refuse && self.read_stance() != ReadStance::Refuse {
+            self.claim.wake_background();
+        }
+    }
+
     /// Record whether trust has stood unbroken since `Ready`, from the state
     /// this hold left.
     ///
@@ -1777,7 +1884,7 @@ impl<A: SnapshotSource> EntryState<A> {
     /// entry no longer holds, and [`EntryState::owes_a_rung`] is what every
     /// publisher of `Ready` and every producer of ordinary work reads: an entry
     /// publishing `Ready` while a stale requirement stands is one no watcher
-    /// poll and no maintenance tick ever schedules against again.
+    /// poll and no background scheduler ever schedules against again.
     fn clear_rung_requirements(&mut self) {
         self.clear_recovery();
         self.clear_rebuild();
@@ -1828,7 +1935,11 @@ impl<A: SnapshotSource> EntryState<A> {
         );
         self.trust_unbroken_since_ready = false;
         self.mint_for_a_leg(ops, &attachment);
+        // An attach starts the entry's background clocks, so it wakes the
+        // scheduler to read them.
+        self.background_due = ops.maintenance_deadline(&attachment);
         self.coverage.install(attachment);
+        self.claim.wake_background();
     }
 
     /// Mint the handle `attachment` serves reads from into `reader`, recording
@@ -1971,6 +2082,7 @@ impl<A: SnapshotSource> EntryState<A> {
         self.trust_unbroken_since_ready = false;
         self.close_reader();
         self.mint_for_a_leg(ops, &attachment);
+        self.background_due = ops.maintenance_deadline(&attachment);
         self.coverage.park_by(leg, attachment);
     }
 
@@ -1986,6 +2098,7 @@ impl<A: SnapshotSource> EntryState<A> {
         if self.reader.is_none() {
             self.mint_for_a_leg(ops, &attachment);
         }
+        self.background_due = ops.maintenance_deadline(&attachment);
         self.coverage.park_by(leg, attachment);
     }
 
@@ -2875,6 +2988,10 @@ fn record_active_declaration<O: EntryOps>(
     state.delivered_engine = ops
         .semantic()
         .and_then(|engines| engines.publish_delivery(name, state.store_reading.as_ref()));
+    // An engine whose delivery this commits becomes ready to initialize.
+    if state.delivered_engine.is_some() {
+        state.claim.wake_background();
+    }
     record_advisories(state, ops, attachment);
 }
 
@@ -3554,9 +3671,10 @@ fn dispatch_taken_job<O: EntryOps>(
     refused
 }
 
-/// One tick of the dispatcher thread: reap the entries idle at `now`, poll
-/// every attached entry's watcher, and send every job a full queue handed
-/// back.
+/// One tick of the dispatcher thread: trim the idle readers, reap the entries
+/// idle at `now`, poll every attached entry's watcher, and send every job a
+/// full queue handed back. None of the four starts background work: the
+/// background scheduler starts maintenance at a wake or a deadline.
 ///
 /// **Each step is caught on its own**, so an unwind in one skips neither the
 /// steps after it in this tick nor any later tick: the thread that catches it
@@ -4117,6 +4235,12 @@ struct Shared<O: EntryOps> {
     idle_after: Duration,
     /// The policy's [`LifecyclePolicy::read_settle_bound`].
     read_settle_bound: Duration,
+    /// The policy's [`LifecyclePolicy::background_turn_budget`].
+    background_turn_budget: Duration,
+    /// The background scheduler every entry's wakes reach.
+    scheduler: Arc<Scheduler>,
+    /// What this host's maintenance legs ran.
+    maintenance: Mutex<MaintenanceReading>,
     /// Root identities claimed by coverage acquisitions while their
     /// filesystem work runs outside this gate.
     attach_gate: Mutex<BTreeMap<Identity, VaultName>>,
@@ -4132,6 +4256,9 @@ struct Shared<O: EntryOps> {
     /// Unwind the next retry of refused dispatches before it sends any.
     #[cfg(test)]
     panic_in_dispatch_retry: AtomicBool,
+    /// Unwind the background scheduler's next ask before it asks any entry.
+    #[cfg(test)]
+    panic_in_scheduler_ask: AtomicBool,
     /// Held across every registration change, from the checks it answers on
     /// through the registry write and the serving-set change it makes.
     ///
@@ -4147,6 +4274,7 @@ pub struct Host<O: EntryOps> {
     workers: Vec<thread::JoinHandle<()>>,
     dispatcher_stop: mpsc::Sender<()>,
     dispatcher: Option<thread::JoinHandle<()>>,
+    scheduler: Option<thread::JoinHandle<()>>,
 }
 
 /// One read's hold on a vault entry.
@@ -4711,6 +4839,8 @@ impl<O: EntryOps> Drop for Host<O> {
         self.shared.shutting_down.store(true, Ordering::SeqCst);
         let _ = self.dispatcher_stop.send(());
         let dispatcher = self.dispatcher.take();
+        self.shared.scheduler.stop();
+        let scheduler = self.scheduler.take();
         // Destruction is a teardown per entry, and it names its leg like every
         // other one: an entry with resources still out publishes the releasing
         // phase here and Unattached below, once they are back. The window has a
@@ -4769,6 +4899,11 @@ impl<O: EntryOps> Drop for Host<O> {
             && dispatcher.thread().id() != thread::current().id()
         {
             let _ = dispatcher.join();
+        }
+        if let Some(scheduler) = scheduler
+            && scheduler.thread().id() != thread::current().id()
+        {
+            let _ = scheduler.join();
         }
         for worker in self.workers.drain(..) {
             // Re-entrant destruction from an EntryOps callback is exotic but
@@ -5038,7 +5173,8 @@ impl<O: EntryOps> Host<O> {
         // Startup takes the same seam a later registration does: every vault in
         // the set arrived through one insertion, so a vault gained while the
         // host runs is served exactly as a vault read at startup is.
-        let entries = ServingSet::new();
+        let scheduler = Arc::new(Scheduler::default());
+        let entries = ServingSet::new(BackgroundWake::to(&scheduler));
         for registration in registry.into_entries() {
             let storage = if ops.first_index_candidate(&registration) {
                 CanonicalStoreObservation::Absent
@@ -5059,6 +5195,9 @@ impl<O: EntryOps> Host<O> {
             shutting_down: AtomicBool::new(false),
             idle_after: policy.idle_after,
             read_settle_bound: policy.read_settle_bound,
+            background_turn_budget: policy.background_turn_budget,
+            scheduler,
+            maintenance: Mutex::new(MaintenanceReading::default()),
             attach_gate: Mutex::new(BTreeMap::new()),
             #[cfg(test)]
             panic_after_reload_handoff: AtomicBool::new(false),
@@ -5066,6 +5205,8 @@ impl<O: EntryOps> Host<O> {
             panic_in_reap_dispatch: AtomicBool::new(false),
             #[cfg(test)]
             panic_in_dispatch_retry: AtomicBool::new(false),
+            #[cfg(test)]
+            panic_in_scheduler_ask: AtomicBool::new(false),
             registration_gate: Mutex::new(()),
         });
         let mut workers = Vec::with_capacity(policy.worker_slots);
@@ -5129,11 +5270,13 @@ impl<O: EntryOps> Host<O> {
                 dispatcher_tick(&shared, Instant::now());
             }
         });
+        let scheduler = background::spawn(Arc::downgrade(&shared), Arc::clone(&shared.scheduler));
         Ok(Self {
             shared,
             workers,
             dispatcher_stop,
             dispatcher: Some(dispatcher),
+            scheduler: Some(scheduler),
         })
     }
 
@@ -6367,6 +6510,28 @@ impl<O: EntryOps> Host<O> {
         self.shared.reads.read()
     }
 
+    /// What this host's background scheduler has received and asked.
+    pub fn scheduler_reading(&self) -> SchedulerReading {
+        self.shared.scheduler.reading()
+    }
+
+    /// What this host's maintenance legs have run: the legs, their units, and
+    /// the longest leg's clock.
+    pub fn maintenance_reading(&self) -> MaintenanceReading {
+        *self
+            .shared
+            .maintenance
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Wake the background scheduler as a site that left work owed would.
+    /// A case whose fake owes maintenance on a flag announces it here.
+    #[cfg(test)]
+    pub(crate) fn wake_background(&self) {
+        self.shared.scheduler.wake();
+    }
+
     /// Record the similarity reads made on a repair's planning hold.
     pub(crate) fn count_similar_stems(&self, cost: crate::evidence::SimilarStemsCost) {
         self.shared.reads.count_similar_stems(cost);
@@ -6713,12 +6878,6 @@ fn poll_claimed_entry<O: EntryOps>(
 ) {
     let name = entry.name();
     let result = shared.ops.poll(name, &mut attachment);
-    // The clock this reads runs whether or not the watcher has anything to
-    // say, so the question is asked on every poll the coverage survived and
-    // both arms below act on the answer. Maintenance a poll only scheduled
-    // where the watcher reported nothing would be maintenance an entry
-    // under sustained traffic never runs.
-    let maintenance_due = result.is_ok() && shared.ops.maintenance_due(name, &attachment);
     let mut schedule = None;
     let mut stale = None;
     let mut release = None;
@@ -6734,27 +6893,19 @@ fn poll_claimed_entry<O: EntryOps>(
                 Ok(None) => {
                     state.claim.end_poll(epoch);
                     state.coverage.park_by(epoch, attachment);
-                    if !state.owes_a_rung() {
-                        // Facts can stand pending over an entry nothing is
-                        // working: a teardown a leg scheduled over them and a
-                        // demand then withdrew. The watcher has nothing more
-                        // to report, so this poll is what schedules the
-                        // reconcile they are owed — behind due maintenance,
-                        // which hands that reconcile on when it ends.
-                        if maintenance_due {
-                            schedule = Some(
-                                state
-                                    .claim
-                                    .schedule(|epoch| Job::Maintenance(name.clone(), epoch)),
-                            );
-                        } else if !state.pending.is_empty() {
-                            state.publish_pending_reconcile();
-                            schedule = Some(
-                                state
-                                    .claim
-                                    .schedule(|epoch| Job::Reconcile(name.clone(), epoch)),
-                            );
-                        }
+                    // Facts can stand pending over an entry nothing is
+                    // working: a teardown a leg scheduled over them and a
+                    // demand then withdrew. The watcher has nothing more to
+                    // report, so this poll is what schedules the reconcile
+                    // they are owed. A poll never schedules maintenance: the
+                    // background scheduler starts it at a wake or a deadline.
+                    if !state.owes_a_rung() && !state.pending.is_empty() {
+                        state.publish_pending_reconcile();
+                        schedule = Some(
+                            state
+                                .claim
+                                .schedule(|epoch| Job::Reconcile(name.clone(), epoch)),
+                        );
                     }
                 }
                 Ok(Some(batch)) => {
@@ -6770,25 +6921,17 @@ fn poll_claimed_entry<O: EntryOps>(
                     }
                     state.coverage.park_by(epoch, attachment);
                     if !state.owes_a_rung() {
-                        // Due maintenance takes the claim ahead of the
-                        // reconcile, and the facts this poll carried wait
-                        // for it in the pending set: the maintenance leg
-                        // reads that set when it ends and hands the
-                        // reconcile on. One claim carries both, so a poll
-                        // that carried facts schedules the maintenance it
-                        // found due rather than dropping the verdict. The
-                        // polls that never see the entry at all — the ones
-                        // a held claim skips — are answered by the
-                        // reconcile leg, which reads the same clocks on
-                        // every turn it takes.
-                        let due = maintenance_due;
-                        schedule = Some(state.claim.schedule(|epoch| {
-                            if due {
-                                Job::Maintenance(name.clone(), epoch)
-                            } else {
-                                Job::Reconcile(name.clone(), epoch)
-                            }
-                        }));
+                        // The facts this poll carried are owed their
+                        // reconcile. Maintenance that came due meanwhile is
+                        // not this poll's to schedule: the reconcile's end
+                        // asks the clocks and hands the claim on to it, ahead
+                        // of another reconcile turn, so its fairness under
+                        // sustained traffic is the reconcile leg's to keep.
+                        schedule = Some(
+                            state
+                                .claim
+                                .schedule(|epoch| Job::Reconcile(name.clone(), epoch)),
+                        );
                     }
                 }
                 Err(JobFailure::LostMaintainership) => {
@@ -7844,11 +7987,12 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     Err(error) => result = Err(error),
                 }
             }
-            // Asked off the gate, like the watcher poll asks it, and asked on
-            // every turn of this loop: a vault whose facts never stop arriving
-            // keeps this leg turning under a claim no watcher poll can look
-            // past, so this is the only place its clocks are read.
-            let maintenance_due = result.is_ok() && shared.ops.maintenance_due(&name, &attachment);
+            // Asked off the gate, and asked on every turn of this loop: a
+            // vault whose facts never stop arriving keeps this leg turning
+            // under a claim the background scheduler only marks, so this is
+            // where its clocks start the maintenance they owe.
+            let maintenance_due =
+                result.is_ok() && maintenance_due(&*shared.ops, &name, &attachment);
             let mut state = entry.gate.lock().expect("entry gate poisoned");
             state.unpin_leg(Leg::Job(epoch));
             if !state.claim.stands_at(epoch) {
@@ -7877,8 +8021,9 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     } else if state.applies_waiting() {
                         // A queued apply takes the claim ahead of the next
                         // turn and of due maintenance: its intake derives the
-                        // facts this turn left, and the maintenance a later
-                        // poll or turn finds due is still due then.
+                        // facts this turn left. Due maintenance is still due
+                        // then, and the entry the scheduler marked when it came
+                        // due wakes it again at the apply's release.
                         let next = state.claim.hand_on(|epoch| Job::Apply(name.clone(), epoch));
                         drop(state);
                         dispatch_handoff(shared, entry, epoch, next);
@@ -7909,10 +8054,11 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                         // What this turn left is published before the claim
                         // moves on: `Ready` where it left nothing to derive,
                         // exactly as the release below publishes it. The
-                        // maintenance then runs over a serving entry, as a
-                        // poll's does, so no quiet slice it takes — a semantic
-                        // slice the turn's commit owed above all — stands
-                        // between that commit and its publication.
+                        // maintenance then runs over a serving entry, as one
+                        // the background scheduler starts does, so no quiet
+                        // slice it takes — a semantic slice the turn's commit
+                        // owed above all — stands between that commit and its
+                        // publication.
                         state.publish_ready_where_nothing_is_left(handoff_saturated);
                         let next = state
                             .claim
@@ -7961,8 +8107,9 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     return None;
                 }
                 // A queued apply takes the claim before a maintenance scan
-                // would begin; the scan is still due when a later poll or
-                // turn asks.
+                // would begin. The scan is still due, and the entry the
+                // scheduler marked when it came due wakes it again at the
+                // apply's release.
                 if state.applies_waiting() {
                     let next = state.claim.hand_on(|epoch| Job::Apply(name.clone(), epoch));
                     drop(state);
@@ -7978,9 +8125,16 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                 (attachment, quiet)
             };
             let progress = reporter(entry, epoch);
-            let mut result = shared
-                .ops
-                .maintain_quiet(&name, &mut attachment, quiet, &progress);
+            let mut turn = MaintenanceTurn::new(shared.background_turn_budget);
+            let mut result =
+                shared
+                    .ops
+                    .maintain_quiet(&name, &mut attachment, quiet, &mut turn, &progress);
+            shared
+                .maintenance
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .record(&turn);
             let mut observed = Batch::default();
             let mut handoff_saturated = false;
             if result.is_ok() {
@@ -7992,7 +8146,8 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     Err(error) => result = Err(error),
                 }
             }
-            let maintenance_due = result.is_ok() && shared.ops.maintenance_due(&name, &attachment);
+            let maintenance_due =
+                result.is_ok() && maintenance_due(&*shared.ops, &name, &attachment);
             let mut state = entry.gate.lock().expect("entry gate poisoned");
             state.unpin_leg(Leg::Job(epoch));
             if !state.claim.stands_at(epoch) {
@@ -9751,13 +9906,32 @@ mod tests {
         poll_gate: Mutex<Option<VaultName>>,
         poll_started: std::sync::atomic::AtomicBool,
         poll_release: std::sync::atomic::AtomicBool,
-        /// The vault whose next watcher poll finds maintenance due. It names
-        /// one vault: the host serves every registered vault off one ledger,
-        /// and a due flag every served vault could take would be taken by
-        /// whichever one the dispatcher polls first — which is not the one
-        /// the case arranged for whenever that one is skipped on the tick, its
-        /// claim held or its coverage out with a leg.
+        /// The vault that owes maintenance on a flag until a maintenance leg
+        /// runs over it. It names one vault: the host serves every registered
+        /// vault off one ledger, and a flag every served vault could read
+        /// would be run by whichever leg reached it first. A case arranging
+        /// it wakes the scheduler, as a commit owing work would.
         maintenance_due_at: Mutex<Option<VaultName>>,
+        /// Work run once, inside the scheduler's own hold of the named
+        /// vault's gate, where its ask next reads whether that vault owes
+        /// maintenance.
+        #[allow(clippy::type_complexity)]
+        when_maintenance_owed_is_read: Mutex<Option<(VaultName, Box<dyn FnOnce() + Send>)>>,
+        /// The engines a case composes into the fake, which a leg's
+        /// publication commits a delivery against; none by default.
+        semantic: Option<Arc<crate::semantic::SemanticEngines>>,
+        /// The clock every coverage of this fake reports as its next
+        /// maintenance deadline, and the period it restarts with at each
+        /// attach and each maintenance leg; `None` for no clock.
+        maintenance_clock: Mutex<Option<Instant>>,
+        maintenance_period: Mutex<Option<Duration>>,
+        /// Units each maintenance leg may run past its first, one per unit,
+        /// each taking `maintenance_unit_cost`.
+        maintenance_units_owed: AtomicUsize,
+        maintenance_unit_cost: Mutex<Duration>,
+        /// The longest one unit of a maintenance leg took, as the unit
+        /// measured itself.
+        longest_maintenance_unit: Mutex<Duration>,
         quiet_maintenances: Mutex<Vec<bool>>,
         maintenances: AtomicUsize,
         /// The vault whose maintenance waits at the gate until the case sets
@@ -9792,6 +9966,8 @@ mod tests {
         continuous_fact_handoff_for: Mutex<Option<VaultName>>,
         /// Every batch a reconcile was handed, in call order.
         reconciled_batches: Mutex<Vec<Batch>>,
+        /// The reconcile and maintenance legs the fake ran, in call order.
+        reconcile_and_maintenance_order: Mutex<Vec<&'static str>>,
         terminal_poll: Mutex<Option<WatchError>>,
         environmental_poll: std::sync::atomic::AtomicBool,
         contend_poll: std::sync::atomic::AtomicBool,
@@ -9986,6 +10162,14 @@ mod tests {
     }
 
     impl FakeOps {
+        /// Start the fake's maintenance clock again, a period from now, where
+        /// the case gave it one.
+        fn restart_maintenance_clock(&self) {
+            if let Some(period) = *self.maintenance_period.lock().unwrap() {
+                *self.maintenance_clock.lock().unwrap() = Some(Instant::now() + period);
+            }
+        }
+
         /// Coverage over this fake's ledger, in the configuration the case
         /// asked for. Every leg that hands coverage out builds it here, so a
         /// case reads one ledger whichever leg minted the handle.
@@ -10050,6 +10234,7 @@ mod tests {
         ) -> Result<FakeCoverage, JobFailure> {
             ON_JOB_THREAD.with(|flag| flag.set(true));
             self.attaches.fetch_add(1, Ordering::SeqCst);
+            self.restart_maintenance_clock();
             self.attach_roots
                 .lock()
                 .expect("attach roots poisoned")
@@ -10109,6 +10294,10 @@ mod tests {
                 .expect("reconciled batches poisoned")
                 .push(work.batch);
             let reconcile = self.reconciles.fetch_add(1, Ordering::SeqCst) + 1;
+            self.reconcile_and_maintenance_order
+                .lock()
+                .unwrap()
+                .push("reconcile");
             if self.block_reconcile.load(Ordering::SeqCst)
                 || self.block_reconcile_at.load(Ordering::SeqCst) == reconcile
             {
@@ -10388,8 +10577,18 @@ mod tests {
             Ok(None)
         }
 
-        fn maintenance_due(&self, name: &VaultName, _: &FakeCoverage) -> bool {
-            takes_the_vault(&self.maintenance_due_at, name)
+        fn semantic(&self) -> Option<&crate::semantic::SemanticEngines> {
+            self.semantic.as_deref()
+        }
+
+        fn maintenance_owed(&self, name: &VaultName) -> bool {
+            let mut arranged = self.when_maintenance_owed_is_read.lock().unwrap();
+            if arranged.as_ref().is_some_and(|(vault, _)| vault == name) {
+                let (_, work) = arranged.take().unwrap();
+                drop(arranged);
+                work();
+            }
+            stands_for_the_vault(&self.maintenance_due_at, name)
         }
 
         /// A resolved plan is applied as it stands and operations as a plan
@@ -10469,20 +10668,50 @@ mod tests {
             })
         }
 
+        /// One unit per leg, which is the fake's `maintain`, unless the case
+        /// owes the fake more units: each further unit takes
+        /// `maintenance_unit_cost` and the leg's turn decides how many run.
         fn maintain_quiet(
             &self,
             name: &VaultName,
             attachment: &mut FakeCoverage,
             quiet: bool,
+            turn: &mut MaintenanceTurn,
             _: &ProgressReporter<FakeCoverage>,
         ) -> Result<(), JobFailure> {
             self.quiet_maintenances.lock().unwrap().push(quiet);
-            self.maintain(name, attachment)
+            let mut first = true;
+            turn.run_units(|| {
+                let began = Instant::now();
+                let ran = if std::mem::take(&mut first) {
+                    self.maintain(name, attachment).map(|()| true)
+                } else if spend_one(&self.maintenance_units_owed) {
+                    thread::sleep(*self.maintenance_unit_cost.lock().unwrap());
+                    Ok(true)
+                } else {
+                    Ok(false)
+                };
+                let mut longest = self.longest_maintenance_unit.lock().unwrap();
+                *longest = (*longest).max(began.elapsed());
+                ran
+            })
+        }
+
+        fn maintenance_deadline(&self, _: &FakeCoverage) -> Option<Instant> {
+            *self.maintenance_clock.lock().unwrap()
         }
 
         fn maintain(&self, name: &VaultName, _: &mut FakeCoverage) -> Result<(), JobFailure> {
             ON_JOB_THREAD.with(|flag| flag.set(true));
             self.maintenances.fetch_add(1, Ordering::SeqCst);
+            self.reconcile_and_maintenance_order
+                .lock()
+                .unwrap()
+                .push("maintenance");
+            // The maintenance the case arranged is what this leg runs, and
+            // the clock it times is set again from here.
+            takes_the_vault(&self.maintenance_due_at, name);
+            self.restart_maintenance_clock();
             if stands_for_the_vault(&self.block_maintenance_at, name) {
                 self.maintenance_started.store(true, Ordering::SeqCst);
                 wait_for_release("maintenance_release", &self.maintenance_release);
@@ -10671,6 +10900,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(2),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
         .unwrap();
@@ -10719,6 +10949,7 @@ mod tests {
             worker_slots,
             watch_poll_interval: Duration::from_secs(60),
             read_settle_bound: crate::READ_SETTLE_BOUND,
+            background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
         }
     }
 
@@ -10798,6 +11029,7 @@ mod tests {
                 worker_slots,
                 watch_poll_interval: Duration::from_millis(2),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
         .unwrap()
@@ -11148,6 +11380,13 @@ mod tests {
 
     /// Arrange for one vault: the leg that reads the arrangement finds this
     /// vault named, and no other. A vault already arranged is replaced.
+    /// Arrange that `name` owes maintenance on the fake's flag, and announce
+    /// it to the background scheduler as a commit owing work would.
+    fn owe_maintenance(host: &Host<Arc<FakeOps>>, ops: &FakeOps, name: &VaultName) {
+        arrange_for(&ops.maintenance_due_at, name);
+        host.wake_background();
+    }
+
     fn arrange_for(arranged: &Mutex<Option<VaultName>>, name: &VaultName) {
         *arranged.lock().expect("an arranged vault poisoned") = Some(name.clone());
     }
@@ -13313,7 +13552,7 @@ mod tests {
         host: &Host<Arc<FakeOps>>,
         name: &VaultName,
     ) -> Option<DemandLease<Arc<FakeOps>>> {
-        arrange_for(&ops.maintenance_due_at, name);
+        owe_maintenance(host, ops, name);
         poll_watchers(&host.shared);
         None
     }
@@ -13847,6 +14086,7 @@ mod tests {
                 worker_slots: 2,
                 watch_poll_interval: Duration::from_millis(2),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
         .unwrap();
@@ -15621,8 +15861,10 @@ mod tests {
         a_job_legs_coverage_loss_gives_the_coverage_back(
             "maintenance",
             |host, ops, name, lease| {
-                arrange_for(&ops.maintenance_due_at, name);
+                // The block stands before the owe: the owe wakes the background
+                // scheduler, which may start the leg before the next statement runs.
                 arrange_for(&ops.block_maintenance_at, name);
+                owe_maintenance(host, ops, name);
                 poll_watchers(&host.shared);
                 wait_for_flag("maintenance_started", &ops.maintenance_started);
                 report_coverage_lost(ops, name);
@@ -15778,8 +16020,10 @@ mod tests {
 
         // A maintenance leg is held open over b, so the drain that ends it is
         // what reaches the watcher next.
-        arrange_for(&ops.maintenance_due_at, &b);
+        // The block stands before the owe: the owe wakes the background
+        // scheduler, which may start the leg before the next statement runs.
         arrange_for(&ops.block_maintenance_at, &b);
+        owe_maintenance(&host, &ops, &b);
         poll_watchers(&host.shared);
         wait_for_flag("maintenance_started", &ops.maintenance_started);
 
@@ -18114,7 +18358,7 @@ mod tests {
 
         arrange_for(&ops.damaged_maintenance_at, &name);
         ops.block_rebuild.store(true, Ordering::SeqCst);
-        arrange_for(&ops.maintenance_due_at, &name);
+        owe_maintenance(&host, &ops, &name);
 
         let withdrawn = TrustState::untrusted(UntrustedReason::store_damaged_rebuilding(
             "the full-text index disagrees with the documents it indexes",
@@ -18160,7 +18404,7 @@ mod tests {
 
         arrange_for(&ops.damaged_maintenance_at, &name);
         ops.block_rebuild.store(true, Ordering::SeqCst);
-        arrange_for(&ops.maintenance_due_at, &name);
+        owe_maintenance(&host, &ops, &name);
         poll_watchers(&host.shared);
         wait_for_flag("rebuild_started", &ops.rebuild_started);
         ops.withholds_trust.store(true, Ordering::SeqCst);
@@ -18635,7 +18879,7 @@ mod tests {
         assert_eq!(ops.readers.closed.load(Ordering::SeqCst), 0);
 
         arrange_for(&ops.damaged_maintenance_at, &name);
-        arrange_for(&ops.maintenance_due_at, &name);
+        owe_maintenance(&host, &ops, &name);
         wait_until(
             "the entry to reach Ready through the rung the verdict schedules",
             lifecycle_wait_budget(),
@@ -19280,6 +19524,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(2),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
         .unwrap();
@@ -19378,6 +19623,7 @@ mod tests {
                 worker_slots: 2,
                 watch_poll_interval: Duration::from_millis(2),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
         .unwrap();
@@ -19410,6 +19656,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(2),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
         .unwrap();
@@ -19440,6 +19687,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(2),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
         .unwrap();
@@ -19476,6 +19724,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(2),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
         .unwrap();
@@ -19667,6 +19916,7 @@ mod tests {
                 worker_slots: 2,
                 watch_poll_interval: Duration::from_millis(2),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
         .unwrap();
@@ -19720,6 +19970,7 @@ mod tests {
                 worker_slots: 2,
                 watch_poll_interval: Duration::from_millis(2),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
         .unwrap();
@@ -19768,6 +20019,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(2),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
         .unwrap();
@@ -20294,6 +20546,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(2),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
         .unwrap();
@@ -20348,6 +20601,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(2),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
         .unwrap();
@@ -24094,6 +24348,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: tick,
                 read_settle_bound: bound,
+                background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
         .unwrap();
@@ -25513,7 +25768,7 @@ mod tests {
         let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
-        arrange_for(&ops.maintenance_due_at, &name);
+        owe_maintenance(&host, &ops, &name);
         wait_until(
             "scheduled maintenance to run once",
             lifecycle_wait_budget(),
@@ -26148,8 +26403,10 @@ mod tests {
         // The leg under test: a maintenance whose own handoff drain saturates,
         // so it hands the entry a reconcile carrying no fact of its own — the
         // entry a tick would otherwise find idle and attached.
-        arrange_for(&ops.maintenance_due_at, &working);
+        // The block stands before the owe: the owe wakes the background
+        // scheduler, which may start the leg before the next statement runs.
         arrange_for(&ops.block_maintenance_at, &working);
+        owe_maintenance(&host, &ops, &working);
         poll_watchers(&host.shared);
         wait_for_flag("maintenance_started", &ops.maintenance_started);
         ops.handoff_poll_batches
@@ -26916,7 +27173,7 @@ mod tests {
         // busy vault's poll, driven rather than waited for.
         ops.off_thread_rescan_poll_batches
             .store(1, Ordering::SeqCst);
-        arrange_for(&ops.maintenance_due_at, &name);
+        owe_maintenance(&host, &ops, &name);
         poll_watchers(&host.shared);
 
         wait_for_maintenance(&ops);
@@ -26940,7 +27197,7 @@ mod tests {
         wait_for_state(&host, &name, TrustState::Ready);
 
         ops.off_thread_poll_batches.store(1, Ordering::SeqCst);
-        arrange_for(&ops.maintenance_due_at, &name);
+        owe_maintenance(&host, &ops, &name);
         poll_watchers(&host.shared);
 
         wait_for_maintenance(&ops);
@@ -26978,7 +27235,7 @@ mod tests {
         report_through_a_driven_poll(&ops, &host, &name, &ops.off_thread_poll_batches);
 
         wait_for_flag("reconcile_started", &ops.reconcile_started);
-        arrange_for(&ops.maintenance_due_at, &name);
+        owe_maintenance(&host, &ops, &name);
         ops.reconcile_release.store(true, Ordering::SeqCst);
 
         wait_for_state(&host, &name, TrustState::Ready);
@@ -27013,7 +27270,7 @@ mod tests {
         report_through_a_driven_poll(&ops, &host, &name, &ops.off_thread_poll_batches);
         wait_for_flag("reconcile_started", &ops.reconcile_started);
         arrange_for(&ops.block_maintenance_at, &name);
-        arrange_for(&ops.maintenance_due_at, &name);
+        owe_maintenance(&host, &ops, &name);
         ops.reconcile_release.store(true, Ordering::SeqCst);
         wait_for_flag("maintenance_started", &ops.maintenance_started);
         let at_maintenance = host.state(&name);
@@ -27077,17 +27334,22 @@ mod tests {
             ) -> Result<Option<Batch>, JobFailure> {
                 self.0.poll(name, attachment).map(|_| None)
             }
-            fn maintenance_due(&self, name: &VaultName, attachment: &ProductionAttachment) -> bool {
-                self.0.maintenance_due(name, attachment)
+            fn maintenance_deadline(&self, attachment: &ProductionAttachment) -> Option<Instant> {
+                self.0.maintenance_deadline(attachment)
+            }
+            fn maintenance_owed(&self, name: &VaultName) -> bool {
+                self.0.maintenance_owed(name)
             }
             fn maintain_quiet(
                 &self,
                 name: &VaultName,
                 attachment: &mut ProductionAttachment,
                 quiet: bool,
+                turn: &mut MaintenanceTurn,
                 progress: &ProgressReporter<ProductionAttachment>,
             ) -> Result<(), JobFailure> {
-                self.0.maintain_quiet(name, attachment, quiet, progress)
+                self.0
+                    .maintain_quiet(name, attachment, quiet, turn, progress)
             }
             fn rolling_heal(
                 &self,
@@ -27136,17 +27398,36 @@ mod tests {
             .unwrap();
             let lease = host.demand(&name).unwrap();
             wait_for_state(&host, &name, TrustState::Ready);
-            fs::write(root.join("changed.md"), "after!").unwrap();
-            fs::File::open(root.join("changed.md"))
-                .unwrap()
-                .set_times(fs::FileTimes::new().set_modified(old))
-                .unwrap();
-            fs::write(root.join("created.md"), "created").unwrap();
-            fs::File::open(root.join("created.md"))
-                .unwrap()
-                .set_times(fs::FileTimes::new().set_modified(old))
-                .unwrap();
+            // A heal counts a write as a miss only once its mtime is past the
+            // delivery grace, and passes run every ten milliseconds from the
+            // attach, concurrently with these edits. A file written in place
+            // and aged afterwards stands fresh between the two steps, and a
+            // pass that reads it there takes the new bytes uncounted, so no
+            // later pass finds the miss. Each write is aged outside the vault
+            // and renamed in, so the vault only ever holds old-stamped bytes.
+            let staging = scratch.join("staging");
+            fs::create_dir_all(&staging).unwrap();
+            let place_aged = |file: &str, contents: &str| {
+                let staged = staging.join(file);
+                fs::write(&staged, contents).unwrap();
+                fs::File::open(&staged)
+                    .unwrap()
+                    .set_times(fs::FileTimes::new().set_modified(old))
+                    .unwrap();
+                fs::rename(&staged, root.join(file)).unwrap();
+            };
+            place_aged("changed.md", "after!");
+            place_aged("created.md", "created");
             fs::remove_file(root.join("deleted.md")).unwrap();
+            // A pass may also have enumerated the vault before these edits
+            // and miss the file created after it. The next pass, a period
+            // later, counts what that one could not see, so the case waits
+            // for every miss rather than for the first completed pass.
+            let every_miss = norn_wire::WatcherMisses {
+                changed: 1,
+                created: 1,
+                deleted: 1,
+            };
             wait_until(
                 "rolling maintenance completion",
                 lifecycle_wait_budget(),
@@ -27157,7 +27438,7 @@ mod tests {
                         .rolling_heal
                         .expect("attached status");
                     if status.last_completed_unix_seconds.is_some()
-                        && status.watcher_misses.deleted == 1
+                        && status.watcher_misses == every_miss
                     {
                         Observed::Met(status)
                     } else {
@@ -27166,14 +27447,6 @@ mod tests {
                 },
             )
             .map(|status| {
-                assert_eq!(
-                    status.watcher_misses,
-                    norn_wire::WatcherMisses {
-                        changed: 1,
-                        created: 1,
-                        deleted: 1
-                    }
-                );
                 assert!(status.next_due_unix_seconds > 0);
             })
             .unwrap_or_else(|failure| panic!("{failure}"));
@@ -27181,6 +27454,11 @@ mod tests {
         }
     }
 
+    /// A maintenance leg reads whether its claim is quiet at the claim
+    /// boundary. Over a quiet entry the scheduler's wake starts it. A busy
+    /// one is the leg a reconcile hands the claim on to while the facts its
+    /// own drain observed stand pending: the maintenance runs there, ahead of
+    /// another reconcile turn, and is told its claim is not quiet.
     #[test]
     fn maintenance_identifies_quiet_claims_without_delaying_busy_maintenance() {
         for busy in [false, true] {
@@ -27189,12 +27467,17 @@ mod tests {
             let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
             let lease = host.demand(&name).unwrap();
             wait_for_state(&host, &name, TrustState::Ready);
+            wait_for_no_claim(&host, &name);
             if busy {
-                ops.off_thread_rescan_poll_batches
-                    .store(1, Ordering::SeqCst);
+                // Owed and not yet announced, so the reconcile below is what
+                // reaches it.
+                arrange_for(&ops.maintenance_due_at, &name);
+                ops.handoff_rescan_poll_batches.store(1, Ordering::SeqCst);
+                ops.off_thread_fact_poll_batches.store(1, Ordering::SeqCst);
+                poll_watchers(&host.shared);
+            } else {
+                owe_maintenance(&host, &ops, &name);
             }
-            arrange_for(&ops.maintenance_due_at, &name);
-            poll_watchers(&host.shared);
             wait_for_maintenance(&ops);
             wait_for_state(&host, &name, TrustState::Ready);
             assert_eq!(*ops.quiet_maintenances.lock().unwrap(), [!busy]);
@@ -27214,7 +27497,7 @@ mod tests {
         let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         arrange_for(&ops.block_maintenance_at, &name);
-        arrange_for(&ops.maintenance_due_at, &name);
+        owe_maintenance(&host, &ops, &name);
         poll_watchers(&host.shared);
         wait_for_flag("maintenance_started", &ops.maintenance_started);
         let entry = host.shared.entries.get(&name).unwrap();
@@ -27261,7 +27544,7 @@ mod tests {
         wait_for_state(&host, &name, TrustState::Ready);
 
         arrange_for(&ops.block_maintenance_at, &name);
-        arrange_for(&ops.maintenance_due_at, &name);
+        owe_maintenance(&host, &ops, &name);
         wait_for_flag("maintenance_started", &ops.maintenance_started);
         // The maintenance job's own handoff drain, not the batch source a
         // watcher poll spends: see the reconcile-side saturation test above
@@ -27288,7 +27571,7 @@ mod tests {
         wait_for_state(&host, &name, TrustState::Ready);
 
         arrange_for(&ops.block_maintenance_at, &name);
-        arrange_for(&ops.maintenance_due_at, &name);
+        owe_maintenance(&host, &ops, &name);
         wait_for_flag("maintenance_started", &ops.maintenance_started);
         ops.handoff_rescan_poll_batches.store(1, Ordering::SeqCst);
         ops.handoff_poll_batches
@@ -27334,6 +27617,7 @@ mod tests {
                 worker_slots: 2,
                 watch_poll_interval: Duration::from_millis(2),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
         .unwrap();
@@ -27343,7 +27627,7 @@ mod tests {
         wait_for_state(&host, &polled, TrustState::Ready);
 
         arrange_for(&ops.block_maintenance_at, &blocked);
-        arrange_for(&ops.maintenance_due_at, &blocked);
+        owe_maintenance(&host, &ops, &blocked);
         wait_for_flag("maintenance_started", &ops.maintenance_started);
         let polls_before = *ops
             .polls
@@ -27377,6 +27661,7 @@ mod tests {
     }
 
     mod applies;
+    mod background;
 
     /// A vault the set gains while the host runs, and a vault it loses.
     ///
