@@ -42,9 +42,9 @@ use crate::planner::control::{SchemaPlace, SchemaSite};
 use crate::reload::{EngineConfigReceiver, ReloadCandidate};
 use crate::{
     ApplyEnd, ApplyEnding, ApplyProgress, AttachmentAdvisory, EntryOps, Established, Healing,
-    JobFailure, MintedReader, ProgressReporter, ReadSource, ReaderUnavailable, ReconcileWork,
-    RecordRefusal, RegistryUnwritable, ReloadError, ReloadJudgment, ReloadOutcome, RetireRefusal,
-    SnapshotSource,
+    JobFailure, MaintenanceTurn, MintedReader, ProgressReporter, ReadSource, ReaderUnavailable,
+    ReconcileWork, RecordRefusal, RegistryUnwritable, ReloadError, ReloadJudgment, ReloadOutcome,
+    RetireRefusal, SnapshotSource,
 };
 
 /// The derived database's file, inside the vault's derived directory.
@@ -114,6 +114,13 @@ pub const WATCH_SYNCHRONIZATION_DEADLINE: Duration = Duration::from_secs(15);
 /// authored for one vault walk, so a change that settles inside one walk is
 /// waited out and one that does not is refused as still indexing.
 pub const READ_SETTLE_BOUND: Duration = Duration::from_secs(5);
+
+/// The production value of [`crate::LifecyclePolicy::background_turn_budget`]:
+/// the time one maintenance leg may hold its vault's claim and a worker slot
+/// before it gives both back.
+///
+/// MEASUREMENT_PENDING
+pub const BACKGROUND_TURN_BUDGET: Duration = Duration::from_millis(150);
 
 /// Resource bounds for the concrete filesystem/store adapter.
 #[derive(Clone, Copy, Debug)]
@@ -788,7 +795,111 @@ impl ProductionEntryOps {
         if let Some(semantic) = &self.semantic {
             self.record_store_reading(attachment, progress);
             semantic.owe(name);
+            progress.owe_background_work();
         }
+    }
+
+    /// Refuse a maintenance unit over coverage whose maintainer lock this
+    /// process no longer holds.
+    fn check_maintainership(&self, attachment: &ProductionAttachment) -> Result<(), JobFailure> {
+        let _job = self.evidence.attributing();
+        if attachment
+            .maintainership
+            .still_current()
+            .map_err(data_dir_effect)?
+        {
+            Ok(())
+        } else {
+            Err(JobFailure::LostMaintainership)
+        }
+    }
+
+    /// The shadow sweep, where its age threshold is reached: answers whether
+    /// it ran.
+    ///
+    /// Shadow residue is inert, and a sweep is only bounded cleanup. Losing
+    /// that cleanup opportunity must not withdraw an otherwise healthy
+    /// attachment or force a full heal; try again at the next normal cadence.
+    fn sweep_unit(&self, attachment: &mut ProductionAttachment) -> bool {
+        if attachment.last_shadow_sweep.elapsed() < norn_fs::SHADOW_AGE_THRESHOLD {
+            return false;
+        }
+        let _job = self.evidence.attributing();
+        let _ = attachment.shadows.sweep(norn_fs::SHADOW_AGE_THRESHOLD);
+        attachment.last_shadow_sweep = Instant::now();
+        true
+    }
+
+    /// The store's verification, where its clock is due: answers whether it
+    /// ran.
+    ///
+    /// The store's own consistency is the other maintenance question, and it
+    /// is asked for the same reason the sweep is: it is bounded work off the
+    /// request path. Its clock is read separately from the sweep's, because
+    /// the two acts cost differently: a sweep reads one directory, and this
+    /// reads every page of the database. One leg serving both cadences on
+    /// whichever clock is up would spend the read on the sweep's. A verdict of
+    /// damage is **not** swallowed the way a failed sweep is — a sweep that
+    /// did not run leaves derived state sound, and this is the one caller that
+    /// learns it is not.
+    fn verification_unit(&self, attachment: &mut ProductionAttachment) -> Result<bool, JobFailure> {
+        if Instant::now() < attachment.store_verification_due {
+            return Ok(false);
+        }
+        let _job = self.evidence.attributing();
+        attachment.store.verify_integrity().map_err(store_effect)?;
+        attachment.store_verification_due = Instant::now() + STORE_VERIFICATION_INTERVAL;
+        Ok(true)
+    }
+
+    /// One unit of a maintenance leg, answering whether one ran.
+    ///
+    /// The sweep and the verification run whether or not the claim is quiet.
+    /// A leg takes at most one quiet slice, the rolling heal's ahead of
+    /// semantic work — lexical correctness first — and only over a quiet
+    /// claim rechecked before it, so the lifecycle drains watcher batches and
+    /// hands on applies, facts and teardown before the next slice, and what a
+    /// slice committed is published at the leg's end before another follows
+    /// it. A rolling-heal slice keeps its own work bounds.
+    fn maintenance_unit(
+        &self,
+        name: &VaultName,
+        attachment: &mut ProductionAttachment,
+        quiet: bool,
+        sliced: &mut bool,
+        progress: &ProgressReporter<ProductionAttachment>,
+    ) -> Result<bool, JobFailure> {
+        self.check_maintainership(attachment)?;
+        if self.sweep_unit(attachment) || self.verification_unit(attachment)? {
+            return Ok(true);
+        }
+        let rolling = attachment.rolling.due();
+        if *sliced || !quiet || !(rolling || self.semantic_owed(name)) {
+            return Ok(false);
+        }
+        // A settled batch may have arrived since the claim was taken. Leave
+        // it for the lifecycle's normal drain before claiming another slice.
+        if !attachment.heal_observed.is_empty() {
+            return Ok(false);
+        }
+        if let Some(batch) = poll_subscription(attachment)? {
+            attachment.heal_observed.merge(batch);
+            return Ok(false);
+        }
+        if !progress.quiet_maintenance_allowed() {
+            return Ok(false);
+        }
+        let _job = self.evidence.attributing();
+        *sliced = true;
+        if rolling {
+            let ended = rolling::slice(attachment, self.policy);
+            if ended.is_ok() {
+                self.owe_semantic(name, attachment, progress);
+            }
+            return self.leg_ended(attachment, progress, ended).map(|()| true);
+        }
+        self.semantic_slice(name, attachment, progress);
+        Ok(true)
     }
 
     /// Whether the vault's engine owes a slice that may run now. Cheap and
@@ -2283,82 +2394,47 @@ impl EntryOps for ProductionEntryOps {
         Some(attachment.rolling.status())
     }
 
+    /// A leg's units in today's order: the shadow sweep, then the store's
+    /// verification, then one quiet slice — a rolling-heal slice ahead of a
+    /// semantic one — each taken only where its clock or flag says it is
+    /// owed and the leg's budget lasts. Only the quiet slice requires a quiet
+    /// claim.
     fn maintain_quiet(
         &self,
         name: &VaultName,
         attachment: &mut Self::Attachment,
         quiet: bool,
+        turn: &mut MaintenanceTurn,
         progress: &ProgressReporter<Self::Attachment>,
     ) -> Result<(), JobFailure> {
-        self.maintain(name, attachment)?;
-        if !quiet || !(attachment.rolling.due() || self.semantic_owed(name)) {
-            return Ok(());
-        }
-        // A settled batch may have arrived since the claim was taken. Leave
-        // it for the lifecycle's normal drain before claiming another slice.
-        if !attachment.heal_observed.is_empty() {
-            return Ok(());
-        }
-        if let Some(batch) = poll_subscription(attachment)? {
-            attachment.heal_observed.merge(batch);
-            return Ok(());
-        }
-        if !progress.quiet_maintenance_allowed() {
-            return Ok(());
-        }
-        let _job = self.evidence.attributing();
-        // One slice per quiet leg, the rolling heal's ahead of semantic work:
-        // lexical correctness first, and the lifecycle drains watcher batches
-        // and hands on applies, facts and teardown before the next slice.
-        if attachment.rolling.due() {
-            let ended = rolling::slice(attachment, self.policy);
-            if ended.is_ok() {
-                self.owe_semantic(name, attachment, progress);
-            }
-            return self.leg_ended(attachment, progress, ended);
-        }
-        self.semantic_slice(name, attachment, progress);
-        Ok(())
+        let mut sliced = false;
+        turn.run_units(|| self.maintenance_unit(name, attachment, quiet, &mut sliced, progress))
     }
 
     /// One maintenance leg serves independent cleanup, verification and rolling
-    /// clocks. Only the rolling duty requires a quiet claim.
-    fn maintenance_due(&self, name: &VaultName, attachment: &Self::Attachment) -> bool {
-        attachment.last_shadow_sweep.elapsed() >= norn_fs::SHADOW_AGE_THRESHOLD
-            || Instant::now() >= attachment.store_verification_due
-            || attachment.rolling.due()
-            || self.semantic_owed(name)
+    /// clocks, whichever comes due first. A rolling pass in progress keeps its
+    /// clock past due until the pass completes.
+    fn maintenance_deadline(&self, attachment: &Self::Attachment) -> Option<Instant> {
+        let swept_due = attachment.last_shadow_sweep + norn_fs::SHADOW_AGE_THRESHOLD;
+        Some(
+            swept_due
+                .min(attachment.store_verification_due)
+                .min(attachment.rolling.due),
+        )
     }
 
+    /// The vault's engine owes a slice. This flag stands for the semantic
+    /// work a commit left owed, which the commit's own wake announces.
+    fn maintenance_owed(&self, name: &VaultName) -> bool {
+        self.semantic_owed(name)
+    }
+
+    /// The shadow sweep and the store's verification, each where its clock
+    /// is due, as one call outside a leg's budget.
     fn maintain(&self, _: &VaultName, attachment: &mut Self::Attachment) -> Result<(), JobFailure> {
-        let _job = self.evidence.attributing();
-        if !attachment
-            .maintainership
-            .still_current()
-            .map_err(data_dir_effect)?
-        {
-            return Err(JobFailure::LostMaintainership);
-        }
-        // Shadow residue is inert, and a sweep is only bounded cleanup. Losing
-        // that cleanup opportunity must not withdraw an otherwise healthy
-        // attachment or force a full heal; try again at the next normal cadence.
-        if attachment.last_shadow_sweep.elapsed() >= norn_fs::SHADOW_AGE_THRESHOLD {
-            let _ = attachment.shadows.sweep(norn_fs::SHADOW_AGE_THRESHOLD);
-            attachment.last_shadow_sweep = Instant::now();
-        }
-        // The store's own consistency is the other maintenance question, and it
-        // is asked here for the same reason the sweep is: it is bounded work
-        // off the request path. Its clock is read separately from the sweep's,
-        // because the two acts cost differently: a sweep reads one directory,
-        // and this reads every page of the database. One leg serving both
-        // cadences on whichever clock is up would spend the read on the
-        // sweep's. A verdict of damage is **not** swallowed the way a failed
-        // sweep is — a sweep that did not run leaves derived state sound, and
-        // this is the one caller that learns it is not.
-        if Instant::now() >= attachment.store_verification_due {
-            attachment.store.verify_integrity().map_err(store_effect)?;
-            attachment.store_verification_due = Instant::now() + STORE_VERIFICATION_INTERVAL;
-        }
+        self.check_maintainership(attachment)?;
+        self.sweep_unit(attachment);
+        self.verification_unit(attachment)?;
         Ok(())
     }
 
@@ -6218,6 +6294,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_secs(60),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
         .unwrap();
@@ -6899,6 +6976,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(25),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
         .unwrap();
@@ -6934,6 +7012,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_secs(60),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
         .unwrap();
@@ -6986,6 +7065,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_secs(60),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
         .unwrap();
@@ -7035,6 +7115,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_secs(60),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
         .unwrap();
@@ -7073,6 +7154,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_secs(60),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
         .unwrap();
@@ -7356,6 +7438,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_secs(60),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
         .unwrap();
@@ -7464,6 +7547,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_secs(60),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
         .unwrap();
@@ -7528,6 +7612,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_secs(60),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
         .unwrap();
@@ -7612,6 +7697,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_secs(60),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
         .unwrap();
@@ -7794,17 +7880,22 @@ mod tests {
         ) -> Result<Option<norn_fs::Batch>, JobFailure> {
             self.inner.poll(name, attachment)
         }
-        fn maintenance_due(&self, name: &VaultName, attachment: &Self::Attachment) -> bool {
-            self.inner.maintenance_due(name, attachment)
+        fn maintenance_deadline(&self, attachment: &Self::Attachment) -> Option<Instant> {
+            self.inner.maintenance_deadline(attachment)
+        }
+        fn maintenance_owed(&self, name: &VaultName) -> bool {
+            self.inner.maintenance_owed(name)
         }
         fn maintain_quiet(
             &self,
             name: &VaultName,
             attachment: &mut Self::Attachment,
             quiet: bool,
+            turn: &mut MaintenanceTurn,
             progress: &ProgressReporter<Self::Attachment>,
         ) -> Result<(), JobFailure> {
-            self.inner.maintain_quiet(name, attachment, quiet, progress)
+            self.inner
+                .maintain_quiet(name, attachment, quiet, turn, progress)
         }
         fn rolling_heal(
             &self,
@@ -8134,6 +8225,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_secs(60),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
         .unwrap();
@@ -8591,6 +8683,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_secs(60),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
         .unwrap();
@@ -8657,6 +8750,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_secs(60),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
         .unwrap();
@@ -8693,6 +8787,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_secs(60),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
         .unwrap();
@@ -9576,14 +9671,15 @@ mod tests {
 
         /// **A vault is `Ready` before its enabled engine is initialized, and
         /// its status says the engine is preparing**: not off, which is a
-        /// section that asks for none, and not on. No watcher poll has run, so
-        /// no maintenance slice has either, and lexical reads already serve.
+        /// section that asks for none, and not on. The case holds owed work,
+        /// so no maintenance slice has run, and lexical reads already serve.
         #[test]
         fn a_ready_vault_reports_its_enabled_engine_preparing_before_any_slice() {
             let f = Fixture::new("status-engine-preparing");
             fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
             fs::write(f.vault().join("alpha.md"), "alpha alpha\n").unwrap();
             let (engines, ops) = engines_and_ops(&f);
+            engines.hold_owed_work();
             let (host, name, _lease) = ready_host(&f, ops);
 
             assert_eq!(
@@ -9715,6 +9811,7 @@ mod tests {
                     worker_slots: 1,
                     watch_poll_interval: Duration::from_millis(5),
                     read_settle_bound: crate::READ_SETTLE_BOUND,
+                    background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
                 },
             )
             .unwrap();
@@ -9824,6 +9921,7 @@ mod tests {
                     &VaultName,
                     &mut ProductionAttachment,
                     bool,
+                    &mut MaintenanceTurn,
                     &ProgressReporter<ProductionAttachment>,
                 ) -> Result<(), JobFailure>
                 + Send,
@@ -9864,6 +9962,7 @@ mod tests {
                     &VaultName,
                     &mut ProductionAttachment,
                     bool,
+                    &mut MaintenanceTurn,
                     &ProgressReporter<ProductionAttachment>,
                 ) -> T
                 + Send
@@ -9873,8 +9972,8 @@ mod tests {
                 let (resume, resumed) = std::sync::mpsc::channel();
                 self.steps
                     .send(Some(Box::new(
-                        move |ops, name, attachment, quiet, progress| {
-                            let observed = action(ops, name, attachment, quiet, progress);
+                        move |ops, name, attachment, quiet, turn, progress| {
+                            let observed = action(ops, name, attachment, quiet, turn, progress);
                             sample.send(observed).unwrap();
                             resumed.recv_timeout(Duration::from_secs(30)).unwrap();
                             Ok(())
@@ -9928,6 +10027,7 @@ mod tests {
                     worker_slots: 1,
                     watch_poll_interval: Duration::from_millis(5),
                     read_settle_bound: crate::READ_SETTLE_BOUND,
+                    background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
                 },
             )
             .unwrap();
@@ -9939,6 +10039,9 @@ mod tests {
             control
                 .active
                 .store(true, std::sync::atomic::Ordering::SeqCst);
+            // The script owes maintenance on a flag, as a commit's semantic
+            // owe does, so it announces it as that commit would.
+            host.wake_background();
             (
                 host,
                 name,
@@ -9969,7 +10072,7 @@ mod tests {
             engines: &Arc<SemanticEngines>,
         ) -> PausedMaintenance<MaintenanceObservation> {
             let engines = Arc::clone(engines);
-            script.pause(move |ops, name, attachment, quiet, progress| {
+            script.pause(move |ops, name, attachment, quiet, turn, progress| {
                 assert!(quiet && progress.quiet_maintenance_allowed());
                 let rolling_before = attachment.rolling.status();
                 let generation_before = attachment.store.feed_read().write_generation().unwrap();
@@ -9979,7 +10082,7 @@ mod tests {
                 engines.run_inside_next_drain(move || {
                     attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 });
-                ops.maintain_quiet(name, attachment, quiet, progress)
+                ops.maintain_quiet(name, attachment, quiet, turn, progress)
                     .unwrap();
                 MaintenanceObservation {
                     rolling_before,
@@ -10001,7 +10104,7 @@ mod tests {
             fs::write(f.vault().join("alpha.md"), "alpha\n").unwrap();
             let (host, name, _lease, engines, script) = scripted_semantic_host(&f);
             hold_the_sidecar(&f, &name);
-            let held = script.pause(|_, _, attachment, _, _| {
+            let held = script.pause(|_, _, attachment, _, _, _| {
                 attachment.subscription.take();
                 attachment.rolling.due = Instant::now() + Duration::from_secs(3600);
             });
@@ -10074,7 +10177,7 @@ mod tests {
                 );
             }
 
-            let held = script.pause(|_, _, _, _, _| {});
+            let held = script.pause(|_, _, _, _, _, _| {});
             match norn_db::connect(&sidecar_file(&f, &name)).unwrap() {
                 norn_db::Attempt::Connected(connection) => connection.execute_batch(
                     "DROP TRIGGER held_delete; DROP TRIGGER held_insert; DROP TRIGGER held_update;"
@@ -10115,7 +10218,7 @@ mod tests {
             fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
             many_documents(&f, 130);
             let (host, name, _lease, engines, script) = scripted_semantic_host(&f);
-            drop(script.pause(|_, _, attachment, _, _| {
+            drop(script.pause(|_, _, attachment, _, _, _| {
                 // Make these real watcher misses; no backend timing decides
                 // which path derives them. Only the rolling heal can do so.
                 attachment.subscription.take();
@@ -10307,11 +10410,15 @@ mod tests {
                 self.inner.reload(name, attachment, progress)
             }
 
-            fn maintenance_due(&self, name: &VaultName, attachment: &Self::Attachment) -> bool {
+            fn maintenance_deadline(&self, attachment: &Self::Attachment) -> Option<Instant> {
+                self.inner.maintenance_deadline(attachment)
+            }
+
+            fn maintenance_owed(&self, name: &VaultName) -> bool {
                 self.maintenance_script
                     .as_ref()
                     .is_some_and(|script| script.active.load(std::sync::atomic::Ordering::SeqCst))
-                    || self.inner.maintenance_due(name, attachment)
+                    || self.inner.maintenance_owed(name)
             }
 
             fn maintain_quiet(
@@ -10319,6 +10426,7 @@ mod tests {
                 name: &VaultName,
                 attachment: &mut Self::Attachment,
                 quiet: bool,
+                turn: &mut MaintenanceTurn,
                 progress: &ProgressReporter<Self::Attachment>,
             ) -> Result<(), JobFailure> {
                 if let Some(script) = &self.maintenance_script
@@ -10331,10 +10439,11 @@ mod tests {
                         .recv_timeout(Duration::from_secs(30))
                         .unwrap();
                     if let Some(step) = step {
-                        return step(&self.inner, name, attachment, quiet, progress);
+                        return step(&self.inner, name, attachment, quiet, turn, progress);
                     }
                 }
-                self.inner.maintain_quiet(name, attachment, quiet, progress)
+                self.inner
+                    .maintain_quiet(name, attachment, quiet, turn, progress)
             }
 
             fn rolling_heal(
@@ -10400,6 +10509,7 @@ mod tests {
                     worker_slots: 1,
                     watch_poll_interval: Duration::from_millis(5),
                     read_settle_bound: crate::READ_SETTLE_BOUND,
+                    background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
                 },
             )
             .unwrap();
@@ -10617,6 +10727,7 @@ mod tests {
             let f = Fixture::new("status-engine-instant");
             fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
             let (engines, ops) = engines_and_ops(&f);
+            engines.hold_owed_work();
             let name = f.registration().name;
             let host = crate::Host::new(
                 crate::RegistryRead::from_entries([f.registration()]),
@@ -10626,6 +10737,7 @@ mod tests {
                     worker_slots: 1,
                     watch_poll_interval: Duration::from_secs(60),
                     read_settle_bound: crate::READ_SETTLE_BOUND,
+                    background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
                 },
             )
             .unwrap();
@@ -10655,8 +10767,8 @@ mod tests {
                 (EngineSection::undelivered(), norn_wire::EngineStatus::off())
             );
             wait_state(&host, &name, norn_wire::TrustState::Ready);
-            // Published, and no poll has run a slice: the engine the entry
-            // committed is preparing.
+            // Published, and no slice has run while owed work is held: the
+            // engine the entry committed is preparing.
             assert_eq!(
                 engine_reported(&host, &name),
                 (
@@ -10722,8 +10834,8 @@ mod tests {
         #[test]
         fn a_status_mid_reload_pairs_the_fingerprints_with_the_section_they_served() {
             let off = || (EngineSection::disabled(), norn_wire::EngineStatus::off());
-            // No poll runs a slice on this host, so an enabled engine stays
-            // preparing across both publications.
+            // Owed work is held on this host, so no slice runs and an enabled
+            // engine stays preparing across both publications.
             let on = || {
                 (
                     EngineSection::enabled(),
@@ -10750,6 +10862,7 @@ mod tests {
                 fs::write(f.vault().join(".norn/config.toml"), before).unwrap();
                 fs::write(f.vault().join("alpha.md"), "alpha alpha\n").unwrap();
                 let (engines, ops) = engines_and_ops(&f);
+                engines.hold_owed_work();
                 let (host, name, _lease) = ready_host(&f, ops);
                 let host = Arc::new(host);
                 let reported = |status: norn_wire::VaultStatus| {
@@ -11584,6 +11697,7 @@ mod tests {
                     worker_slots: 1,
                     watch_poll_interval: Duration::from_secs(60),
                     read_settle_bound: crate::READ_SETTLE_BOUND,
+                    background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
                 },
             )
             .unwrap(),
@@ -11681,6 +11795,7 @@ mod tests {
             worker_slots: 1,
             watch_poll_interval: Duration::from_secs(60),
             read_settle_bound: crate::READ_SETTLE_BOUND,
+            background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
         };
         let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
         let first = crate::Host::new(
@@ -17403,6 +17518,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(2),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
         .unwrap();
@@ -20832,6 +20948,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(2),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
         .unwrap();
@@ -20886,6 +21003,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(2),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
         .unwrap();
@@ -22267,6 +22385,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(2),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
         .unwrap();
@@ -22451,6 +22570,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(2),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
         .unwrap();
@@ -22512,6 +22632,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(2),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
         .unwrap();
@@ -22778,6 +22899,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(2),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
         .unwrap();
@@ -22950,6 +23072,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(2),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
         .unwrap();
@@ -23851,10 +23974,10 @@ mod tests {
         attachment.last_shadow_sweep =
             Instant::now() - norn_fs::SHADOW_AGE_THRESHOLD - Duration::from_secs(1);
 
-        assert!(ops.maintenance_due(&name, &attachment));
+        assert!(crate::lifecycle::maintenance_due(&ops, &name, &attachment));
         ops.maintain(&name, &mut attachment).unwrap();
         assert!(!residue.exists());
-        assert!(!ops.maintenance_due(&name, &attachment));
+        assert!(!crate::lifecycle::maintenance_due(&ops, &name, &attachment));
         ops.detach(&name, attachment);
     }
 
@@ -23871,11 +23994,11 @@ mod tests {
         attachment.last_shadow_sweep =
             Instant::now() - norn_fs::SHADOW_AGE_THRESHOLD - Duration::from_secs(1);
 
-        assert!(ops.maintenance_due(&name, &attachment));
+        assert!(crate::lifecycle::maintenance_due(&ops, &name, &attachment));
         ops.maintain(&name, &mut attachment)
             .expect("cleanup availability must not withdraw serving availability");
         assert!(attachment.maintainership.still_current().expect("a stat"));
-        assert!(!ops.maintenance_due(&name, &attachment));
+        assert!(!crate::lifecycle::maintenance_due(&ops, &name, &attachment));
 
         ops.detach(&name, attachment);
     }
@@ -24086,6 +24209,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(2),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
         .unwrap();
@@ -24204,6 +24328,7 @@ mod tests {
                     worker_slots: 1,
                     watch_poll_interval: Duration::from_secs(60),
                     read_settle_bound: crate::READ_SETTLE_BOUND,
+                    background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
                 },
             )
             .unwrap();
@@ -24844,6 +24969,7 @@ mod tests {
                     worker_slots: 1,
                     watch_poll_interval: Duration::from_millis(5),
                     read_settle_bound: crate::READ_SETTLE_BOUND,
+                    background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
                 },
             )
             .unwrap();
@@ -25146,6 +25272,7 @@ mod tests {
                     worker_slots: 1,
                     watch_poll_interval: Duration::from_secs(60),
                     read_settle_bound: crate::READ_SETTLE_BOUND,
+                    background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
                 },
             )
             .unwrap();

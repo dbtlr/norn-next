@@ -65,7 +65,7 @@ fn an_apply_queued_during_maintenance_prevents_quiet_work() {
     let ops = Arc::new(FakeOps::default());
     let (host, name, lease) = a_ready_vault(&ops);
     arrange_for(&ops.block_maintenance_at, &name);
-    arrange_for(&ops.maintenance_due_at, &name);
+    owe_maintenance(&host, &ops, &name);
     poll_watchers(&host.shared);
     wait_for_flag("maintenance_started", &ops.maintenance_started);
     let entry = host.shared.entries.get(&name).unwrap();
@@ -156,7 +156,7 @@ fn an_apply_arriving_during_a_reconcile_takes_the_claim_before_the_next_turn_and
     let entry = host.shared.entries.get(&name).unwrap();
     hold_a_reconcile_turn(&ops, &host);
     ops.facts_on_next_polls.store(1, Ordering::SeqCst);
-    arrange_for(&ops.maintenance_due_at, &name);
+    owe_maintenance(&host, &ops, &name);
 
     let pending = host
         .admit_apply(&name, a_plan(&name))
@@ -788,7 +788,7 @@ fn read_damage_carried_to_a_hand_on_is_published_with_its_rebuild_and_answers_th
         .expect("a ready entry answers a read");
     hold_a_reconcile_turn(&ops, &host);
     ops.facts_on_next_polls.store(1, Ordering::SeqCst);
-    arrange_for(&ops.maintenance_due_at, &name);
+    owe_maintenance(&host, &ops, &name);
     let pending = host.admit_apply(&name, a_plan(&name)).expect("admitted");
     let refusal = host.withdraw_for_read_damage(&hold, "the store is damaged".to_string());
     assert!(
@@ -1068,21 +1068,22 @@ fn a_full_job_queue_on_a_hand_off_to_an_apply_retries_through_the_marker() {
     drop((leases, host));
 }
 
-/// **Case 2, the maintenance scan's start: a scan scheduled while an apply
-/// was admitted yields the claim to it before it begins.** The apply
-/// arrives while a watcher poll holds the entry, so it queues; the poll then
-/// finds maintenance due and schedules the scan. The scan's start is the
-/// first point the queue can take the claim, and it does: the apply runs
-/// with no maintenance scan run before it.
+/// **Case 2, the maintenance scan's start: a scan that came due while an
+/// apply was admitted yields the claim to it.** The apply arrives while a
+/// watcher poll holds the entry, so it queues; the scan comes due meanwhile,
+/// and the scheduler marks the entry rather than scheduling over the held
+/// claim. The poll's release is the first point the queue can take the
+/// claim, and it does: the apply runs with no maintenance scan run before
+/// it, and the scan follows it at the apply's own release.
 #[test]
 fn a_maintenance_scan_yields_the_claim_to_an_apply_queued_before_it_began() {
     let ops = Arc::new(FakeOps::default());
     let (host, name, lease) = a_ready_vault(&ops);
     *ops.poll_gate.lock().unwrap() = Some(name.clone());
-    arrange_for(&ops.maintenance_due_at, &name);
     let shared = Arc::clone(&host.shared);
     let polling = thread::spawn(move || poll_watchers(&shared));
     wait_for_flag("poll_started", &ops.poll_started);
+    owe_maintenance(&host, &ops, &name);
 
     let pending = host.admit_apply(&name, a_plan(&name)).expect("admitted");
     assert!(
@@ -1107,6 +1108,7 @@ fn a_maintenance_scan_yields_the_claim_to_an_apply_queued_before_it_began() {
         0,
         "a maintenance scan ran ahead of the apply queued before it began"
     );
+    wait_for_maintenance(&ops);
     drop((lease, host));
 }
 

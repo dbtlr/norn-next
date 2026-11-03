@@ -481,6 +481,7 @@
 //! written under, and that coupling is the entry's, not the claim's.
 
 use super::Job;
+use super::background::BackgroundWake;
 
 /// An entry's coverage, and who holds it.
 ///
@@ -531,6 +532,15 @@ impl<A> Coverage<A> {
     /// it ends, and an entry with none is one an attach is what serves.
     pub(super) fn in_hand(&self) -> bool {
         matches!(self.0, Custody::Parked(_))
+    }
+
+    /// Whether the entry accounts for coverage, in its own hand or out with a
+    /// leg. An entry's background clocks run exactly while it does: the
+    /// release that leaves it accounting for none — a detach, an unwound
+    /// leg's discard, or the give-back after a refusal or a loss — ends them,
+    /// and the next attach starts them again.
+    pub(super) fn accounted_for(&self) -> bool {
+        !matches!(self.0, Custody::None)
     }
 
     /// Whether the entry's coverage is out with a leg. What a leg holds is
@@ -752,27 +762,61 @@ pub(super) struct Claim {
     /// is about to send itself.
     leg: Option<Leg>,
     slot: Slot,
-}
-
-impl Default for Claim {
-    fn default() -> Self {
-        Self {
-            epoch: 0,
-            gate: Gate::Open,
-            leg: None,
-            slot: Slot::default(),
-        }
-    }
+    /// Whether the background scheduler found a claim-bound slice due over
+    /// this entry at its last ask, and so contributes no deadline for it
+    /// until it asks again. Set and cleared by the scheduler alone.
+    owes_maintenance: bool,
+    /// Where the release of a marked entry sends its wake.
+    wake: BackgroundWake,
 }
 
 impl Claim {
     /// A claim standing at `epoch`, holding nothing: what an entry joining
     /// the serving set starts from, with every epoch at or below `epoch`
-    /// already spent by an entry that left it.
-    pub(super) fn starting_at(epoch: u64) -> Self {
+    /// already spent by an entry that left it. `wake` is the host's
+    /// background scheduler.
+    pub(super) fn starting_at(epoch: u64, wake: BackgroundWake) -> Self {
         Self {
             epoch,
-            ..Self::default()
+            gate: Gate::Open,
+            leg: None,
+            slot: Slot::default(),
+            owes_maintenance: false,
+            wake,
+        }
+    }
+
+    /// Mark the entry as owing maintenance: the background scheduler found a
+    /// claim-bound slice due over it, and either scheduled the leg or could
+    /// not. The next move that opens the gate wakes the scheduler, which asks
+    /// again.
+    pub(super) fn mark_owing_maintenance(&mut self) {
+        self.owes_maintenance = true;
+    }
+
+    /// Clear the mark: the scheduler's ask found no claim-bound slice due.
+    pub(super) fn clear_maintenance_mark(&mut self) {
+        self.owes_maintenance = false;
+    }
+
+    /// Whether the entry is marked as owing maintenance.
+    #[cfg(test)]
+    pub(super) fn owes_maintenance(&self) -> bool {
+        self.owes_maintenance
+    }
+
+    /// Wake the background scheduler, which asks every entry again.
+    pub(super) fn wake_background(&self) {
+        self.wake.send();
+    }
+
+    /// **The release wake is the claim carrier's own.** Every move here that
+    /// opens the gate calls this, so a release of a marked entry wakes the
+    /// scheduler whichever site released it, and no site outside the carrier
+    /// can omit the wake.
+    fn wake_where_marked(&self) {
+        if self.owes_maintenance && matches!(self.gate, Gate::Open) {
+            self.wake.send();
         }
     }
 
@@ -851,6 +895,7 @@ impl Claim {
     /// nothing is left holding the entry for is work no dispatch reaches.
     pub(super) fn open(&mut self) {
         self.gate = Gate::Open;
+        self.wake_where_marked();
     }
 
     /// Put back a claim on the gate, leaving a job scheduled against the entry
@@ -860,6 +905,7 @@ impl Claim {
         if !matches!(self.gate, Gate::Scheduled(_)) {
             self.gate = Gate::Open;
         }
+        self.wake_where_marked();
     }
 
     /// Give up the job scheduled against the entry, leaving the gate to the leg
@@ -877,6 +923,7 @@ impl Claim {
                 Gate::Open
             };
         }
+        self.wake_where_marked();
     }
 
     /// Record the job a claim took the entry from under, where the entry has

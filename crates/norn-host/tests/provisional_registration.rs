@@ -8,9 +8,9 @@ use norn_config::ConfigDirs;
 use norn_config::registry::VaultRoot;
 use norn_host::{
     ActiveFingerprints, ApplyEnd, ApplyProgress, AttachmentAdvisory, EntryOps, EntryReloadFailure,
-    Host, JobFailure, LifecyclePolicy, PlanGround, ProductionEntryOps, ProductionPolicy,
-    ProgressReporter, ReconcileWork, RecordRefusal, Registration, RegistryRead, ReloadJudgment,
-    RetireRefusal, SemanticEngines,
+    Host, JobFailure, LifecyclePolicy, MaintenanceTurn, PlanGround, ProductionEntryOps,
+    ProductionPolicy, ProgressReporter, ReconcileWork, RecordRefusal, Registration, RegistryRead,
+    ReloadJudgment, RetireRefusal, SemanticEngines,
 };
 use norn_store::ContentModel;
 use norn_testkit::isolation::{self, Lease};
@@ -79,8 +79,9 @@ impl EntryOps for PreHeld {
         fn count_leg_mint(&self, statements: u64);
         fn semantic(&self) -> Option<&SemanticEngines>;
         fn rolling_heal(&self, attachment: &Self::Attachment) -> Option<RollingHealStatus>;
-        fn maintenance_due(&self, name: &VaultName, attachment: &Self::Attachment) -> bool;
-        fn maintain_quiet(&self, name: &VaultName, attachment: &mut Self::Attachment, quiet: bool, progress: &ProgressReporter<Self::Attachment>) -> Result<(), JobFailure>;
+        fn maintenance_deadline(&self, attachment: &Self::Attachment) -> Option<Instant>;
+        fn maintenance_owed(&self, name: &VaultName) -> bool;
+        fn maintain_quiet(&self, name: &VaultName, attachment: &mut Self::Attachment, quiet: bool, turn: &mut MaintenanceTurn, progress: &ProgressReporter<Self::Attachment>) -> Result<(), JobFailure>;
         fn maintain(&self, name: &VaultName, attachment: &mut Self::Attachment) -> Result<(), JobFailure>;
         fn detach(&self, name: &VaultName, attachment: Self::Attachment);
         fn discard(&self, name: &VaultName);
@@ -117,6 +118,7 @@ fn host(
             worker_slots: 1,
             watch_poll_interval: Duration::from_millis(25),
             read_settle_bound: norn_host::READ_SETTLE_BOUND,
+            background_turn_budget: norn_host::BACKGROUND_TURN_BUDGET,
         },
     )
     .unwrap()
@@ -280,6 +282,7 @@ fn a_fresh_first_public_caller_triggers_attachment_and_waits_for_its_own_capabil
             worker_slots: 1,
             watch_poll_interval: Duration::from_millis(25),
             read_settle_bound: norn_host::READ_SETTLE_BOUND,
+            background_turn_budget: norn_host::BACKGROUND_TURN_BUDGET,
         },
     )
     .unwrap();
@@ -357,6 +360,7 @@ fn dynamic_registration_and_replacement_reobserve_storage_before_any_read() {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(25),
                 read_settle_bound: norn_host::READ_SETTLE_BOUND,
+                background_turn_budget: norn_host::BACKGROUND_TURN_BUDGET,
             },
         )
         .unwrap();
@@ -458,6 +462,7 @@ fn foreign_and_inaccessible_storage_cannot_make_a_provisional_waiter() {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(25),
                 read_settle_bound: norn_host::READ_SETTLE_BOUND,
+                background_turn_budget: norn_host::BACKGROUND_TURN_BUDGET,
             },
         )
         .unwrap();

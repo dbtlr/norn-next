@@ -43,6 +43,7 @@ use std::collections::BTreeSet;
 
 use norn_fs::Identity;
 
+use super::background::BackgroundWake;
 use super::{Entry, Service, SnapshotSource};
 use crate::registry::{ResolveRefusal, RootReading, containing, reaching, recheck};
 
@@ -135,15 +136,19 @@ pub(crate) struct ServingSet<A: SnapshotSource> {
     /// replaced entry, which holds no slot, stands past every job it left
     /// queued. Written and read under the set's write lock.
     retired_epoch: AtomicU64,
+    /// The host's background scheduler, which every entry this set serves
+    /// sends its wakes to.
+    wake: BackgroundWake,
 }
 
 impl<A: SnapshotSource> ServingSet<A> {
-    /// A set serving nothing.
-    pub(crate) fn new() -> Self {
+    /// A set serving nothing, whose entries wake `wake`.
+    pub(crate) fn new(wake: BackgroundWake) -> Self {
         Self {
             entries: RwLock::new(BTreeMap::new()),
             classifications: AtomicUsize::new(0),
             retired_epoch: AtomicU64::new(0),
+            wake,
         }
     }
 
@@ -348,6 +353,7 @@ impl<A: SnapshotSource> ServingSet<A> {
                 registration,
                 self.retired_epoch.load(Ordering::SeqCst),
                 storage,
+                self.wake.clone(),
             )),
         );
         Ok(())
@@ -436,6 +442,7 @@ impl<A: SnapshotSource> ServingSet<A> {
                 registration,
                 self.retired_epoch.load(Ordering::SeqCst),
                 storage,
+                self.wake.clone(),
             )),
         );
         drop(entries);

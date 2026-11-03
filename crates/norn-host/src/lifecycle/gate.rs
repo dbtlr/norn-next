@@ -58,6 +58,13 @@ pub(super) trait Stanced {
     /// Record what this hold left, as the hold ends.
     fn end_hold(&mut self);
 
+    /// Answer a hold that moved the stance from `opened` to where it stands
+    /// now, under the gate, after [`Stanced::end_hold`]. The default does
+    /// nothing.
+    fn stance_moved(&mut self, opened: Self::Stance) {
+        let _ = opened;
+    }
+
     fn take_after_hold(&mut self) -> Self::AfterHold {
         Self::AfterHold::default()
     }
@@ -199,6 +206,7 @@ impl<T: Stanced> Drop for GateHold<'_, T> {
     fn drop(&mut self) {
         self.guard.end_hold();
         if self.guard.stance() != self.opened {
+            self.guard.stance_moved(self.opened);
             self.signal.notify();
         }
         self.after_hold = self.guard.take_after_hold();

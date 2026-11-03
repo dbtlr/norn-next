@@ -737,6 +737,10 @@ impl SemanticEngines {
     /// is published and it owes initialization or feed. Cheap and
     /// nonblocking — the map lock alone, never the slot's.
     pub(crate) fn owes_work(&self, vault: &VaultName) -> bool {
+        #[cfg(test)]
+        if self.hooks.owed_work_held() {
+            return false;
+        }
         tolerant(&self.vaults).get(vault).is_some_and(|delivery| {
             delivery.published_store.is_some()
                 && delivery
@@ -1056,9 +1060,16 @@ pub(crate) mod tests {
         install: Mutex<Option<Arranged>>,
         publication: Mutex<Option<Arranged>>,
         install_end: Mutex<Option<Arranged>>,
+        /// While set, no vault's engine owes work, so nothing starts a slice.
+        owed_work_held: std::sync::atomic::AtomicBool,
     }
 
     impl Hooks {
+        pub(super) fn owed_work_held(&self) -> bool {
+            self.owed_work_held
+                .load(std::sync::atomic::Ordering::SeqCst)
+        }
+
         pub(super) fn run_inside_drain(&self) {
             let arranged = tolerant(&self.drain).take();
             if let Some(arranged) = arranged {
@@ -1103,6 +1114,16 @@ pub(crate) mod tests {
     }
 
     impl SemanticEngines {
+        /// Answer that no vault's engine owes work from here on, so no slice
+        /// starts and an enabled engine stays as its delivery left it: a case
+        /// reads an engine that is preparing without racing the wake that
+        /// starts its initialization.
+        pub(crate) fn hold_owed_work(&self) {
+            self.hooks
+                .owed_work_held
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+
         /// Run `arranged` once, inside the next drain of any vault's engine,
         /// while that drain holds its slot and before it reads the feed.
         pub(crate) fn run_inside_next_drain(&self, arranged: impl FnOnce() + Send + 'static) {
