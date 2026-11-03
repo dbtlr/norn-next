@@ -448,17 +448,13 @@ fn a_scheduler_turn_that_unwinds_ends_no_later_turn() {
         .panic_in_scheduler_ask
         .store(true, Ordering::SeqCst);
     host.wake_background();
-    wait_until(
-        "the armed ask to unwind",
-        lifecycle_wait_budget(),
-        || {
-            if host.shared.panic_in_scheduler_ask.load(Ordering::SeqCst) {
-                Observed::pending("the armed ask has not run")
-            } else {
-                Observed::Met(())
-            }
-        },
-    )
+    wait_until("the armed ask to unwind", lifecycle_wait_budget(), || {
+        if host.shared.panic_in_scheduler_ask.load(Ordering::SeqCst) {
+            Observed::pending("the armed ask has not run")
+        } else {
+            Observed::Met(())
+        }
+    })
     .unwrap_or_else(|failure| panic!("{failure}"));
     owe_maintenance(&host, &ops, &name);
     wait_for_maintenances(&ops, 1);
@@ -467,7 +463,11 @@ fn a_scheduler_turn_that_unwinds_ends_no_later_turn() {
 
 /// Whether the entry is marked, whether anything holds its claim, and how
 /// many maintenance legs the fake has run, read under one hold.
-fn mark_claim_and_legs(host: &Host<Arc<FakeOps>>, ops: &FakeOps, name: &VaultName) -> (bool, bool, usize) {
+fn mark_claim_and_legs(
+    host: &Host<Arc<FakeOps>>,
+    ops: &FakeOps,
+    name: &VaultName,
+) -> (bool, bool, usize) {
     let entry = host.shared.entries.get(name).unwrap();
     let state = entry.gate.lock().unwrap();
     (
@@ -607,8 +607,8 @@ fn a_hold_returning_the_stance_from_refuse_to_serve_wakes_the_scheduler() {
 /// case stands in for.
 #[test]
 fn the_commit_of_an_engine_delivery_wakes_the_scheduler() {
-    use crate::semantic::SemanticEngines;
     use crate::reload::EngineConfigReceiver;
+    use crate::semantic::SemanticEngines;
 
     let scratch = std::env::temp_dir().join("norn-host-delivery-wake");
     let engines = SemanticEngines::new(
@@ -632,7 +632,10 @@ fn the_commit_of_an_engine_delivery_wakes_the_scheduler() {
         let coverage = state.coverage.take(leg).expect("the coverage is parked");
         record_active_declaration(&mut state, &*host.shared.ops, &name, &coverage);
         state.coverage.park_by(leg, coverage);
-        assert!(state.delivered_engine.is_some(), "no delivery was committed");
+        assert!(
+            state.delivered_engine.is_some(),
+            "no delivery was committed"
+        );
     }
     assert_eq!(
         host.scheduler_reading().wakes,
@@ -660,17 +663,13 @@ fn an_ask_with_nothing_due_clears_the_mark_and_the_entry_contributes_its_deadlin
     }
     let deadlines = host.scheduler_reading().deadlines;
     host.wake_background();
-    wait_until(
-        "the ask to clear the mark",
-        lifecycle_wait_budget(),
-        || {
-            if entry.gate.lock().unwrap().claim.owes_maintenance() {
-                Observed::pending("the entry is still marked")
-            } else {
-                Observed::Met(())
-            }
-        },
-    )
+    wait_until("the ask to clear the mark", lifecycle_wait_budget(), || {
+        if entry.gate.lock().unwrap().claim.owes_maintenance() {
+            Observed::pending("the entry is still marked")
+        } else {
+            Observed::Met(())
+        }
+    })
     .unwrap_or_else(|failure| panic!("{failure}"));
     assert_eq!(ops.maintenances.load(Ordering::SeqCst), 0);
 
