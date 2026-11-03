@@ -254,13 +254,18 @@ fn ask_entry<O: EntryOps>(
     // is a deadline; one already past is owed work, which the lane's turn
     // hands the clock's next reading back from, and over a stance that
     // refuses it waits for the wake the stance's return sends.
+    // One reading of the clock, taken before the owed check: a lane clock at
+    // or before it is owed at that later check too, since the clock only moves
+    // on, and one after it is kept as a deadline. Two readings would drop a
+    // clock that came due between them, neither owed nor a deadline.
+    let now = Instant::now();
     if state.read_stance() != ReadStance::Refuse && shared.ops.background_owed(entry.name()) {
         shared.lane.enqueue(entry.name());
     }
     let lane_deadline = shared
         .ops
         .background_deadline(entry.name())
-        .filter(|at| *at > Instant::now());
+        .filter(|at| *at > now);
     if let Some(attachment) = state.coverage.held() {
         state.background_due = shared.ops.maintenance_deadline(attachment);
     }

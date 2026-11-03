@@ -408,7 +408,10 @@ fn a_store_with_long_steps(
     let mut store = scratch.open();
     let body = "a body long enough to fill pages of the database\n".repeat(64);
     let mut request = store.begin_request();
-    for at in 0..2_000 {
+    // Large enough that each stopped statement runs for tens of milliseconds
+    // in a test build, so the stop, the join and the copy's removal fit well
+    // inside the bound below even on a loaded runner.
+    for at in 0..6_000 {
         write_document(
             &mut request,
             &document(&format!("{at}.md"), "hash-1", &body),
@@ -433,7 +436,7 @@ fn a_store_with_long_steps(
     ];
     for (kind, _, took) in steps {
         assert!(
-            took >= Duration::from_millis(10),
+            took >= Duration::from_millis(30),
             "the statement after {kind:?} took {took:?}, too short to be stopped inside"
         );
     }
@@ -472,8 +475,11 @@ fn a_stop_from_another_thread_interrupts_the_statement_in_flight() {
             matches!(verdict, Verification::Interrupted),
             "{kind:?}: {verdict:?}"
         );
+        // A stop that did not interrupt the statement returns only once the
+        // statement ends, at about `took`; an interrupted one returns at the
+        // tenth it was stopped at plus the stop's own cleanup.
         assert!(
-            returned < took / 2,
+            returned < took * 3 / 4,
             "a stop {:?} into the {took:?} statement after {kind:?} returned after {returned:?}",
             took / 10
         );
