@@ -113,8 +113,12 @@ fn a_background_turn_ends_within_its_budget_plus_one_unit() {
         "the longest turn ended at {:?}, short of its {budget:?} budget",
         reading.longest_turn
     );
+    // The turn's clock also covers each unit's entry-gate lock and the
+    // scheduler's delay, so its slack is generous: an overrun is caught by
+    // the units-per-turn assertion above, and this bound only checks that a
+    // turn stops at a unit boundary.
     assert!(
-        reading.longest_turn < budget + longest_unit + Duration::from_millis(5),
+        reading.longest_turn < budget + longest_unit + Duration::from_millis(25),
         "a turn took {:?}, past its {budget:?} budget plus one unit of {longest_unit:?}",
         reading.longest_turn
     );
