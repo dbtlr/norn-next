@@ -111,7 +111,8 @@ pub const READ_SETTLE_BOUND: Duration = Duration::from_secs(5);
 
 /// The production value of [`crate::LifecyclePolicy::background_turn_budget`]:
 /// the time one maintenance leg may hold its vault's claim and a worker slot
-/// before it gives both back.
+/// before it gives both back, and the time one background turn on the lane
+/// may take before its thread serves the next owed store.
 ///
 /// Chosen by `maintenance_unit_release_probe`, a release build over 2,000 and
 /// 10,000 documents of 2 KiB: a shadow sweep takes about 50 µs and the
@@ -121,6 +122,13 @@ pub const READ_SETTLE_BOUND: Duration = Duration::from_secs(5);
 /// behind a leg waits at most 100 ms plus one unit, which is one rolling
 /// slice except where the verification is the unit. The verification's own
 /// length is what the budget cannot bound while it runs on the claim.
+///
+/// `semantic_unit_release_probe` measures the lane's units over the same
+/// corpora with the stub embedder: an initialization takes about 0.6 ms and
+/// the longest drain step, one page of 256 embeddings with its read and its
+/// commit, about 21 ms at either size, so a 100 ms turn runs about five pages
+/// and ends within about 120 ms. A real model's page will cost more, and its
+/// runtime will size the page so one page stays within human scale.
 pub const BACKGROUND_TURN_BUDGET: Duration = Duration::from_millis(100);
 
 /// The production value of [`crate::LifecyclePolicy::background_threads`]:
@@ -24001,6 +24009,61 @@ mod tests {
             eprintln!(
                 "UNIT_CALIBRATION docs={count} verification_us={verification:?} sweep_us={sweep} rolling_slices={slices} rolling_longest_us={longest} rolling_total_us={total}"
             );
+        }
+    }
+
+    /// The release-build cost of each background-lane unit of the stub
+    /// engine, which [`BACKGROUND_TURN_BUDGET`] also bounds a background turn
+    /// by: the initialization and every drain step of a vault's first drain,
+    /// at 2,000 and 10,000 documents of 2 KiB. A drain step's page holds up to
+    /// 256 embeddings. Clocks are evidence, never a CI threshold.
+    #[test]
+    #[ignore = "release-build background lane unit calibration"]
+    fn semantic_unit_release_probe() {
+        for count in [2_000, 10_000] {
+            let f = Fixture::new(&format!("semantic-unit-calibration-{count}"));
+            fs::create_dir_all(f.vault().join("docs")).unwrap();
+            fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+            let mut body = format!(
+                "---\ntitle: Note\n---\n# Heading\n{}",
+                "ordinary body text\n".repeat(110)
+            );
+            body.truncate(2048);
+            for index in 0..count {
+                fs::write(f.vault().join(format!("docs/{index:05}.md")), &body).unwrap();
+            }
+            let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
+            let engines = crate::semantic::SemanticEngines::new(dirs.clone());
+            let ops = ProductionEntryOps::new(dirs, ProductionPolicy::new(64, 2).unwrap())
+                .with_semantic(Arc::clone(&engines));
+            let name = f.registration().name;
+            let progress = ProgressReporter::disconnected();
+            let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+            attachment.subscription.take();
+            let source = attachment.store.feed_source();
+            let mut feed = attachment.store.feed_read();
+            let generation = feed.write_generation().unwrap();
+            let reading = norn_store::StoreReading::of(feed.epoch(), generation);
+            drop(feed);
+            engines.publish_delivery(&name, Some(&reading), Some(source));
+            let mut units = Vec::new();
+            loop {
+                let started = Instant::now();
+                let unit = engines.unit(&name);
+                units.push(started.elapsed().as_micros());
+                if unit != (crate::BackgroundUnit::Ran { owed: true }) {
+                    break;
+                }
+            }
+            let longest = units.iter().copied().max().unwrap_or(0);
+            let total: u128 = units.iter().sum();
+            eprintln!(
+                "LANE_UNIT_CALIBRATION docs={count} units={} initialization_us={} longest_us={longest} total_us={total} reading={:?}",
+                units.len(),
+                units[0],
+                engines.reading()
+            );
+            ops.detach(&name, attachment);
         }
     }
 
