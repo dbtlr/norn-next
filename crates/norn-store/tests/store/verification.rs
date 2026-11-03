@@ -552,6 +552,30 @@ fn a_copy_its_place_refuses_is_refused_rather_than_called_damage() {
     assert_eq!(error.damage(), None, "{error:?}");
 }
 
+/// **A copy whose place cannot be cleared never fails a discard or a
+/// rebuild.** The copy is derived state the next copy or attach clears
+/// again, and a verification over an occupied place is refused, so a discard
+/// that stopped at it would trade a leftover file for a vault with no store:
+/// the store goes, the rebuild reopens it, and the obstruction stays.
+#[test]
+#[allow(clippy::disallowed_methods)] // Harness scaffolding: arranging the verification's copy.
+fn a_copy_whose_place_cannot_be_cleared_never_fails_a_discard_or_a_rebuild() {
+    let scratch = Scratch::new("source-discard-obstructed");
+    let store = a_store_with_a_row_for_every_check(&scratch);
+    std::fs::create_dir_all(copy_of(&scratch).join("occupied")).unwrap();
+    let rebuilt = store
+        .discard_and_reopen(StoredPathOrder::Sensitive)
+        .expect("a rebuild over an obstructed copy");
+    drop(rebuilt);
+
+    let store = scratch.open();
+    store.discard().expect("a discard over an obstructed copy");
+    assert!(
+        !scratch.database().exists(),
+        "the discard left the store itself"
+    );
+}
+
 /// **A store whose directory's name is not UTF-8 is verified like any
 /// other.** The data directory is read from the environment as raw bytes,
 /// and the copy is written beside the store at exactly those bytes: a copy

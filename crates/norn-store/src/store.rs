@@ -1612,11 +1612,16 @@ impl Store {
 /// Remove the database at `path` with its sidecars, then the copy a
 /// verification of it writes beside it: the one removal every discard runs,
 /// because a copy is derived state of the store it was taken from.
+///
+/// The copy's removal is best effort, as it is where an open rebuilds from
+/// zero and where an attach binds the store: a copy whose place cannot be
+/// cleared is cleared again before the next copy, and a verification over it
+/// is refused rather than judged, so failing the discard there would leave
+/// the vault with no store over a leftover file.
 fn remove_with_its_copy(path: &Path) -> Result<(), StoreError> {
     norn_db::remove_database(path)?;
-    Ok(norn_db::remove_database(
-        &crate::verification::verification_copy(path),
-    )?)
+    let _ = norn_db::remove_database(&crate::verification::verification_copy(path));
+    Ok(())
 }
 
 /// What a database says about the store schema it was written under.
