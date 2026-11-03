@@ -624,3 +624,42 @@ fn the_commit_of_an_engine_delivery_wakes_the_scheduler() {
     wait_for_maintenances(&ops, 1);
     drop((lease, host));
 }
+
+/// **An ask that finds nothing due clears the mark, and the entry then
+/// contributes its next deadline.** The entry stands marked over a clock
+/// still ahead; the wake's ask clears the mark, and the clock's deadline is
+/// what next asks it and starts the maintenance.
+#[test]
+fn an_ask_with_nothing_due_clears_the_mark_and_the_entry_contributes_its_deadline() {
+    let ops = Arc::new(FakeOps::default());
+    let (host, name, lease) = a_ready_vault(&ops);
+    wait_for_no_claim(&host, &name);
+    let entry = host.shared.entries.get(&name).unwrap();
+    {
+        let mut state = entry.gate.lock().unwrap();
+        state.claim.mark_owing_maintenance();
+        *ops.maintenance_clock.lock().unwrap() = Some(Instant::now() + Duration::from_millis(500));
+    }
+    let deadlines = host.scheduler_reading().deadlines;
+    host.wake_background();
+    wait_until(
+        "the ask to clear the mark",
+        lifecycle_wait_budget(),
+        || {
+            if entry.gate.lock().unwrap().claim.owes_maintenance() {
+                Observed::pending("the entry is still marked")
+            } else {
+                Observed::Met(())
+            }
+        },
+    )
+    .unwrap_or_else(|failure| panic!("{failure}"));
+    assert_eq!(ops.maintenances.load(Ordering::SeqCst), 0);
+
+    wait_for_maintenances(&ops, 1);
+    assert!(
+        host.scheduler_reading().deadlines > deadlines,
+        "the maintenance started without the entry's deadline being reached"
+    );
+    drop((lease, host));
+}
