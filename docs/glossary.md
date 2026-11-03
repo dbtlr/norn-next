@@ -222,7 +222,6 @@ A declared unit of derived state naming its inputs, whether it is deterministic,
 One of two maintenance disciplines for derived state. Lane 1 is deterministic projection of vault documents, committed inside the changeset. Lane 2 is everything else: asynchronous, eventually consistent, and derived from lane-1 records rather than vault files.
 _Avoid_: Sync/async indexing (unqualified)
 
-
 **Engine**:
 A lane-2 domain that owns a sidecar database, consumes the change feed, and answers its own query capabilities. An engine never reads vault files.
 _Avoid_: Worker, plugin
