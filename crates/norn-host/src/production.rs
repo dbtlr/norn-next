@@ -11336,6 +11336,378 @@ mod tests {
             let answer = engines.nearest(&name, "alpha", 1000).expect("an answer");
             assert_eq!(answer.neighbors.len(), 600);
         }
+
+        /// Hold the next embedding phase of any vault's drain: the receiver
+        /// hears once the phase is entered, holding no lock, and the phase
+        /// waits until the sender is sent to or dropped.
+        fn hold_next_embedding(
+            engines: &SemanticEngines,
+        ) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+            let (entered, embedding_entered) = std::sync::mpsc::channel();
+            let (resume, embedding_resumes) = std::sync::mpsc::channel::<()>();
+            engines.run_inside_next_embedding(move || {
+                entered.send(()).unwrap();
+                let _ = embedding_resumes.recv_timeout(Duration::from_secs(30));
+            });
+            (embedding_entered, resume)
+        }
+
+        /// The sidecar's revision as the file holds it, read by an engine
+        /// opened over it for the reading alone.
+        fn sidecar_revision(f: &Fixture, name: &VaultName) -> norn_semantic::SidecarRevision {
+            norn_semantic::Engine::open(
+                sidecar_file(f, name),
+                Arc::new(norn_embed::StubEmbedder::new()),
+            )
+            .expect("the sidecar opens")
+            .revision()
+        }
+
+        /// **An apply completes while its vault's semantic turn is in flight.**
+        /// The engine's unit is held inside its embedding, and an apply over
+        /// the same vault takes the claim, publishes and answers: the unit
+        /// holds no claim, no attachment and no lock an apply takes. Released,
+        /// the engine catches up with the edit and the apply both.
+        #[test]
+        fn an_apply_completes_while_its_vaults_semantic_turn_is_in_flight() {
+            let f = Fixture::new("semantic-apply-during-turn");
+            fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+            fs::write(f.vault().join("note.md"), "status draft\n").unwrap();
+            let (engines, ops) = engines_and_ops(&f);
+            let (host, name, _lease) = polling_ready_host(&f, ops);
+            wait_for_engine(&host, &name, |engine| {
+                *engine == norn_wire::EngineStatus::on(None, Some(Freshness::trailing(0)))
+            });
+            let (embedding_entered, resume) = hold_next_embedding(&engines);
+            fs::write(f.vault().join("beta.md"), "beta\n").unwrap();
+            embedding_entered
+                .recv_timeout(Duration::from_secs(15))
+                .expect("the lane to embed the edit");
+
+            let host = Arc::new(host);
+            let (answered, answer) = std::sync::mpsc::channel();
+            let applying = Arc::clone(&host);
+            let vault = name.clone();
+            thread::spawn(move || {
+                let plan = norn_wire::AuthoredPlan::new(
+                    norn_wire::VaultAddress::name(vault),
+                    vec![norn_wire::Operation::new(
+                        norn_wire::OperationKind::str_replace(
+                            norn_wire::DocumentPath::new("note.md").unwrap(),
+                            "draft",
+                            "final",
+                        ),
+                    )],
+                );
+                let applied = applying
+                    .apply(norn_wire::ApplyParams::new(
+                        norn_wire::ApplyMode::Apply,
+                        PlanDocument::operations(plan),
+                    ))
+                    .expect("an apply over a ready vault is admitted")
+                    .wait();
+                answered.send(applied.is_ok()).unwrap();
+            });
+            let applied = answer.recv_timeout(Duration::from_secs(15));
+            resume.send(()).unwrap();
+
+            assert_eq!(
+                applied,
+                Ok(true),
+                "the apply waited for the semantic unit in flight"
+            );
+            assert_eq!(
+                fs::read_to_string(f.vault().join("note.md")).unwrap(),
+                "status final\n"
+            );
+            wait_for_engine(&*host, &name, |engine| {
+                *engine == norn_wire::EngineStatus::on(None, Some(Freshness::trailing(0)))
+            });
+        }
+
+        /// **A page whose delivery or store lifetime retires while it is
+        /// embedded commits nothing**, whichever retirement it is: a disable,
+        /// a replacing delivery, a detach, or a rebuild's retirement of the
+        /// store lifetime. The unit discards the page, the sidecar stands at
+        /// the revision it had before the page, and the turn owes nothing
+        /// more of the retired delivery.
+        #[test]
+        fn a_page_whose_delivery_or_store_lifetime_retires_while_it_embeds_commits_nothing() {
+            type Retirement = fn(&SemanticEngines, &VaultName);
+            let retirements: [(&str, Retirement); 4] = [
+                ("disabled", |engines, name| {
+                    crate::reload::EngineConfigReceiver::receive(
+                        engines,
+                        name,
+                        Some(&engine_section("[engine.semantic]\nenabled = false\n")),
+                    );
+                }),
+                ("replaced", |engines, name| {
+                    crate::reload::EngineConfigReceiver::receive(engines, name, None);
+                    crate::reload::EngineConfigReceiver::receive(
+                        engines,
+                        name,
+                        Some(&engine_section("[engine.semantic]\n")),
+                    );
+                }),
+                ("detached", |engines, name| engines.detach(name)),
+                ("store lifetime retired", |engines, name| {
+                    engines.retire_store(name);
+                }),
+            ];
+            for (label, retire) in retirements {
+                let f = Fixture::new(&format!("semantic-late-page-{}", label.replace(' ', "-")));
+                fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+                fs::create_dir_all(f.vault().join("docs")).unwrap();
+                fs::write(f.vault().join("docs/alpha.md"), "alpha alpha\n").unwrap();
+                let (engines, ops) = engines_and_ops(&f);
+                let name = f.registration().name;
+                let progress = ProgressReporter::disconnected();
+                let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+                settle(&engines, &name, &mut attachment);
+                let before = sidecar_revision(&f, &name);
+
+                fs::write(f.vault().join("docs/beta.md"), "beta beta\n").unwrap();
+                ops.reconcile(
+                    &name,
+                    &mut attachment,
+                    ReconcileWork {
+                        batch: norn_fs::Batch::rescan(RescanScope::Vault),
+                    },
+                    &progress,
+                )
+                .expect("the rescan reconcile");
+                let retiring = Arc::clone(&engines);
+                let retired = name.clone();
+                engines.run_inside_next_embedding(move || retire(&retiring, &retired));
+                let discarded = engines.reading().pages_discarded;
+                let committed = engines.reading().pages_committed;
+
+                assert_eq!(
+                    engines.unit(&name),
+                    crate::BackgroundUnit::Ran { owed: false },
+                    "{label}"
+                );
+                assert_eq!(
+                    engines.reading().pages_discarded,
+                    discarded + 1,
+                    "{label}: the late page was not discarded"
+                );
+                assert_eq!(engines.reading().pages_committed, committed, "{label}");
+                assert!(
+                    !engines.owes_work(&name),
+                    "{label}: a retired delivery owes work"
+                );
+                assert_eq!(
+                    engines.unit(&name),
+                    crate::BackgroundUnit::NothingOwed,
+                    "{label}: the turn went on past the retirement"
+                );
+                ops.detach(&name, attachment);
+                assert_eq!(
+                    sidecar_revision(&f, &name),
+                    before,
+                    "{label}: the late page reached the sidecar"
+                );
+            }
+        }
+
+        /// **A detach returns while a semantic unit is held in its
+        /// embedding**, and that unit commits nothing. The detach waits for
+        /// at most one hold of the slot lock, never for an embedding; the
+        /// unit, released after the entry has given its resources back, finds
+        /// its delivery retired, and its turn runs no unit after it.
+        #[test]
+        fn a_detach_returns_while_an_embedding_is_held_and_the_unit_commits_nothing() {
+            let f = Fixture::new("semantic-detach-during-embedding");
+            fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+            many_documents(&f, 600);
+            let (engines, ops) = engines_and_ops(&f);
+            let (embedding_entered, resume) = hold_next_embedding(&engines);
+            let (host, name, lease) = polling_ready_host(&f, ops);
+            embedding_entered
+                .recv_timeout(Duration::from_secs(15))
+                .expect("the lane to embed the backlog's first page");
+            let units = engines.reading().units;
+
+            drop(lease);
+            host.reap_idle(Instant::now() + Duration::from_secs(3600))
+                .expect("an idle reap");
+            wait_state(&host, &name, norn_wire::TrustState::Unattached);
+            assert_eq!(
+                engines.section(&name),
+                None,
+                "the engine outlived its entry"
+            );
+            let discarded = engines.reading().pages_discarded;
+            resume.send(()).unwrap();
+
+            wait_until("the held unit to end", lifecycle_budget(), || {
+                let reading = engines.reading();
+                if reading.pages_discarded > discarded {
+                    Observed::Met(())
+                } else {
+                    Observed::Pending(format!("{reading:?}"))
+                }
+            })
+            .unwrap_or_else(|failure| panic!("{failure}"));
+            let reading = engines.reading();
+            assert_eq!(reading.pages_committed, 0, "{reading:?}");
+            assert_eq!(
+                reading.units, units,
+                "a unit ran after the delivery retired: {reading:?}"
+            );
+        }
+
+        /// **Host shutdown waits for at most one unit per lane thread.** A
+        /// unit held in its embedding when the host is dropped finishes its
+        /// embedding, discards its page, and is the last unit the lane runs;
+        /// the drop returns only once it has, so the page is discarded by the
+        /// time the drop returns.
+        #[test]
+        fn host_shutdown_waits_for_the_unit_in_flight_and_starts_no_other() {
+            let f = Fixture::new("semantic-shutdown-during-embedding");
+            fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+            many_documents(&f, 600);
+            let (engines, ops) = engines_and_ops(&f);
+            let (embedding_entered, resume) = hold_next_embedding(&engines);
+            let (host, _name, lease) = polling_ready_host(&f, ops);
+            embedding_entered
+                .recv_timeout(Duration::from_secs(15))
+                .expect("the lane to embed the backlog's first page");
+            let units = engines.reading().units;
+
+            let dropping = thread::spawn(move || drop(host));
+            wait_until("the host to begin its shutdown", lifecycle_budget(), || {
+                if lease.host_shutdown_started() {
+                    Observed::Met(())
+                } else {
+                    Observed::pending("the host has not begun its shutdown")
+                }
+            })
+            .unwrap_or_else(|failure| panic!("{failure}"));
+            resume.send(()).unwrap();
+            dropping.join().expect("the host drop");
+
+            let reading = engines.reading();
+            assert_eq!(
+                reading.pages_discarded, 1,
+                "the drop returned before the unit in flight ended: {reading:?}"
+            );
+            assert_eq!(reading.pages_committed, 0, "{reading:?}");
+            assert_eq!(
+                reading.units, units,
+                "the lane started a unit after shutdown began: {reading:?}"
+            );
+        }
+
+        /// **A search waits behind at most one hold of the slot lock.** A
+        /// search takes its ticket while the lane embeds, holding no lock, and
+        /// is held between its ticket and the lock: the lane, coming back for
+        /// the lock to commit, yields it to that search rather than taking it
+        /// ahead of it, and the search, released, holds the lock before the
+        /// lane's next hold begins.
+        #[test]
+        fn a_search_waits_behind_at_most_one_hold_of_the_lane() {
+            let f = Fixture::new("semantic-search-ticket");
+            fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+            many_documents(&f, 600);
+            let (engines, ops) = engines_and_ops(&f);
+            let (embedding_entered, resume_embedding) = hold_next_embedding(&engines);
+            let (host, name, _lease) = polling_ready_host(&f, ops);
+            embedding_entered
+                .recv_timeout(Duration::from_secs(15))
+                .expect("the lane to embed the backlog's first page");
+
+            let (ticketed, ticket_taken) = std::sync::mpsc::channel();
+            let (go, search_goes) = std::sync::mpsc::channel::<()>();
+            engines.run_after_next_ticket(move || {
+                ticketed.send(()).unwrap();
+                let _ = search_goes.recv_timeout(Duration::from_secs(30));
+            });
+            let searching = Arc::clone(&engines);
+            let vault = name.clone();
+            let search = thread::spawn(move || searching.nearest(&vault, "alpha", 5).is_ok());
+            ticket_taken
+                .recv_timeout(Duration::from_secs(15))
+                .expect("the search to take its ticket");
+            let (yielding, lane_yields) = std::sync::mpsc::channel();
+            engines.run_as_the_lane_next_yields(move || yielding.send(()).unwrap());
+            resume_embedding.send(()).unwrap();
+            let yielded = lane_yields.recv_timeout(Duration::from_secs(15));
+            go.send(()).unwrap();
+            search.join().expect("the search");
+
+            assert!(
+                yielded.is_ok(),
+                "the lane took the slot lock ahead of a search already waiting"
+            );
+            let waited = engines.reading().most_lane_holds_a_search_waited;
+            assert!(waited <= 1, "a search waited behind {waited} lane holds");
+            wait_for_engine(&host, &name, |engine| {
+                *engine == norn_wire::EngineStatus::on(None, Some(Freshness::trailing(0)))
+            });
+        }
+
+        /// **Under continuous search the lane still runs its units, and no
+        /// search waits behind more than one of its holds.** Four threads
+        /// search the vault without pause while the lane drains a three-page
+        /// backlog; the lane waits only for the searches already waiting when
+        /// it comes to the lock, never for later ones, so the backlog drains.
+        #[test]
+        fn continuous_search_does_not_starve_the_lane() {
+            let f = Fixture::new("semantic-search-continuous");
+            fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+            many_documents(&f, 600);
+            let (engines, ops) = engines_and_ops(&f);
+            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let searches = Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let searchers: Vec<_> = (0..4)
+                .map(|_| {
+                    let engines = Arc::clone(&engines);
+                    let stop = Arc::clone(&stop);
+                    let searches = Arc::clone(&searches);
+                    let vault = f.registration().name;
+                    thread::spawn(move || {
+                        while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                            let _ = engines.nearest(&vault, "alpha", 5);
+                            searches.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        }
+                    })
+                })
+                .collect();
+            let (host, name, _lease) = polling_ready_host(&f, ops);
+            wait_for_engine(&host, &name, |engine| {
+                *engine == norn_wire::EngineStatus::on(None, Some(Freshness::trailing(0)))
+            });
+            stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            for searcher in searchers {
+                searcher.join().expect("a searcher");
+            }
+
+            let reading = engines.reading();
+            assert!(
+                reading.pages_committed >= 3,
+                "the backlog did not drain under search: {reading:?}"
+            );
+            assert!(
+                searches.load(std::sync::atomic::Ordering::SeqCst) > 0,
+                "no search ran beside the lane"
+            );
+            assert!(
+                reading.most_lane_holds_a_search_waited <= 1,
+                "a search waited behind {} lane holds",
+                reading.most_lane_holds_a_search_waited
+            );
+            assert_eq!(
+                engines
+                    .nearest(&name, "alpha", 1000)
+                    .unwrap()
+                    .neighbors
+                    .len(),
+                600
+            );
+        }
     }
 
     mod status {

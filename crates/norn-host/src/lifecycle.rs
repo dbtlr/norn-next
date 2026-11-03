@@ -4639,25 +4639,7 @@ impl<O: EntryOps> DemandLease<O> {
         &self.outcome
     }
 
-    /// Clone the actual entry-committed report before a test pauses its gate.
-    #[cfg(test)]
-    pub(crate) fn review_committed_delivery(&self) -> crate::semantic::DeliveredEngine {
-        let shared = self.held.as_ref().unwrap();
-        let entry = shared.entries.get(&self.name).unwrap();
-        let state = entry.gate.lock().unwrap();
-        state.delivered_engine.clone().unwrap()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn entry_gate_is_blocked(&self) -> bool {
-        let shared = self.held.as_ref().unwrap();
-        let entry = shared.entries.get(&self.name).unwrap();
-        matches!(
-            entry.gate.try_lock(),
-            Err(std::sync::TryLockError::WouldBlock)
-        )
-    }
-
+    /// Whether the host this lease holds has begun its shutdown.
     #[cfg(test)]
     pub(crate) fn host_shutdown_started(&self) -> bool {
         self.held

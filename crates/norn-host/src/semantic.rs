@@ -474,12 +474,15 @@ struct Lifetime {
 ///
 /// A search takes a ticket before it takes the slot lock, and its ticket is
 /// served once it holds the lock, or returns or unwinds before reaching it.
-/// The lane, before it takes the lock, waits until every ticket issued before
-/// it came to the lock is served, and never for a later one. The lock itself
-/// promises no order among its waiters, so this is what keeps a lane thread
-/// that releases it from taking it straight back ahead of a waiting search: a
-/// search waits behind at most one hold of the lane's, and continuous search
-/// delays the lane only by the searches already waiting when it came.
+/// The lane, before it takes the lock, records the last ticket issued and
+/// waits until every ticket up to it is served; a search whose ticket was
+/// issued after that waits, before it reaches the lock, until the lane holds
+/// it. The lock itself promises no order among its waiters, so the first half
+/// is what keeps a lane thread that releases it from taking it straight back
+/// ahead of a waiting search, and the second is what keeps a stream of later
+/// searches from barging ahead of the lane: a search waits behind at most one
+/// hold of the lane's, and continuous search delays the lane only by the
+/// searches already waiting when it came.
 #[derive(Default)]
 struct Tickets {
     state: Mutex<TicketState>,
@@ -490,6 +493,9 @@ struct Tickets {
 struct TicketState {
     issued: u64,
     waiting: BTreeSet<u64>,
+    /// The last ticket issued when the lane came to the lock, while the lane
+    /// is coming to it: a later ticket waits until the lane holds it.
+    lane_after: Option<u64>,
 }
 
 /// One search's place in the slot's order, served on its way out whatever
@@ -513,11 +519,13 @@ impl Tickets {
         }
     }
 
-    /// The last ticket issued, where one issued up to it still waits: what
-    /// the lane yields to.
-    fn waiting_now(&self) -> Option<u64> {
-        let state = tolerant(&self.state);
+    /// Come to the lock for the lane: record the last ticket issued, so every
+    /// later one waits for the lane, and answer it where a ticket up to it
+    /// still waits, which is what the lane yields to.
+    fn lane_comes(&self) -> Option<u64> {
+        let mut state = tolerant(&self.state);
         let last = state.issued;
+        state.lane_after = Some(last);
         state
             .waiting
             .first()
@@ -529,6 +537,23 @@ impl Tickets {
     fn wait_until_served(&self, last: u64) {
         let mut state = tolerant(&self.state);
         while state.waiting.first().is_some_and(|&first| first <= last) {
+            state = self
+                .served
+                .wait(state)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+
+    /// The lane holds the lock: the searches that came after it may go.
+    fn lane_holds(&self) {
+        tolerant(&self.state).lane_after = None;
+        self.served.notify_all();
+    }
+
+    /// Wait, before the lock, while the lane came to it ahead of `ticket`.
+    fn wait_behind_the_lane(&self, ticket: u64) {
+        let mut state = tolerant(&self.state);
+        while state.lane_after.is_some_and(|after| ticket > after) {
             state = self
                 .served
                 .wait(state)
@@ -621,7 +646,7 @@ impl EngineSlot {
     /// Take the slot lock for the lane: after every search already waiting
     /// for it has held it.
     fn lane_lock(&self, engines: &SemanticEngines) -> MutexGuard<'_, Slot> {
-        if let Some(last) = self.tickets.waiting_now() {
+        if let Some(last) = self.tickets.lane_comes() {
             #[cfg(test)]
             engines.hooks.run_as_the_lane_yields();
             self.tickets.wait_until_served(last);
@@ -629,6 +654,7 @@ impl EngineSlot {
         let _ = engines;
         let guard = tolerant(&self.slot);
         self.lane_holds.fetch_add(1, Ordering::SeqCst);
+        self.tickets.lane_holds();
         guard
     }
 
@@ -639,6 +665,7 @@ impl EngineSlot {
         let before = self.lane_holds.load(Ordering::SeqCst);
         #[cfg(test)]
         engines.hooks.run_after_a_ticket();
+        self.tickets.wait_behind_the_lane(ticket.number);
         let guard = tolerant(&self.slot);
         ticket.serve();
         let waited = self.lane_holds.load(Ordering::SeqCst) - before;
@@ -1114,8 +1141,6 @@ impl SemanticEngines {
                 reading.initializations_refused += 1;
             }
         });
-        #[cfg(test)]
-        self.hooks.run_as_install_ends();
         BackgroundUnit::Ran {
             owed: installed && engine_slot.owed.load(Ordering::Acquire),
         }
@@ -1479,7 +1504,6 @@ pub(crate) mod tests {
         embedding: Mutex<Option<Arranged>>,
         delivery: Mutex<Option<Arranged>>,
         install: Mutex<Option<Arranged>>,
-        install_end: Mutex<Option<Arranged>>,
         ticket: Mutex<Option<Arranged>>,
         lane_yield: Mutex<Option<Arranged>>,
         /// While set, no vault's engine owes work, so nothing starts a unit.
@@ -1509,10 +1533,6 @@ pub(crate) mod tests {
 
         pub(super) fn run_inside_embedding(&self) {
             run(&self.embedding);
-        }
-
-        pub(super) fn run_as_install_ends(&self) {
-            run(&self.install_end);
         }
 
         pub(super) fn run_before_install(&self) {
@@ -1570,12 +1590,6 @@ pub(crate) mod tests {
         /// held.
         pub(crate) fn run_before_next_install(&self, arranged: impl FnOnce() + Send + 'static) {
             *tolerant(&self.hooks.install) = Some(Box::new(arranged));
-        }
-
-        /// Run after initialization installs or refuses its result, outside
-        /// every lock of this set.
-        pub(crate) fn run_as_next_install_ends(&self, arranged: impl FnOnce() + Send + 'static) {
-            *tolerant(&self.hooks.install_end) = Some(Box::new(arranged));
         }
 
         /// Run `arranged` once, as the next delivery to any vault returns,
