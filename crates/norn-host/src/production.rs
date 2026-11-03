@@ -9706,6 +9706,55 @@ mod tests {
             assert_eq!(page.answer.report.page.rows.len(), 1);
         }
 
+        /// **Owed semantic work starts without a poll tick.** The host's
+        /// watcher poll is a minute away. The delivery the attach commits
+        /// wakes the scheduler, so the engine initializes and drains; an
+        /// apply's commit, which hands on no reconcile, leaves the engine
+        /// owing its documents and wakes it again, so the engine catches up
+        /// with the apply too.
+        #[test]
+        fn owed_semantic_work_starts_without_a_poll_tick() {
+            let f = Fixture::new("semantic-owe-wakes");
+            fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+            fs::write(f.vault().join("note.md"), "status draft\n").unwrap();
+            let (_engines, ops) = engines_and_ops(&f);
+            let (host, name, _lease) = ready_host(&f, ops);
+            wait_for_engine(&host, &name, |engine| {
+                *engine == norn_wire::EngineStatus::on(None, Some(Freshness::trailing(0)))
+            });
+            let caught_up = host.maintenance_reading().legs;
+
+            let plan = norn_wire::AuthoredPlan::new(
+                norn_wire::VaultAddress::name(name.clone()),
+                vec![norn_wire::Operation::new(
+                    norn_wire::OperationKind::str_replace(
+                        norn_wire::DocumentPath::new("note.md").unwrap(),
+                        "draft",
+                        "final",
+                    ),
+                )],
+            );
+            host.apply(norn_wire::ApplyParams::new(
+                norn_wire::ApplyMode::Apply,
+                PlanDocument::operations(plan),
+            ))
+            .expect("an apply over a ready vault is admitted")
+            .wait()
+            .expect("the apply applies");
+            wait_until("the engine to drain the apply", lifecycle_budget(), || {
+                let legs = host.maintenance_reading().legs;
+                let (_, engine) = engine_reported(&host, &name);
+                if legs > caught_up
+                    && engine == norn_wire::EngineStatus::on(None, Some(Freshness::trailing(0)))
+                {
+                    Observed::Met(())
+                } else {
+                    Observed::Pending(format!("{legs} legs; the engine reports {engine:?}"))
+                }
+            })
+            .unwrap_or_else(|failure| panic!("{failure}"));
+        }
+
         /// **A ready vault whose section enables the engine reports it
         /// standing, caught up with the store, once its slices have run**:
         /// the initialization and the drain after it leave it trailing by
@@ -20860,6 +20909,197 @@ mod tests {
         assert_eq!(stored_paths(&mut attachment.store), ["keep.md"]);
         assert_eq!(finding_total(&mut attachment.store), 0);
         ops.detach(&name, attachment);
+    }
+
+    /// Production ops whose attach brings the store's verification or the
+    /// rolling heal due shortly after it, so a case reads what starts the
+    /// leg each clock owes.
+    struct DueSoonAfterAttach {
+        inner: ProductionEntryOps,
+        verification: bool,
+        rolling: bool,
+    }
+
+    impl EntryOps for DueSoonAfterAttach {
+        type Attachment = ProductionAttachment;
+
+        fn rebuild(
+            &self,
+            name: &VaultName,
+            attachment: Self::Attachment,
+            progress: &ProgressReporter<Self::Attachment>,
+        ) -> Result<Self::Attachment, JobFailure> {
+            self.inner.rebuild(name, attachment, progress)
+        }
+
+        fn attach(
+            &self,
+            registration: &Registration,
+            progress: &ProgressReporter<Self::Attachment>,
+        ) -> Result<Self::Attachment, JobFailure> {
+            let mut attachment = self.inner.attach(registration, progress)?;
+            let soon = Instant::now() + Duration::from_millis(50);
+            if self.verification {
+                attachment.store_verification_due = soon;
+            }
+            if self.rolling {
+                attachment.rolling.due = soon;
+            }
+            Ok(attachment)
+        }
+
+        fn reconcile(
+            &self,
+            name: &VaultName,
+            attachment: &mut Self::Attachment,
+            work: ReconcileWork,
+            progress: &ProgressReporter<Self::Attachment>,
+        ) -> Result<(), JobFailure> {
+            self.inner.reconcile(name, attachment, work, progress)
+        }
+
+        fn recover(
+            &self,
+            name: &VaultName,
+            attachment: &mut Self::Attachment,
+            progress: &ProgressReporter<Self::Attachment>,
+        ) -> Result<(), JobFailure> {
+            self.inner.recover(name, attachment, progress)
+        }
+
+        fn poll(
+            &self,
+            name: &VaultName,
+            attachment: &mut Self::Attachment,
+        ) -> Result<Option<norn_fs::Batch>, JobFailure> {
+            self.inner.poll(name, attachment)
+        }
+
+        fn maintenance_deadline(&self, attachment: &Self::Attachment) -> Option<Instant> {
+            self.inner.maintenance_deadline(attachment)
+        }
+
+        fn maintain_quiet(
+            &self,
+            name: &VaultName,
+            attachment: &mut Self::Attachment,
+            quiet: bool,
+            turn: &mut MaintenanceTurn,
+            progress: &ProgressReporter<Self::Attachment>,
+        ) -> Result<(), JobFailure> {
+            self.inner
+                .maintain_quiet(name, attachment, quiet, turn, progress)
+        }
+
+        fn rolling_heal(
+            &self,
+            attachment: &Self::Attachment,
+        ) -> Option<norn_wire::RollingHealStatus> {
+            self.inner.rolling_heal(attachment)
+        }
+
+        fn detach(&self, name: &VaultName, attachment: Self::Attachment) {
+            self.inner.detach(name, attachment);
+        }
+
+        fn count_leg_mint(&self, statements: u64) {
+            self.inner.count_leg_mint(statements);
+        }
+    }
+
+    /// A ready host over [`DueSoonAfterAttach`] whose watcher poll is a
+    /// minute away, its maintenance legs running under `budget`.
+    fn due_soon_host(
+        f: &Fixture,
+        verification: bool,
+        rolling: bool,
+        budget: Duration,
+    ) -> (
+        crate::Host<DueSoonAfterAttach>,
+        VaultName,
+        crate::DemandLease<DueSoonAfterAttach>,
+    ) {
+        let name = f.registration().name;
+        let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
+        let host = crate::Host::new(
+            crate::RegistryRead::from_entries([f.registration()]),
+            DueSoonAfterAttach {
+                inner: ProductionEntryOps::new(dirs, ProductionPolicy::new(64, 2).unwrap()),
+                verification,
+                rolling,
+            },
+            crate::LifecyclePolicy {
+                idle_after: Duration::from_secs(60),
+                worker_slots: 1,
+                watch_poll_interval: Duration::from_secs(60),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_turn_budget: budget,
+            },
+        )
+        .unwrap();
+        norn_fs::watch::settle_prior_changes(f.root.root(), lifecycle_budget().work()).unwrap();
+        let lease = host.demand(&name).unwrap();
+        wait_state(&host, &name, norn_wire::TrustState::Ready);
+        (host, name, lease)
+    }
+
+    /// **A due verification starts a maintenance leg without a poll tick.**
+    /// The watcher poll is a minute away and nothing else is due, so the leg
+    /// that runs is the verification's, started at its deadline.
+    #[test]
+    fn a_due_verification_starts_a_maintenance_leg_without_a_poll_tick() {
+        let f = Fixture::new("verification-deadline");
+        write_a_vault_of_documents(&f, 4);
+        let (host, _name, _lease) = due_soon_host(&f, true, false, crate::BACKGROUND_TURN_BUDGET);
+        wait_until("the verification's leg to run", lifecycle_budget(), || {
+            let reading = host.maintenance_reading();
+            if reading.units >= 1 {
+                Observed::Met(())
+            } else {
+                Observed::Pending(format!("{reading:?}"))
+            }
+        })
+        .unwrap_or_else(|failure| panic!("{failure}"));
+        assert!(host.scheduler_reading().deadlines >= 1);
+    }
+
+    /// **A due rolling heal starts a maintenance leg without a poll tick,
+    /// and the pass runs to completion leg after leg.**
+    #[test]
+    fn a_due_rolling_heal_starts_and_completes_without_a_poll_tick() {
+        let f = Fixture::new("rolling-deadline");
+        write_a_vault_of_documents(&f, 4);
+        let (host, name, _lease) = due_soon_host(&f, false, true, crate::BACKGROUND_TURN_BUDGET);
+        wait_until("the rolling pass to complete", lifecycle_budget(), || {
+            let rolling = status::status_of(&host, &name).rolling_heal;
+            match rolling {
+                Some(status) if status.last_completed_unix_seconds.is_some() => Observed::Met(()),
+                other => Observed::Pending(format!("{other:?}")),
+            }
+        })
+        .unwrap_or_else(|failure| panic!("{failure}"));
+    }
+
+    /// **A budget too small for any unit runs exactly one unit per leg.** The
+    /// verification and a rolling pass are both due, so every leg owes more
+    /// than one unit, and each runs exactly one; the leg's end schedules the
+    /// next while maintenance is still due.
+    #[test]
+    fn a_maintenance_leg_under_a_budget_too_small_for_any_unit_runs_one() {
+        let f = Fixture::new("one-unit-legs");
+        write_a_vault_of_documents(&f, 4);
+        let (host, name, _lease) = due_soon_host(&f, true, true, Duration::ZERO);
+        wait_until("the rolling pass to complete", lifecycle_budget(), || {
+            let rolling = status::status_of(&host, &name).rolling_heal;
+            match rolling {
+                Some(status) if status.last_completed_unix_seconds.is_some() => Observed::Met(()),
+                other => Observed::Pending(format!("{other:?}")),
+            }
+        })
+        .unwrap_or_else(|failure| panic!("{failure}"));
+        let reading = host.maintenance_reading();
+        assert!(reading.legs >= 2, "{reading:?}");
+        assert_eq!(reading.most_units_in_a_leg, 1, "{reading:?}");
     }
 
     struct CountedAttach {
