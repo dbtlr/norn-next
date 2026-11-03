@@ -95,8 +95,9 @@ impl Embedder for CountingEmbedder {
 
 /// The stub embedder with a one-shot side effect: the first `embed` call
 /// opens its own handle on the store and applies the given change, so a
-/// drain in progress meets a store that moved between its page read and a
-/// later fetch — the readings the deferred arm answers.
+/// drain in progress meets a store that moved while its page was embedded —
+/// after every fetch the page makes, and before the page completing the
+/// next feed is read.
 pub struct InterferingEmbedder {
     inner: StubEmbedder,
     store_path: PathBuf,
@@ -112,13 +113,6 @@ impl InterferingEmbedder {
             store_path,
             Box::new(move |store| write_document(store, &interference)),
         )
-    }
-
-    /// An embedder whose first call records the death of `at` behind the
-    /// drain's back.
-    pub fn killing(store_path: PathBuf, at: &str) -> Arc<Self> {
-        let at = at.to_string();
-        Self::with_effect(store_path, Box::new(move |store| record_death(store, &at)))
     }
 
     fn with_effect(

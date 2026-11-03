@@ -759,8 +759,17 @@ impl<'a> Request<'a> {
         &self,
         path: &DocumentPath,
     ) -> Result<Option<StoredDocument>, StoreError> {
+        Self::stored_document_on(self.store.connection(), path)
+    }
+
+    /// [`Request::stored_document`] on `connection`: the store's writer, or
+    /// the read-only connection of a feed source.
+    pub(crate) fn stored_document_on(
+        connection: &Connection,
+        path: &DocumentPath,
+    ) -> Result<Option<StoredDocument>, StoreError> {
         Self::read_one(
-            self.store.connection(),
+            connection,
             &stored_document_sql(),
             params![path.as_str()],
             |row| stored_document(row, 0),
@@ -943,8 +952,22 @@ impl<'a> Request<'a> {
             .store
             .database
             .deferred_transaction("opening the stored-facts snapshot")?;
+        Self::stored_facts_on(&transaction, &self.read_work, path)
+        // The transaction is never committed. A read takes no write lock worth
+        // keeping and discards nothing on rollback, so letting it drop here
+        // is the same outcome as a `COMMIT` without a statement that says so.
+    }
+
+    /// [`Request::stored_facts`]'s seven reads on `connection`, which the
+    /// caller has already put inside the one snapshot they must share: the
+    /// writer's deferred transaction above, or a feed source's page.
+    pub(crate) fn stored_facts_on(
+        transaction: &Connection,
+        read_work: &ReadWork,
+        path: &DocumentPath,
+    ) -> Result<Option<StoredFacts>, StoreError> {
         let found = Self::read_one(
-            &transaction,
+            transaction,
             &stored_facts_document_sql(),
             params![path.as_str()],
             |row| {
@@ -961,16 +984,16 @@ impl<'a> Request<'a> {
             document,
             body,
             links: Self::read_all_on(
-                &transaction,
-                &self.read_work,
+                transaction,
+                read_work,
                 DOCUMENT_LINKS_SQL,
                 params![id],
                 stored_link_row,
                 "reading a document's links",
             )?,
             link_keys: Self::read_all_on(
-                &transaction,
-                &self.read_work,
+                transaction,
+                read_work,
                 DOCUMENT_LINK_KEYS_SQL,
                 params![id],
                 |row| {
@@ -983,24 +1006,24 @@ impl<'a> Request<'a> {
                 "reading a document's link keys",
             )?,
             headings: Self::read_all_on(
-                &transaction,
-                &self.read_work,
+                transaction,
+                read_work,
                 DOCUMENT_HEADINGS_SQL,
                 params![id],
                 stored_heading,
                 "reading a document's headings",
             )?,
             blocks: Self::read_all_on(
-                &transaction,
-                &self.read_work,
+                transaction,
+                read_work,
                 DOCUMENT_BLOCKS_SQL,
                 params![id],
                 stored_block,
                 "reading a document's block ids",
             )?,
             tags: Self::read_all_on(
-                &transaction,
-                &self.read_work,
+                transaction,
+                read_work,
                 DOCUMENT_TAGS_SQL,
                 params![id],
                 |row| {
@@ -1014,17 +1037,14 @@ impl<'a> Request<'a> {
                 "reading a document's tags",
             )?,
             fields: FieldRows::stored(Self::read_all_on(
-                &transaction,
-                &self.read_work,
+                transaction,
+                read_work,
                 DOCUMENT_FIELDS_SQL,
                 params![id],
                 stored_field,
                 "reading a document's field rows",
             )?),
         }))
-        // The transaction is never committed. A read takes no write lock worth
-        // keeping and discards nothing on rollback, so letting it drop here
-        // is the same outcome as a `COMMIT` without a statement that says so.
     }
 
     /// The hash of the bytes the content finding standing at `path` was
@@ -1330,6 +1350,16 @@ impl<'a> Request<'a> {
         after: Option<&FeedCursor>,
         limit: usize,
     ) -> Result<Vec<(FeedCursor, FeedDocument)>, StoreError> {
+        Self::changed_documents_on(self.store.connection(), &self.read_work, after, limit)
+    }
+
+    /// [`Request::changed_documents_after`] on `connection`.
+    pub(crate) fn changed_documents_on(
+        connection: &Connection,
+        read_work: &ReadWork,
+        after: Option<&FeedCursor>,
+        limit: usize,
+    ) -> Result<Vec<(FeedCursor, FeedDocument)>, StoreError> {
         if limit == 0 || limit > MAX_PAGE {
             return Err(StoreError::Bound {
                 what: "a document change-feed page",
@@ -1337,7 +1367,9 @@ impl<'a> Request<'a> {
                 given: limit,
             });
         }
-        self.read_all(
+        Self::read_all_on(
+            connection,
+            read_work,
             &document_feed_sql(),
             params_from_iter(feed_page_parameters(after, limit)),
             fed_document,
@@ -1376,6 +1408,16 @@ impl<'a> Request<'a> {
         after: Option<&FeedCursor>,
         limit: usize,
     ) -> Result<Vec<(FeedCursor, FeedTombstone)>, StoreError> {
+        Self::changed_tombstones_on(self.store.connection(), &self.read_work, after, limit)
+    }
+
+    /// [`Request::changed_tombstones_after`] on `connection`.
+    pub(crate) fn changed_tombstones_on(
+        connection: &Connection,
+        read_work: &ReadWork,
+        after: Option<&FeedCursor>,
+        limit: usize,
+    ) -> Result<Vec<(FeedCursor, FeedTombstone)>, StoreError> {
         if limit == 0 || limit > MAX_PAGE {
             return Err(StoreError::Bound {
                 what: "a tombstone change-feed page",
@@ -1383,7 +1425,9 @@ impl<'a> Request<'a> {
                 given: limit,
             });
         }
-        self.read_all(
+        Self::read_all_on(
+            connection,
+            read_work,
             &tombstone_feed_sql(),
             params_from_iter(feed_page_parameters(after, limit)),
             fed_tombstone,

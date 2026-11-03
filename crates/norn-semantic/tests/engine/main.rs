@@ -10,5 +10,6 @@ mod firewall;
 mod lifecycle;
 mod model;
 mod nearest;
+mod phases;
 mod progress;
 mod slices;

@@ -13,7 +13,7 @@ use std::sync::{Arc, Condvar, Mutex, PoisonError, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::{Entry, EntryOps, Job, Shared, dispatch_pending};
+use super::{Entry, EntryOps, Job, ReadStance, Shared, dispatch_pending};
 
 /// What the scheduler has received and done, counted since the host began.
 ///
@@ -39,6 +39,11 @@ struct Signals {
     woken: bool,
     /// The earliest deadline any entry contributed at the last ask.
     earliest: Option<Instant>,
+    /// The earliest retry the lane asked for since the last ask began: a
+    /// store whose unit was refused or whose turn unwound, owed and with no
+    /// wake coming. Kept apart from `earliest`, which each ask overwrites, so
+    /// a retry asked for during an ask is not lost to it.
+    retry: Option<Instant>,
     stopping: bool,
     reading: SchedulerReading,
 }
@@ -49,6 +54,8 @@ struct Signals {
 pub(super) struct Scheduler {
     signals: Mutex<Signals>,
     ready: Condvar,
+    #[cfg(test)]
+    before_sleep: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl Scheduler {
@@ -68,6 +75,15 @@ impl Scheduler {
         self.ready.notify_all();
     }
 
+    /// Ask again at `at` where nothing asks sooner: the lane's retry of a
+    /// store it left owed with no wake coming.
+    pub(super) fn retry_at(&self, at: Instant) {
+        let mut signals = self.signals();
+        signals.retry = Some(signals.retry.map_or(at, |earlier| earlier.min(at)));
+        drop(signals);
+        self.ready.notify_all();
+    }
+
     /// Stop the scheduler thread at its next turn.
     pub(super) fn stop(&self) {
         self.signals().stopping = true;
@@ -82,16 +98,24 @@ impl Scheduler {
             if signals.stopping {
                 return None;
             }
+            // Every ask asks every entry, a store the lane asked to retry
+            // among them, so an ask that begins answers the retry too.
             if signals.woken {
                 signals.woken = false;
                 signals.earliest = None;
+                signals.retry = None;
                 signals.reading.asks += 1;
                 return Some(());
             }
             let now = Instant::now();
-            match signals.earliest {
+            let next = match (signals.earliest, signals.retry) {
+                (Some(earliest), Some(retry)) => Some(earliest.min(retry)),
+                (earliest, retry) => earliest.or(retry),
+            };
+            match next {
                 Some(at) if at <= now => {
                     signals.earliest = None;
+                    signals.retry = None;
                     signals.reading.deadlines += 1;
                     signals.reading.asks += 1;
                     return Some(());
@@ -115,7 +139,19 @@ impl Scheduler {
 
     /// Record the earliest deadline the ask that just ended found, which is
     /// what the scheduler sleeps until where no wake arrives first.
+    #[cfg(test)]
+    pub(super) fn run_before_next_sleep(&self, hook: impl FnOnce() + Send + 'static) {
+        *self.before_sleep.lock().unwrap() = Some(Box::new(hook));
+    }
+
     pub(super) fn sleep_until(&self, earliest: Option<Instant>) {
+        #[cfg(test)]
+        {
+            let hook = self.before_sleep.lock().unwrap().take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
         self.signals().earliest = earliest;
     }
 
@@ -215,6 +251,11 @@ fn ask_entry<O: EntryOps>(
         state.claim.clear_maintenance_mark();
         state.background_due = None;
         return (None, false);
+    }
+    // Lane work needs no claim and no coverage in hand: it is owed wherever
+    // the entry is attached and its stance feeds.
+    if state.read_stance() != ReadStance::Refuse && shared.ops.background_owed(entry.name()) {
+        shared.lane.enqueue(entry.name());
     }
     if let Some(attachment) = state.coverage.held() {
         state.background_due = shared.ops.maintenance_deadline(attachment);
@@ -321,8 +362,9 @@ impl MaintenanceTurn {
 }
 
 /// [`MaintenanceTurn::run_units`] over a clock the caller reads, so a case can
-/// state the boundary without a wall clock.
-fn run_units_until<E>(
+/// state the boundary without a wall clock. A background turn on the lane runs
+/// its units through it too, under the same budget.
+pub(super) fn run_units_until<E>(
     budget: Duration,
     units: &mut u32,
     elapsed: impl Fn() -> Duration,

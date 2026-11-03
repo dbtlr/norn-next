@@ -72,12 +72,6 @@ pub const MAX_CHANGESET_SIZE: usize = 1024;
 /// the memory invariant rules out.
 const SKIPPED_LINKS_RETAINED: usize = 16;
 
-/// How much one quiet maintenance leg may drain into a semantic sidecar: one
-/// feed or reconcile page, so a vault-sized backlog is many slices with
-/// watcher batches drained between them. Work, not time: one page can hold up
-/// to a page of embeddings.
-const SEMANTIC_SLICE: norn_semantic::SliceBudget =
-    norn_semantic::SliceBudget::pages(std::num::NonZeroUsize::MIN);
 /// How long an attachment goes between verifications of its own derived state.
 ///
 /// An authored bound rather than a measured one. `PRAGMA integrity_check` reads
@@ -117,7 +111,8 @@ pub const READ_SETTLE_BOUND: Duration = Duration::from_secs(5);
 
 /// The production value of [`crate::LifecyclePolicy::background_turn_budget`]:
 /// the time one maintenance leg may hold its vault's claim and a worker slot
-/// before it gives both back.
+/// before it gives both back, and the time one background turn on the lane
+/// may take before its thread serves the next owed store.
 ///
 /// Chosen by `maintenance_unit_release_probe`, a release build over 2,000 and
 /// 10,000 documents of 2 KiB: a shadow sweep takes about 50 µs and the
@@ -127,7 +122,25 @@ pub const READ_SETTLE_BOUND: Duration = Duration::from_secs(5);
 /// behind a leg waits at most 100 ms plus one unit, which is one rolling
 /// slice except where the verification is the unit. The verification's own
 /// length is what the budget cannot bound while it runs on the claim.
+///
+/// `semantic_unit_release_probe` measures the lane's units over the same
+/// corpora with the stub embedder: an initialization takes about 0.6 ms and
+/// the longest drain step, one page of 256 embeddings with its read and its
+/// commit, about 21 ms at either size, so a 100 ms turn runs about five pages
+/// and ends within about 120 ms. A real model's page will cost more, and its
+/// runtime will size the page so one page stays within human scale.
 pub const BACKGROUND_TURN_BUDGET: Duration = Duration::from_millis(100);
+
+/// The production value of [`crate::LifecyclePolicy::background_threads`]:
+/// one background lane thread per host.
+///
+/// One thread is enough for the work the lane carries — an engine's
+/// initialization and its feed pages — and it bounds how far that work
+/// competes with writes, readiness and claim-bound maintenance for CPU at one
+/// core whatever the number of attached vaults. A store with a large backlog
+/// takes one background turn while every other owed store takes one, so one
+/// thread is shared fairly rather than held.
+pub const BACKGROUND_THREADS: usize = 1;
 
 /// Resource bounds for the concrete filesystem/store adapter.
 #[derive(Clone, Copy, Debug)]
@@ -252,10 +265,10 @@ pub struct ProductionEntryOps {
     evidence: Arc<JobEvidence>,
     engine_config_receivers: Vec<Arc<dyn EngineConfigReceiver>>,
     /// The semantic engines this host composes, where it composes them. Named
-    /// beside the generic receiver list because the ops also owe and run the
-    /// engine's slices — the one engine seam the receiver dispatch cannot
-    /// carry, since a slice needs a leg's own store handle. A second engine
-    /// is what generalizes this field into a seam.
+    /// beside the generic receiver list because the ops also owe the engines
+    /// their work, mint their feed source and run their background units — the
+    /// engine seams the receiver dispatch cannot carry. A second engine is
+    /// what generalizes this field into a seam.
     semantic: Option<Arc<crate::semantic::SemanticEngines>>,
 }
 
@@ -345,11 +358,32 @@ pub struct ProductionAttachment {
     /// when it is due again.
     store_verification_due: Instant,
     rolling: rolling::RollingHeal,
+    /// The retirement of the vault's engine delivery, declared just before the
+    /// maintainer lock because fields drop in declaration order: an attachment
+    /// dropped on an unwinding stack retires the delivery before the lock
+    /// goes, so no sidecar commit of this host follows the end of its
+    /// maintainership. [`release`] drops it ahead of the lock as well.
+    engine_retirement: EngineRetirement,
     /// The maintainer lock, declared last because fields drop in declaration
     /// order: an attachment dropped rather than released gives its resources
     /// back in the order [`release`] gives them back, so the lock never ends
     /// while this process's watch over the vault still stands.
     maintainership: Maintainership,
+}
+
+/// Retires a vault's engine delivery where it is dropped: the slot is marked
+/// retired and its engine and feed connection closed, while the delivery's
+/// map entry is left for the name-keyed give-back ([`EntryOps::discard`]) to
+/// remove. Every path that gives an attachment back on purpose gives the
+/// engine back first, so the retirement here finds it gone and does nothing.
+struct EngineRetirement(Option<(Arc<crate::semantic::SemanticEngines>, VaultName)>);
+
+impl Drop for EngineRetirement {
+    fn drop(&mut self) {
+        if let Some((engines, name)) = self.0.take() {
+            engines.retire_delivery(&name);
+        }
+    }
 }
 
 type WatchEntrypoint = fn(&Path, &Path) -> Result<(Subscription, OwnWrites), WatchError>;
@@ -773,8 +807,8 @@ impl ProductionEntryOps {
 
     /// Composes the semantic engines: their config sections dispatch through
     /// the receiver set, every leg that may commit lane-1 work records that
-    /// the vault's engine owes a slice, whether or not it committed any, and
-    /// quiet maintenance runs the owed slices.
+    /// the vault's engine owes work, whether or not it committed any, and the
+    /// background lane runs the owed units.
     pub fn with_semantic(mut self, engines: Arc<crate::semantic::SemanticEngines>) -> Self {
         self.semantic = Some(Arc::clone(&engines));
         self.engine_config_receivers.push(engines);
@@ -783,17 +817,17 @@ impl ProductionEntryOps {
 
     /// The post-leg nudge: lane-1 work may just have committed, so the leg
     /// records where the store stands through `progress` and that the
-    /// vault's engine owes a slice. No semantic work runs on the leg: the
-    /// leg's own publication — its `derived_through` or `Ready` — comes
-    /// first, and the owed slice follows on quiet maintenance
-    /// ([`Self::maintain_quiet`]), which the background scheduler starts:
-    /// the owe wakes it.
+    /// vault's engine owes work. No semantic work runs on the leg: the owe
+    /// wakes the background scheduler, which puts the store in the background
+    /// lane's set, and the lane's units read the committed feed through the
+    /// delivery's own connection, holding no claim, so they run alongside the
+    /// leg and never delay its publication.
     ///
-    /// The reading is recorded ahead of the slice, so a status taken before
-    /// it runs judges the engine against the work this leg committed and
-    /// reports it trailing, as a search would; a leg that committed nothing
-    /// adds nothing to how far the engine trails. A host that composes no
-    /// engine judges no engine, records nothing and owes nothing.
+    /// The reading is recorded ahead of the owe, so a status taken before
+    /// the lane runs judges the engine against the work this leg committed
+    /// and reports it trailing, as a search would; a leg that committed
+    /// nothing adds nothing to how far the engine trails. A host that
+    /// composes no engine judges no engine, records nothing and owes nothing.
     fn owe_semantic(
         &self,
         name: &VaultName,
@@ -863,12 +897,12 @@ impl ProductionEntryOps {
     /// One unit of a maintenance leg, answering whether one ran.
     ///
     /// The sweep and the verification run whether or not the claim is quiet.
-    /// A leg takes at most one quiet slice, the rolling heal's ahead of
-    /// semantic work — lexical correctness first — and only over a quiet
-    /// claim rechecked before it, so the lifecycle drains watcher batches and
-    /// hands on applies, facts and teardown before the next slice, and what a
-    /// slice committed is published at the leg's end before another follows
-    /// it. A rolling-heal slice keeps its own work bounds.
+    /// A leg takes at most one rolling-heal slice, and only over a quiet claim
+    /// rechecked before it, so the lifecycle drains watcher batches and hands
+    /// on applies, facts and teardown before the next slice, and what a slice
+    /// committed is published at the leg's end before another follows it. A
+    /// rolling-heal slice keeps its own work bounds. Semantic work is no unit
+    /// of a leg: it runs on the background lane, off the claim.
     fn maintenance_unit(
         &self,
         name: &VaultName,
@@ -881,8 +915,7 @@ impl ProductionEntryOps {
         if self.sweep_unit(attachment) || self.verification_unit(attachment)? {
             return Ok(true);
         }
-        let rolling = attachment.rolling.due();
-        if *sliced || !quiet || !(rolling || self.semantic_owed(name)) {
+        if *sliced || !quiet || !attachment.rolling.due() {
             return Ok(false);
         }
         // A settled batch may have arrived since the claim was taken. Leave
@@ -899,41 +932,11 @@ impl ProductionEntryOps {
         }
         let _job = self.evidence.attributing();
         *sliced = true;
-        if rolling {
-            let ended = rolling::slice(attachment, self.policy);
-            if ended.is_ok() {
-                self.owe_semantic(name, attachment, progress);
-            }
-            return self.leg_ended(attachment, progress, ended).map(|()| true);
+        let ended = rolling::slice(attachment, self.policy);
+        if ended.is_ok() {
+            self.owe_semantic(name, attachment, progress);
         }
-        self.semantic_slice(name, attachment, progress);
-        Ok(true)
-    }
-
-    /// Whether the vault's engine owes a slice that may run now. Cheap and
-    /// nonblocking, so a maintenance clock may ask it.
-    fn semantic_owed(&self, name: &VaultName) -> bool {
-        self.semantic
-            .as_ref()
-            .is_some_and(|semantic| semantic.owes_work(name))
-    }
-
-    /// One owed semantic unit — an initialization or a bounded drain slice —
-    /// on a quiet maintenance leg that holds `attachment`. Answers whether
-    /// the vault's engine still owes work.
-    fn semantic_slice(
-        &self,
-        name: &VaultName,
-        attachment: &mut ProductionAttachment,
-        progress: &ProgressReporter<ProductionAttachment>,
-    ) -> bool {
-        let Some(semantic) = &self.semantic else {
-            return false;
-        };
-        let mut feed = attachment.store.feed_read();
-        semantic.work(name, &mut feed, SEMANTIC_SLICE, |install| {
-            progress.publish_if_claimed(install);
-        })
+        self.leg_ended(attachment, progress, ended).map(|()| true)
     }
 
     /// Record where `attachment`'s lane-1 store stands through `progress`,
@@ -1566,6 +1569,11 @@ impl ProductionEntryOps {
             last_shadow_sweep: Instant::now(),
             store_verification_due: Instant::now() + STORE_VERIFICATION_INTERVAL,
             rolling,
+            engine_retirement: EngineRetirement(
+                self.semantic
+                    .as_ref()
+                    .map(|engines| (Arc::clone(engines), registration.name.clone())),
+            ),
         };
         attachment.read_pinned_model()?;
         if candidate.undeclarable().is_some() {
@@ -1708,10 +1716,17 @@ impl ProductionEntryOps {
         // left in the order a detach gives it back: coverage first and the
         // maintainer lock last, so no second maintainer takes this vault while
         // a watch over it still stands.
+        // The engines' feed connection and sidecar over this store lifetime
+        // close before the store is removed, so no background unit reads a
+        // store that is gone; the rebuild's publication binds the new one.
+        if let Some(semantic) = &self.semantic {
+            semantic.retire_store(&attachment.registration.name);
+        }
         match attachment.store.discard_and_reopen(order) {
             Ok(store) => attachment.store = store,
             Err(error) => {
                 drop(attachment.subscription);
+                drop(attachment.engine_retirement);
                 drop(attachment.maintainership);
                 return Err(store_effect(error));
             }
@@ -1801,6 +1816,7 @@ fn release_owned(
     attachment: ProductionAttachment,
     close_subscription: impl FnOnce(Option<Subscription>) -> Result<(), String>,
 ) -> Vec<String> {
+    drop(attachment.engine_retirement);
     let watcher = close_subscription(attachment.subscription);
     let store = attachment.store.close();
     drop(attachment.maintainership);
@@ -2361,9 +2377,15 @@ impl EntryOps for ProductionEntryOps {
         // therefore give the resources back through [`release`] rather than by
         // dropping the attachment, which would release the maintainer lock
         // ahead of the watch it is declared before — and the engine goes back
-        // with them, since no detach will come to give it back later.
+        // ahead of them, since no detach will come to give it back later and
+        // no sidecar commit may follow the maintainer lock's release.
         let _job = self.evidence.attributing();
         self.evidence.count_rebuild();
+        let give_back_the_engine = || {
+            if let Some(semantic) = &self.semantic {
+                semantic.detach(name);
+            }
+        };
         let rebuilt = match attachment.maintainership.still_current() {
             Ok(true) => {
                 // Controls a recovery or reload held for this rung are pinned
@@ -2381,19 +2403,21 @@ impl EntryOps for ProductionEntryOps {
                 })
             }
             Ok(false) => {
+                give_back_the_engine();
                 release(attachment);
                 Err(JobFailure::LostMaintainership)
             }
             Err(refusal) => {
                 let failure = data_dir_effect(refusal);
+                give_back_the_engine();
                 release(attachment);
                 Err(failure)
             }
         };
-        if rebuilt.is_err()
-            && let Some(semantic) = &self.semantic
-        {
-            semantic.detach(name);
+        // A failed rung 3 gave the store and the maintainer lock back on its
+        // way out, after it retired the store lifetime the engine read.
+        if rebuilt.is_err() {
+            give_back_the_engine();
         }
         rebuilt
     }
@@ -2403,10 +2427,9 @@ impl EntryOps for ProductionEntryOps {
     }
 
     /// A leg's units in today's order: the shadow sweep, then the store's
-    /// verification, then one quiet slice — a rolling-heal slice ahead of a
-    /// semantic one — each taken only where its clock or flag says it is
-    /// owed and the leg's budget lasts. Only the quiet slice requires a quiet
-    /// claim.
+    /// verification, then one rolling-heal slice, each taken only where its
+    /// clock says it is owed and the leg's budget lasts. Only the rolling-heal
+    /// slice requires a quiet claim.
     fn maintain_quiet(
         &self,
         name: &VaultName,
@@ -2431,10 +2454,30 @@ impl EntryOps for ProductionEntryOps {
         )
     }
 
-    /// The vault's engine owes a slice. This flag stands for the semantic
-    /// work a commit left owed, which the commit's own wake announces.
-    fn maintenance_owed(&self, name: &VaultName) -> bool {
-        self.semantic_owed(name)
+    /// The engines read the store lifetime through a source minted here, in
+    /// the gate hold that commits their delivery beside it: no I/O.
+    fn mint_feed(&self, attachment: &Self::Attachment) -> Option<norn_store::FeedSource> {
+        self.semantic
+            .as_ref()
+            .map(|_| attachment.store.feed_source())
+    }
+
+    /// The vault's engine owes a unit that may run now: the semantic work a
+    /// commit left owed, which the commit's own wake announces, or the
+    /// initialization its published delivery owes.
+    fn background_owed(&self, name: &VaultName) -> bool {
+        self.semantic
+            .as_ref()
+            .is_some_and(|semantic| semantic.owes_work(name))
+    }
+
+    /// One unit of the vault's engine, on the background lane.
+    fn background_unit(&self, name: &VaultName) -> crate::BackgroundUnit {
+        self.semantic
+            .as_ref()
+            .map_or(crate::BackgroundUnit::NothingOwed, |semantic| {
+                semantic.unit(name)
+            })
     }
 
     /// The shadow sweep and the store's verification, each where its clock
@@ -6302,6 +6345,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_secs(60),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_threads: crate::BACKGROUND_THREADS,
                 background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
@@ -6984,6 +7028,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(25),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_threads: crate::BACKGROUND_THREADS,
                 background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
@@ -7020,6 +7065,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_secs(60),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_threads: crate::BACKGROUND_THREADS,
                 background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
@@ -7073,6 +7119,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_secs(60),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_threads: crate::BACKGROUND_THREADS,
                 background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
@@ -7123,6 +7170,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_secs(60),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_threads: crate::BACKGROUND_THREADS,
                 background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
@@ -7162,6 +7210,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_secs(60),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_threads: crate::BACKGROUND_THREADS,
                 background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
@@ -7446,6 +7495,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_secs(60),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_threads: crate::BACKGROUND_THREADS,
                 background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
@@ -7555,6 +7605,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_secs(60),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_threads: crate::BACKGROUND_THREADS,
                 background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
@@ -7620,6 +7671,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_secs(60),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_threads: crate::BACKGROUND_THREADS,
                 background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
@@ -7705,6 +7757,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_secs(60),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_threads: crate::BACKGROUND_THREADS,
                 background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
@@ -7872,6 +7925,18 @@ mod tests {
         }
         fn semantic(&self) -> Option<&crate::semantic::SemanticEngines> {
             self.inner.semantic()
+        }
+
+        fn mint_feed(&self, attachment: &Self::Attachment) -> Option<norn_store::FeedSource> {
+            self.inner.mint_feed(attachment)
+        }
+
+        fn background_owed(&self, name: &VaultName) -> bool {
+            self.inner.background_owed(name)
+        }
+
+        fn background_unit(&self, name: &VaultName) -> crate::BackgroundUnit {
+            self.inner.background_unit(name)
         }
         fn rebuild(
             &self,
@@ -8233,6 +8298,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_secs(60),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_threads: crate::BACKGROUND_THREADS,
                 background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
@@ -8691,6 +8757,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_secs(60),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_threads: crate::BACKGROUND_THREADS,
                 background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
@@ -8758,6 +8825,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_secs(60),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_threads: crate::BACKGROUND_THREADS,
                 background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
@@ -8795,6 +8863,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_secs(60),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_threads: crate::BACKGROUND_THREADS,
                 background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
@@ -8849,149 +8918,6 @@ mod tests {
         use crate::semantic::{SemanticEngines, SemanticRefusal, SemanticStatus, freshness};
         use norn_wire::{EngineSection, Freshness};
 
-        /// Read the real lifecycle release while the semantic worker still
-        /// holds the attachment, so detach cannot hide a forbidden install.
-        fn wait_for_semantic_release(lease: &crate::DemandLease<ProductionEntryOps>) {
-            let deadline = Instant::now() + Duration::from_secs(15);
-            loop {
-                let completion = lease.completion();
-                if matches!(
-                    completion,
-                    crate::Demand::State(norn_wire::TrustState::Warming {
-                        phase: norn_wire::WarmingPhase::ReleasingCoverage,
-                        ..
-                    })
-                ) {
-                    return;
-                }
-                assert!(
-                    Instant::now() < deadline,
-                    "claim was not retired: {completion:?}"
-                );
-                std::thread::yield_now();
-            }
-        }
-
-        #[test]
-        fn semantic_publication_holds_claim_through_install_before_host_teardown() {
-            for fails_to_open in [false, true] {
-                let f = Fixture::new("semantic-publication-before-teardown");
-                fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
-                fs::write(f.vault().join("alpha.md"), "alpha\n").unwrap();
-                let (engines, ops) = engines_and_ops(&f);
-                if fails_to_open {
-                    let sidecar = sidecar_file(&f, &f.registration().name);
-                    fs::create_dir_all(sidecar).unwrap();
-                }
-                let (opened, opened_rx) = std::sync::mpsc::channel();
-                let (publish, publish_rx) = std::sync::mpsc::channel();
-                engines.run_before_next_install(move || {
-                    opened.send(()).unwrap();
-                    publish_rx.recv_timeout(Duration::from_secs(30)).unwrap();
-                });
-                let (host, name, lease) = polling_ready_host(&f, ops);
-                opened_rx.recv_timeout(Duration::from_secs(30)).unwrap();
-                let committed = lease.review_committed_delivery();
-                assert_eq!(committed.reading().1, SemanticStatus::Preparing);
-                let (claimed, claimed_rx) = std::sync::mpsc::channel();
-                let (install, install_rx) = std::sync::mpsc::channel();
-                engines.run_inside_next_publication(move || {
-                    claimed.send(()).unwrap();
-                    install_rx.recv_timeout(Duration::from_secs(30)).unwrap();
-                });
-                let (installed, installed_rx) = std::sync::mpsc::channel();
-                let (finish, finish_rx) = std::sync::mpsc::channel();
-                let e = Arc::clone(&engines);
-                let n = name.clone();
-                let report = committed.clone();
-                engines.run_as_next_install_ends(move || {
-                    installed.send((e.status(&n), report.reading())).unwrap();
-                    finish_rx.recv_timeout(Duration::from_secs(30)).unwrap();
-                });
-                publish.send(()).unwrap();
-                claimed_rx.recv_timeout(Duration::from_secs(30)).unwrap();
-                // Probe the exact post-validation/pre-map gap. Do not wait for
-                // retirement here: the gate must prevent that retirement.
-                let gate_held_before_drop = lease.entry_gate_is_blocked();
-                let dropping = std::thread::spawn(move || drop(host));
-                let deadline = Instant::now() + Duration::from_secs(15);
-                while !lease.host_shutdown_started() {
-                    assert!(Instant::now() < deadline, "host drop did not begin");
-                    std::thread::yield_now();
-                }
-                let gate_held_during_drop = lease.entry_gate_is_blocked();
-                let pending = committed.reading();
-                install.send(()).unwrap();
-                let observed = installed_rx.recv_timeout(Duration::from_secs(30)).unwrap();
-                wait_for_semantic_release(&lease);
-                finish.send(()).unwrap();
-                dropping.join().unwrap();
-                eprintln!(
-                    "publication first: failed_open={fails_to_open}, entry gate held={gate_held_before_drop}/{gate_held_during_drop}, installed={observed:?}"
-                );
-                assert!(
-                    gate_held_before_drop && gate_held_during_drop,
-                    "claim validation and publication did not hold one uninterrupted entry gate"
-                );
-                assert_eq!(pending.1, SemanticStatus::Preparing);
-                assert_eq!(observed.0, observed.1.1);
-                assert_eq!(observed.1.0, EngineSection::enabled());
-                if fails_to_open {
-                    assert!(matches!(observed.0, SemanticStatus::SelfDisabled { .. }));
-                } else {
-                    assert!(matches!(observed.0, SemanticStatus::On { .. }));
-                }
-            }
-        }
-
-        #[test]
-        fn semantic_publication_rejects_result_after_host_teardown_retires_claim() {
-            for fails_to_open in [false, true] {
-                let f = Fixture::new("semantic-teardown-before-publication");
-                fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
-                fs::write(f.vault().join("alpha.md"), "alpha\n").unwrap();
-                let (engines, ops) = engines_and_ops(&f);
-                if fails_to_open {
-                    fs::create_dir_all(sidecar_file(&f, &f.registration().name)).unwrap();
-                }
-                let (opened, opened_rx) = std::sync::mpsc::channel();
-                let (publish, publish_rx) = std::sync::mpsc::channel();
-                engines.run_before_next_install(move || {
-                    opened.send(()).unwrap();
-                    publish_rx.recv_timeout(Duration::from_secs(30)).unwrap();
-                });
-                let (host, name, lease) = polling_ready_host(&f, ops);
-                opened_rx.recv_timeout(Duration::from_secs(30)).unwrap();
-                let committed = lease.review_committed_delivery();
-                let reached = Arc::new(std::sync::atomic::AtomicBool::new(false));
-                let r = Arc::clone(&reached);
-                engines.run_inside_next_publication(move || {
-                    r.store(true, std::sync::atomic::Ordering::SeqCst);
-                });
-                let (installed, installed_rx) = std::sync::mpsc::channel();
-                let e = Arc::clone(&engines);
-                let n = name.clone();
-                let report = committed.clone();
-                engines.run_as_next_install_ends(move || {
-                    installed.send((e.status(&n), report.reading())).unwrap();
-                });
-                let dropping = std::thread::spawn(move || drop(host));
-                wait_for_semantic_release(&lease);
-                publish.send(()).unwrap();
-                let observed = installed_rx.recv_timeout(Duration::from_secs(30)).unwrap();
-                dropping.join().unwrap();
-                eprintln!("teardown first: failed_open={fails_to_open}, rejected={observed:?}");
-                assert!(!reached.load(std::sync::atomic::Ordering::SeqCst));
-                assert_eq!(
-                    observed,
-                    (
-                        SemanticStatus::Preparing,
-                        (EngineSection::enabled(), SemanticStatus::Preparing)
-                    )
-                );
-            }
-        }
-
         fn engines_and_ops(f: &Fixture) -> (Arc<SemanticEngines>, ProductionEntryOps) {
             let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
             let engines = SemanticEngines::new(dirs.clone());
@@ -9001,21 +8927,26 @@ mod tests {
         }
 
         /// What the entry's publishing gate hold does for a delivery: commit
-        /// it beside the store reading `attachment` stands at.
+        /// it beside the store reading `attachment` stands at, with the feed
+        /// source minted from that store.
         fn publish(
             engines: &SemanticEngines,
             name: &VaultName,
             attachment: &mut ProductionAttachment,
         ) -> Option<crate::semantic::DeliveredEngine> {
-            let mut feed = attachment.store.feed_read();
-            let generation = feed.write_generation().expect("the store's generation");
-            let reading = norn_store::StoreReading::of(feed.epoch(), generation);
-            engines.publish_delivery(name, Some(&reading))
+            let reading = store_reading(attachment);
+            engines.publish_delivery(name, Some(&reading), Some(attachment.store.feed_source()))
         }
 
-        /// Publish the delivery, then run the units it owes one production
-        /// slice at a time until it owes none, as quiet maintenance legs whose
-        /// claim stands would. Answers how many units ran.
+        /// Where `attachment`'s store stands.
+        fn store_reading(attachment: &mut ProductionAttachment) -> norn_store::StoreReading {
+            let mut feed = attachment.store.feed_read();
+            let generation = feed.write_generation().expect("the store's generation");
+            norn_store::StoreReading::of(feed.epoch(), generation)
+        }
+
+        /// Publish the delivery, then run the units it owes until it owes
+        /// none, as the background lane would. Answers how many units ran.
         fn settle(
             engines: &SemanticEngines,
             name: &VaultName,
@@ -9026,12 +8957,7 @@ mod tests {
             loop {
                 units += 1;
                 assert!(units < 64, "the owed units never settle");
-                if !engines.work(
-                    name,
-                    &mut attachment.store.feed_read(),
-                    SEMANTIC_SLICE,
-                    |install| install(),
-                ) {
+                if engines.unit(name) != (crate::BackgroundUnit::Ran { owed: true }) {
                     return units;
                 }
             }
@@ -9075,12 +9001,7 @@ mod tests {
                 !engines.owes_work(&name),
                 "an unpublished delivery owes nothing yet"
             );
-            engines.work(
-                &name,
-                &mut attachment.store.feed_read(),
-                SEMANTIC_SLICE,
-                |install| install(),
-            );
+            assert_eq!(engines.unit(&name), crate::BackgroundUnit::NothingOwed);
             assert_eq!(
                 engines.status(&name),
                 SemanticStatus::Preparing,
@@ -9090,13 +9011,9 @@ mod tests {
 
             publish(&engines, &name, &mut attachment);
             assert!(engines.owes_work(&name));
-            assert!(
-                engines.work(
-                    &name,
-                    &mut attachment.store.feed_read(),
-                    SEMANTIC_SLICE,
-                    |install| install()
-                ),
+            assert_eq!(
+                engines.unit(&name),
+                crate::BackgroundUnit::Ran { owed: true },
                 "the initialization owes the drain that converges it"
             );
             assert!(fs::metadata(sidecar_file(&f, &name)).is_ok());
@@ -9169,6 +9086,41 @@ mod tests {
                 "the engine outlived the vault"
             );
             assert_eq!(engines.status(&name), SemanticStatus::Off);
+        }
+
+        /// **An attachment lost to an unwinding stack retires its engine's
+        /// delivery as it drops, before its maintainer lock goes**: the slot
+        /// left for the name-keyed give-back runs no unit and answers nothing,
+        /// so no sidecar commit of this host can follow the lock's release.
+        #[test]
+        fn an_attachment_lost_to_an_unwind_retires_its_engine_before_its_lock_goes() {
+            let f = Fixture::new("semantic-unwound-attachment");
+            fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+            fs::write(f.vault().join("alpha.md"), "alpha\n").unwrap();
+            let (engines, ops) = engines_and_ops(&f);
+            let name = f.registration().name;
+            let mut attachment = ops
+                .attach(&f.registration(), &ProgressReporter::disconnected())
+                .expect("an attach with an enabled engine");
+            settle(&engines, &name, &mut attachment);
+            assert!(engines.nearest(&name, "alpha", 5).is_ok());
+
+            drop(attachment);
+            engines.owe(&name);
+
+            assert!(
+                engines.section(&name).is_some(),
+                "the delivery is the give-back's to remove"
+            );
+            assert!(!engines.owes_work(&name), "a retired delivery owes work");
+            assert_eq!(engines.unit(&name), crate::BackgroundUnit::NothingOwed);
+            assert_eq!(
+                engines.nearest(&name, "alpha", 5),
+                Err(SemanticRefusal::Preparing),
+                "the engine outlived its attachment"
+            );
+            ops.discard(&name);
+            assert_eq!(engines.section(&name), None);
         }
 
         /// No section, no engine: the status is off and the refusal says so.
@@ -9381,12 +9333,14 @@ mod tests {
             );
         }
 
-        /// The store-rebuild leg owes the new epoch rather than draining it:
-        /// the rebuilt store's epoch is exactly the reading a cursor must not
-        /// sleep through, so the leg leaves the engine owing a slice, and the
-        /// slices after it reconcile against the new lifetime.
+        /// **A store rebuild retires the store lifetime at its discard, and
+        /// the units after its publication reconcile against the new one.**
+        /// The rebuild closes the engine's sidecar and feed connection before
+        /// the store is removed, so the engine prepares again; the rebuilt
+        /// store's epoch is exactly the reading a cursor must not sleep
+        /// through, so the reopened engine's drain rescans against it.
         #[test]
-        fn a_store_rebuild_leg_owes_the_new_epoch_to_later_slices() {
+        fn a_store_rebuild_retires_its_lifetime_and_later_units_reconcile_the_new_epoch() {
             let f = Fixture::new("semantic-rebuild");
             fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
             fs::create_dir_all(f.vault().join("docs")).unwrap();
@@ -9411,14 +9365,14 @@ mod tests {
             let mut rebuilt = ops
                 .rebuild(&name, attachment, &ProgressReporter::disconnected())
                 .expect("the rung-3 rebuild");
-            assert!(engines.owes_work(&name), "the leg owes the new epoch");
-            let SemanticStatus::On { watermarks, .. } = engines.status(&name) else {
-                panic!("the engine is not on: {:?}", engines.status(&name));
-            };
-            assert_eq!(
-                watermarks.documents.map(|mark| mark.store_epoch),
-                Some(old_epoch),
-                "the rebuild leg drained the new epoch itself"
+            assert_ne!(rebuilt.store.feed_read().epoch(), old_epoch);
+            // The discard retired the store lifetime the engine read: its
+            // sidecar and feed connection closed, and nothing is owed until
+            // the rebuild's publication commits the new lifetime.
+            assert_eq!(engines.status(&name), SemanticStatus::Preparing);
+            assert!(
+                !engines.owes_work(&name),
+                "a retired store lifetime still owes the lane work"
             );
             settle(&engines, &name, &mut rebuilt);
             assert!(matches!(
@@ -9490,9 +9444,9 @@ mod tests {
             );
         }
 
-        /// Damage met by a drain slice resolves by the engine's rebuild floor:
+        /// Damage met by a drain step resolves by the engine's rebuild floor:
         /// the slot stays running, the rebuilt sidecar converges over the
-        /// slices after it, and the diagnostic clears.
+        /// units after it, and the diagnostic clears.
         #[test]
         fn drain_time_damage_resolves_by_the_rebuild_floor() {
             let f = Fixture::new("semantic-damage");
@@ -9680,7 +9634,7 @@ mod tests {
         /// **A vault is `Ready` before its enabled engine is initialized, and
         /// its status says the engine is preparing**: not off, which is a
         /// section that asks for none, and not on. The case holds owed work,
-        /// so no maintenance slice has run, and lexical reads already serve.
+        /// so no background unit has run, and lexical reads already serve.
         #[test]
         fn a_ready_vault_reports_its_enabled_engine_preparing_before_any_slice() {
             let f = Fixture::new("status-engine-preparing");
@@ -9714,14 +9668,15 @@ mod tests {
             assert_eq!(page.answer.report.page.rows.len(), 1);
         }
 
-        /// **Owed semantic work starts without a poll tick.** The host's
-        /// watcher poll is a minute away. The delivery the attach commits
-        /// wakes the scheduler, so the engine initializes and drains; an
+        /// **Owed lane work starts without a poll tick.** The host's watcher
+        /// poll is a minute away. The delivery the attach commits wakes the
+        /// scheduler, so the lane initializes the engine and drains it; an
         /// apply's commit, which hands on no reconcile, leaves the engine
-        /// owing its documents and wakes it again, so the engine catches up
-        /// with the apply too.
+        /// owing its documents and wakes it again, so the lane catches the
+        /// engine up with the apply too, and no maintenance leg carries any
+        /// of it.
         #[test]
-        fn owed_semantic_work_starts_without_a_poll_tick() {
+        fn owed_lane_work_starts_without_a_poll_tick() {
             let f = Fixture::new("semantic-owe-wakes");
             fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
             fs::write(f.vault().join("note.md"), "status draft\n").unwrap();
@@ -9730,7 +9685,13 @@ mod tests {
             wait_for_engine(&host, &name, |engine| {
                 *engine == norn_wire::EngineStatus::on(None, Some(Freshness::trailing(0)))
             });
-            let caught_up = host.maintenance_reading().legs;
+            let caught_up = host.lane_reading().units;
+            assert!(caught_up > 0, "the lane ran none of the engine's work");
+            assert_eq!(
+                host.maintenance_reading().legs,
+                0,
+                "a maintenance leg ran the engine's work"
+            );
 
             let plan = norn_wire::AuthoredPlan::new(
                 norn_wire::VaultAddress::name(name.clone()),
@@ -9750,17 +9711,18 @@ mod tests {
             .wait()
             .expect("the apply applies");
             wait_until("the engine to drain the apply", lifecycle_budget(), || {
-                let legs = host.maintenance_reading().legs;
+                let units = host.lane_reading().units;
                 let (_, engine) = engine_reported(&host, &name);
-                if legs > caught_up
+                if units > caught_up
                     && engine == norn_wire::EngineStatus::on(None, Some(Freshness::trailing(0)))
                 {
                     Observed::Met(())
                 } else {
-                    Observed::Pending(format!("{legs} legs; the engine reports {engine:?}"))
+                    Observed::Pending(format!("{units} lane units; the engine reports {engine:?}"))
                 }
             })
             .unwrap_or_else(|failure| panic!("{failure}"));
+            assert_eq!(host.maintenance_reading().legs, 0);
         }
 
         /// **A ready vault whose section enables the engine reports it
@@ -9868,6 +9830,7 @@ mod tests {
                     worker_slots: 1,
                     watch_poll_interval: Duration::from_millis(5),
                     read_settle_bound: crate::READ_SETTLE_BOUND,
+                    background_threads: crate::BACKGROUND_THREADS,
                     background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
                 },
             )
@@ -9940,7 +9903,7 @@ mod tests {
             fs::write(f.vault().join("a.md"), "alpha alpha\n").unwrap();
             // Never armed: the watcher's facts are swallowed, so the explicit
             // reload is the only leg that meets the exhausted document open, and
-            // the scheduler still starts the engine's maintenance slices.
+            // the background lane still runs the engine's units.
             let (host, name, _lease, _armed, _) = overflowing_ready_host(&f);
             wait_for_engine(&host, &name, |engine| {
                 *engine == norn_wire::EngineStatus::on(None, Some(Freshness::trailing(0)))
@@ -9995,7 +9958,6 @@ mod tests {
         struct MaintenanceScript {
             control: Arc<MaintenanceControl>,
             steps: std::sync::mpsc::Sender<Option<MaintenanceStep>>,
-            injected: Arc<Mutex<Option<norn_fs::Batch>>>,
         }
 
         struct PausedMaintenance<T> {
@@ -10084,6 +10046,7 @@ mod tests {
                     worker_slots: 1,
                     watch_poll_interval: Duration::from_millis(5),
                     read_settle_bound: crate::READ_SETTLE_BOUND,
+                    background_threads: crate::BACKGROUND_THREADS,
                     background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
                 },
             )
@@ -10104,11 +10067,7 @@ mod tests {
                 name,
                 lease,
                 engines,
-                MaintenanceScript {
-                    control,
-                    steps,
-                    injected,
-                },
+                MaintenanceScript { control, steps },
             )
         }
 
@@ -10119,26 +10078,15 @@ mod tests {
             rolling_due_after: bool,
             generation_before: i64,
             generation_after: i64,
-            engine_before: SemanticStatus,
-            engine_after: SemanticStatus,
-            drains: usize,
         }
 
-        fn observe_semantic_maintenance(
+        fn observe_maintenance(
             script: &MaintenanceScript,
-            engines: &Arc<SemanticEngines>,
         ) -> PausedMaintenance<MaintenanceObservation> {
-            let engines = Arc::clone(engines);
             script.pause(move |ops, name, attachment, quiet, turn, progress| {
                 assert!(quiet && progress.quiet_maintenance_allowed());
                 let rolling_before = attachment.rolling.status();
                 let generation_before = attachment.store.feed_read().write_generation().unwrap();
-                let engine_before = engines.status(name);
-                let drains = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-                let attempts = Arc::clone(&drains);
-                engines.run_inside_next_drain(move || {
-                    attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                });
                 ops.maintain_quiet(name, attachment, quiet, turn, progress)
                     .unwrap();
                 MaintenanceObservation {
@@ -10147,94 +10095,80 @@ mod tests {
                     rolling_due_after: attachment.rolling.due(),
                     generation_before,
                     generation_after: attachment.store.feed_read().write_generation().unwrap(),
-                    engine_before,
-                    engine_after: engines.status(name),
-                    drains: drains.load(std::sync::atomic::Ordering::SeqCst),
                 }
             })
         }
 
+        /// **A failed drain step waits for lane-1 work instead of retrying at
+        /// every wake.** A sidecar that refuses every write fails the step an
+        /// edit owes; the wakes that follow ask the scheduler again and the
+        /// lane runs nothing, because the failure owes nothing until a leg
+        /// commits. A later edit owes the feed again, and the released sidecar
+        /// converges on both edits.
         #[test]
-        fn a_failed_semantic_drain_waits_for_lane_one_work_instead_of_retrying_quiet_ticks() {
+        fn a_failed_drain_step_waits_for_lane_one_work_instead_of_retrying_at_every_wake() {
             let f = Fixture::new("semantic-failure-retry-cadence");
             fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
             fs::write(f.vault().join("alpha.md"), "alpha\n").unwrap();
-            let (host, name, _lease, engines, script) = scripted_semantic_host(&f);
-            hold_the_sidecar(&f, &name);
-            let held = script.pause(|_, _, attachment, _, _, _| {
-                attachment.subscription.take();
-                attachment.rolling.due = Instant::now() + Duration::from_secs(3600);
+            let (engines, ops) = engines_and_ops(&f);
+            let (host, name, _lease) = polling_ready_host(&f, ops);
+            wait_for_engine(&host, &name, |engine| {
+                *engine == norn_wire::EngineStatus::on(None, Some(Freshness::trailing(0)))
             });
+            hold_the_sidecar(&f, &name);
+            let SemanticStatus::On {
+                sidecar: before, ..
+            } = engines.status(&name)
+            else {
+                panic!("no running engine before the edit");
+            };
+
             fs::write(f.vault().join("beta.md"), "beta\n").unwrap();
-            *script.injected.lock().unwrap() = Some(dirty_batch(&f.vault(), &["beta.md"]));
-            // The real maintenance handoff drains this injected watcher fact,
-            // runs a real reconcile, and publishes it before the next step.
-            drop(held);
-            let failed = observe_semantic_maintenance(&script, &engines);
-            let observation = &failed.observed;
-            assert_eq!(
-                observation.drains, 1,
-                "the owed drain never attempted its write"
-            );
+            wait_for_engine(&host, &name, |engine| {
+                matches!(
+                    engine,
+                    norn_wire::EngineStatus::On {
+                        last_drain_error: Some(_),
+                        ..
+                    }
+                )
+            });
             let SemanticStatus::On {
-                last_drain_error: Some(error),
                 sidecar,
-                watermarks,
-            } = &observation.engine_after
-            else {
-                panic!("the SQL refusal did not leave a running engine: {observation:?}");
-            };
-            let SemanticStatus::On {
-                sidecar: before_sidecar,
-                watermarks: before_watermarks,
+                last_drain_error: Some(refusal),
                 ..
-            } = &observation.engine_before
+            } = engines.status(&name)
             else {
-                panic!("no running engine before the drain");
+                panic!("the refusal did not leave a running engine");
             };
-            assert_eq!(
-                sidecar, before_sidecar,
-                "a refused write committed a revision"
-            );
-            assert_eq!(
-                watermarks, before_watermarks,
-                "a refused write claimed progress"
-            );
+            assert_eq!(sidecar, before, "a refused write committed a revision");
             assert!(
-                watermarks.documents.as_ref().unwrap().generation < observation.generation_before
+                !engines.owes_work(&name),
+                "a failed step still owes work no leg committed: {refusal}"
             );
-            let reported = engine_reported(&host, &name).1;
-            assert!(matches!(
-                reported,
-                norn_wire::EngineStatus::On {
-                    last_drain_error: Some(_),
-                    ..
-                }
-            ));
-            eprintln!(
-                "failed drain: {observation:?}; actual Host engine={reported:?}; refusal={error}"
-            );
-            let failed_status = observation.engine_after.clone();
-            drop(failed);
+            let failed_at = engines.reading().units;
 
-            for tick in 0..3 {
-                let idle = observe_semantic_maintenance(&script, &engines);
-                eprintln!(
-                    "quiet tick {tick}: actual drains={}; engine={:?}",
-                    idle.observed.drains, idle.observed.engine_after
-                );
-                assert_eq!(
-                    idle.observed.drains, 0,
-                    "a failed non-damage drain retried without new lane-1 work"
-                );
-                assert_eq!(idle.observed.engine_after, failed_status);
-                assert_eq!(
-                    idle.observed.generation_before,
-                    idle.observed.generation_after
-                );
+            let asks = host.scheduler_reading().asks;
+            for _ in 0..3 {
+                host.wake_background();
             }
+            wait_until("the scheduler to ask again", lifecycle_budget(), || {
+                let asked = host.scheduler_reading().asks;
+                if asked > asks {
+                    Observed::Met(())
+                } else {
+                    Observed::Pending(format!("{asked} asks"))
+                }
+            })
+            .unwrap_or_else(|failure| panic!("{failure}"));
+            // The lane reads the set the asks filled; a store the asks found
+            // owing nothing was never put in it.
+            assert_eq!(
+                engines.reading().units,
+                failed_at,
+                "a failed step was retried without new lane-1 work: {refusal}"
+            );
 
-            let held = script.pause(|_, _, _, _, _, _| {});
             match norn_db::connect(&sidecar_file(&f, &name)).unwrap() {
                 norn_db::Attempt::Connected(connection) => connection.execute_batch(
                     "DROP TRIGGER held_delete; DROP TRIGGER held_insert; DROP TRIGGER held_update;"
@@ -10242,39 +10176,21 @@ mod tests {
                 norn_db::Attempt::Unreadable { detail } => panic!("{detail}"),
             }
             fs::write(f.vault().join("gamma.md"), "gamma\n").unwrap();
-            *script.injected.lock().unwrap() = Some(dirty_batch(&f.vault(), &["gamma.md"]));
-            drop(held);
-            let resumed = observe_semantic_maintenance(&script, &engines);
-            let observation = &resumed.observed;
-            assert_eq!(
-                observation.drains, 1,
-                "new lane-1 work did not re-owe the failed feed"
-            );
-            let SemanticStatus::On {
-                last_drain_error: None,
-                watermarks,
-                ..
-            } = &observation.engine_after
-            else {
-                panic!("the re-owed drain did not recover: {observation:?}");
-            };
-            assert_eq!(
-                watermarks.documents.as_ref().unwrap().generation,
-                observation.generation_after
-            );
+            wait_for_engine(&host, &name, |engine| {
+                *engine == norn_wire::EngineStatus::on(None, Some(Freshness::trailing(0)))
+            });
             assert_eq!(
                 engines.nearest(&name, "gamma", 10).unwrap().neighbors.len(),
                 3
             );
-            eprintln!("after new lane-1 publication: {observation:?}");
         }
 
         #[test]
-        fn a_rolling_maintenance_leg_yields_before_semantics_and_its_own_publication() {
+        fn a_rolling_maintenance_leg_yields_before_its_own_publication() {
             let f = Fixture::new("semantic-rolling-publication");
             fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
             many_documents(&f, 130);
-            let (host, name, _lease, engines, script) = scripted_semantic_host(&f);
+            let (host, name, _lease, _engines, script) = scripted_semantic_host(&f);
             drop(script.pause(|_, _, attachment, _, _, _| {
                 // Make these real watcher misses; no backend timing decides
                 // which path derives them. Only the rolling heal can do so.
@@ -10290,16 +10206,14 @@ mod tests {
             }));
             let mut saw_commit = false;
             let mut completed = false;
-            let mut rolling_drains = 0;
             for leg in 0..32 {
-                let held = observe_semantic_maintenance(&script, &engines);
+                let held = observe_maintenance(&script);
                 let observed = &held.observed;
                 let published = super::status::status_of(&host, &name).rolling_heal.unwrap();
                 assert_eq!(
                     published.pass, observed.rolling_before.pass,
                     "a rolling leg published before returning to lifecycle"
                 );
-                rolling_drains += observed.drains;
                 eprintln!(
                     "rolling leg {leg}: {observed:?}; actual published pass={:?}",
                     published.pass
@@ -10321,14 +10235,6 @@ mod tests {
                         published.pass, observed.rolling_after.pass,
                         "the committing rolling slice must still await its publication"
                     );
-                    assert_eq!(
-                        observed.drains, 0,
-                        "semantic work ran after a rolling commit and before its publication"
-                    );
-                    assert_eq!(
-                        observed.engine_after, observed.engine_before,
-                        "the committing leg also advanced the semantic engine"
-                    );
                 }
                 let due = observed.rolling_due_after;
                 drop(held);
@@ -10341,27 +10247,16 @@ mod tests {
                 saw_commit && completed,
                 "the real rolling pass did not commit and finish"
             );
-            assert_eq!(rolling_drains, 0, "a rolling leg also ran a semantic slice");
-            let held = observe_semantic_maintenance(&script, &engines);
-            let observed = &held.observed;
+            let held = observe_maintenance(&script);
             let published = super::status::status_of(&host, &name).rolling_heal.unwrap();
             assert!(published.pass.is_none() && published.last_completed_unix_seconds.is_some());
-            assert_eq!(
-                observed.drains, 1,
-                "the later quiet leg must consume the owed feed"
-            );
-            let SemanticStatus::On {
-                watermarks,
-                last_drain_error: None,
-                ..
-            } = &observed.engine_after
-            else {
-                panic!("the semantic slice did not succeed: {observed:?}");
-            };
-            assert_eq!(
-                watermarks.documents.as_ref().unwrap().generation,
-                observed.generation_after
-            );
+            drop(held);
+            drop(script);
+            // The rolling heal's commits owe the engine its work, which the
+            // background lane carries, off the claim the legs held.
+            wait_for_engine(&host, &name, |engine| {
+                *engine == norn_wire::EngineStatus::on(None, Some(Freshness::trailing(0)))
+            });
         }
 
         /// Production ops whose poll reports a watcher overflow once the case
@@ -10435,6 +10330,18 @@ mod tests {
 
             fn semantic(&self) -> Option<&SemanticEngines> {
                 self.inner.semantic()
+            }
+
+            fn mint_feed(&self, attachment: &Self::Attachment) -> Option<norn_store::FeedSource> {
+                self.inner.mint_feed(attachment)
+            }
+
+            fn background_owed(&self, name: &VaultName) -> bool {
+                self.inner.background_owed(name)
+            }
+
+            fn background_unit(&self, name: &VaultName) -> crate::BackgroundUnit {
+                self.inner.background_unit(name)
             }
 
             fn rebuild(
@@ -10566,6 +10473,7 @@ mod tests {
                     worker_slots: 1,
                     watch_poll_interval: Duration::from_millis(5),
                     read_settle_bound: crate::READ_SETTLE_BOUND,
+                    background_threads: crate::BACKGROUND_THREADS,
                     background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
                 },
             )
@@ -10691,12 +10599,12 @@ mod tests {
         /// a store that has moved on. Once the drain lands it trails by
         /// nothing.
         ///
-        /// The drain held is the slice owed by the leg that commits
+        /// The drain held is the step owed by the leg that commits
         /// `beta.md`, once the engine has caught up with the attach. A leg
-        /// that commits nothing still owes a slice, and its engine truthfully
+        /// that commits nothing still owes the engine its work, and the engine truthfully
         /// trails by nothing; on macOS fseventsd can deliver a change made
         /// before the watch was established after the attach published, which
-        /// owes such a slice ahead of `beta.md`'s. A held
+        /// owes such a step ahead of `beta.md`'s. A held
         /// drain that reports the engine caught up is that leg's: the hook is
         /// armed again before it is released, so the next drain is held too.
         #[test]
@@ -10794,6 +10702,7 @@ mod tests {
                     worker_slots: 1,
                     watch_poll_interval: Duration::from_secs(60),
                     read_settle_bound: crate::READ_SETTLE_BOUND,
+                    background_threads: crate::BACKGROUND_THREADS,
                     background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
                 },
             )
@@ -10863,14 +10772,8 @@ mod tests {
             )
             .expect("the rescan reconcile");
             engines.run_as_next_drain_ends(|| panic!("the drain unwound"));
-            let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                engines.work(
-                    &name,
-                    &mut attachment.store.feed_read(),
-                    SEMANTIC_SLICE,
-                    |install| install(),
-                )
-            }));
+            let unwound =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| engines.unit(&name)));
 
             assert!(unwound.is_err(), "the drain did not unwind");
             let reached = engines.standing(&name).expect("the engine stands");
@@ -10993,23 +10896,10 @@ mod tests {
             (engines, ops, attachment)
         }
 
-        /// One initialization unit, the claim standing as `claimed` says.
-        fn initialize_once(
-            engines: &SemanticEngines,
-            name: &VaultName,
-            attachment: &mut ProductionAttachment,
-            claimed: bool,
-        ) {
-            engines.work(
-                name,
-                &mut attachment.store.feed_read(),
-                SEMANTIC_SLICE,
-                |install| {
-                    if claimed {
-                        install();
-                    }
-                },
-            );
+        /// One unit, as the background lane runs it: the initialization a
+        /// published preparing slot owes.
+        fn initialize_once(engines: &SemanticEngines, name: &VaultName) {
+            engines.unit(name);
         }
 
         /// **An initialization whose delivery was disabled, replaced or torn
@@ -11034,7 +10924,7 @@ mod tests {
                 ("torn down", Some("teardown"), SemanticStatus::Off, None),
             ] {
                 let f = Fixture::new(&format!("semantic-obsolete-{}", label.replace(' ', "-")));
-                let (engines, ops, mut attachment) = published_preparing(&f);
+                let (engines, ops, attachment) = published_preparing(&f);
                 let name = f.registration().name;
                 let superseder = Arc::clone(&engines);
                 let superseded = name.clone();
@@ -11051,7 +10941,7 @@ mod tests {
                         None,
                     ),
                 });
-                initialize_once(&engines, &name, &mut attachment, true);
+                initialize_once(&engines, &name);
 
                 assert_eq!(engines.status(&name), status, "{label}");
                 assert_eq!(engines.section(&name), section, "{label}");
@@ -11075,9 +10965,8 @@ mod tests {
             let name = f.registration().name;
             // What the entry committed for the first attachment.
             let first = publish(&engines, &name, &mut attachment).expect("a delivery");
-            let mut feed = attachment.store.feed_read();
-            let generation = feed.write_generation().unwrap();
-            let same_store = norn_store::StoreReading::of(feed.epoch(), generation);
+            let same_store = store_reading(&mut attachment);
+            let same_feed = attachment.store.feed_source();
             let reattaching = Arc::clone(&engines);
             let reattached = name.clone();
             engines.run_before_next_install(move || {
@@ -11087,9 +10976,9 @@ mod tests {
                     &reattached,
                     Some(&engine_section("[engine.semantic]\n")),
                 );
-                reattaching.publish_delivery(&reattached, Some(&same_store));
+                reattaching.publish_delivery(&reattached, Some(&same_store), Some(same_feed));
             });
-            initialize_once(&engines, &name, &mut attachment, true);
+            initialize_once(&engines, &name);
 
             assert_eq!(
                 engines.status(&name),
@@ -11134,6 +11023,7 @@ mod tests {
                 norn_store::DerivationVersion::new(1),
             )
             .unwrap();
+            let changed_feed = replacement.feed_source();
             let mut feed = replacement.feed_read();
             assert_ne!(feed.epoch(), attachment.store.feed_read().epoch());
             let generation = feed.write_generation().unwrap();
@@ -11146,9 +11036,13 @@ mod tests {
                 // Reaching this hook proves the early work() guard admitted
                 // and opened this result. publish_delivery changes no slot.
                 after_precheck.store(true, std::sync::atomic::Ordering::SeqCst);
-                republishing.publish_delivery(&republished, Some(&changed_store));
+                republishing.publish_delivery(
+                    &republished,
+                    Some(&changed_store),
+                    Some(changed_feed),
+                );
             });
-            initialize_once(&engines, &name, &mut attachment, true);
+            initialize_once(&engines, &name);
             let observed = (engines.status(&name), committed.reading());
             eprintln!(
                 "internal install boundary: passed early precheck={}, actual result={observed:?}",
@@ -11177,55 +11071,17 @@ mod tests {
             ops.detach(&name, attachment);
         }
 
-        /// **An initialization whose lifecycle claim no longer stands, or
-        /// whose delivery was committed beside another store lifetime,
-        /// installs nothing**, and the slot stays preparing for the claim and
-        /// the publication that follow.
-        #[test]
-        fn an_initialization_needs_its_claim_and_its_published_store() {
-            let f = Fixture::new("semantic-claim");
-            let (engines, ops, mut attachment) = published_preparing(&f);
-            let name = f.registration().name;
-
-            initialize_once(&engines, &name, &mut attachment, false);
-            assert_eq!(engines.status(&name), SemanticStatus::Preparing);
-            // A real reporter whose entry is gone answers that no claim stands.
-            engines.work(
-                &name,
-                &mut attachment.store.feed_read(),
-                SEMANTIC_SLICE,
-                |install| {
-                    ProgressReporter::<ProductionAttachment>::disconnected()
-                        .publish_if_claimed(install)
-                },
-            );
-            assert_eq!(engines.status(&name), SemanticStatus::Preparing);
-
-            engines.publish_delivery(&name, Some(&norn_store::StoreReading::of("another", 1)));
-            assert!(engines.owes_work(&name));
-            initialize_once(&engines, &name, &mut attachment, true);
-            assert_eq!(
-                engines.status(&name),
-                SemanticStatus::Preparing,
-                "a delivery committed beside another store lifetime initialized"
-            );
-
-            settle(&engines, &name, &mut attachment);
-            assert!(matches!(engines.status(&name), SemanticStatus::On { .. }));
-            ops.detach(&name, attachment);
-        }
-
         /// **A sidecar that will not open leaves the engine self-disabled at
         /// its initialization**, not at its delivery, and owes nothing more
         /// until the next delivery.
         #[test]
         fn a_sidecar_that_will_not_open_self_disables_at_initialization() {
             let f = Fixture::new("semantic-open-fails");
-            let (engines, ops, mut attachment) = published_preparing(&f);
+            let (engines, ops, attachment) = published_preparing(&f);
             let name = f.registration().name;
             fs::create_dir_all(sidecar_file(&f, &name)).unwrap();
 
-            initialize_once(&engines, &name, &mut attachment, true);
+            initialize_once(&engines, &name);
             let SemanticStatus::SelfDisabled { detail } = engines.status(&name) else {
                 panic!(
                     "the engine is not out of service: {:?}",
@@ -11257,7 +11113,7 @@ mod tests {
             let (host, name, _lease) = polling_ready_host(&f, ops);
             install_entered
                 .recv_timeout(Duration::from_secs(15))
-                .expect("a maintenance slice to initialize the engine");
+                .expect("a background unit to initialize the engine");
 
             let get = host.get(&norn_wire::GetParams::new(
                 norn_wire::VaultAddress::name(name.clone()),
@@ -11374,14 +11230,15 @@ mod tests {
             }
         }
 
-        /// **A semantic backlog is consumed in slices that yield to watcher
-        /// facts**: a fact that reaches the entry as the first drain slice of
-        /// a three-page backlog ends is reconciled and readable before the
-        /// next slice starts. The facts are injected at the poll the slice's
-        /// leg ends with, so the order is the lifecycle's and not a watcher's
-        /// latency.
+        /// **Watcher facts reconcile beside a semantic backlog**: a fact
+        /// that reaches the entry while the first unit of a three-page
+        /// backlog reads its page is reconciled and readable from inside the
+        /// next unit, which holds its engine slot: the lane holds no claim, so
+        /// the reconcile never waits for the backlog. The facts are injected at
+        /// the next poll, so the reconcile is the lifecycle's and not a
+        /// watcher's latency.
         #[test]
-        fn semantic_slices_yield_to_watcher_facts_between_them() {
+        fn watcher_facts_reconcile_beside_a_semantic_backlog() {
             type Shared = Arc<Mutex<Option<Arc<crate::Host<OverflowOnArm>>>>>;
             type Injected = Arc<Mutex<Option<norn_fs::Batch>>>;
             let f = Fixture::new("semantic-slices-yield");
@@ -11408,8 +11265,8 @@ mod tests {
                     engines.run_inside_next_drain(move || {
                         started.send(()).unwrap();
                         let _ = first_goes.recv_timeout(Duration::from_secs(30));
-                        // The fact arrives while this slice holds the claim:
-                        // the poll the leg ends with reports it.
+                        // The fact arrives while this unit reads its page:
+                        // the next poll reports it.
                         fs::write(&rewritten, "omega rewritten\n").unwrap();
                         let injected = injected_cell.lock().unwrap().clone().expect("the cell");
                         *injected.lock().unwrap() = Some(norn_fs::Batch::vault_change(omega));
@@ -11424,10 +11281,22 @@ mod tests {
                                     norn_wire::RungSet::of([norn_wire::Rung::Lexical]).unwrap(),
                                 ),
                             );
-                            *observed.lock().unwrap() = Some(
-                                host.search(&params)
-                                    .map(|answer| answer.answer.report.page.rows.len()),
-                            );
+                            // The next poll delivers the fact, and nothing
+                            // orders that poll before this unit begins, so the
+                            // unit waits here, holding its slot, until the
+                            // reconcile has published the edit: a reconcile
+                            // that waited for the backlog would never get there.
+                            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                            let rows = loop {
+                                let rows = host
+                                    .search(&params)
+                                    .map(|answer| answer.answer.report.page.rows.len());
+                                if matches!(rows, Ok(1)) || std::time::Instant::now() >= deadline {
+                                    break rows;
+                                }
+                                std::thread::sleep(Duration::from_millis(5));
+                            };
+                            *observed.lock().unwrap() = Some(rows);
                             second_entered.send(()).unwrap();
                         });
                     });
@@ -11438,30 +11307,34 @@ mod tests {
             *injected_cell.lock().unwrap() = Some(injected);
             first_started
                 .recv_timeout(Duration::from_secs(15))
-                .expect("the first slice of the backlog");
+                .expect("the first unit of the backlog");
             go.send(()).unwrap();
             second_drain
-                .recv_timeout(Duration::from_secs(15))
-                .expect("the next slice of the backlog");
+                .recv_timeout(Duration::from_secs(30))
+                .expect("the next unit of the backlog");
 
             assert_eq!(
                 *observed.lock().unwrap(),
                 Some(Ok(1)),
-                "the next slice ran ahead of the fact's reconcile"
+                "the fact was not reconciled beside the backlog"
             );
             wait_for_engine(&*host, &name, |engine| {
                 *engine == norn_wire::EngineStatus::on(None, Some(Freshness::trailing(0)))
             });
         }
 
-        /// **A reconcile publishes `Ready` before the semantic slice it
-        /// owes**: an edit's reconcile commits lane-1 work and owes the
-        /// engine a slice, and by the moment that slice starts the entry
-        /// already answers `Ready` and a lexical read finds the edit. The
-        /// slice is the one the edit owes because the engine had drained
-        /// everything before the edit landed.
+        /// **A reconcile records the store reading and the owe before its
+        /// publication, so a status taken before the unit it owes runs reports
+        /// the engine trailing the edit**, and that unit runs while the entry
+        /// serves or settles. The engine had drained everything, and the unit
+        /// the edit owes is held inside its read phase, before it reads the
+        /// feed. Holding no slot lock, the case waits until a lexical read
+        /// finds the edit — the reconcile has published — and reads the
+        /// entry's state and status there: the entry serves or settles, never
+        /// refusing, and the engine trails the store. Released, the unit
+        /// drains the edit.
         #[test]
-        fn a_reconcile_publishes_ready_before_the_semantic_slice_it_owes() {
+        fn a_reconcile_owes_the_engine_its_edit_before_the_unit_runs() {
             let f = Fixture::new("semantic-slice-after-ready");
             fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
             fs::write(f.vault().join("alpha.md"), "alpha\n").unwrap();
@@ -11470,44 +11343,60 @@ mod tests {
             wait_for_engine(&host, &name, |engine| {
                 *engine == norn_wire::EngineStatus::on(None, Some(Freshness::trailing(0)))
             });
-            let host = Arc::new(host);
-            let watched = Arc::downgrade(&host);
-            let vault = name.clone();
-            let (seen, seen_at_slice) = std::sync::mpsc::channel();
+            let (entered, unit_entered) = std::sync::mpsc::channel();
+            let (resume, unit_resumes) = std::sync::mpsc::channel::<()>();
             engines.run_inside_next_drain(move || {
-                let Some(host) = watched.upgrade() else {
-                    return;
-                };
-                let state = host.state(&vault);
-                let params = norn_wire::SearchParams::new(
-                    norn_wire::VaultAddress::name(vault.clone()),
-                    "beta",
-                )
-                .with_rungs(norn_wire::RungSelection::exactly(
-                    norn_wire::RungSet::of([norn_wire::Rung::Lexical]).unwrap(),
-                ));
-                let rows = host
-                    .search(&params)
-                    .map(|answer| answer.answer.report.page.rows.len());
-                seen.send((state, rows)).unwrap();
+                entered.send(()).unwrap();
+                let _ = unit_resumes.recv_timeout(Duration::from_secs(30));
             });
 
             fs::write(f.vault().join("beta.md"), "beta\n").unwrap();
-            let (state, rows) = seen_at_slice
+            unit_entered
                 .recv_timeout(Duration::from_secs(30))
-                .expect("the semantic slice the edit owes");
+                .expect("the semantic unit the edit owes");
+            let params =
+                norn_wire::SearchParams::new(norn_wire::VaultAddress::name(name.clone()), "beta")
+                    .with_rungs(norn_wire::RungSelection::exactly(
+                        norn_wire::RungSet::of([norn_wire::Rung::Lexical]).unwrap(),
+                    ));
+            wait_until(
+                "the edit to be published",
+                lifecycle_budget(),
+                || match host
+                    .search(&params)
+                    .map(|answer| answer.answer.report.page.rows.len())
+                {
+                    Ok(1) => Observed::Met(()),
+                    rows => Observed::Pending(format!("a lexical read found {rows:?}")),
+                },
+            )
+            .unwrap_or_else(|failure| panic!("{failure}"));
+            let state = host.state(&name);
+            let (_, engine) = engine_reported(&host, &name);
+            resume.send(()).unwrap();
 
-            assert_eq!(
-                state,
-                crate::lifecycle::answered(norn_wire::TrustState::Ready),
-                "a semantic slice ran before its reconcile published Ready"
+            assert!(
+                matches!(
+                    state,
+                    Ok(norn_wire::TrustState::Ready
+                        | norn_wire::TrustState::Warming {
+                            phase: norn_wire::WarmingPhase::Healing,
+                            ..
+                        })
+                ),
+                "the entry refused while the semantic unit was owed: {state:?}"
             );
-            assert_eq!(
-                rows,
-                Ok(1),
-                "a semantic slice ran before the edit was readable"
+            assert!(
+                matches!(
+                    engine,
+                    norn_wire::EngineStatus::On {
+                        freshness: Some(Freshness::Trailing { generations, .. }),
+                        ..
+                    } if generations > 0
+                ),
+                "a status before the unit ran called the engine caught up: {engine:?}"
             );
-            wait_for_engine(&*host, &name, |engine| {
+            wait_for_engine(&host, &name, |engine| {
                 *engine == norn_wire::EngineStatus::on(None, Some(Freshness::trailing(0)))
             });
         }
@@ -11550,6 +11439,744 @@ mod tests {
             });
             let answer = engines.nearest(&name, "alpha", 1000).expect("an answer");
             assert_eq!(answer.neighbors.len(), 600);
+        }
+
+        /// Hold the next embedding phase of any vault's drain: the receiver
+        /// hears once the phase is entered, holding no lock, and the phase
+        /// waits until the sender is sent to or dropped.
+        fn hold_next_embedding(
+            engines: &SemanticEngines,
+        ) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+            let (entered, embedding_entered) = std::sync::mpsc::channel();
+            let (resume, embedding_resumes) = std::sync::mpsc::channel::<()>();
+            engines.run_inside_next_embedding(move || {
+                entered.send(()).unwrap();
+                let _ = embedding_resumes.recv_timeout(Duration::from_secs(30));
+            });
+            (embedding_entered, resume)
+        }
+
+        /// The sidecar's revision as the file holds it, read by an engine
+        /// opened over it for the reading alone.
+        fn sidecar_revision(f: &Fixture, name: &VaultName) -> norn_semantic::SidecarRevision {
+            norn_semantic::Engine::open(
+                sidecar_file(f, name),
+                Arc::new(norn_embed::StubEmbedder::new()),
+            )
+            .expect("the sidecar opens")
+            .revision()
+        }
+
+        /// **An apply completes while its vault's semantic turn is in flight.**
+        /// The engine's unit is held inside its embedding, and an apply over
+        /// the same vault takes the claim, publishes and answers: the unit
+        /// holds no claim, no attachment and no lock an apply takes. Released,
+        /// the engine catches up with the edit and the apply both.
+        #[test]
+        fn an_apply_completes_while_its_vaults_semantic_turn_is_in_flight() {
+            let f = Fixture::new("semantic-apply-during-turn");
+            fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+            fs::write(f.vault().join("note.md"), "status draft\n").unwrap();
+            let (engines, ops) = engines_and_ops(&f);
+            let (host, name, _lease) = polling_ready_host(&f, ops);
+            wait_for_engine(&host, &name, |engine| {
+                *engine == norn_wire::EngineStatus::on(None, Some(Freshness::trailing(0)))
+            });
+            let (embedding_entered, resume) = hold_next_embedding(&engines);
+            fs::write(f.vault().join("beta.md"), "beta\n").unwrap();
+            embedding_entered
+                .recv_timeout(Duration::from_secs(15))
+                .expect("the lane to embed the edit");
+
+            let host = Arc::new(host);
+            let (answered, answer) = std::sync::mpsc::channel();
+            let applying = Arc::clone(&host);
+            let vault = name.clone();
+            thread::spawn(move || {
+                let plan = norn_wire::AuthoredPlan::new(
+                    norn_wire::VaultAddress::name(vault),
+                    vec![norn_wire::Operation::new(
+                        norn_wire::OperationKind::str_replace(
+                            norn_wire::DocumentPath::new("note.md").unwrap(),
+                            "draft",
+                            "final",
+                        ),
+                    )],
+                );
+                let applied = applying
+                    .apply(norn_wire::ApplyParams::new(
+                        norn_wire::ApplyMode::Apply,
+                        PlanDocument::operations(plan),
+                    ))
+                    .expect("an apply over a ready vault is admitted")
+                    .wait();
+                answered.send(applied.is_ok()).unwrap();
+            });
+            let applied = answer.recv_timeout(Duration::from_secs(15));
+            resume.send(()).unwrap();
+
+            assert_eq!(
+                applied,
+                Ok(true),
+                "the apply waited for the semantic unit in flight"
+            );
+            assert_eq!(
+                fs::read_to_string(f.vault().join("note.md")).unwrap(),
+                "status final\n"
+            );
+            wait_for_engine(&*host, &name, |engine| {
+                *engine == norn_wire::EngineStatus::on(None, Some(Freshness::trailing(0)))
+            });
+        }
+
+        /// **A page whose delivery or store lifetime is no longer current when
+        /// its embedding ends commits nothing**, whichever way it stopped
+        /// being current: a disable, a replacing delivery, a detach, a
+        /// rebuild's retirement of the store lifetime, or a publication beside
+        /// another store lifetime. The unit discards the page, the sidecar
+        /// stands at the revision it had before the page, and a retired
+        /// delivery owes nothing more.
+        #[test]
+        fn a_page_whose_delivery_or_store_lifetime_retires_while_it_embeds_commits_nothing() {
+            type Retirement = fn(&SemanticEngines, &VaultName, &Path);
+            let retirements: [(&str, Retirement); 5] = [
+                ("disabled", |engines, name, _| {
+                    crate::reload::EngineConfigReceiver::receive(
+                        engines,
+                        name,
+                        Some(&engine_section("[engine.semantic]\nenabled = false\n")),
+                    );
+                }),
+                ("replaced", |engines, name, _| {
+                    crate::reload::EngineConfigReceiver::receive(engines, name, None);
+                    crate::reload::EngineConfigReceiver::receive(
+                        engines,
+                        name,
+                        Some(&engine_section("[engine.semantic]\n")),
+                    );
+                }),
+                ("detached", |engines, name, _| engines.detach(name)),
+                ("store lifetime retired", |engines, name, _| {
+                    engines.retire_store(name);
+                }),
+                // A publication beside another store lifetime, which takes no
+                // engine out: only the unit's own currency check refuses it.
+                (
+                    "republished beside another lifetime",
+                    |engines, name, other_at| {
+                        let mut other = norn_store::Store::open(
+                            other_at,
+                            norn_store::StoredPathOrder::Sensitive,
+                            norn_store::DerivationVersion::new(1),
+                        )
+                        .unwrap();
+                        let feed = other.feed_source();
+                        let mut read = other.feed_read();
+                        let generation = read.write_generation().unwrap();
+                        let reading = norn_store::StoreReading::of(read.epoch(), generation);
+                        engines.publish_delivery(name, Some(&reading), Some(feed));
+                    },
+                ),
+            ];
+            for (label, retire) in retirements {
+                let f = Fixture::new(&format!("semantic-late-page-{}", label.replace(' ', "-")));
+                fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+                fs::create_dir_all(f.vault().join("docs")).unwrap();
+                fs::write(f.vault().join("docs/alpha.md"), "alpha alpha\n").unwrap();
+                let (engines, ops) = engines_and_ops(&f);
+                let name = f.registration().name;
+                let progress = ProgressReporter::disconnected();
+                let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+                settle(&engines, &name, &mut attachment);
+                let before = sidecar_revision(&f, &name);
+
+                fs::write(f.vault().join("docs/beta.md"), "beta beta\n").unwrap();
+                ops.reconcile(
+                    &name,
+                    &mut attachment,
+                    ReconcileWork {
+                        batch: norn_fs::Batch::rescan(RescanScope::Vault),
+                    },
+                    &progress,
+                )
+                .expect("the rescan reconcile");
+                let retiring = Arc::clone(&engines);
+                let retired = name.clone();
+                let other_at = f.root.join("another.sqlite3");
+                engines.run_inside_next_embedding(move || retire(&retiring, &retired, &other_at));
+                let discarded = engines.reading().pages_discarded;
+                let committed = engines.reading().pages_committed;
+
+                assert_eq!(
+                    engines.unit(&name),
+                    crate::BackgroundUnit::Ran { owed: false },
+                    "{label}"
+                );
+                assert_eq!(
+                    engines.reading().pages_discarded,
+                    discarded + 1,
+                    "{label}: the late page was not discarded"
+                );
+                assert_eq!(engines.reading().pages_committed, committed, "{label}");
+                if label == "republished beside another lifetime" {
+                    // The delivery stands, and owes the new lifetime its
+                    // drain from a rescan.
+                    assert!(engines.owes_work(&name), "{label}");
+                } else {
+                    assert!(
+                        !engines.owes_work(&name),
+                        "{label}: a retired delivery owes work"
+                    );
+                    assert_eq!(
+                        engines.unit(&name),
+                        crate::BackgroundUnit::NothingOwed,
+                        "{label}: the turn went on past the retirement"
+                    );
+                }
+                ops.detach(&name, attachment);
+                assert_eq!(
+                    sidecar_revision(&f, &name),
+                    before,
+                    "{label}: the late page reached the sidecar"
+                );
+            }
+        }
+
+        /// **No maintenance leg runs a semantic unit.** The engine owes work,
+        /// and a maintenance leg runs over the vault, quiet or not, and the
+        /// shadow sweep and verification beside it: no unit runs, and the
+        /// work is still owed for the background lane.
+        #[test]
+        fn no_maintenance_leg_runs_a_semantic_unit() {
+            let f = Fixture::new("semantic-maintenance-runs-no-unit");
+            fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+            fs::write(f.vault().join("alpha.md"), "alpha alpha\n").unwrap();
+            let (engines, ops) = engines_and_ops(&f);
+            let name = f.registration().name;
+            let progress = ProgressReporter::disconnected();
+            let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+            settle(&engines, &name, &mut attachment);
+            engines.owe(&name);
+            let units = engines.reading().units;
+
+            for quiet in [false, true] {
+                let mut turn = crate::MaintenanceTurn::new(Duration::from_secs(60));
+                ops.maintain_quiet(&name, &mut attachment, quiet, &mut turn, &progress)
+                    .expect("a maintenance leg");
+            }
+            ops.maintain(&name, &mut attachment)
+                .expect("the maintenance call");
+
+            assert_eq!(
+                engines.reading().units,
+                units,
+                "a maintenance leg ran a semantic unit"
+            );
+            assert!(engines.owes_work(&name), "the owed work was taken");
+            ops.detach(&name, attachment);
+        }
+
+        /// **An unwind in a unit's read phase leaves the engine draining.**
+        /// The engine unwinds while its read phase holds the feed source out
+        /// of the binding; the engine stays in its slot, the source goes back
+        /// to it, and the work stays owed, so the units after a later commit
+        /// read the feed again and embed what it committed.
+        #[test]
+        fn an_unwind_in_the_read_phase_leaves_the_engine_draining() {
+            let f = Fixture::new("semantic-read-phase-unwind");
+            fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+            fs::create_dir_all(f.vault().join("docs")).unwrap();
+            fs::write(f.vault().join("docs/alpha.md"), "alpha alpha\n").unwrap();
+            let (engines, ops) = engines_and_ops(&f);
+            let name = f.registration().name;
+            let progress = ProgressReporter::disconnected();
+            let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+            settle(&engines, &name, &mut attachment);
+
+            engines.owe(&name);
+            engines.run_with_the_feed_next_out(|| panic!("the engine unwound mid-read"));
+            let unwound =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| engines.unit(&name)));
+            assert!(unwound.is_err(), "the read phase did not unwind");
+            assert!(
+                engines.owes_work(&name),
+                "the unwound unit settled the work it never did"
+            );
+
+            fs::write(f.vault().join("docs/beta.md"), "beta beta\n").unwrap();
+            ops.reconcile(
+                &name,
+                &mut attachment,
+                ReconcileWork {
+                    batch: norn_fs::Batch::rescan(RescanScope::Vault),
+                },
+                &progress,
+            )
+            .expect("the rescan reconcile");
+            for _ in 0..8 {
+                if engines.unit(&name) != (crate::BackgroundUnit::Ran { owed: true }) {
+                    break;
+                }
+            }
+            assert!(!engines.owes_work(&name), "the drain never settled");
+            let answer = engines.nearest(&name, "beta beta", 5).expect("an answer");
+            assert!(
+                answer
+                    .neighbors
+                    .iter()
+                    .any(|neighbor| neighbor.path == "docs/beta.md"),
+                "the engine never drained a commit after the unwind: {answer:?}"
+            );
+            ops.detach(&name, attachment);
+        }
+
+        /// **An owe a leg records after a unit's snapshot is not lost.** The
+        /// engine has drained everything and a leg that committed nothing
+        /// still owes it a look; the unit that look starts reads its page, and
+        /// before it records how it ended a reconcile commits a new document
+        /// and owes the engine again. The unit's outcome covers only what its
+        /// snapshot saw, so the engine still owes work after it, and the
+        /// units that follow embed the new document.
+        #[test]
+        fn an_owe_recorded_after_a_units_snapshot_is_not_lost() {
+            let f = Fixture::new("semantic-owe-after-snapshot");
+            fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+            fs::create_dir_all(f.vault().join("docs")).unwrap();
+            fs::write(f.vault().join("docs/alpha.md"), "alpha alpha\n").unwrap();
+            let (engines, ops) = engines_and_ops(&f);
+            let ops = Arc::new(ops);
+            let name = f.registration().name;
+            let mut attachment = ops
+                .attach(&f.registration(), &ProgressReporter::disconnected())
+                .unwrap();
+            settle(&engines, &name, &mut attachment);
+            assert!(!engines.owes_work(&name), "the engine settled");
+
+            engines.owe(&name);
+            let attachment = Arc::new(Mutex::new(attachment));
+            {
+                let (ops, attachment, name, vault) = (
+                    Arc::clone(&ops),
+                    Arc::clone(&attachment),
+                    name.clone(),
+                    f.vault(),
+                );
+                engines.run_after_next_page_read(move || {
+                    fs::write(vault.join("docs/beta.md"), "beta beta\n").unwrap();
+                    ops.reconcile(
+                        &name,
+                        &mut attachment.lock().unwrap(),
+                        ReconcileWork {
+                            batch: norn_fs::Batch::rescan(RescanScope::Vault),
+                        },
+                        &ProgressReporter::disconnected(),
+                    )
+                    .expect("the rescan reconcile");
+                });
+            }
+            engines.unit(&name);
+            assert!(
+                engines.owes_work(&name),
+                "the unit's outcome overwrote the owe the reconcile recorded"
+            );
+            for _ in 0..8 {
+                if engines.unit(&name) == crate::BackgroundUnit::NothingOwed {
+                    break;
+                }
+            }
+            let answer = engines.nearest(&name, "beta beta", 5).expect("an answer");
+            assert!(
+                answer
+                    .neighbors
+                    .iter()
+                    .any(|neighbor| neighbor.path == "docs/beta.md"),
+                "the committed document was never embedded: {answer:?}"
+            );
+            let attachment = Arc::try_unwrap(attachment)
+                .ok()
+                .expect("the hook let the attachment go")
+                .into_inner()
+                .unwrap();
+            ops.detach(&name, attachment);
+        }
+
+        // A failure settles only the snapshot it attempted; a later commit still drains.
+        #[test]
+        fn an_owe_recorded_after_a_failed_units_snapshot_is_not_lost() {
+            let f = Fixture::new("semantic-owe-after-failed-snapshot");
+            fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+            fs::create_dir_all(f.vault().join("docs")).unwrap();
+            fs::write(f.vault().join("docs/alpha.md"), "alpha alpha\n").unwrap();
+            let (engines, ops) = engines_and_ops(&f);
+            let ops = Arc::new(ops);
+            let name = f.registration().name;
+            let mut attachment = ops
+                .attach(&f.registration(), &ProgressReporter::disconnected())
+                .unwrap();
+            settle(&engines, &name, &mut attachment);
+            assert!(!engines.owes_work(&name), "the engine settled");
+
+            engines.owe(&name);
+            let attachment = Arc::new(Mutex::new(attachment));
+            {
+                let (ops, attachment, name, vault) = (
+                    Arc::clone(&ops),
+                    Arc::clone(&attachment),
+                    name.clone(),
+                    f.vault(),
+                );
+                engines.run_after_next_page_read(move || {
+                    fs::write(vault.join("docs/beta.md"), "beta beta\n").unwrap();
+                    ops.reconcile(
+                        &name,
+                        &mut attachment.lock().unwrap(),
+                        ReconcileWork {
+                            batch: norn_fs::Batch::rescan(RescanScope::Vault),
+                        },
+                        &ProgressReporter::disconnected(),
+                    )
+                    .expect("the rescan reconcile");
+                });
+            }
+            engines.fail_next_step();
+            assert_eq!(
+                engines.unit(&name),
+                crate::BackgroundUnit::Ran { owed: true }
+            );
+            assert!(
+                engines.owes_work(&name),
+                "the unit's outcome overwrote the owe the reconcile recorded"
+            );
+            for _ in 0..8 {
+                if engines.unit(&name) == crate::BackgroundUnit::NothingOwed {
+                    break;
+                }
+            }
+            assert!(!engines.owes_work(&name), "the later owe never drained");
+            let answer = engines.nearest(&name, "beta beta", 5).expect("an answer");
+            assert!(
+                answer
+                    .neighbors
+                    .iter()
+                    .any(|neighbor| neighbor.path == "docs/beta.md"),
+                "the committed document was never embedded: {answer:?}"
+            );
+            let attachment = Arc::try_unwrap(attachment)
+                .ok()
+                .expect("the hook let the attachment go")
+                .into_inner()
+                .unwrap();
+            ops.detach(&name, attachment);
+        }
+
+        /// **A detach returns while a semantic unit is held in its
+        /// embedding**, and that unit commits nothing. The detach waits for
+        /// at most one hold of the slot lock, never for an embedding; the
+        /// unit, released after the entry has given its resources back, finds
+        /// its delivery retired, and its turn runs no unit after it.
+        #[test]
+        fn a_detach_returns_while_an_embedding_is_held_and_the_unit_commits_nothing() {
+            let f = Fixture::new("semantic-detach-during-embedding");
+            fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+            many_documents(&f, 600);
+            let (engines, ops) = engines_and_ops(&f);
+            let (embedding_entered, resume) = hold_next_embedding(&engines);
+            let (host, name, lease) = polling_ready_host(&f, ops);
+            embedding_entered
+                .recv_timeout(Duration::from_secs(15))
+                .expect("the lane to embed the backlog's first page");
+            let units = engines.reading().units;
+
+            drop(lease);
+            host.reap_idle(Instant::now() + Duration::from_secs(3600))
+                .expect("an idle reap");
+            wait_state(&host, &name, norn_wire::TrustState::Unattached);
+            assert_eq!(
+                engines.section(&name),
+                None,
+                "the engine outlived its entry"
+            );
+            let discarded = engines.reading().pages_discarded;
+            resume.send(()).unwrap();
+
+            wait_until("the held unit to end", lifecycle_budget(), || {
+                let reading = engines.reading();
+                if reading.pages_discarded > discarded {
+                    Observed::Met(())
+                } else {
+                    Observed::Pending(format!("{reading:?}"))
+                }
+            })
+            .unwrap_or_else(|failure| panic!("{failure}"));
+            let reading = engines.reading();
+            assert_eq!(reading.pages_committed, 0, "{reading:?}");
+            assert_eq!(
+                reading.units, units,
+                "a unit ran after the delivery retired: {reading:?}"
+            );
+        }
+
+        /// **Host shutdown waits for at most one unit per lane thread.** A
+        /// unit held in its embedding when the host is dropped finishes its
+        /// embedding, discards its page, and is the last unit the lane runs;
+        /// the drop returns only once it has, so the page is discarded by the
+        /// time the drop returns.
+        #[test]
+        fn host_shutdown_waits_for_the_unit_in_flight_and_starts_no_other() {
+            let f = Fixture::new("semantic-shutdown-during-embedding");
+            fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+            many_documents(&f, 600);
+            let (engines, ops) = engines_and_ops(&f);
+            let (embedding_entered, resume) = hold_next_embedding(&engines);
+            let (host, _name, lease) = polling_ready_host(&f, ops);
+            embedding_entered
+                .recv_timeout(Duration::from_secs(15))
+                .expect("the lane to embed the backlog's first page");
+            let units = engines.reading().units;
+
+            let dropping = thread::spawn(move || drop(host));
+            wait_until("the host to begin its shutdown", lifecycle_budget(), || {
+                if lease.host_shutdown_started() {
+                    Observed::Met(())
+                } else {
+                    Observed::pending("the host has not begun its shutdown")
+                }
+            })
+            .unwrap_or_else(|failure| panic!("{failure}"));
+            resume.send(()).unwrap();
+            dropping.join().expect("the host drop");
+
+            let reading = engines.reading();
+            assert_eq!(
+                reading.pages_discarded, 1,
+                "the drop returned before the unit in flight ended: {reading:?}"
+            );
+            assert_eq!(reading.pages_committed, 0, "{reading:?}");
+            assert_eq!(
+                reading.units, units,
+                "the lane started a unit after shutdown began: {reading:?}"
+            );
+        }
+
+        /// **A search waits behind at most one hold of the slot lock.** A
+        /// search takes its ticket while the lane embeds, holding no lock, and
+        /// is held between its ticket and the lock: the lane, coming back for
+        /// the lock to commit, yields it to that search rather than taking it
+        /// ahead of it, and the search, released, holds the lock before the
+        /// lane's next hold begins.
+        #[test]
+        fn a_search_waits_behind_at_most_one_hold_of_the_lane() {
+            let f = Fixture::new("semantic-search-ticket");
+            fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+            many_documents(&f, 600);
+            let (engines, ops) = engines_and_ops(&f);
+            let (embedding_entered, resume_embedding) = hold_next_embedding(&engines);
+            let (host, name, _lease) = polling_ready_host(&f, ops);
+            embedding_entered
+                .recv_timeout(Duration::from_secs(15))
+                .expect("the lane to embed the backlog's first page");
+
+            let (ticketed, ticket_taken) = std::sync::mpsc::channel();
+            let (go, search_goes) = std::sync::mpsc::channel::<()>();
+            engines.run_after_next_ticket(move || {
+                ticketed.send(()).unwrap();
+                let _ = search_goes.recv_timeout(Duration::from_secs(30));
+            });
+            let searching = Arc::clone(&engines);
+            let vault = name.clone();
+            let search = thread::spawn(move || searching.nearest(&vault, "alpha", 5).is_ok());
+            ticket_taken
+                .recv_timeout(Duration::from_secs(15))
+                .expect("the search to take its ticket");
+            let yielded = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let yielding = Arc::clone(&yielded);
+            engines.run_as_the_lane_next_yields(move || {
+                yielding.store(true, std::sync::atomic::Ordering::SeqCst);
+            });
+            resume_embedding.send(()).unwrap();
+            // The lane comes back for the lock to commit: it either waits for
+            // the held search or takes the lock ahead of it.
+            wait_until("the lane to come to the lock", lifecycle_budget(), || {
+                if yielded.load(std::sync::atomic::Ordering::SeqCst)
+                    || engines.reading().lane_holds_ahead_of_a_waiting_search > 0
+                {
+                    Observed::Met(())
+                } else {
+                    Observed::pending("the lane has not come to the lock")
+                }
+            })
+            .unwrap_or_else(|failure| panic!("{failure}"));
+            go.send(()).unwrap();
+            search.join().expect("the search");
+
+            assert_eq!(
+                engines.reading().lane_holds_ahead_of_a_waiting_search,
+                0,
+                "the lane took the slot lock ahead of a search already waiting"
+            );
+            let waited = engines.reading().most_lane_holds_a_search_waited;
+            assert!(waited <= 1, "a search waited behind {waited} lane holds");
+            wait_for_engine(&host, &name, |engine| {
+                *engine == norn_wire::EngineStatus::on(None, Some(Freshness::trailing(0)))
+            });
+        }
+
+        /// **A search's vector rung waits behind at most one hold of the
+        /// lane's**, counted through `Host::search` across every hold of the
+        /// slot lock the rung takes. The rung takes its ticket while the lane
+        /// holds the lock to commit a page, so it waits behind that hold;
+        /// once it has let the lock go the lane holds it again, for the next
+        /// unit's read phase, and a rung that took the lock a second time
+        /// would wait behind that hold too.
+        #[test]
+        fn a_vector_rung_waits_behind_at_most_one_hold_of_the_lane() {
+            use std::sync::mpsc::channel;
+            let f = Fixture::new("semantic-rung-one-hold");
+            fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+            many_documents(&f, 600);
+            let (engines, ops) = engines_and_ops(&f);
+            let (embedding_entered, resume_embedding) = hold_next_embedding(&engines);
+            let (host, name, _lease) = polling_ready_host(&f, ops);
+            let host = Arc::new(host);
+            embedding_entered
+                .recv_timeout(Duration::from_secs(15))
+                .expect("the lane to embed the backlog's first page");
+
+            // The lane comes back for the lock to commit, and holds it.
+            let (committing, lane_commits) = channel();
+            let (commit_goes, commit_resumes) = channel::<()>();
+            engines.run_as_next_drain_ends(move || {
+                committing.send(()).unwrap();
+                let _ = commit_resumes.recv_timeout(Duration::from_secs(30));
+            });
+            resume_embedding.send(()).unwrap();
+            lane_commits
+                .recv_timeout(Duration::from_secs(15))
+                .expect("the lane to hold the lock for its commit");
+
+            // The rung takes its ticket behind that hold, and stops once it
+            // has let the lock go.
+            let (ticketed, ticket_taken) = channel();
+            engines.run_after_next_ticket(move || ticketed.send(()).unwrap());
+            let (let_go, search_let_go) = channel();
+            let (search_goes, search_resumes) = channel::<()>();
+            engines.run_after_next_search_hold(move || {
+                let_go.send(()).unwrap();
+                let _ = search_resumes.recv_timeout(Duration::from_secs(30));
+            });
+            let (finished, outcome) = channel();
+            let second_ticket = finished.clone();
+            let searching = Arc::clone(&host);
+            let vault = name.clone();
+            let search = thread::spawn(move || {
+                let params =
+                    norn_wire::SearchParams::new(norn_wire::VaultAddress::name(vault), "alpha")
+                        .with_rungs(norn_wire::RungSelection::exactly(
+                            norn_wire::RungSet::of([norn_wire::Rung::Vector]).unwrap(),
+                        ));
+                let answer = searching.search(&params).map(|_| ());
+                finished.send(true).unwrap();
+                answer
+            });
+            ticket_taken
+                .recv_timeout(Duration::from_secs(15))
+                .expect("the rung to take its ticket");
+
+            // The lane's next unit holds the lock for its read phase.
+            let (reading, lane_reads) = channel();
+            let (read_goes, read_resumes) = channel::<()>();
+            engines.run_inside_next_drain(move || {
+                reading.send(()).unwrap();
+                let _ = read_resumes.recv_timeout(Duration::from_secs(30));
+            });
+            commit_goes.send(()).unwrap();
+            search_let_go
+                .recv_timeout(Duration::from_secs(15))
+                .expect("the rung to hold the lock and let it go");
+            lane_reads
+                .recv_timeout(Duration::from_secs(15))
+                .expect("the lane to hold the lock for its next read phase");
+
+            // A rung that takes the lock again takes another ticket behind
+            // that hold; one that answered in one hold takes none.
+            engines.run_after_next_ticket(move || second_ticket.send(false).unwrap());
+            search_goes.send(()).unwrap();
+            let finished_in_one_hold = outcome.recv_timeout(Duration::from_secs(15));
+            read_goes.send(()).unwrap();
+            search
+                .join()
+                .expect("the search")
+                .expect("the vector rung answers");
+
+            assert!(
+                finished_in_one_hold.unwrap(),
+                "the rung took a second ticket before finishing"
+            );
+            let waited = engines.reading().most_lane_holds_a_vector_rung_waited;
+            assert_eq!(waited, 1, "a vector rung waited behind {waited} lane holds");
+            wait_for_engine(&*host, &name, |engine| {
+                *engine == norn_wire::EngineStatus::on(None, Some(Freshness::trailing(0)))
+            });
+        }
+
+        /// **Under continuous search the lane still runs its units, and no
+        /// search waits behind more than one of its holds.** Four threads
+        /// search the vault without pause while the lane drains a three-page
+        /// backlog; the lane waits only for the searches already waiting when
+        /// it comes to the lock, never for later ones, so the backlog drains.
+        #[test]
+        fn continuous_search_does_not_starve_the_lane() {
+            let f = Fixture::new("semantic-search-continuous");
+            fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+            many_documents(&f, 600);
+            let (engines, ops) = engines_and_ops(&f);
+            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let searches = Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let searchers: Vec<_> = (0..4)
+                .map(|_| {
+                    let engines = Arc::clone(&engines);
+                    let stop = Arc::clone(&stop);
+                    let searches = Arc::clone(&searches);
+                    let vault = f.registration().name;
+                    thread::spawn(move || {
+                        while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                            let _ = engines.nearest(&vault, "alpha", 5);
+                            searches.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        }
+                    })
+                })
+                .collect();
+            let (host, name, _lease) = polling_ready_host(&f, ops);
+            wait_for_engine(&host, &name, |engine| {
+                *engine == norn_wire::EngineStatus::on(None, Some(Freshness::trailing(0)))
+            });
+            stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            for searcher in searchers {
+                searcher.join().expect("a searcher");
+            }
+
+            let reading = engines.reading();
+            assert!(
+                reading.pages_committed >= 3,
+                "the backlog did not drain under search: {reading:?}"
+            );
+            assert!(
+                searches.load(std::sync::atomic::Ordering::SeqCst) > 0,
+                "no search ran beside the lane"
+            );
+            assert!(
+                reading.most_lane_holds_a_search_waited <= 1,
+                "a search waited behind {} lane holds",
+                reading.most_lane_holds_a_search_waited
+            );
+            assert_eq!(
+                engines
+                    .nearest(&name, "alpha", 1000)
+                    .unwrap()
+                    .neighbors
+                    .len(),
+                600
+            );
         }
     }
 
@@ -11754,6 +12381,7 @@ mod tests {
                     worker_slots: 1,
                     watch_poll_interval: Duration::from_secs(60),
                     read_settle_bound: crate::READ_SETTLE_BOUND,
+                    background_threads: crate::BACKGROUND_THREADS,
                     background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
                 },
             )
@@ -11852,6 +12480,7 @@ mod tests {
             worker_slots: 1,
             watch_poll_interval: Duration::from_secs(60),
             read_settle_bound: crate::READ_SETTLE_BOUND,
+            background_threads: crate::BACKGROUND_THREADS,
             background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
         };
         let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
@@ -17575,6 +18204,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(2),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_threads: crate::BACKGROUND_THREADS,
                 background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
@@ -21041,6 +21671,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_secs(60),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_threads: crate::BACKGROUND_THREADS,
                 background_turn_budget: budget,
             },
         )
@@ -21196,6 +21827,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(2),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_threads: crate::BACKGROUND_THREADS,
                 background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
@@ -21251,6 +21883,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(2),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_threads: crate::BACKGROUND_THREADS,
                 background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
@@ -22633,6 +23266,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(2),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_threads: crate::BACKGROUND_THREADS,
                 background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
@@ -22818,6 +23452,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(2),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_threads: crate::BACKGROUND_THREADS,
                 background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
@@ -22880,6 +23515,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(2),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_threads: crate::BACKGROUND_THREADS,
                 background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
@@ -23147,6 +23783,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(2),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_threads: crate::BACKGROUND_THREADS,
                 background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
@@ -23320,6 +23957,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(2),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_threads: crate::BACKGROUND_THREADS,
                 background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
@@ -23782,6 +24420,61 @@ mod tests {
             eprintln!(
                 "UNIT_CALIBRATION docs={count} verification_us={verification:?} sweep_us={sweep} rolling_slices={slices} rolling_longest_us={longest} rolling_total_us={total}"
             );
+        }
+    }
+
+    /// The release-build cost of each background-lane unit of the stub
+    /// engine, which [`BACKGROUND_TURN_BUDGET`] also bounds a background turn
+    /// by: the initialization and every drain step of a vault's first drain,
+    /// at 2,000 and 10,000 documents of 2 KiB. A drain step's page holds up to
+    /// 256 embeddings. Clocks are evidence, never a CI threshold.
+    #[test]
+    #[ignore = "release-build background lane unit calibration"]
+    fn semantic_unit_release_probe() {
+        for count in [2_000, 10_000] {
+            let f = Fixture::new(&format!("semantic-unit-calibration-{count}"));
+            fs::create_dir_all(f.vault().join("docs")).unwrap();
+            fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+            let mut body = format!(
+                "---\ntitle: Note\n---\n# Heading\n{}",
+                "ordinary body text\n".repeat(110)
+            );
+            body.truncate(2048);
+            for index in 0..count {
+                fs::write(f.vault().join(format!("docs/{index:05}.md")), &body).unwrap();
+            }
+            let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
+            let engines = crate::semantic::SemanticEngines::new(dirs.clone());
+            let ops = ProductionEntryOps::new(dirs, ProductionPolicy::new(64, 2).unwrap())
+                .with_semantic(Arc::clone(&engines));
+            let name = f.registration().name;
+            let progress = ProgressReporter::disconnected();
+            let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+            attachment.subscription.take();
+            let source = attachment.store.feed_source();
+            let mut feed = attachment.store.feed_read();
+            let generation = feed.write_generation().unwrap();
+            let reading = norn_store::StoreReading::of(feed.epoch(), generation);
+            drop(feed);
+            engines.publish_delivery(&name, Some(&reading), Some(source));
+            let mut units = Vec::new();
+            loop {
+                let started = Instant::now();
+                let unit = engines.unit(&name);
+                units.push(started.elapsed().as_micros());
+                if unit != (crate::BackgroundUnit::Ran { owed: true }) {
+                    break;
+                }
+            }
+            let longest = units.iter().copied().max().unwrap_or(0);
+            let total: u128 = units.iter().sum();
+            eprintln!(
+                "LANE_UNIT_CALIBRATION docs={count} units={} initialization_us={} longest_us={longest} total_us={total} reading={:?}",
+                units.len(),
+                units[0],
+                engines.reading()
+            );
+            ops.detach(&name, attachment);
         }
     }
 
@@ -24508,6 +25201,7 @@ mod tests {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(2),
                 read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_threads: crate::BACKGROUND_THREADS,
                 background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
             },
         )
@@ -24627,6 +25321,7 @@ mod tests {
                     worker_slots: 1,
                     watch_poll_interval: Duration::from_secs(60),
                     read_settle_bound: crate::READ_SETTLE_BOUND,
+                    background_threads: crate::BACKGROUND_THREADS,
                     background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
                 },
             )
@@ -25268,6 +25963,7 @@ mod tests {
                     worker_slots: 1,
                     watch_poll_interval: Duration::from_millis(5),
                     read_settle_bound: crate::READ_SETTLE_BOUND,
+                    background_threads: crate::BACKGROUND_THREADS,
                     background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
                 },
             )
@@ -25571,6 +26267,7 @@ mod tests {
                     worker_slots: 1,
                     watch_poll_interval: Duration::from_secs(60),
                     read_settle_bound: crate::READ_SETTLE_BOUND,
+                    background_threads: crate::BACKGROUND_THREADS,
                     background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
                 },
             )

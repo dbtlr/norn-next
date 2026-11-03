@@ -78,6 +78,9 @@ impl EntryOps for PreHeld {
         fn advisories(&self, attachment: &Self::Attachment) -> Vec<AttachmentAdvisory>;
         fn count_leg_mint(&self, statements: u64);
         fn semantic(&self) -> Option<&SemanticEngines>;
+        fn mint_feed(&self, attachment: &Self::Attachment) -> Option<norn_store::FeedSource>;
+        fn background_owed(&self, name: &VaultName) -> bool;
+        fn background_unit(&self, name: &VaultName) -> norn_host::BackgroundUnit;
         fn rolling_heal(&self, attachment: &Self::Attachment) -> Option<RollingHealStatus>;
         fn maintenance_deadline(&self, attachment: &Self::Attachment) -> Option<Instant>;
         fn maintenance_owed(&self, name: &VaultName) -> bool;
@@ -118,6 +121,7 @@ fn host(
             worker_slots: 1,
             watch_poll_interval: Duration::from_millis(25),
             read_settle_bound: norn_host::READ_SETTLE_BOUND,
+            background_threads: norn_host::BACKGROUND_THREADS,
             background_turn_budget: norn_host::BACKGROUND_TURN_BUDGET,
         },
     )
@@ -282,6 +286,7 @@ fn a_fresh_first_public_caller_triggers_attachment_and_waits_for_its_own_capabil
             worker_slots: 1,
             watch_poll_interval: Duration::from_millis(25),
             read_settle_bound: norn_host::READ_SETTLE_BOUND,
+            background_threads: norn_host::BACKGROUND_THREADS,
             background_turn_budget: norn_host::BACKGROUND_TURN_BUDGET,
         },
     )
@@ -360,6 +365,7 @@ fn dynamic_registration_and_replacement_reobserve_storage_before_any_read() {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(25),
                 read_settle_bound: norn_host::READ_SETTLE_BOUND,
+                background_threads: norn_host::BACKGROUND_THREADS,
                 background_turn_budget: norn_host::BACKGROUND_TURN_BUDGET,
             },
         )
@@ -462,6 +468,7 @@ fn foreign_and_inaccessible_storage_cannot_make_a_provisional_waiter() {
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(25),
                 read_settle_bound: norn_host::READ_SETTLE_BOUND,
+                background_threads: norn_host::BACKGROUND_THREADS,
                 background_turn_budget: norn_host::BACKGROUND_TURN_BUDGET,
             },
         )

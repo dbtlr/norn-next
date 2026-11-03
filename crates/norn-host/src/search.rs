@@ -169,6 +169,17 @@ enum Restriction {
     Unfiltered { margin: usize },
 }
 
+impl Restriction {
+    /// Whether the scan scores `path`: every path on an unfiltered search,
+    /// and only the admitted ones on a filtered one.
+    fn admits(&self, path: &str) -> bool {
+        match self {
+            Restriction::Admitted(admitted) => admitted.by_path.contains_key(path),
+            Restriction::Unfiltered { .. } => true,
+        }
+    }
+}
+
 /// What the host found of the vector rung when it sampled the vault.
 enum VectorSample {
     /// The selection does not name the rung, so it was not sampled.
@@ -566,10 +577,11 @@ where
     /// Sample the vector rung of `vault`, the vault `params` addresses:
     /// whether an engine stands and, where one does, its answer.
     ///
-    /// Whether an engine stands is read first, with how far it had drained,
-    /// so a vault whose engine is not running pays for no restriction; the
-    /// answer then samples the slot again, under its lock, and that sample is
-    /// the one the selection resolves by.
+    /// **The rung takes the engine slot's lock once**, so it waits behind at
+    /// most one hold of the lane's: in that one hold it reads how far the
+    /// engine had drained, draws its restriction, and runs the scan. Where no
+    /// engine stands the restriction is never drawn, so a vault whose engine
+    /// is not running pays for none.
     ///
     /// **A filtered search scores only what its conjunction admits**: the
     /// admitted set is drawn whole from `snapshot` first, and the scan holds
@@ -588,32 +600,28 @@ where
         let Some(engines) = self.ops().semantic() else {
             return Ok(VectorSample::Refused(VectorRefusal::not_composed()));
         };
-        let watermarks = match engines.standing(vault) {
-            Ok(watermarks) => watermarks,
-            Err(refusal) => return Ok(VectorSample::Refused(VectorRefusal::of(refusal))),
-        };
         let depth = RUNG_DEPTH as usize;
-        let answered = if params.predicates.is_empty() {
-            let margin = margin(snapshot, &watermarks)?;
-            cost.margin = margin as u64;
-            engines
-                .nearest_among(vault, &params.query, depth + margin, |_| true)
-                .map(|answer| (answer, Restriction::Unfiltered { margin }))
-        } else {
-            let (admitted, pages) = admitted(snapshot, params, declared)?;
-            cost.candidate_pages = pages;
-            cost.candidates = admitted.by_path.len() as u64;
-            engines
-                .nearest_among(vault, &params.query, depth, |path| {
-                    admitted.by_path.contains_key(path)
-                })
-                .map(|answer| (answer, Restriction::Admitted(admitted)))
+        let restrict = |watermarks: &Watermarks| -> Result<(usize, Restriction), PageRefusal> {
+            if params.predicates.is_empty() {
+                let margin = margin(snapshot, watermarks)?;
+                cost.margin = margin as u64;
+                Ok((depth + margin, Restriction::Unfiltered { margin }))
+            } else {
+                let (admitted, pages) = admitted(snapshot, params, declared)?;
+                cost.candidate_pages = pages;
+                cost.candidates = admitted.by_path.len() as u64;
+                Ok((depth, Restriction::Admitted(admitted)))
+            }
         };
+        let answered = engines.vector_rung(|| {
+            engines.nearest_restricted(vault, &params.query, restrict, Restriction::admits)
+        });
         match answered {
-            Ok((answer, restriction)) => {
+            Ok(Ok((answer, restriction))) => {
                 cost.vector = Some(answer.work);
                 Ok(VectorSample::Answered(Box::new((answer, restriction))))
             }
+            Ok(Err(refused)) => Err(refused.into()),
             Err(refusal) => Ok(VectorSample::Refused(VectorRefusal::of(refusal))),
         }
     }

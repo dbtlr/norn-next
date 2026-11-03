@@ -72,6 +72,13 @@ pub struct Engine {
     /// loaded at open and moved only after a transaction that wrote them
     /// commits, so a reading never names progress the sidecar does not hold.
     recorded: Recorded,
+    /// The document feed came back complete, so [`Engine::step`] hands the
+    /// turn to the tombstone feed until a tombstone page comes back short.
+    /// Without it, a write landing before every step would keep each step on
+    /// the document feed and starve the deaths. Held in memory only: an
+    /// engine opened afresh starts on the document feed, which a step passes
+    /// through to the tombstones when it has nothing to present.
+    tombstones_turn: bool,
 }
 
 /// What one drain did, in rows.
@@ -112,12 +119,141 @@ impl DrainReport {
     /// converged sidecar can still report work (a rescan re-triages every
     /// row it kept), and quiescence holds only until the next write. The
     /// drain reads one store lifetime, because the handle's epoch is pinned
-    /// at its open and the feed borrow is exclusive; a store file replaced
-    /// underneath a live handle is the maintainer singleton's to prevent
-    /// (ADR 0016, one maintainer per derived store), not this reading's to
-    /// detect.
+    /// at its open — a writer borrow, or a feed source that refuses a page
+    /// over another lifetime; a store file replaced underneath a live handle
+    /// is the maintainer singleton's to prevent (ADR 0016, one maintainer
+    /// per derived store), not this reading's to detect.
     pub fn is_settled(&self) -> bool {
         *self == DrainReport::default()
+    }
+}
+
+impl DrainReport {
+    /// Add `step`'s row counts to this report, and take its rescan where it
+    /// rescanned. Whether work is still owed is the caller's to say.
+    fn absorb(&mut self, step: &DrainReport) {
+        self.rescan |= step.rescan;
+        self.reconciled_away += step.reconciled_away;
+        self.embedded += step.embedded;
+        self.skipped_current += step.skipped_current;
+        self.deferred += step.deferred;
+        self.retracted += step.retracted;
+    }
+}
+
+/// One step of a drain, as [`Engine::step`] read it.
+#[derive(Debug)]
+pub enum DrainStep {
+    /// The step committed what its page held, or found nothing to do, and
+    /// embedded nothing. [`DrainReport::owed`] says whether more steps are
+    /// owed.
+    Done(DrainReport),
+    /// A document page whose bodies must be embedded before it can commit:
+    /// [`PendingPage::embed`], then [`Engine::commit`].
+    Embed(Box<PendingPage>),
+}
+
+/// A document page read and triaged, whose bodies are still to embed.
+///
+/// It holds everything the embedding needs and nothing of the engine's
+/// sidecar or of the store, so an owner embeds it holding no lock, and an
+/// owner that finds the page's delivery retired when it comes back drops it,
+/// committing nothing.
+pub struct PendingPage {
+    embedder: Arc<dyn Embedder>,
+    rows: Vec<PendingRow>,
+    retractions: Vec<String>,
+    advanced: FeedCursor,
+    completed: Option<Watermark>,
+    /// The sidecar state the page was triaged against.
+    revision: SidecarRevision,
+    report: DrainReport,
+}
+
+impl std::fmt::Debug for PendingPage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PendingPage")
+            .field("rows", &self.rows.len())
+            .field("retractions", &self.retractions.len())
+            .field("revision", &self.revision)
+            .finish_non_exhaustive()
+    }
+}
+
+/// One row a page will embed: its path, the body hash the embedding is
+/// recorded under, and the body itself, fetched in the page's snapshot.
+struct PendingRow {
+    path: String,
+    input_hash: String,
+    body: String,
+}
+
+impl PendingPage {
+    /// How many bodies the page embeds.
+    pub fn rows(&self) -> usize {
+        self.rows.len()
+    }
+
+    /// Embed every body the page holds, in order. One embedding is never
+    /// interrupted, and neither is the page: it is the unit an owner's turn
+    /// is bounded by.
+    pub fn embed(self) -> Result<EmbeddedPage, EngineError> {
+        let mut report = self.report;
+        let mut writes = Vec::with_capacity(self.rows.len());
+        let promised = self.embedder.dimensions().get();
+        for row in self.rows {
+            let embedding = self
+                .embedder
+                .embed(&row.body)
+                .map_err(|error| EngineError::Embed {
+                    path: row.path.clone(),
+                    error,
+                })?;
+            if embedding.dimensions() != promised {
+                return Err(EngineError::WrongWidth {
+                    path: row.path,
+                    promised,
+                    produced: embedding.dimensions(),
+                });
+            }
+            let dimensions = embedding.dimensions();
+            writes.push((
+                row.path,
+                row.input_hash,
+                encode(embedding.values()),
+                dimensions,
+            ));
+            report.embedded += 1;
+        }
+        Ok(EmbeddedPage {
+            writes,
+            retractions: self.retractions,
+            advanced: self.advanced,
+            completed: self.completed,
+            revision: self.revision,
+            report,
+        })
+    }
+}
+
+/// A page whose bodies are embedded, ready for [`Engine::commit`].
+pub struct EmbeddedPage {
+    writes: Vec<(String, String, Vec<u8>, usize)>,
+    retractions: Vec<String>,
+    advanced: FeedCursor,
+    completed: Option<Watermark>,
+    revision: SidecarRevision,
+    report: DrainReport,
+}
+
+impl std::fmt::Debug for EmbeddedPage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("EmbeddedPage")
+            .field("writes", &self.writes.len())
+            .field("revision", &self.revision)
+            .finish_non_exhaustive()
     }
 }
 
@@ -203,6 +339,7 @@ impl Engine {
             embedder,
             outcome,
             recorded,
+            tombstones_turn: false,
         })
     }
 
@@ -272,6 +409,7 @@ impl Engine {
                 detail: "discarded by its owner".to_string(),
             }),
             recorded,
+            tombstones_turn: false,
         })
     }
 
@@ -287,6 +425,11 @@ impl Engine {
     /// [`DrainReport::owed`] is set stopped at its budget; the next slice
     /// resumes from the positions this one committed, and slices repeated
     /// until one owes nothing settle where an unbounded drain would.
+    ///
+    /// It is [`Engine::step`] repeated, each page embedded and committed in
+    /// turn: the spelling a caller holding the feed for the whole drain
+    /// takes. An owner that must not hold its lock across an embedding runs
+    /// the three phases itself.
     ///
     /// # The protocol
     ///
@@ -338,142 +481,222 @@ impl Engine {
     ) -> Result<DrainReport, EngineError> {
         let mut report = DrainReport::default();
         let mut left = budget.pages;
+        // One drain reads each feed through once: a document feed it has
+        // completed is not read again before its tombstones, so a write that
+        // lands after the completing page is the next drain's to present.
+        let mut documents_complete = false;
+        loop {
+            if left == 0 {
+                report.owed = true;
+                return Ok(report);
+            }
+            let (step, counted, completed) = self.step_counted(feed, documents_complete)?;
+            documents_complete |= completed;
+            let ended = match step {
+                DrainStep::Done(ended) => ended,
+                DrainStep::Embed(pending) => self.commit(pending.embed()?)?,
+            };
+            report.absorb(&ended);
+            if counted {
+                left -= 1;
+            }
+            if !ended.owed {
+                report.owed = false;
+                return Ok(report);
+            }
+        }
+    }
+
+    /// Run one step of the drain over `feed`: at most one counted page — a
+    /// reconcile page, a document page or a tombstone page — read in full
+    /// from `feed`, so a caller that opens one snapshot for the step reads
+    /// every row it acts on from one instant of the store.
+    ///
+    /// A step that embeds nothing commits here and answers
+    /// [`DrainStep::Done`], whose report says whether more steps are owed. A
+    /// document page with bodies to embed answers [`DrainStep::Embed`]: the
+    /// rows and their bodies, embedded with no lock of the caller's held
+    /// ([`PendingPage::embed`]) and committed by [`Engine::commit`]. Pages
+    /// that come back empty are not counted, and a step passes through them
+    /// to the next feed, so a step over a settled sidecar reads every feed
+    /// once and owes nothing.
+    ///
+    /// **Deaths get their turn while documents keep changing.** A committed
+    /// document page that completes the document feed hands the next steps
+    /// to the tombstone feed, until a tombstone page comes back short; only
+    /// then does a step read documents again. A step that skipped the
+    /// document feed owes another step, so a step owes nothing only where it
+    /// read both feeds complete in its own snapshot.
+    pub fn step(&mut self, feed: &mut FeedRead<'_>) -> Result<DrainStep, EngineError> {
+        let documents_skipped = self.tombstones_turn;
+        let (step, _, _) = self.step_counted(feed, documents_skipped)?;
+        Ok(match step {
+            DrainStep::Done(mut report) if documents_skipped => {
+                report.owed = true;
+                DrainStep::Done(report)
+            }
+            step => step,
+        })
+    }
+
+    /// [`Engine::step`], passing the document feed by where
+    /// `documents_complete` says this drain already completed it, and
+    /// answering beside the step whether it counted a page and whether it
+    /// completed the document feed.
+    fn step_counted(
+        &mut self,
+        feed: &mut FeedRead<'_>,
+        documents_complete: bool,
+    ) -> Result<(DrainStep, bool, bool), EngineError> {
+        let mut report = DrainReport::default();
         let store_epoch = feed.epoch().to_string();
         let observed: Option<String> = self.get_meta(ddl::meta::OBSERVED_STORE_EPOCH)?;
-        let complete = (observed.as_deref() == Some(store_epoch.as_str()) || {
+        if observed.as_deref() != Some(store_epoch.as_str()) {
             report.rescan = true;
-            self.reconcile(feed, &store_epoch, &mut left, &mut report)?
-        }) && self.drain_documents(feed, &store_epoch, &mut left, &mut report)?
-            && self.drain_tombstones(feed, &store_epoch, &mut left, &mut report)?;
-        report.owed = !complete;
+            // The rescan resets both cursors, and the document feed reads
+            // from its start again before the tombstones take their turn.
+            self.tombstones_turn = false;
+            let (complete, counted) = self.reconcile_page(feed, &store_epoch, &mut report)?;
+            if counted || !complete {
+                report.owed = true;
+                return Ok((DrainStep::Done(report), true, false));
+            }
+        }
+        if !documents_complete
+            && let Some((step, completed)) =
+                self.document_step(feed, &store_epoch, report.clone())?
+        {
+            return Ok((step, true, completed));
+        }
+        let (step, counted) = self.tombstone_step(feed, &store_epoch, report)?;
+        Ok((step, counted, true))
+    }
+
+    /// Commit `page`'s writes and position, where the
+    /// sidecar still stands where the page was read: the engine is the
+    /// sidecar's one writer, so a page whose revision moved since it was read
+    /// was overtaken and is discarded rather than committed over what moved
+    /// it. Answers the step's report; a discarded page owes its step again.
+    pub fn commit(&mut self, page: EmbeddedPage) -> Result<DrainReport, EngineError> {
+        let mut report = page.report;
+        if self.revision() != page.revision {
+            report.owed = true;
+            return Ok(report);
+        }
+        let retractions: Vec<&str> = page.retractions.iter().map(String::as_str).collect();
+        let completes = page.completed.is_some();
+        report.retracted +=
+            self.commit_documents(&page.writes, &retractions, &page.advanced, page.completed)?;
+        self.tombstones_turn |= completes;
+        report.owed = true;
         Ok(report)
     }
 
-    /// Drain the document feed within `left` counted pages, answering
-    /// whether the feed completed.
-    fn drain_documents(
+    /// The next document page, where the feed presents one: committed here
+    /// where it embeds nothing, or handed back to embed, beside whether the
+    /// page completed the feed. `None` where the page came back empty, its
+    /// watermark recorded.
+    fn document_step(
         &mut self,
         feed: &mut FeedRead<'_>,
         store_epoch: &str,
-        left: &mut usize,
-        report: &mut DrainReport,
-    ) -> Result<bool, EngineError> {
-        let mut cursor = self.read_cursor(ddl::meta::DOCUMENT_CURSOR)?;
-        loop {
-            if *left == 0 {
-                return Ok(false);
-            }
-            let observed = feed.write_generation()?;
-            let page = feed.changed_documents_after(cursor.as_ref(), DRAIN_PAGE)?;
-            let full = page.len() == DRAIN_PAGE;
-            let completed = (!full).then(|| Watermark {
-                store_epoch: store_epoch.to_string(),
-                generation: observed,
-            });
-            let Some((last, _)) = page.last() else {
-                self.advance_watermark(Feed::Documents, completed)?;
-                return Ok(true);
+        mut report: DrainReport,
+    ) -> Result<Option<(DrainStep, bool)>, EngineError> {
+        let cursor = self.read_cursor(ddl::meta::DOCUMENT_CURSOR)?;
+        let observed = feed.write_generation()?;
+        let page = feed.changed_documents_after(cursor.as_ref(), DRAIN_PAGE)?;
+        let full = page.len() == DRAIN_PAGE;
+        let completed = (!full).then(|| Watermark {
+            store_epoch: store_epoch.to_string(),
+            generation: observed,
+        });
+        let Some((last, _)) = page.last() else {
+            self.advance_watermark(Feed::Documents, completed)?;
+            return Ok(None);
+        };
+        let advanced = last.clone();
+
+        let mut rows: Vec<PendingRow> = Vec::new();
+        let mut retractions = Vec::new();
+        for (_, document) in &page {
+            let Some(body_hash) = document.body_hash.as_ref() else {
+                retractions.push(document.path.as_str().to_string());
+                continue;
             };
-            let advanced = last.clone();
-
-            let mut writes: Vec<(String, String, Vec<u8>, usize)> = Vec::new();
-            let mut retractions = Vec::new();
-            for (_, document) in &page {
-                let Some(body_hash) = document.body_hash.as_ref() else {
-                    retractions.push(document.path.as_str());
-                    continue;
-                };
-                let current: Option<String> = self.row_input_hash(document.path.as_str())?;
-                if current.as_deref() == Some(body_hash.as_str()) {
-                    report.skipped_current += 1;
-                    continue;
-                }
-                let fetched = feed.stored_facts(&document.path)?;
-                match fetched {
-                    Some(facts) if facts.document.generation == document.generation => {
-                        let Some(body) = facts.body.as_deref() else {
-                            report.deferred += 1;
-                            continue;
-                        };
-                        let embedding =
-                            self.embedder
-                                .embed(body)
-                                .map_err(|error| EngineError::Embed {
-                                    path: document.path.as_str().to_string(),
-                                    error,
-                                })?;
-                        let promised = self.embedder.dimensions().get();
-                        if embedding.dimensions() != promised {
-                            return Err(EngineError::WrongWidth {
-                                path: document.path.as_str().to_string(),
-                                promised,
-                                produced: embedding.dimensions(),
-                            });
-                        }
-                        writes.push((
-                            document.path.as_str().to_string(),
-                            body_hash.clone(),
-                            encode(embedding.values()),
-                            embedding.dimensions(),
-                        ));
-                        report.embedded += 1;
-                    }
-                    // Superseded mid-drain: re-derived past this row's
-                    // generation, or died. The feed's later rows carry the
-                    // truth, so acting on this reading would write a hash
-                    // beside values it does not describe.
-                    _ => report.deferred += 1,
-                }
+            let current: Option<String> = self.row_input_hash(document.path.as_str())?;
+            if current.as_deref() == Some(body_hash.as_str()) {
+                report.skipped_current += 1;
+                continue;
             }
-
-            report.retracted +=
-                self.commit_documents(&writes, &retractions, &advanced, completed)?;
-            *left -= 1;
-            cursor = Some(advanced);
-            if !full {
-                return Ok(true);
+            match feed.stored_facts(&document.path)? {
+                Some(facts) if facts.document.generation == document.generation => {
+                    let Some(body) = facts.body else {
+                        report.deferred += 1;
+                        continue;
+                    };
+                    rows.push(PendingRow {
+                        path: document.path.as_str().to_string(),
+                        input_hash: body_hash.clone(),
+                        body,
+                    });
+                }
+                // Superseded mid-drain: re-derived past this row's
+                // generation, or died. The feed's later rows carry the
+                // truth, so acting on this reading would write a hash
+                // beside values it does not describe.
+                _ => report.deferred += 1,
             }
         }
+        let pending = PendingPage {
+            embedder: Arc::clone(&self.embedder),
+            rows,
+            retractions,
+            advanced,
+            completed,
+            revision: self.revision(),
+            report,
+        };
+        if pending.rows.is_empty() {
+            let embedded = pending.embed()?;
+            return self
+                .commit(embedded)
+                .map(|done| Some((DrainStep::Done(done), !full)));
+        }
+        Ok(Some((DrainStep::Embed(Box::new(pending)), !full)))
     }
 
-    /// Drain the tombstone feed within `left` counted pages, answering
-    /// whether the feed completed.
-    fn drain_tombstones(
+    /// The next tombstone page, committed whole: a death embeds nothing.
+    /// Answers beside the step whether the page presented rows, which is
+    /// what counts it.
+    fn tombstone_step(
         &mut self,
         feed: &mut FeedRead<'_>,
         store_epoch: &str,
-        left: &mut usize,
-        report: &mut DrainReport,
-    ) -> Result<bool, EngineError> {
-        let mut cursor = self.read_cursor(ddl::meta::TOMBSTONE_CURSOR)?;
-        loop {
-            if *left == 0 {
-                return Ok(false);
-            }
-            let observed = feed.write_generation()?;
-            let page = feed.changed_tombstones_after(cursor.as_ref(), DRAIN_PAGE)?;
-            let full = page.len() == DRAIN_PAGE;
-            let completed = (!full).then(|| Watermark {
-                store_epoch: store_epoch.to_string(),
-                generation: observed,
-            });
-            let Some((last, _)) = page.last() else {
-                self.advance_watermark(Feed::Tombstones, completed)?;
-                return Ok(true);
-            };
-            let advanced = last.clone();
-
-            let paths: Vec<String> = page
-                .iter()
-                .map(|(_, tombstone)| tombstone.path.as_str().to_string())
-                .collect();
-            report.retracted += self.commit_retractions(&paths, &advanced, completed)?;
-            *left -= 1;
-            cursor = Some(advanced);
-            if !full {
-                return Ok(true);
-            }
-        }
+        mut report: DrainReport,
+    ) -> Result<(DrainStep, bool), EngineError> {
+        let cursor = self.read_cursor(ddl::meta::TOMBSTONE_CURSOR)?;
+        let observed = feed.write_generation()?;
+        let page = feed.changed_tombstones_after(cursor.as_ref(), DRAIN_PAGE)?;
+        let full = page.len() == DRAIN_PAGE;
+        let completed = (!full).then(|| Watermark {
+            store_epoch: store_epoch.to_string(),
+            generation: observed,
+        });
+        let Some((last, _)) = page.last() else {
+            self.advance_watermark(Feed::Tombstones, completed)?;
+            self.tombstones_turn = false;
+            return Ok((DrainStep::Done(report), false));
+        };
+        let advanced = last.clone();
+        let paths: Vec<String> = page
+            .iter()
+            .map(|(_, tombstone)| tombstone.path.as_str().to_string())
+            .collect();
+        report.retracted += self.commit_retractions(&paths, &advanced, completed)?;
+        // A short page ends the tombstones' turn, once its writes commit.
+        self.tombstones_turn &= full;
+        report.owed = full;
+        Ok((DrainStep::Done(report), true))
     }
 
     /// Every row of this engine's model, in path order.
@@ -609,93 +832,83 @@ impl Engine {
         })
     }
 
-    /// Reconcile the sidecar toward `store_epoch` within `left` counted pages,
-    /// answering whether the pass completed.
+    /// Reconcile the sidecar toward `store_epoch` by one page of held paths,
+    /// answering whether the pass completed and whether the page held any
+    /// path, which is what counts it.
     ///
-    /// Each page checks the next held paths in path order against the store
+    /// The page checks the next held paths in path order against the store
     /// and commits the removal of those it no longer holds together with the
     /// pass's position. The page that comes back short completes the pass: in
     /// the same transaction it resets both cursors, records `store_epoch` as
     /// observed and clears the position, so the observed epoch never moves
     /// ahead of a whole pass. A recorded position is resumed only for the
-    /// lifetime it was recorded in.
-    fn reconcile(
+    /// lifetime it was recorded in. A reconcile page embeds nothing, so it
+    /// runs whole inside its step.
+    fn reconcile_page(
         &mut self,
         feed: &mut FeedRead<'_>,
         store_epoch: &str,
-        left: &mut usize,
         report: &mut DrainReport,
-    ) -> Result<bool, EngineError> {
+    ) -> Result<(bool, bool), EngineError> {
         let target: Option<String> = self.get_meta(ddl::meta::RECONCILE_STORE_EPOCH)?;
-        let mut after: Option<String> = if target.as_deref() == Some(store_epoch) {
+        let after: Option<String> = if target.as_deref() == Some(store_epoch) {
             self.get_meta::<String>(ddl::meta::RECONCILE_CURSOR)?
                 .filter(|cursor| !cursor.is_empty())
         } else {
             None
         };
-        loop {
-            if *left == 0 {
-                return Ok(false);
+        let held = self.held_paths_after(after.as_deref())?;
+        let full = held.len() == RECONCILE_PAGE;
+        let mut dead: Vec<&str> = Vec::new();
+        for path in &held {
+            let parsed =
+                DocumentPath::new(path).map_err(|problem| EngineError::SidecarDamaged {
+                    what: format!("`{path}` is held and is not a document path: {problem}"),
+                })?;
+            if feed.stored_document(&parsed)?.is_none() {
+                dead.push(path);
             }
-            let held = self.held_paths_after(after.as_deref())?;
-            let full = held.len() == RECONCILE_PAGE;
-            let mut dead: Vec<&str> = Vec::new();
-            for path in &held {
-                let parsed =
-                    DocumentPath::new(path).map_err(|problem| EngineError::SidecarDamaged {
-                        what: format!("`{path}` is held and is not a document path: {problem}"),
-                    })?;
-                if feed.stored_document(&parsed)?.is_none() {
-                    dead.push(path);
-                }
-            }
-
-            let transaction = self
-                .database
-                .immediate_transaction("reconciling the sidecar")?;
-            for path in &dead {
-                transaction
-                    .execute(
-                        "DELETE FROM document_vectors WHERE path = ?1",
-                        params![path],
-                    )
-                    .map_err(|error| error::sql("reconciling a dead path away", error))?;
-            }
-            match held.last().filter(|_| full) {
-                Some(last) => {
-                    norn_db::meta::put_meta(
-                        &transaction,
-                        ddl::meta::RECONCILE_STORE_EPOCH,
-                        store_epoch,
-                    )?;
-                    norn_db::meta::put_meta(&transaction, ddl::meta::RECONCILE_CURSOR, last)?;
-                }
-                None => {
-                    norn_db::meta::put_meta(&transaction, ddl::meta::DOCUMENT_CURSOR, "")?;
-                    norn_db::meta::put_meta(&transaction, ddl::meta::TOMBSTONE_CURSOR, "")?;
-                    norn_db::meta::put_meta(
-                        &transaction,
-                        ddl::meta::OBSERVED_STORE_EPOCH,
-                        store_epoch,
-                    )?;
-                    norn_db::meta::put_meta(&transaction, ddl::meta::RECONCILE_STORE_EPOCH, "")?;
-                    norn_db::meta::put_meta(&transaction, ddl::meta::RECONCILE_CURSOR, "")?;
-                }
-            }
-            let revision = norn_db::meta::next_generation(&transaction)?;
-            transaction
-                .commit()
-                .map_err(|error| error::sql("committing the reconcile", error))?;
-            self.recorded.revision = revision;
-            report.reconciled_away += dead.len() as u64;
-            if !held.is_empty() {
-                *left -= 1;
-            }
-            if !full {
-                return Ok(true);
-            }
-            after = held.last().cloned();
         }
+
+        let transaction = self
+            .database
+            .immediate_transaction("reconciling the sidecar")?;
+        for path in &dead {
+            transaction
+                .execute(
+                    "DELETE FROM document_vectors WHERE path = ?1",
+                    params![path],
+                )
+                .map_err(|error| error::sql("reconciling a dead path away", error))?;
+        }
+        match held.last().filter(|_| full) {
+            Some(last) => {
+                norn_db::meta::put_meta(
+                    &transaction,
+                    ddl::meta::RECONCILE_STORE_EPOCH,
+                    store_epoch,
+                )?;
+                norn_db::meta::put_meta(&transaction, ddl::meta::RECONCILE_CURSOR, last)?;
+            }
+            None => {
+                norn_db::meta::put_meta(&transaction, ddl::meta::DOCUMENT_CURSOR, "")?;
+                norn_db::meta::put_meta(&transaction, ddl::meta::TOMBSTONE_CURSOR, "")?;
+                norn_db::meta::put_meta(
+                    &transaction,
+                    ddl::meta::OBSERVED_STORE_EPOCH,
+                    store_epoch,
+                )?;
+                norn_db::meta::put_meta(&transaction, ddl::meta::RECONCILE_STORE_EPOCH, "")?;
+                norn_db::meta::put_meta(&transaction, ddl::meta::RECONCILE_CURSOR, "")?;
+            }
+        }
+        let revision = norn_db::meta::next_generation(&transaction)?;
+        transaction
+            .commit()
+            .map_err(|error| error::sql("committing the reconcile", error))?;
+        self.recorded.revision = revision;
+        report.reconciled_away += dead.len() as u64;
+        Ok((!full, !held.is_empty()))
     }
 
     /// The next page of held paths after `after`, in path order, each once
