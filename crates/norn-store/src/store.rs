@@ -1132,6 +1132,13 @@ impl Store {
             },
         )?;
         let database = Database::adopt(connection, path)?;
+        if matches!(outcome, OpenOutcome::RebuiltFromZero(_)) {
+            // The open discarded the store it met, so a verification's copy of
+            // that store goes with it. The rebuilt store is already open, so a
+            // copy the environment will not let go fails nothing: the next
+            // verification clears the copy's place before it writes.
+            let _ = norn_db::remove_database(&crate::verification::verification_copy(path));
+        }
 
         crate::resolve::register_functions(database.connection())?;
         let under_construction = outcome != OpenOutcome::Reused;
@@ -1534,13 +1541,14 @@ impl Store {
 
     /// Discard the database entirely — heal rung 3, reached deliberately.
     ///
-    /// The store is consumed, the file and its sidecars are removed, and the
-    /// caller opens again to get a database built from the statement list. The
-    /// open path reaches this by itself for a store schema that disagrees with
-    /// this build; this is the entry point for damage found later, which the
-    /// lower rungs cannot resolve.
+    /// The store is consumed, the file, its sidecars and a verification's
+    /// copy beside it are removed, and the caller opens again to get a
+    /// database built from the statement list. The open path reaches this by
+    /// itself for a store schema that disagrees with this build; this is the
+    /// entry point for damage found later, which the lower rungs cannot
+    /// resolve.
     pub fn discard(mut self) -> Result<(), StoreError> {
-        norn_db::remove_database(self.database.path())?;
+        remove_with_its_copy(self.database.path())?;
         self.torn_down = true;
         Ok(())
     }
@@ -1554,10 +1562,7 @@ impl Store {
     /// over the directory, so no store is open on the file. A database that is
     /// not there is already discarded.
     pub fn discard_at(path: &Path) -> Result<(), StoreError> {
-        norn_db::remove_database(path)?;
-        Ok(norn_db::remove_database(
-            &crate::verification::verification_copy(path),
-        )?)
+        remove_with_its_copy(path)
     }
 
     /// Discard the database and open a store on the one that replaces it — heal
@@ -1602,6 +1607,16 @@ impl Store {
         replacement.set_count_retention(policy)?;
         Ok(replacement)
     }
+}
+
+/// Remove the database at `path` with its sidecars, then the copy a
+/// verification of it writes beside it: the one removal every discard runs,
+/// because a copy is derived state of the store it was taken from.
+fn remove_with_its_copy(path: &Path) -> Result<(), StoreError> {
+    norn_db::remove_database(path)?;
+    Ok(norn_db::remove_database(
+        &crate::verification::verification_copy(path),
+    )?)
 }
 
 /// What a database says about the store schema it was written under.

@@ -521,3 +521,43 @@ fn a_store_whose_directory_is_not_utf8_is_verified() {
     let error = verified_through_a_source(&store).expect_err("a damaged store");
     assert!(error.damage().is_some(), "{error:?}");
 }
+
+/// **Every discard takes the verification's copy with the store.** A copy a
+/// crash left beside the store is derived state of the store discarded, so
+/// a rebuild's discard removes it as the discard of a vault no longer
+/// served does, and nothing is left to clear after it.
+#[test]
+#[allow(clippy::disallowed_methods)] // Harness scaffolding: arranging and finding the verification's copy.
+fn a_discard_removes_the_verifications_copy() {
+    let scratch = Scratch::new("source-discard");
+    let copy = copy_of(&scratch);
+
+    let store = a_store_with_a_row_for_every_check(&scratch);
+    std::fs::write(&copy, b"not a database").unwrap();
+    store.discard().expect("discarding the store");
+    assert!(!copy_left(&copy), "a discard left the verification's copy");
+
+    let store = scratch.open();
+    std::fs::write(&copy, b"not a database").unwrap();
+    let rebuilt = store
+        .discard_and_reopen(StoredPathOrder::Sensitive)
+        .expect("a rebuild of the store");
+    assert!(!copy_left(&copy), "a rebuild left the verification's copy");
+    drop(rebuilt);
+
+    std::fs::write(scratch.database(), b"not a database").unwrap();
+    std::fs::write(&copy, b"not a database").unwrap();
+    let reopened = scratch.open();
+    assert!(
+        matches!(
+            reopened.open_outcome(),
+            norn_store::OpenOutcome::RebuiltFromZero(_)
+        ),
+        "{:?}",
+        reopened.open_outcome()
+    );
+    assert!(
+        !copy_left(&copy),
+        "an open's rebuild left the verification's copy"
+    );
+}
