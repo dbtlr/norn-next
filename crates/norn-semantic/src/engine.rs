@@ -72,6 +72,13 @@ pub struct Engine {
     /// loaded at open and moved only after a transaction that wrote them
     /// commits, so a reading never names progress the sidecar does not hold.
     recorded: Recorded,
+    /// The document feed came back complete, so [`Engine::step`] hands the
+    /// turn to the tombstone feed until a tombstone page comes back short.
+    /// Without it, a write landing before every step would keep each step on
+    /// the document feed and starve the deaths. Held in memory only: an
+    /// engine opened afresh starts on the document feed, which a step passes
+    /// through to the tombstones when it has nothing to present.
+    tombstones_turn: bool,
 }
 
 /// What one drain did, in rows.
@@ -332,6 +339,7 @@ impl Engine {
             embedder,
             outcome,
             recorded,
+            tombstones_turn: false,
         })
     }
 
@@ -401,6 +409,7 @@ impl Engine {
                 detail: "discarded by its owner".to_string(),
             }),
             recorded,
+            tombstones_turn: false,
         })
     }
 
@@ -511,8 +520,23 @@ impl Engine {
     /// that come back empty are not counted, and a step passes through them
     /// to the next feed, so a step over a settled sidecar reads every feed
     /// once and owes nothing.
+    ///
+    /// **Deaths get their turn while documents keep changing.** A committed
+    /// document page that completes the document feed hands the next steps
+    /// to the tombstone feed, until a tombstone page comes back short; only
+    /// then does a step read documents again. A step that skipped the
+    /// document feed owes another step, so a step owes nothing only where it
+    /// read both feeds complete in its own snapshot.
     pub fn step(&mut self, feed: &mut FeedRead<'_>) -> Result<DrainStep, EngineError> {
-        self.step_counted(feed, false).map(|(step, _, _)| step)
+        let documents_skipped = self.tombstones_turn;
+        let (step, _, _) = self.step_counted(feed, documents_skipped)?;
+        Ok(match step {
+            DrainStep::Done(mut report) if documents_skipped => {
+                report.owed = true;
+                DrainStep::Done(report)
+            }
+            step => step,
+        })
     }
 
     /// [`Engine::step`], passing the document feed by where
@@ -529,6 +553,9 @@ impl Engine {
         let observed: Option<String> = self.get_meta(ddl::meta::OBSERVED_STORE_EPOCH)?;
         if observed.as_deref() != Some(store_epoch.as_str()) {
             report.rescan = true;
+            // The rescan resets both cursors, and the document feed reads
+            // from its start again before the tombstones take their turn.
+            self.tombstones_turn = false;
             let (complete, counted) = self.reconcile_page(feed, &store_epoch, &mut report)?;
             if counted || !complete {
                 report.owed = true;
@@ -557,8 +584,10 @@ impl Engine {
             return Ok(report);
         }
         let retractions: Vec<&str> = page.retractions.iter().map(String::as_str).collect();
+        let completes = page.completed.is_some();
         report.retracted +=
             self.commit_documents(&page.writes, &retractions, &page.advanced, page.completed)?;
+        self.tombstones_turn |= completes;
         report.owed = true;
         Ok(report)
     }
@@ -655,6 +684,7 @@ impl Engine {
         });
         let Some((last, _)) = page.last() else {
             self.advance_watermark(Feed::Tombstones, completed)?;
+            self.tombstones_turn = false;
             return Ok((DrainStep::Done(report), false));
         };
         let advanced = last.clone();
@@ -663,6 +693,8 @@ impl Engine {
             .map(|(_, tombstone)| tombstone.path.as_str().to_string())
             .collect();
         report.retracted += self.commit_retractions(&paths, &advanced, completed)?;
+        // A short page ends the tombstones' turn, once its writes commit.
+        self.tombstones_turn &= full;
         report.owed = full;
         Ok((DrainStep::Done(report), true))
     }
