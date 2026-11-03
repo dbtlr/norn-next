@@ -147,10 +147,10 @@ fn a_watcher_poll_never_schedules_a_maintenance_leg() {
     // The reconcile's end hands the claim on to the maintenance it found
     // due, so maintenance follows the facts' reconcile rather than leading.
     wait_for_maintenances(&ops, 1);
-    let applies_or_not = ops.reconciled_batches.lock().unwrap().len();
-    assert!(
-        applies_or_not >= 1,
-        "the poll's facts were not the first leg"
+    assert_eq!(
+        ops.reconcile_and_maintenance_order.lock().unwrap()[..2],
+        ["reconcile", "maintenance"],
+        "the poll's reconcile was not the first leg"
     );
     drop((lease, host));
 }
@@ -309,13 +309,16 @@ fn an_entry_whose_release_is_in_flight_gets_no_maintenance() {
 
 /// **A maintenance leg ends within its budget plus one unit.** The fake owes
 /// far more 10 ms units than a 30 ms budget holds, so the leg runs more than
-/// one and stops at the first unit boundary past the budget.
+/// one and stops at the first unit boundary past the budget: the leg's clock,
+/// as the host records it, reaches the budget and stays inside the budget
+/// plus the longest unit the leg ran.
 #[test]
 fn a_maintenance_leg_ends_within_its_budget_plus_one_unit() {
     let ops = Arc::new(FakeOps::default());
     ops.maintenance_units_owed.store(1_000, Ordering::SeqCst);
     *ops.maintenance_unit_cost.lock().unwrap() = Duration::from_millis(10);
-    let (host, name, lease) = a_ready_vault_under(&ops, Duration::from_millis(30));
+    let budget = Duration::from_millis(30);
+    let (host, name, lease) = a_ready_vault_under(&ops, budget);
     arrange_for(&ops.maintenance_due_at, &name);
     host.wake_background();
     wait_for_maintenances(&ops, 1);
@@ -328,6 +331,21 @@ fn a_maintenance_leg_ends_within_its_budget_plus_one_unit() {
         (2..=4).contains(&reading.most_units_in_a_leg),
         "the leg ran {} units under a 30 ms budget of 10 ms units",
         reading.most_units_in_a_leg
+    );
+    // The leg stopped for its budget, not for want of units, so its clock
+    // reached the budget; it began no unit past it, so the clock stays
+    // inside the budget plus one unit. The margin is the leg's own
+    // bookkeeping between its last unit and the reading.
+    let longest_unit = *ops.longest_maintenance_unit.lock().unwrap();
+    assert!(
+        reading.longest_leg >= budget,
+        "the leg ended at {:?}, short of its {budget:?} budget",
+        reading.longest_leg
+    );
+    assert!(
+        reading.longest_leg < budget + longest_unit + Duration::from_millis(5),
+        "the leg took {:?}, past its {budget:?} budget plus one unit of {longest_unit:?}",
+        reading.longest_leg
     );
     drop((lease, host));
 }

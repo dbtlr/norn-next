@@ -9919,6 +9919,9 @@ mod tests {
         /// each taking `maintenance_unit_cost`.
         maintenance_units_owed: AtomicUsize,
         maintenance_unit_cost: Mutex<Duration>,
+        /// The longest one unit of a maintenance leg took, as the unit
+        /// measured itself.
+        longest_maintenance_unit: Mutex<Duration>,
         quiet_maintenances: Mutex<Vec<bool>>,
         maintenances: AtomicUsize,
         /// The vault whose maintenance waits at the gate until the case sets
@@ -9953,6 +9956,8 @@ mod tests {
         continuous_fact_handoff_for: Mutex<Option<VaultName>>,
         /// Every batch a reconcile was handed, in call order.
         reconciled_batches: Mutex<Vec<Batch>>,
+        /// The reconcile and maintenance legs the fake ran, in call order.
+        reconcile_and_maintenance_order: Mutex<Vec<&'static str>>,
         terminal_poll: Mutex<Option<WatchError>>,
         environmental_poll: std::sync::atomic::AtomicBool,
         contend_poll: std::sync::atomic::AtomicBool,
@@ -10279,6 +10284,10 @@ mod tests {
                 .expect("reconciled batches poisoned")
                 .push(work.batch);
             let reconcile = self.reconciles.fetch_add(1, Ordering::SeqCst) + 1;
+            self.reconcile_and_maintenance_order
+                .lock()
+                .unwrap()
+                .push("reconcile");
             if self.block_reconcile.load(Ordering::SeqCst)
                 || self.block_reconcile_at.load(Ordering::SeqCst) == reconcile
             {
@@ -10663,14 +10672,18 @@ mod tests {
             self.quiet_maintenances.lock().unwrap().push(quiet);
             let mut first = true;
             turn.run_units(|| {
-                if std::mem::take(&mut first) {
-                    return self.maintain(name, attachment).map(|()| true);
-                }
-                if !spend_one(&self.maintenance_units_owed) {
-                    return Ok(false);
-                }
-                thread::sleep(*self.maintenance_unit_cost.lock().unwrap());
-                Ok(true)
+                let began = Instant::now();
+                let ran = if std::mem::take(&mut first) {
+                    self.maintain(name, attachment).map(|()| true)
+                } else if spend_one(&self.maintenance_units_owed) {
+                    thread::sleep(*self.maintenance_unit_cost.lock().unwrap());
+                    Ok(true)
+                } else {
+                    Ok(false)
+                };
+                let mut longest = self.longest_maintenance_unit.lock().unwrap();
+                *longest = (*longest).max(began.elapsed());
+                ran
             })
         }
 
@@ -10681,6 +10694,10 @@ mod tests {
         fn maintain(&self, name: &VaultName, _: &mut FakeCoverage) -> Result<(), JobFailure> {
             ON_JOB_THREAD.with(|flag| flag.set(true));
             self.maintenances.fetch_add(1, Ordering::SeqCst);
+            self.reconcile_and_maintenance_order
+                .lock()
+                .unwrap()
+                .push("maintenance");
             // The maintenance the case arranged is what this leg runs, and
             // the clock it times is set again from here.
             takes_the_vault(&self.maintenance_due_at, name);
