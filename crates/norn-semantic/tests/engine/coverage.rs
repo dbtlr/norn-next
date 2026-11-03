@@ -346,3 +346,37 @@ fn the_census_reads_the_rows_that_moved_and_never_the_vault() {
         assert_eq!(engine.coverage().expect("counted").total, size as u64);
     }
 }
+
+/// **A census with more left to read than the drain still owes steps until
+/// it is whole.** Its recorded lifetime is cleared out of band over a settled
+/// sidecar, so the census starts over across more than one page while the
+/// drain has nothing to do; the drain keeps stepping until the count is whole
+/// again, and the count it lands on is the recount's.
+#[test]
+fn a_census_behind_the_drain_owes_steps_until_it_is_whole() {
+    let scratch = Scratch::new("coverage-behind");
+    let mut store = scratch.store();
+    write_numbered(&mut store, 1_200);
+    let mut engine = scratch.engine(CountingEmbedder::new());
+    let before = settled(&mut engine, &mut store);
+    drop(engine);
+
+    match norn_db::connect(&scratch.sidecar_path()).expect("connecting to the sidecar") {
+        norn_db::Attempt::Connected(connection) => {
+            connection
+                .execute(
+                    "UPDATE meta SET value = 'another lifetime' WHERE key = 'census_store_epoch'",
+                    [],
+                )
+                .expect("clearing the census's lifetime");
+        }
+        norn_db::Attempt::Unreadable { detail } => panic!("the sidecar is unreadable: {detail}"),
+    }
+
+    let mut engine = scratch.engine(CountingEmbedder::new());
+    let report = engine.drain(&mut store.feed_read()).expect("a drain");
+    assert_eq!(report.embedded, 0, "{report:?}");
+    assert_eq!(report.censused, 1_200, "{report:?}");
+    assert_eq!(engine.coverage(), Some(before));
+    assert_eq!(before, recount(&mut store, &engine));
+}
