@@ -676,7 +676,7 @@ pub fn open_read_only_to_verify(path: &Path) -> Result<Database, DbError> {
 /// only into the schema SQLite names for the copy. `query_only` is not set,
 /// because it refuses that write to the copy too.
 ///
-/// **Both names reach SQLite as URI filenames** ([`uri_filename`]), so a path
+/// **Both names reach SQLite as percent-encoded `file:` URIs**, so a path
 /// that is not UTF-8 is opened and written at exactly the bytes it holds, and
 /// no name is read as carrying a parameter.
 ///
@@ -1192,6 +1192,7 @@ mod tests {
     /// [`Database::copy_into`] as the refused operation, before anything is
     /// written at the target.
     #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: finding a copy no connection should write.
     fn a_connection_not_opened_to_copy_is_refused_the_copy() {
         let (scratch, sealed) = sealed_database("copy-refused", "trial", "value");
         let path = sealed.path().to_path_buf();
