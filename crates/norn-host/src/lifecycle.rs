@@ -1246,6 +1246,8 @@ impl<A: SnapshotSource> Entry<A> {
                 identity_refused: None,
                 claim: Claim::starting_at(epoch, wake),
                 background_due: None,
+                #[cfg(test)]
+                stance_wakes: 0,
                 maintainer_contended: None,
                 duplicate_root: None,
                 last_demand: Instant::now(),
@@ -1267,6 +1269,10 @@ impl<A: SnapshotSource> Entry<A> {
 }
 
 struct EntryState<A: SnapshotSource> {
+    /// How many wakes a return of the read stance from refuse sent, so a case
+    /// can tell that wake from any other the scheduler counts.
+    #[cfg(test)]
+    stance_wakes: u64,
     initial_attach_started: bool,
     initial_loading_candidate: bool,
     /// The from-zero build this entry's early reads are admitted against, or
@@ -1714,6 +1720,10 @@ impl<A: SnapshotSource> Stanced for EntryState<A> {
     fn stance_moved(&mut self, opened: ReadStanding) {
         if opened.stance == ReadStance::Refuse && self.read_stance() != ReadStance::Refuse {
             self.claim.wake_background();
+            #[cfg(test)]
+            {
+                self.stance_wakes += 1;
+            }
         }
     }
 

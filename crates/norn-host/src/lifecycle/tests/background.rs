@@ -636,11 +636,14 @@ fn a_hold_returning_the_stance_from_refuse_to_serve_wakes_the_scheduler() {
     }
 
     arrange_for(&ops.maintenance_due_at, &name);
-    let wakes = host.scheduler_reading().wakes;
+    // The entry's own count of stance wakes, not the scheduler's count of
+    // every wake: another wake (a late release, a tick's poll) may land in
+    // the same window and must not stand in for this one.
+    let stance_wakes = entry.gate.lock().unwrap().stance_wakes;
     entry.gate.lock().unwrap().trust = TrustState::Ready;
     assert_eq!(
-        host.scheduler_reading().wakes,
-        wakes + 1,
+        entry.gate.lock().unwrap().stance_wakes,
+        stance_wakes + 1,
         "the return to serve sent no wake"
     );
     wait_for_maintenances(&ops, 1);
