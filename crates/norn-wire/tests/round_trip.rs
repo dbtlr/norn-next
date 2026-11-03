@@ -22,14 +22,14 @@ use norn_wire::{
     ConflictingDefault, ContainerKind, ContentHash, ControlFile, ControlFileFailure, CountParams,
     Cursor, CursorKey, CursorOrderChanged, DefaultCandidate, DeleteParams, DescribeParams,
     Direction, Directory, DoctorRegistryParams, DoctorRegistryReport, DocumentEdit, DocumentPath,
-    DocumentPathHead, DocumentRow, Drift, EditParams, ElsewhereNamesDocuments, EngineHealth,
-    EngineSection, EngineStatus, ErrorDetail, ErrorEnvelope, ExpectedField, Facet, FacetKind,
-    FieldChange, FieldShape, FieldType, FieldValue, FilePath, FileState, FindParams, FindReport,
-    FindingKind, FindingRow, FindingScope, Fingerprints, FolderPath, Forecast, Freshness,
-    GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit, HygieneConflict, IllegalContentHash,
-    IllegalOperationId, IllegalRuleSet, IllegalValueHead, InitParams, InitReport,
-    InterruptionCause, KindTally, LadderDeclaration, LinkAddress, LinkAddressKind, LinkAdvisory,
-    LinkFamily, LinkHealth, LinkKey, LinkRewrite, LinkRow, ListParams, ListReport,
+    DocumentPathHead, DocumentRow, Drift, EditParams, ElsewhereNamesDocuments, EmbeddingCoverage,
+    EngineHealth, EngineSection, EngineStatus, ErrorDetail, ErrorEnvelope, ExpectedField, Facet,
+    FacetKind, FieldChange, FieldShape, FieldType, FieldValue, FilePath, FileState, FindParams,
+    FindReport, FindingKind, FindingRow, FindingScope, Fingerprints, FolderPath, Forecast,
+    Freshness, GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit, HygieneConflict,
+    IllegalContentHash, IllegalOperationId, IllegalRuleSet, IllegalValueHead, InitParams,
+    InitReport, InterruptionCause, KindTally, LadderDeclaration, LinkAddress, LinkAddressKind,
+    LinkAdvisory, LinkFamily, LinkHealth, LinkKey, LinkRewrite, LinkRow, ListParams, ListReport,
     MaintainerIdentity, MalformedLadder, MigrateParams, MigrateReport, MigrationRefusal,
     ModelIdentity, MoveParams, MoveSubject, Moved, NameSet, NewParams, NewSubject, NoProblems,
     NoRetrievalRung, NonFiniteScore, NotReady, Operation, OperationId, OperationKind,
@@ -6255,19 +6255,22 @@ fn drifts() -> Vec<Drift> {
     drifts
 }
 
-/// Every engine status, over every freshness a standing one reports.
+/// Every engine status, over every freshness and a coverage a standing one
+/// reports.
 fn engine_statuses() -> Vec<EngineStatus> {
     let mut statuses = vec![
         EngineStatus::off(),
         EngineStatus::preparing(),
-        EngineStatus::on(None, None),
-        EngineStatus::on(Some("the drain refused".to_string()), None),
+        EngineStatus::on(None, None, None),
+        EngineStatus::on(Some("the drain refused".to_string()), None, None),
+        EngineStatus::on(None, None, Some(EmbeddingCoverage::new(0, 0))),
+        EngineStatus::on(None, None, Some(EmbeddingCoverage::new(2, 3))),
         EngineStatus::self_disabled("the slot took itself out of service"),
     ];
     statuses.extend(
         freshnesses()
             .into_iter()
-            .map(|freshness| EngineStatus::on(None, Some(freshness))),
+            .map(|freshness| EngineStatus::on(None, Some(freshness), None)),
     );
     statuses
 }
@@ -6486,7 +6489,7 @@ fn every_vault_namespace_shape_survives_the_round_trip() {
     round_trip(&EngineHealth::new(
         name("notes"),
         EngineSection::enabled(),
-        EngineStatus::on(None, None),
+        EngineStatus::on(None, None, None),
     ));
 }
 
@@ -6537,7 +6540,7 @@ fn every_vault_namespace_params_and_report_shape_survives_the_round_trip() {
             [EngineHealth::new(
                 name("notes"),
                 EngineSection::enabled(),
-                EngineStatus::on(None, None),
+                EngineStatus::on(None, None, None),
             )],
         ));
     }
@@ -6615,23 +6618,24 @@ fn a_drift_is_an_object_tagged_state() {
     );
 }
 
-/// A standing engine reports both of the parts it has, and each is `null`
-/// until there is one: nothing reports a watermark until the engine seams
-/// land.
+/// A standing engine reports each of the parts it has, and each is `null`
+/// until there is one: freshness until the engine reports a watermark, and
+/// coverage until a background unit has counted.
 #[test]
 fn an_engine_status_carries_what_the_slot_is_doing() {
     assert_eq!(wire(&EngineStatus::off()), r#"{"state":"off"}"#);
     assert_eq!(wire(&EngineStatus::preparing()), r#"{"state":"preparing"}"#);
     assert_eq!(
-        wire(&EngineStatus::on(None, None)),
-        r#"{"state":"on","last_drain_error":null,"freshness":null}"#
+        wire(&EngineStatus::on(None, None, None)),
+        r#"{"state":"on","last_drain_error":null,"freshness":null,"coverage":null}"#
     );
     assert_eq!(
         wire(&EngineStatus::on(
             Some("the drain refused".to_string()),
-            Some(Freshness::trailing(3))
+            Some(Freshness::trailing(3)),
+            Some(EmbeddingCoverage::new(2, 3)),
         )),
-        r#"{"state":"on","last_drain_error":"the drain refused","freshness":{"state":"trailing","generations":3}}"#
+        r#"{"state":"on","last_drain_error":"the drain refused","freshness":{"state":"trailing","generations":3},"coverage":{"embedded":2,"total":3}}"#
     );
     assert_eq!(
         wire(&EngineStatus::self_disabled("out of service")),
@@ -7277,7 +7281,7 @@ fn a_doctor_registry_reading_pins_its_problems_and_its_engines() {
             EngineHealth::new(
                 name("notes"),
                 EngineSection::enabled(),
-                EngineStatus::on(None, None),
+                EngineStatus::on(None, None, None),
             ),
         ],
     );
@@ -7290,7 +7294,7 @@ fn a_doctor_registry_reading_pins_its_problems_and_its_engines() {
             r#"{"problem":"duplicate_root","aliases":["notes","vault"]}]},"#,
             r#""engines":["#,
             r#"{"name":"notes","section":{"state":"enabled"},"#,
-            r#""engine":{"state":"on","last_drain_error":null,"freshness":null}},"#,
+            r#""engine":{"state":"on","last_drain_error":null,"freshness":null,"coverage":null}},"#,
             r#"{"name":"vault","section":{"state":"absent"},"#,
             r#""engine":{"state":"self_disabled","detail":"out of service"}}"#,
             r#"]}"#

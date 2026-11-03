@@ -13,6 +13,7 @@
 /// `mod` lines.
 const SOURCES: &[(&str, &str)] = &[
     ("src/lib.rs", include_str!("../../src/lib.rs")),
+    ("src/census.rs", include_str!("../../src/census.rs")),
     ("src/ddl.rs", include_str!("../../src/ddl.rs")),
     ("src/engine.rs", include_str!("../../src/engine.rs")),
     ("src/error.rs", include_str!("../../src/error.rs")),

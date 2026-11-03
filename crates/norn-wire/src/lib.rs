@@ -88,7 +88,8 @@
 //! registration is spelled here too: the [`Registration`] itself, the
 //! [`Published`] answer an entry carries, the [`Fingerprints`] it serves
 //! under, the [`Drift`] its authored control files stand at, the
-//! [`EngineStatus`] of its engine slot, the [`Advisory`] list its serving
+//! [`EngineStatus`] of its engine slot with the [`EmbeddingCoverage`] a
+//! standing engine reports, the [`Advisory`] list its serving
 //! raises, and the [`VaultStatus`] that holds all of them — with the [`RollUp`]
 //! those statuses add up to and the [`Attention`] it names them for.
 //!
@@ -368,6 +369,7 @@
 //! [`Fingerprints::new`], [`Drift::inactive`],
 //! [`Drift::current`], [`Drift::reload_pending`], [`Drift::unreadable`],
 //! [`EngineStatus::off`], [`EngineStatus::on`], [`EngineStatus::self_disabled`],
+//! [`EmbeddingCoverage::new`],
 //! [`ControlFileFailure::new`],
 //! the constructor on each [`Advisory`], [`Attention`], [`ResolveReport`],
 //! [`StatusReport`], [`RegistrySanity`] and [`RegistryProblem`] variant,
@@ -675,8 +677,9 @@ pub use reading::{
 };
 pub use reload::{ControlFile, ControlFileFailure, ReloadFailure, ReloadStage};
 pub use status::{
-    Advisory, Attention, Drift, EngineStatus, Fingerprints, Published, Registration, RollUp,
-    RollingHealPhase, RollingHealProgress, RollingHealStatus, VaultStatus, WatcherMisses,
+    Advisory, Attention, Drift, EmbeddingCoverage, EngineStatus, Fingerprints, Published,
+    Registration, RollUp, RollingHealPhase, RollingHealProgress, RollingHealStatus, VaultStatus,
+    WatcherMisses,
 };
 pub use tag::fold_tag;
 pub use target::{Anchor, IllegalTarget, ResolutionTarget};

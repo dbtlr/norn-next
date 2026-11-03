@@ -225,6 +225,7 @@ fn every_wire_schema() -> Vec<Value> {
         schema_of::<Fingerprints>(),
         schema_of::<Drift>(),
         schema_of::<EngineStatus>(),
+        schema_of::<norn_wire::EmbeddingCoverage>(),
         schema_of::<Advisory>(),
         schema_of::<Attention>(),
         schema_of::<VaultStatus>(),
@@ -2784,6 +2785,28 @@ fn the_status_readings_advertise_their_tags() {
     assert_eq!(
         property_names(&schema_of::<Fingerprints>()),
         ["schema", "config"].into_iter().collect()
+    );
+}
+
+/// A standing engine advertises its coverage beside its freshness, each its
+/// own definition, and a coverage is the two counts.
+#[test]
+fn a_standing_engine_advertises_its_coverage_beside_its_freshness() {
+    let schema = schema_of::<EngineStatus>();
+    let on = branches(&schema)
+        .iter()
+        .find(|branch| tag_constant(branch, "state") == Some("on"))
+        .expect("the on branch")
+        .clone();
+    assert_eq!(
+        property_names(&on),
+        ["state", "last_drain_error", "freshness", "coverage"]
+            .into_iter()
+            .collect()
+    );
+    assert_eq!(
+        property_names(&schema_of::<norn_wire::EmbeddingCoverage>()),
+        ["embedded", "total"].into_iter().collect()
     );
 }
 

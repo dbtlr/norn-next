@@ -203,9 +203,11 @@ fn a_write_landing_during_the_drain_reads_as_lag() {
 /// schema pin — so the next drain's completion is what covers it.
 #[test]
 fn a_write_after_the_completing_page_is_read_reads_as_lag() {
-    // A drain over a store holding one document reads two pages: the
-    // document feed's completing page, then the tombstone feed's.
-    for (label, page) in [("documents", 1), ("tombstones", 2)] {
+    // A drain over a store holding one document reads two pages of its own:
+    // the document feed's completing page, then the tombstone feed's. Each
+    // step's census reads one page of each feed before the drain's page, so
+    // the drain's pages are the third and the sixth.
+    for (label, page) in [("documents", 3), ("tombstones", 6)] {
         let scratch = Scratch::new(&format!("watermark-order-{label}"));
         let mut store = scratch.store();
         write_document(&mut store, &document("docs/a.md", "hash-1", "alpha\n"));
@@ -315,8 +317,10 @@ fn out_of_band(path: &std::path::Path, statement: &str) {
 }
 
 /// **Progress that will not read is a rebuild, not a refusal.** A sidecar
-/// recording no revision, or a watermark no reader of this build wrote, is a
-/// file this build did not write, and resolves by the rebuild floor.
+/// recording no revision, a watermark no reader of this build wrote, census
+/// counts that are absent, below zero or neither whole nor part way, or half
+/// of a last whole count, is a file this build did not write, and resolves by
+/// the rebuild floor.
 #[test]
 fn recorded_progress_that_will_not_read_is_rebuilt_from_zero() {
     for (label, statement) in [
@@ -335,6 +339,31 @@ fn recorded_progress_that_will_not_read_is_rebuilt_from_zero() {
         (
             "watermark-epoch",
             "INSERT INTO meta (key, value) VALUES ('document_watermark', '12:')",
+        ),
+        (
+            "no-census-total",
+            "DELETE FROM meta WHERE key = 'census_total'",
+        ),
+        (
+            "census-below-zero",
+            "UPDATE meta SET value = -1 WHERE key = 'census_embedded'",
+        ),
+        (
+            "no-census-whole",
+            "DELETE FROM meta WHERE key = 'census_whole'",
+        ),
+        (
+            "census-whole",
+            "UPDATE meta SET value = 2 WHERE key = 'census_whole'",
+        ),
+        (
+            "census-last-whole-half",
+            "INSERT INTO meta (key, value) VALUES ('census_last_whole_total', 3)",
+        ),
+        (
+            "census-last-whole-below-zero",
+            "INSERT INTO meta (key, value) VALUES ('census_last_whole_total', -1), \
+             ('census_last_whole_embedded', 0)",
         ),
     ] {
         let scratch = Scratch::new(&format!("progress-unreadable-{label}"));
@@ -412,7 +441,11 @@ fn an_unreadable_retraction_commits_atomically_with_document_progress() {
         .drain(&mut store.feed_read())
         .expect_err("the page cannot record progress");
     assert_eq!(engine.projection().expect("the rolled-back vector"), held);
-    assert_eq!(engine.revision(), revision);
+    // The census commits its own reading of the unreadable row before the
+    // page is read; only the page's commit is refused.
+    let censused = engine.revision();
+    assert_eq!(censused.revision, revision.revision + 1, "{censused:?}");
+    let revision = censused;
     assert_eq!(engine.watermarks(), &watermarks);
     assert_eq!(embedder.calls(), 1, "a broken document is never embedded");
     out_of_band(

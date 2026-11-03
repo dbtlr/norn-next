@@ -48,7 +48,8 @@ pub(crate) fn statements() -> Vec<String> {
     statements
 }
 
-const STATEMENTS: &[&str] = &["CREATE TABLE document_vectors (
+const STATEMENTS: &[&str] = &[
+    "CREATE TABLE document_vectors (
     path          TEXT    NOT NULL,
     model_id      TEXT    NOT NULL,
     model_version TEXT    NOT NULL,
@@ -56,7 +57,15 @@ const STATEMENTS: &[&str] = &["CREATE TABLE document_vectors (
     dimensions    INTEGER NOT NULL,
     embedding     BLOB    NOT NULL,
     PRIMARY KEY (path, model_id, model_version)
-)"];
+)",
+    // The census (`crate::census`): one row per document the store holds
+    // readable, with the body hash it holds. Narrow and keyed by path alone,
+    // so it is stored in its key's order.
+    "CREATE TABLE census (
+    path      TEXT NOT NULL PRIMARY KEY,
+    body_hash TEXT NOT NULL
+) WITHOUT ROWID",
+];
 
 /// The engine's own pinned scalars, beside the substrate's
 /// (`norn_db::meta`). Together they are the whole of the engine's progress:
@@ -111,4 +120,35 @@ pub(crate) mod meta {
     /// [`RECONCILE_STORE_EPOCH`] and moved in the same transaction as the
     /// page that checked it.
     pub(crate) const RECONCILE_CURSOR: &str = "reconcile_cursor";
+    /// The store epoch the census was taken in, absent until its first step.
+    /// A store whose epoch differs empties the census and reads both feeds
+    /// again from their starts.
+    pub(crate) const CENSUS_STORE_EPOCH: &str = "census_store_epoch";
+    /// The census's document feed position, spelled as [`DOCUMENT_CURSOR`] is
+    /// and moved only by the census.
+    pub(crate) const CENSUS_DOCUMENT_CURSOR: &str = "census_document_cursor";
+    /// The census's tombstone feed position.
+    pub(crate) const CENSUS_TOMBSTONE_CURSOR: &str = "census_tombstone_cursor";
+    /// How many census rows there are: the readable documents counted.
+    /// Seeded at zero at create and moved in every transaction that moves a
+    /// census row.
+    pub(crate) const CENSUS_TOTAL: &str = "census_total";
+    /// How many census rows this engine's model holds a vector row over with
+    /// the same hash. Seeded at zero and moved in every transaction that moves
+    /// a census row or a vector row.
+    pub(crate) const CENSUS_EMBEDDED: &str = "census_embedded";
+    /// `1` where the census step that last moved the census read both feeds
+    /// to their ends, so the two counts are whole; `0` otherwise. Seeded at
+    /// `0`, and set to `0` by every census step that empties the census or
+    /// stops short of a feed's end.
+    pub(crate) const CENSUS_WHOLE: &str = "census_whole";
+    /// The `total` count as it stood when the counts last stopped being
+    /// whole, which a status answers while [`CENSUS_WHOLE`] is `0`. Absent,
+    /// with [`CENSUS_LAST_WHOLE_EMBEDDED`], until the counts first stop being
+    /// whole in the census's store epoch, and removed by the census step that
+    /// empties the census for a new one.
+    pub(crate) const CENSUS_LAST_WHOLE_TOTAL: &str = "census_last_whole_total";
+    /// The `embedded` count beside [`CENSUS_LAST_WHOLE_TOTAL`], recorded and
+    /// removed with it.
+    pub(crate) const CENSUS_LAST_WHOLE_EMBEDDED: &str = "census_last_whole_embedded";
 }

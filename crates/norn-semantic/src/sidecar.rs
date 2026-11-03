@@ -72,12 +72,15 @@ impl norn_db::Client for SidecarClient<'_> {
         // The revision starts at zero: a created sidecar has committed no
         // mutation of its own yet.
         norn_db::meta::put_meta(transaction, norn_db::meta::WRITE_GENERATION, 0_i64)?;
+        // An empty census counts nothing.
+        crate::census::Counts::default().put(transaction)?;
         Ok(())
     }
 
     /// A shape this build wrote, holding another model's rows and cursors, is
-    /// rebuilt from zero, and so is one whose recorded progress — the revision
-    /// and the two watermarks — will not read, or records no revision.
+    /// rebuilt from zero, and so is one whose recorded progress — the revision,
+    /// the two watermarks and the census counts — will not read, or records no
+    /// revision or no counts.
     ///
     /// The cursors are model-blind — the drained feed is drained for whichever
     /// model was embedding — so adopting them under a new model would skip

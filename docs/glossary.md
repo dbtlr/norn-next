@@ -240,6 +240,9 @@ _Avoid_: Event queue, event bus
 **Store epoch**:
 The identity a derived database carries from creation to discard. Progress recorded against one epoch is not valid in the next.
 
+**Store lifetime**:
+The span during which one derived database stands for a vault, from the attach or rebuild that opens it to the detach, discard or replacement that ends it. Work bound to a store lifetime ends with it. A store epoch can outlast a store lifetime: a detach ends the lifetime, and a later attach opens another over the same database and epoch.
+
 **Cursor envelope**:
 A typed continuation position — where a page stopped, and what it was read against — rendered as one opaque string on the wire. A retained count continuation also names a result with a bounded lifetime; expiry requires restarting the count. A client holds the string unchanged and never decodes or branches on what it carries.
 _Avoid_: Cursor (unqualified) — elsewhere in this glossary "cursor" names a change-feed position, a different concept from the wire continuation
