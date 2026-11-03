@@ -9373,9 +9373,9 @@ mod tests {
             );
         }
 
-        /// Damage met by a drain slice resolves by the engine's rebuild floor:
+        /// Damage met by a drain step resolves by the engine's rebuild floor:
         /// the slot stays running, the rebuilt sidecar converges over the
-        /// slices after it, and the diagnostic clears.
+        /// units after it, and the diagnostic clears.
         #[test]
         fn drain_time_damage_resolves_by_the_rebuild_floor() {
             let f = Fixture::new("semantic-damage");
@@ -10528,12 +10528,12 @@ mod tests {
         /// a store that has moved on. Once the drain lands it trails by
         /// nothing.
         ///
-        /// The drain held is the slice owed by the leg that commits
+        /// The drain held is the step owed by the leg that commits
         /// `beta.md`, once the engine has caught up with the attach. A leg
-        /// that commits nothing still owes a slice, and its engine truthfully
+        /// that commits nothing still owes the engine its work, and the engine truthfully
         /// trails by nothing; on macOS fseventsd can deliver a change made
         /// before the watch was established after the attach published, which
-        /// owes such a slice ahead of `beta.md`'s. A held
+        /// owes such a step ahead of `beta.md`'s. A held
         /// drain that reports the engine caught up is that leg's: the hook is
         /// armed again before it is released, so the next drain is held too.
         #[test]
@@ -11159,14 +11159,15 @@ mod tests {
             }
         }
 
-        /// **A semantic backlog is consumed in slices that yield to watcher
-        /// facts**: a fact that reaches the entry as the first drain slice of
-        /// a three-page backlog ends is reconciled and readable before the
-        /// next slice starts. The facts are injected at the poll the slice's
-        /// leg ends with, so the order is the lifecycle's and not a watcher's
-        /// latency.
+        /// **Watcher facts reconcile beside a semantic backlog**: a fact
+        /// that reaches the entry while the first unit of a three-page
+        /// backlog reads its page is reconciled and readable from inside the
+        /// next unit, which holds its engine slot: the lane holds no claim, so
+        /// the reconcile never waits for the backlog. The facts are injected at
+        /// the next poll, so the reconcile is the lifecycle's and not a
+        /// watcher's latency.
         #[test]
-        fn semantic_slices_yield_to_watcher_facts_between_them() {
+        fn watcher_facts_reconcile_beside_a_semantic_backlog() {
             type Shared = Arc<Mutex<Option<Arc<crate::Host<OverflowOnArm>>>>>;
             type Injected = Arc<Mutex<Option<norn_fs::Batch>>>;
             let f = Fixture::new("semantic-slices-yield");
@@ -11193,8 +11194,8 @@ mod tests {
                     engines.run_inside_next_drain(move || {
                         started.send(()).unwrap();
                         let _ = first_goes.recv_timeout(Duration::from_secs(30));
-                        // The fact arrives while this slice holds the claim:
-                        // the poll the leg ends with reports it.
+                        // The fact arrives while this unit reads its page:
+                        // the next poll reports it.
                         fs::write(&rewritten, "omega rewritten\n").unwrap();
                         let injected = injected_cell.lock().unwrap().clone().expect("the cell");
                         *injected.lock().unwrap() = Some(norn_fs::Batch::vault_change(omega));
@@ -11223,30 +11224,33 @@ mod tests {
             *injected_cell.lock().unwrap() = Some(injected);
             first_started
                 .recv_timeout(Duration::from_secs(15))
-                .expect("the first slice of the backlog");
+                .expect("the first unit of the backlog");
             go.send(()).unwrap();
             second_drain
                 .recv_timeout(Duration::from_secs(15))
-                .expect("the next slice of the backlog");
+                .expect("the next unit of the backlog");
 
             assert_eq!(
                 *observed.lock().unwrap(),
                 Some(Ok(1)),
-                "the next slice ran ahead of the fact's reconcile"
+                "the fact was not reconciled beside the backlog"
             );
             wait_for_engine(&*host, &name, |engine| {
                 *engine == norn_wire::EngineStatus::on(None, Some(Freshness::trailing(0)))
             });
         }
 
-        /// **A reconcile publishes `Ready` before the semantic slice it
-        /// owes**: an edit's reconcile commits lane-1 work and owes the
-        /// engine a slice, and by the moment that slice starts the entry
-        /// already answers `Ready` and a lexical read finds the edit. The
-        /// slice is the one the edit owes because the engine had drained
-        /// everything before the edit landed.
+        /// **A reconcile commits the edit before the semantic unit it owes,
+        /// and that unit runs while the entry serves or settles**: an edit's
+        /// reconcile commits lane-1 work and owes the engine its work, and by
+        /// the moment the unit starts the entry answers `Ready` or is settling
+        /// the change — never refusing — and a settling lexical read from
+        /// inside the unit finds the edit. The unit holds no claim, so it may
+        /// start before the reconcile publishes; what it reads is the
+        /// committed store. The unit is the one the edit owes because the
+        /// engine had drained everything before the edit landed.
         #[test]
-        fn a_reconcile_publishes_ready_before_the_semantic_slice_it_owes() {
+        fn a_reconcile_commits_the_edit_before_the_semantic_unit_it_owes() {
             let f = Fixture::new("semantic-slice-after-ready");
             fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
             fs::write(f.vault().join("alpha.md"), "alpha\n").unwrap();
@@ -11258,7 +11262,7 @@ mod tests {
             let host = Arc::new(host);
             let watched = Arc::downgrade(&host);
             let vault = name.clone();
-            let (seen, seen_at_slice) = std::sync::mpsc::channel();
+            let (seen, seen_at_unit) = std::sync::mpsc::channel();
             engines.run_inside_next_drain(move || {
                 let Some(host) = watched.upgrade() else {
                     return;
@@ -11278,19 +11282,25 @@ mod tests {
             });
 
             fs::write(f.vault().join("beta.md"), "beta\n").unwrap();
-            let (state, rows) = seen_at_slice
+            let (state, rows) = seen_at_unit
                 .recv_timeout(Duration::from_secs(30))
-                .expect("the semantic slice the edit owes");
+                .expect("the semantic unit the edit owes");
 
-            assert_eq!(
-                state,
-                crate::lifecycle::answered(norn_wire::TrustState::Ready),
-                "a semantic slice ran before its reconcile published Ready"
+            assert!(
+                matches!(
+                    state,
+                    Ok(norn_wire::TrustState::Ready
+                        | norn_wire::TrustState::Warming {
+                            phase: norn_wire::WarmingPhase::Healing,
+                            ..
+                        })
+                ),
+                "a semantic unit fed while its entry refused: {state:?}"
             );
             assert_eq!(
                 rows,
                 Ok(1),
-                "a semantic slice ran before the edit was readable"
+                "a semantic unit ran before the edit was committed"
             );
             wait_for_engine(&*host, &name, |engine| {
                 *engine == norn_wire::EngineStatus::on(None, Some(Freshness::trailing(0)))

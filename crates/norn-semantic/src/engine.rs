@@ -112,10 +112,10 @@ impl DrainReport {
     /// converged sidecar can still report work (a rescan re-triages every
     /// row it kept), and quiescence holds only until the next write. The
     /// drain reads one store lifetime, because the handle's epoch is pinned
-    /// at its open and the feed borrow is exclusive; a store file replaced
-    /// underneath a live handle is the maintainer singleton's to prevent
-    /// (ADR 0016, one maintainer per derived store), not this reading's to
-    /// detect.
+    /// at its open — a writer borrow, or a feed source that refuses a page
+    /// over another lifetime; a store file replaced underneath a live handle
+    /// is the maintainer singleton's to prevent (ADR 0016, one maintainer
+    /// per derived store), not this reading's to detect.
     pub fn is_settled(&self) -> bool {
         *self == DrainReport::default()
     }

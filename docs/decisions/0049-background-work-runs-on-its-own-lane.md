@@ -1125,9 +1125,12 @@ when the lane would take the lock, and never to a search that arrives later. For
 each search takes a ticket from a counter before it takes the lock, and marks its ticket
 served once it holds the lock, or returns or unwinds before reaching it. A lane thread
 reads the last ticket issued and leaves the lock until every search up to that ticket is
-served. A vector rung therefore waits behind at most one hold of the slot lock, and
-answers between units or between the phases of one. Continuous search delays the lane only
-by the searches that were waiting when the lane came to the lock.
+served. The same mutex lets a search that arrives later take the lock ahead of a lane
+thread waiting for it, and a stream of such searches would starve the lane, so a search
+whose ticket was issued after the lane came to the lock waits, before it reaches the lock,
+until the lane holds it. A vector rung therefore waits behind at most one hold of the slot
+lock, and answers between units or between the phases of one. Continuous search delays the
+lane only by the searches that were waiting when the lane came to the lock.
 
 ### A result installs only while its delivery and store lifetime are current
 

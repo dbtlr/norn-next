@@ -9,9 +9,9 @@
 //!   running or preparing one it already has), an absent section (or
 //!   `enabled = false`) closes it, and a section the engine refuses leaves a
 //!   typed self-disabled state a status read reports. The sidecar open and
-//!   the model setup — the initialization — run later, as a lifecycle slice
-//!   after the publication that committed the delivery, and an engine that
-//!   cannot open is self-disabled there.
+//!   the model setup — the initialization — run later, as a background unit
+//!   on the host's background lane after the publication that committed the
+//!   delivery, and an engine that cannot open is self-disabled there.
 //!   What the section *means* is the engine's own ([`norn_semantic::Settings`]).
 //!   The reading of the section itself — absent, disabled, malformed with the
 //!   engine's refusal, or enabled — is retained beside the slot at the same
@@ -19,20 +19,21 @@
 //!   stands carries the reading taken under the same lookup as the slot it
 //!   found missing, because "no engine stands" is answered differently for a
 //!   vault that asked for none and one whose section could not be read.
-//! - **The nudge is owed work, run in bounded slices.** Every leg that ends
-//!   holding a consistent lane-1 store — the increments, every heal (attach,
-//!   recover, schema reload, and the store rebuild whose new epoch is exactly
-//!   what a cursor must not sleep through), and the config-only reload, whose
-//!   drain is what converges a corpus derived before its engine existed —
-//!   records that the slot owes a slice ([`SemanticEngines::owe`]) and runs
-//!   none of it, so its publication never waits for semantic work. Quiet
-//!   maintenance legs then run one unit each over the leg's own feed handle
-//!   ([`SemanticEngines::work`]): no thread, no channel, no missable wake —
-//!   a dedicated engine worker is the carve drain cost forces, not this
-//!   composition's obligation. A drain failure never fails the leg: lane 2's
-//!   contract is eventual consistency, so engine trouble is retained as the
-//!   slot's own diagnostic, and sidecar damage resolves by the engine's
-//!   rebuild floor, whose reset cursors the next slices drain.
+//! - **The nudge is owed work, run on the background lane.** Every leg that
+//!   ends holding a consistent lane-1 store — the increments, every heal
+//!   (attach, recover, schema reload, and the store rebuild whose new epoch is
+//!   exactly what a cursor must not sleep through), and the config-only
+//!   reload, whose drain is what converges a corpus derived before its engine
+//!   existed — records that the slot owes work ([`SemanticEngines::owe`]) and
+//!   runs none of it; its wake puts the store in the lane's set. A lane unit
+//!   ([`SemanticEngines::unit`]) holds no claim and no attachment: it reads
+//!   the feed through a feed source the delivery owns, minted from the live
+//!   store in the gate hold that committed the delivery, so it runs alongside
+//!   the vault's reconciles and applies and never delays a publication. A
+//!   drain failure never fails a leg: lane 2's contract is eventual
+//!   consistency, so engine trouble is retained as the slot's own diagnostic,
+//!   and sidecar damage resolves by the engine's rebuild floor, whose reset
+//!   cursors the next units drain.
 //! - **Answers come from the slot, gated by the slot alone.** A nearest
 //!   answer needs the engine and its sidecar, never the vault's store, so it
 //!   runs on the caller's thread and answers whenever a slot stands — the
@@ -44,35 +45,45 @@
 //!   for an entry the seam serves, beside the snapshot its hold established.
 //! - **An answer carries its own reading.** A nearest answer is sampled under
 //!   the slot's lock together with the model it ran, the sidecar revision it
-//!   was taken from and the engine's watermarks, so no drain lands between
+//!   was taken from and the engine's watermarks, so no unit lands between
 //!   the rows and the reading that describes them. Freshness is those
 //!   watermarks judged against the store reading the caller's own hold
 //!   established ([`freshness`]).
 //!
-//! # Locking, and the guarantee it leans on
+//! # Locking, and the guarantees it leans on
 //!
-//! The outer map lock covers lookup, delivery bookkeeping, publication and
-//! teardown only — never an engine open, a sidecar close, a drain, or an
-//! answer — so one vault's work never holds another vault's. The one place
-//! it is held with a slot's lock is an initialization's install, which moves
-//! an already-open engine into a preparing slot and does no I/O. It is taken
-//! after the entry gate where both are held, never before it. Within one vault, a slot's own lock serializes its
-//! drains and its answers against each other, and a drain holds it for the
-//! whole drain. The report beside each slot has a lock of its own, written
-//! while the slot's lock is held and read without it, so a status taken
-//! during a drain reads the slot as it stood before that drain rather than
-//! waiting for it to end ([`EngineSlot`]). Slot replacement at delivery
-//! is sound because the lifecycle admits one leg per vault at a time (the
-//! entry's custody claim); a lifecycle that relaxed that would need delivery
-//! to mutate in place rather than replace. An initialization does not lean
-//! on that alone: its result is installed only into the slot it opened for,
-//! while that slot is still the vault's, beside the store lifetime its
-//! publication committed, under a claim that still stands.
+//! The lock order is the entry gate, then the map lock, then a slot's lock;
+//! a slot's binding — its retirement mark, its store lifetime and its feed
+//! source — is a leaf under either of the last two. The map lock covers
+//! lookup, delivery bookkeeping, publication and retirement's removal only —
+//! never an engine open, a sidecar close, a unit, or an answer — so one
+//! vault's work never holds another vault's. A publication takes the map lock
+//! and the binding, never the slot lock, so it never waits for a unit. A unit
+//! takes neither the entry gate nor the map lock while it holds the slot.
+//!
+//! **A unit touches the sidecar and the feed only under the slot lock, and
+//! embeds holding none.** Its read phase and its commit are each one hold, and
+//! each checks the slot's binding first: a unit that finds its delivery
+//! retired or its store lifetime replaced discards its page. A search takes
+//! the slot lock behind at most one hold of the lane's ([`Tickets`]). The
+//! report beside each slot has a lock of its own, written as each hold ends
+//! and read without the slot's lock, so a status never waits for a unit.
+//!
+//! **Retirement takes the slot lock, and only then gives back what it
+//! guards.** A detach, a disable, a replacing delivery, a rebuild's discard
+//! of the store and host shutdown mark the slot retired, or its store lifetime
+//! gone, and take out the engine and the feed source under the slot lock,
+//! then close both after releasing it, before the caller goes on — a detach
+//! to release the maintainer lock, a rebuild to discard the store. Every
+//! sidecar commit is made under the slot lock after the currency check, so no
+//! commit reaches a sidecar after this host's maintainership of it ends, and
+//! a retirement waits for at most one hold of the slot lock, never for an
+//! embedding or a model setup.
 //!
 //! Every slot lock tolerates poison: a panic that escaped the engine never
-//! becomes a second panic on a worker leg or a caller's thread. What it leaves
-//! depends on where it escaped — an engine borrowed for an ordinary drain or a
-//! nearest answer stays in the slot, and an engine taken out for the
+//! becomes a second panic on a lane thread or a caller's thread. What it
+//! leaves depends on where it escaped — an engine borrowed for a unit's hold
+//! or a nearest answer stays in the slot, and an engine taken out for the
 //! sidecar-damage rebuild is abandoned, which every later reader answers as
 //! the self-disabled state.
 
@@ -104,9 +115,9 @@ pub(crate) const SIDECAR_FILE: &str = "semantic.sqlite3";
 /// One vault's engine, or the typed reason it is not running.
 enum Slot {
     /// The delivered section enables the engine and none is open yet. The
-    /// sidecar open and the model setup are owed: they run as a lifecycle
-    /// slice once the publication that committed this delivery has been
-    /// made ([`SemanticEngines::work`]), never at the delivery itself.
+    /// sidecar open and the model setup are owed: they run as a background
+    /// unit once the publication that committed this delivery has been made
+    /// ([`SemanticEngines::unit`]), never at the delivery itself.
     Preparing,
     Running {
         /// `None` only when a panic escaped the sidecar-damage rebuild, which

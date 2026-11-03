@@ -798,7 +798,7 @@ impl<A: SnapshotSource> ProgressReporter<A> {
 
     /// Record `reading` as where this entry's lane-1 store stands: the reading
     /// a leg takes where its lane-1 work has committed, as it owes the
-    /// engine's slice, or at its end where it failed, and `None` where that reading
+    /// engine its work, or at its end where it failed, and `None` where that reading
     /// could not be taken.
     ///
     /// It is what `vault status` and `doctor` judge the engine's watermarks
@@ -8155,8 +8155,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                         // exactly as the release below publishes it. The
                         // maintenance then runs over a serving entry, as one
                         // the background scheduler starts does, so no quiet
-                        // slice it takes — a semantic slice the turn's commit
-                        // owed above all — stands between that commit and its
+                        // slice it takes stands between that commit and its
                         // publication.
                         state.publish_ready_where_nothing_is_left(handoff_saturated);
                         let next = state
@@ -27410,9 +27409,8 @@ mod tests {
 
     /// **A reconcile that leaves nothing to derive publishes `Ready` before
     /// it hands the claim to due maintenance.** The maintenance leg's quiet
-    /// work — a semantic slice the turn's commit owed among it — runs over a
-    /// serving entry, as a poll's maintenance does, so it never stands
-    /// between the turn's commit and that publication.
+    /// work runs over a serving entry, as the scheduler's maintenance does,
+    /// so it never stands between the turn's commit and that publication.
     #[test]
     fn a_reconcile_publishes_ready_before_handing_on_to_due_maintenance() {
         let ops = Arc::new(FakeOps::default());

@@ -42,11 +42,13 @@
 //!
 //! # Who calls this
 //!
-//! The host's composition: `norn-host` opens one engine per enabled vault on
-//! a lifecycle slice after the publication that committed its config
-//! delivery, runs bounded drain slices ([`Engine::drain_bounded`]) after the
-//! legs that commit lane-1 work have published, and answers vector-nearest
-//! through its semantic capability. [`Settings`] is the engine owning what its
+//! The host's composition: `norn-host` opens one engine per enabled vault as
+//! a background unit on its background lane, after the publication that
+//! committed its config delivery, drains it one step at a time
+//! ([`Engine::step`], [`PendingPage::embed`], [`Engine::commit`]) through a
+//! feed source of the delivery's own, holding no vault claim and no lock
+//! across an embedding, and answers vector-nearest through its semantic
+//! capability. [`Settings`] is the engine owning what its
 //! `[engine.semantic]` section means; the host hands the table over and
 //! defines nothing past the handoff. What does not exist yet is the layer
 //! that composes that capability into a running product — the serving
@@ -57,6 +59,8 @@
 //! # Where to start
 //!
 //! - [`Engine`] — open, drain, nearest; the whole surface.
+//! - [`DrainStep`] — one step of a drain, read in one snapshot, its bodies
+//!   embedded and committed apart from it.
 //! - [`SliceBudget`] — how much one bounded drain may do, in pages.
 //! - [`Watermarks`] and [`SidecarRevision`] — how far the engine has drained
 //!   against the store, and which sidecar state it answers from.
