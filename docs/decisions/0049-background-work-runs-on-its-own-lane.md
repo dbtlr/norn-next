@@ -3,7 +3,7 @@ status: proposed
 date: 2026-11-02
 ---
 
-# 0049 — Background work runs on its own lane and starts when it is owed, and only a bounded heal slice holds a vault's claim
+# 0049 — Background work that needs no claim runs on its own lane, claim-bound maintenance runs in legs bounded by time, and both start only when owed
 
 Supersedes [ADR 0048](0048-a-build-step-ends-at-its-closing-take.md) and restates it whole.
 ADR 0048 restated ADR 0045 whole and changed one rule, that each requeue takes once, which
@@ -17,19 +17,17 @@ wrote it:
   lane-1 commit and that commit's publication are replaced by the section
   [Background work runs on its own lane](#background-work-runs-on-its-own-lane).
 - **The known limit of *A read waits for the facts it met*.** The observation gap it
-  accepts now comes only from a claim-bound slice, and a settling read may wait behind one
-  such slice.
+  accepts now comes only from a maintenance leg, which the background turn budget bounds,
+  and a settling read may wait behind one such leg.
 
-Background work gets its own threads in `norn-host`, the **background lane**. The
-**background units** run there and nowhere else: an engine's initialization and feed
-consumption, the store's verification, the rolling heal and the shadow sweep. The shared
-worker pool keeps only correctness work and readiness work. A semantic background turn and
-the store's read-only verification hold no vault claim, so neither delays that vault's
-writes. The rolling heal, the shadow sweep and the full-text check still take the claim,
-each for one slice bounded by work and by time. A leg hands the claim to such a slice
-only where a lane thread is idle to start it at once, so a held claim never waits for a
-lane thread. The lane starts work when a wake or a
-deadline says it is owed, never on a poll tick. The section
+Background work is split by whether it needs the vault's claim. Work that needs no claim
+gets its own threads in `norn-host`, the **background lane**: an engine's initialization
+and feed consumption, and the store's read-only verification. Neither holds a vault claim,
+so neither delays that vault's writes, and long semantic work never takes a slot of the
+shared worker pool. Work that needs the claim stays in maintenance legs on the shared
+worker pool, as today: the rolling-heal slice, the shadow sweep and the full-text check. A
+maintenance leg now also ends at the background turn budget. Both kinds of work start when
+a wake or a deadline says they are owed, and no poll tick starts either. The section
 [Background work runs on its own lane](#background-work-runs-on-its-own-lane) records the
 change.
 
@@ -309,23 +307,25 @@ recorded going back with the next hold of the gate.**
 
 ### Known limit
 
-This limit is amended: the slice that opens the gap is a claim-bound slice, semantic work
-no longer opens one, and a settling read may wait behind one such slice.
+This limit is amended: the gap is opened by a maintenance leg, which the background turn
+budget now bounds, semantic work no longer opens one, and a settling read may wait behind
+one such leg.
 
-While a claim-bound slice holds the entry, the entry can stay `Ready` and not yet see an
+While a maintenance leg holds the entry, the entry can stay `Ready` and not yet see an
 edit made moments before, so a read in that window can miss that edit. This accepted
-observation gap is limited to one claim-bound slice, ended by its work bounds or by the
-background turn budget, whichever it reaches first, plus the one step in flight when it
-reaches the bound. Watcher batches drain before another slice starts. A semantic
-background turn and the store's read-only verification hold no claim and open no such
-window. The bound is not a promise of wall-clock duration for an individual filesystem
-operation.
+observation gap is limited to one maintenance leg. The leg ends when the background turn
+budget runs out, plus the one unit in flight at that moment, or earlier when its work is
+done. Watcher batches drain before another leg starts. A semantic background turn and the
+store's read-only verification hold no claim and open no such window. The bound is not a
+promise of wall-clock duration for an individual filesystem operation.
 
-The same slice is what a settling read can now wait behind. A read waiting for the facts
-it met may wait behind one claim-bound slice that a reconcile leg handed the claim to: the
-full-text check, or one step of the shadow sweep. That wait is shorter than the whole
-maintenance leg a read could wait behind under ADR 0048, which ran the sweep and the whole
-verification under the claim. The wait stays inside the read's bound.
+The same leg is what a settling read can now wait behind. A read waiting for the facts it
+met may wait behind one maintenance leg, whether a reconcile leg handed the claim to it or
+a deadline started it. The read waits for the rest of that leg: at most the rest of one
+rolling-heal slice, which ends at its existing work bounds or the budget, whichever it
+reaches first, the full-text check, and one sweep step. That wait is shorter than the
+maintenance leg a read could wait behind under ADR 0048, which ran the whole verification
+under the claim. The wait stays inside the read's bound.
 
 
 ## A from-zero build writes once, in steps
@@ -857,23 +857,32 @@ there when it is. Work that a leg with no such check leaves owed, such as an app
 hands on no reconcile, starts only at the next dispatcher poll tick whose watcher poll
 finds it due. Its latency then follows the tick interval rather than the work.
 
+The work splits by whether it needs the vault's claim. Semantic work and the store's
+read-only checks need none, and they are the work whose cost can reach seconds. The
+rolling heal, the shadow sweep and the full-text check need the claim, and each runs in
+bounded steps. This decision moves the first kind to its own threads and keeps the second
+on the worker pool under a time bound.
+
 ### The lane serves derived stores in background turns
 
 The background lane is a set of threads in `norn-host`, sized by the lifecycle policy
 value `LifecyclePolicy.background_threads`. It sits beside `worker_slots`, which sizes
 the shared worker pool, because the lifecycle owns that pool and the dispatcher, and so it
 is where the lane's scheduling lives. `LifecyclePolicy` has no library default: the
-composition root sets every value, and it sets `background_threads` to 1 in production. The lane holds the one
-host-wide background queue: a coalescing set of owed derived stores. A derived store, not
-a vault name or a root, is the key, as it is for the read budget, because two
-registrations over one root have two stores under
+composition root sets every value, and it sets `background_threads` to 1 in production.
+
+The lane runs **background units**, the background work that needs no claim: an engine's
+initialization, its feed and reconcile pages, and the store's read-only verification. The
+lane holds the one host-wide background queue: a coalescing set of owed derived stores. A
+derived store, not a vault name or a root, is the key, as it is for the read budget,
+because two registrations over one root have two stores under
 [ADR 0016](0016-maintainer-singleton-per-derived-store.md). The host-wide background
 budget is the lane's thread count. No background unit runs anywhere else, and no
 worker-pool job carries one.
 
 The background lane is not a derivation lane. It runs lane-2 work (engine consumption)
-and lane-1 work (the rolling heal's derivation and the verification of the lane-1 store)
-alike. The lane adds no crate and no dependency edge.
+and lane-1 work (the read-only verification of the lane-1 store) alike. The lane adds no
+crate and no dependency edge.
 
 A thread takes one derived store from the set and runs one **background turn** for it:
 units of that store's owed work until the background turn budget runs out or nothing is
@@ -882,11 +891,12 @@ set. One store with a large backlog therefore takes one background turn while ev
 owed store takes one, and it cannot starve them. At most one background turn runs for a
 derived store at a time.
 
-The shared worker pool keeps correctness work (reconciles, applies and heals) and
-readiness work (attach, the from-zero build, recovery, rebuild, detach and reload). The
-per-entry claim keeps ordering that lane-1 work exactly as it does now. The dispatcher
-keeps its tick for the watcher polls, the idle reap, the retry of refused dispatches and
-the trimming of idle readers. None of those is a background unit.
+The shared worker pool keeps correctness work (reconciles, applies and heals), readiness
+work (attach, the from-zero build, recovery, rebuild, detach and reload) and the
+maintenance legs that run the claim-bound slices. The per-entry claim keeps ordering that
+work exactly as it does now. The dispatcher keeps its tick for the watcher polls, the idle
+reap, the retry of refused dispatches and the trimming of idle readers. None of those
+starts background work.
 
 ### A background turn is bounded by time, with one unit as its floor
 
@@ -900,9 +910,7 @@ clock, so a budget too small for any unit shows as exactly one unit per backgrou
 A unit is the smallest step that is not interrupted:
 
 - for an engine, its initialization, or one feed page or one reconcile page of its drain;
-- for the store's read-only verification, the whole verification;
-- for a claim-bound slice, one step of that slice, such as one entry of the heal merge,
-  the full-text check, or one sweep of the shadow home.
+- for the store's read-only verification, the whole verification.
 
 One embedding is never interrupted, and neither is one page. The engine's page size is
 therefore what bounds the overrun of a semantic background turn.
@@ -925,10 +933,6 @@ rest:
 An interrupted verification reaches no verdict. It returns within one handler interval,
 or one document's recompute, after the mark is set.
 
-A claim-bound slice keeps its existing work bounds: 64 enumeration acts, 64 checked
-entries and 1 MiB of hashed content. It also takes the background turn budget. It ends
-at whichever bound it reaches first.
-
 A work bound alone does not fit a lane whose unit cost depends on the embedder. A bound
 sized for the stub gives background turns estimated at seconds under a real model. A
 bound sized for a real model makes a stub background turn mostly scheduling overhead. A time bound
@@ -937,40 +941,70 @@ progress.
 
 ### Work starts at a wake or a deadline, with no poll backstop
 
-The lane sleeps until a wake arrives or the earliest background deadline comes. The
-deadlines are:
+The **background scheduler** is one thread in `norn-host`. It keeps every background
+deadline, lane and claim-bound alike, and it receives every wake. It does no background
+work itself. It sleeps until a wake arrives or the earliest deadline comes, and then
+reads the owed flags and due clocks of each derived store:
 
-- a rolling heal due, or a rolling heal pass still in progress;
-- a store verification due, which comes due hourly for each of its two units;
-- a shadow sweep's age threshold reached.
+- Where a store owes lane work, the scheduler puts the store in the lane's set and wakes a
+  lane thread.
+- Where a claim-bound slice is due, the scheduler asks for a maintenance leg for the
+  store's entry, as the paragraph below describes.
 
-A store waiting for the claim contributes no deadline, as
-[The rolling heal, the shadow sweep and the full-text check keep the claim](#the-rolling-heal-the-shadow-sweep-and-the-full-text-check-keep-the-claim)
-rules.
+The deadlines are:
+
+- for the lane, a read-only verification due, hourly for each store;
+- for a maintenance leg, a rolling heal due or a rolling heal pass still in progress, a
+  full-text check due, hourly for each store, and a shadow sweep's age threshold reached.
+
+**The scheduler asks for a maintenance leg through the existing scheduling path.** It
+takes the entry's gate, as the dispatcher's retry does. Where the claim is free, no
+teardown is due and the entry owes no heal rung, it schedules a maintenance leg under the
+claim's scheduled marker and sends it to the worker pool, as a poll schedules one today.
+Where a full queue refuses the send, the marker stands with the claim held for it, and the
+dispatcher's retry of refused dispatches sends it. That retry sends a leg that was already
+scheduled. It never decides that maintenance is owed. Where the claim is held, the
+scheduler marks the entry as owing maintenance. A marked entry contributes no claim-bound
+deadline, so a rolling heal past its due time cannot wake the scheduler again and again
+for the length of a reconcile. The release of the claim on a marked entry wakes the
+scheduler, which asks again. A leg that hands the claim on to a maintenance leg clears the
+mark.
+
+**Leg ends keep asking `maintenance_due`, as today.** A reconcile leg that ends with
+maintenance due hands the claim on to a maintenance leg ahead of another reconcile turn,
+behind a queued apply and a due teardown. A maintenance leg that ends with maintenance
+still due schedules another, behind the reconcile its observed facts owe. The watcher poll
+stops scheduling maintenance. A poll that carries facts schedules their reconcile, and
+that reconcile's end hands on to due maintenance. The poll therefore no longer decides
+maintenance, and under sustained watcher traffic the fairness of maintenance holds.
 
 A wake is contentless. It says that something may be owed, and the owed flags and due
 clocks say what. These sites send one:
 
 - a commit that leaves an engine owing work;
-- the release of a claim while a claim-bound slice waits for it;
 - an engine that becomes ready to initialize, which is the publication that commits its
   delivery;
 - a publication that returns an entry's read stance from refuse to serve or settle with
   the same delivery and store lifetime, such as a recovery that did not rebuild, so the
   engine of an idle vault resumes feeding without waiting for a commit;
-- an attach.
+- an attach, which starts the entry's clocks;
+- the release of the claim on an entry marked as owing maintenance.
 
-The dispatcher's poll tick stops starting background work, and so does the end of a leg.
-A leg that used to schedule maintenance wakes the lane instead. The wake is host-internal
-and never travels on the filesystem event bus (invariant 9). The owed flags and due clocks
-stay authoritative, so a lost wake costs latency and never correctness, as
-[ADR 0047](0047-a-write-re-decides-only-the-links-whose-inputs-it-moved.md) rules for the
-feed. The latency lasts until the next wake from any site or the lane's next deadline.
+No poll tick starts background work, on the lane or in a maintenance leg. The wake is
+host-internal and never travels on the filesystem event bus (invariant 9). A wake sets a
+flag under the scheduler's lock, so a wake sent while the scheduler is busy is kept. The
+owed flags and due clocks stay authoritative, so a lost wake costs latency and never
+correctness, as [ADR 0047](0047-a-write-re-decides-only-the-links-whose-inputs-it-moved.md)
+rules for the feed. A wake is lost only where a site that owes one does not send it. The
+latency then lasts until the next wake from any site, the next deadline, or, for a
+maintenance leg, the entry's next leg end that asks `maintenance_due`. A marked entry has
+no deadline, so its latency has no time bound of its own.
 
 A detached vault gets no background work until its next attach. Outstanding background
 work holds no demand and never defers an idle detach. ADR 0048 ruled this for semantic
-work alone. This decision makes it the rule for every background unit. Remaining work
-resumes after a later attachment, under the then-current configuration and store.
+work alone. This decision makes it the rule for every background unit and every
+maintenance leg. Remaining work resumes after a later attachment, under the then-current
+configuration and store.
 
 ### Semantic work leaves the claim
 
@@ -1064,11 +1098,14 @@ A unit holds that lock for its read phase, its commit, a sidecar open or one rec
 page, never across an embedding or a model setup, and never for a whole background turn.
 The slot lock is a `std::sync::Mutex`, which promises no order among its waiters, so a
 lane thread that releases it could take it back ahead of a waiting search. The
-implementation therefore makes the lane yield the slot to a waiting search each time the
-lane would take the lock. For example, a search counts itself as waiting before it takes
-the lock, and a lane thread that finds the count above zero leaves the lock until the count
-falls back. A vector rung therefore waits behind at most one hold of the slot lock, and
-answers between units or between the phases of one.
+implementation therefore makes the lane yield the slot to the searches already waiting
+when the lane would take the lock, and never to a search that arrives later. For example,
+each search takes a ticket from a counter before it takes the lock, and marks its ticket
+served once it holds the lock. A lane thread reads the last ticket issued and leaves the
+lock until every search up to that ticket is served. A vector rung therefore waits behind
+at most one hold of the slot lock, and answers between units or between the phases of one.
+Continuous search delays the lane only by the searches that were waiting when the lane
+came to the lock.
 
 ### A result installs only while its delivery and store lifetime are current
 
@@ -1118,7 +1155,8 @@ lock, and retirement closes the feed connection before the removal.
 - Host shutdown starts no new unit, retires every delivery as above, and waits for each
   lane thread to end the unit it has in flight: at most one unit for each thread. A
   verification in flight is interrupted. A semantic unit in flight finishes its embedding
-  and then discards its page.
+  and then discards its page. A maintenance leg in flight ends as a worker-pool leg ends
+  at shutdown today.
 
 A background turn checks currency before each unit and stops at the first unit boundary
 after its delivery or store lifetime retires. A report the background turn writes into a
@@ -1126,20 +1164,12 @@ retired slot reaches no reader of a current delivery. A later initialization ove
 sidecar is a unit of the same derived store, so it starts only after the retired
 background turn's unit in flight ends.
 
-**An unwind out of a claim-free unit is caught at the lane's seam,** and the lane thread
-outlives it. The engine slot reads the unwind as an unwinding drain does today. An unwind
-during the embedding phase leaves the engine in its slot and commits nothing. An engine
-borrowed under the slot lock stays in its slot, and an engine taken out for its sidecar
-rebuild is abandoned and reads as self-disabled.
-
-**An unwind out of a claim-bound slice goes through the leg cleanup.** A claim-bound
-slice runs as a leg of its entry's claim. The lane's seam catches its unwind and runs the
-same one cleanup that reconciles an unwound leg today, the architecture's one cleanup at
-the seam that runs a leg: the leg's claim ends, its pin goes back, the coverage reaches
-`detach` through the release every teardown takes where the entry still holds it, and the
-entry stands untrusted for the unwind unless a park stands over it. Coverage the unwinding
-stack carried off is accounted as released there, and the ops' per-vault residue goes back
-through `discard`.
+**An unwind out of a unit is caught at the lane's seam,** and the lane thread outlives
+it. The engine slot reads the unwind as an unwinding drain does today. An unwind during
+the embedding phase leaves the engine in its slot and commits nothing. An engine borrowed
+under the slot lock stays in its slot, and an engine taken out for its sidecar rebuild is
+abandoned and reads as self-disabled. An unwind out of a maintenance leg goes through the
+cleanup that reconciles an unwound worker-pool leg today.
 
 ### The store's verification splits in two
 
@@ -1160,10 +1190,10 @@ outside the request read budget, and closes when the verification ends.
 
 **The full-text check stays on the claim.** `INSERT INTO documents_fts(documents_fts,
 rank) VALUES ('integrity-check', 1)` is a write. It takes the write lock on any connection
-that runs it, so it runs as a claim-bound slice of one step on the background lane, hourly,
-as it does today. The implementation measures how long it holds the writer at 10,000
-documents. A hold at human scale, about 100 ms of write delay or more, is a defect to fix,
-not an accepted cost.
+that runs it, so it stays in the maintenance leg on the shared worker pool, hourly, as it
+runs today. It is one claim-bound slice and one unit, never interrupted. The
+implementation measures how long it holds the writer at 10,000 documents. A hold at human
+scale, about 100 ms of write delay or more, is a defect to fix, not an accepted cost.
 
 A damage verdict from either half enters the damage judgment that
 [Source reader acquisition](#source-reader-acquisition) gives damage a read meets. That
@@ -1181,72 +1211,41 @@ The read-only verification may hold a lane thread for its whole duration, once a
 per attachment. While it runs, the WAL cannot checkpoint past its snapshot. Both costs are
 accepted.
 
-### The rolling heal, the shadow sweep and the full-text check keep the claim
+### Claim-bound slices stay maintenance legs on the worker pool
 
-The rolling heal, the shadow sweep and the full-text check are **claim-bound slices**. A
-lane thread runs each one holding the vault's claim and its attachment, as the
-maintenance leg does today. Every claim-bound slice yields to a queued apply and waits
-while a teardown is due or the entry owes a heal rung. A slice of the full-text check is
-one step, the check itself. A slice of the shadow sweep is one step too: one sweep of the
-shadow home, which reads one directory. A slice of the rolling heal keeps its work bounds.
+The rolling heal, the shadow sweep and the full-text check need the vault's claim and its
+attachment. Each runs as a **claim-bound slice** in a maintenance leg on the shared worker
+pool, as today. A slice of the shadow sweep is one sweep of the shadow home, which reads
+one directory. A slice of the full-text check is the check itself. A slice of the rolling
+heal keeps its existing work bounds: 64 enumeration acts, 64 checked entries and 1 MiB of
+hashed content. A leg runs them in today's order: the sweep, then the full-text check,
+then one rolling-heal slice.
 
-The rolling heal also waits for a quiet entry: one that publishes `Ready` and has no
-pending watcher facts. These are its existing waits. The shadow sweep and the full-text
-check do not wait for a quiet entry, because a vault under continuous edits is never quiet
-and neither would run. Today every maintenance leg runs both, quiet or not, and
-the architecture promises that shadow cleanup and store verification keep their fairness
-under sustained watcher traffic. The hand-on below keeps that promise.
+Their waits stay as they are. A queued apply takes the claim before a maintenance leg
+begins. The rolling-heal slice runs only over a quiet entry: one that publishes `Ready`,
+owes no heal rung, and has no queued apply, no pending watcher facts and no teardown due.
+The shadow sweep and the full-text check do not wait for a quiet entry, because a vault
+under continuous edits is never quiet and neither would run. Today a maintenance leg runs
+each of them whenever its clock is due, quiet or not. The architecture promises that
+shadow cleanup and store verification keep their fairness under sustained watcher traffic.
+The reconcile leg's hand-on to due maintenance, ahead of another reconcile turn, keeps
+that promise, as it does today.
 
-**A held claim never waits for a lane thread.** A lane thread gets a vault's claim in one
-of two ways:
+**A maintenance leg takes the background turn budget.** The leg checks the budget between
+units and always runs at least one. A unit of a maintenance leg is one sweep, the
+full-text check, or one step of a rolling-heal slice, such as one entry of the heal merge.
+The rolling-heal slice ends at its work bounds or at the budget, whichever it reaches
+first. A maintenance leg therefore holds the claim and one worker slot for at most its
+budget plus one unit. The longest unit is the full-text check, whose length the
+implementation measures. The leg counts its units beside its clock, as a background turn
+does. A leg that ends with maintenance still due schedules another, as
+[Work starts at a wake or a deadline](#work-starts-at-a-wake-or-a-deadline-with-no-poll-backstop)
+rules.
 
-- **It takes a free claim itself.** A thread whose background turn reaches a due
-  claim-bound slice over a free claim takes the claim, as a dispatch takes a free entry,
-  and starts the slice at once.
-- **A leg hands the claim on to it.** A leg that ends with a claim-bound slice due, over an
-  entry that meets that slice's waits, hands the claim on to the slice ahead of another
-  reconcile turn, as a reconcile leg hands the claim on to due maintenance today. It does
-  so only where a lane thread is idle to start the slice at once.
-
-The hand-on works like this. The lane keeps its idle threads in a set. Under the entry's
-lock, the ending leg reserves one idle thread by taking it out of that set. Where it gets
-one, it hands the claim on under a scheduled marker that names the slice, and gives the
-marker to the reserved thread. A reserved thread takes no other work, so it starts the
-slice at once. Only that thread takes the marker. The dispatcher's tick never sends it, and
-no worker-pool job runs it. Where the leg gets no thread, it hands the claim on as it would
-have: to another reconcile turn, to a queued apply, or to the release. The slice stays due.
-No claim is therefore ever held for a claim-bound slice that has not started. The claim
-crosses to a thread that is already free, and the slice starts as the thread takes it.
-
-The facts that the leg's last reconcile turn observed wait in the pending set while the
-slice runs. When the slice ends, its thread hands the claim on as a leg does: to the
-reconcile those facts owe, to a queued apply, or to the release. The thread then goes back
-to the idle set.
-
-**A slice that found no thread gets the next free one.** A leg that finds no idle thread
-records a reservation request for its store. A lane thread that ends a background turn
-serves a standing request before it takes another store from the queue: it reserves
-itself for that store and waits, idle. The vault's next leg end then hands the claim to
-it, and where the claim is released instead, the release wakes it and it takes the free
-claim. A claim-bound slice is therefore delayed by at most one reconcile turn after a lane
-thread is free, behind any applies queued ahead of it, as maintenance is today. A thread
-inside a read-only verification is not free until the verification ends, so with one lane
-thread the delay can include the rest of one verification.
-
-A reservation lapses where the claim goes to readiness work (an attach, a recovery, a
-rebuild, a detach or a reload) or a teardown comes due, because none of those ends within a
-reconcile turn. The reserved thread goes back to the idle set, and the slice stays due. A
-reserved thread therefore waits idle for at most one reconcile turn and the applies queued
-ahead of the slice.
-
-A thread never blocks on a busy claim. A claim-bound slice that finds the claim held marks
-its store as waiting for the claim, which is a reservation request, and the thread moves
-on to other work. An entry marked for a scheduled job counts as held, as the claim already
-treats it. A store's claim-free units can run in that same background turn. A store marked
-waiting has no deadline until a leg end or the claim's release serves it, so a rolling
-heal past its due time cannot wake the lane again and again for the length of a reconcile.
-When the claim is free, a store's background turn runs its claim-bound slice before its
-claim-free units: lexical correctness first, as today.
+The shared worker pool now runs correctness work, readiness work and these maintenance
+legs. A maintenance leg can therefore take a slot that an attach or a reconcile of another
+vault needs, for at most its budget plus one unit. Long semantic work and the full
+verification never take a slot.
 
 ### Status reports embedding coverage
 
@@ -1283,27 +1282,32 @@ implementation decides how it keeps the counts. `EngineStatus::On` is
 - **Keep semantic work on the claim.** A real-model page blocks that vault's writes for
   its whole duration. It also widens the window in which a `Ready` vault does not see a
   recent edit to a page of embeddings. Rejected.
-- **Cap background jobs inside the shared worker pool.** A cap still lets a background job
-  occupy a slot that an attach or a reconcile of another vault needs. Background work keeps
-  taking correctness capacity, only less of it. Separate threads isolate the two by
-  construction. Rejected.
+- **Keep semantic work and the read-only verification on the shared worker pool under a
+  cap.** A cap still lets a job that can last seconds occupy a slot that an attach or a
+  reconcile of another vault needs. Separate threads isolate the two by construction.
+  Rejected. Claim-bound slices stay on the pool because they need the claim, and the time
+  budget bounds the slot they hold.
+- **Run every background unit on the lane, the claim-bound slices included, with a
+  reserved-thread hand-on.** A leg would hand the claim to a slice only where it could
+  reserve an idle lane thread, so a held claim never waited for one. Without the
+  reservation, a held claim could wait for a lane thread, which can be inside another
+  store's whole verification. The reservation needed its own wake protocol, between leg
+  ends, claim releases and idle threads, and that protocol produced a lost wakeup.
+  Rejected.
 - **Let a background turn run only while its vault is quiet.** This is today's rule for
   semantic slices. Under continuous edits the vault is never quiet, so the engine never
   catches up, and nothing guarantees it ever will. Rejected.
-- **Keep a poll tick as a backstop beside the wakes.** A backstop is a second path that
-  hides a missing wake site. Tests keep passing while a site is missing, and the only
-  symptom is latency up to the tick interval. Without it, a missing wake site shows up as
-  owed work that does not start, which a test can see. Rejected.
+- **Keep a poll tick as a backstop beside the wakes.** This includes the watcher poll
+  that schedules due maintenance today. A backstop is a second path that hides a missing
+  wake site. Tests keep passing while a site is missing, and the only symptom is latency
+  up to the tick interval. Without it, a missing wake site shows up as owed work that does
+  not start, which a test can see. Rejected.
 - **Bound a background turn by work alone.** The cost of a unit depends on the embedder,
   so a work bound is wrong for one embedder or the other. Rejected.
 - **Let the maintainer lock's release wait for the unit in flight.** This is sound, but a
   detach would then wait for a whole page of embeddings, estimated at seconds under a real
   model.
   Taking the slot lock bounds the wait by one sidecar step instead. Rejected.
-- **Hand the claim on to a claim-bound slice whether or not a lane thread is free.** The
-  claim would then stay held while the lane finishes other work, which can be another
-  store's whole verification, and that vault's writes, reconciles and settling reads would
-  wait for a check of another vault. Rejected.
 - **Let the shadow sweep wait for a quiet entry.** Under continuous edits the sweep would
   never run, which breaks the fairness the architecture promises shadow cleanup. Rejected.
 - **Run the whole verification off the claim.** The full-text check is a write, so it
@@ -1315,7 +1319,8 @@ implementation decides how it keeps the counts. `EngineStatus::On` is
 
 The implementation lands in four sequential pull requests:
 
-1. the lane and its triggers;
+1. the lane, the background scheduler and their triggers, with maintenance legs started by
+   deadline and the budget on maintenance legs;
 2. semantic work off the claim;
 3. verification split, with its read-only half off the claim;
 4. embedding coverage in status.
@@ -1328,39 +1333,44 @@ change.
 `docs/architecture.md` that describe the behavior it changes:
 
 - Part I, *The heal ladder*: the paragraph on silent damage, which runs the verification as
-  lifecycle maintenance beside the shadow sweep. Its read-only checks become a claim-free
-  background unit, and its full-text check a claim-bound slice.
-- Part I, *The trust model*: the rolling-heal bullet. Its maintenance slices become
-  claim-bound slices on the background lane, and its promise that shadow cleanup and store
-  verification keep their fairness under sustained watcher traffic names the hand-on that
-  keeps it.
+  lifecycle maintenance beside the shadow sweep. Its read-only checks become a background
+  unit on the lane, and its full-text check stays in the maintenance leg.
+- Part I, *The trust model*: the rolling-heal bullet. Its maintenance slices stay
+  maintenance legs, bounded also by the background turn budget and started by a deadline
+  or a leg end rather than a poll. Its promise that shadow cleanup and store verification
+  keep their fairness under sustained watcher traffic names the reconcile leg's hand-on
+  that keeps it.
 - Part II, the crate map's `norn-semantic` row: the engine opens in a background unit, not
   a lifecycle slice, and its drain runs on the background lane through the delivery's feed
   connection, not in quiet maintenance.
-- Part II, the crate map's `norn-host` row: the background lane beside the worker pool, its
-  wakes and deadlines, owed work as background units rather than one quiet-maintenance unit
-  per leg, the install rule's test of delivery and store lifetime rather than of the claim,
-  and the coverage field in engine status.
+- Part II, the crate map's `norn-host` row: the background lane beside the worker pool,
+  the background scheduler with its wakes and deadlines, owed semantic work and
+  verification as background units rather than one quiet-maintenance unit per leg,
+  maintenance legs started by a deadline or a leg end and never by a poll, the install
+  rule's test of delivery and store lifetime rather than of the claim, and the coverage
+  field in engine status.
 - Part III, *Request flows*: the settling read's window under a maintenance scan becomes
-  the window under a claim-bound slice. The apply bullets that name a maintenance scan name
-  a claim-bound slice, and a leg hands the claim to one only with a reserved lane thread.
+  the window under one maintenance leg bounded by the background turn budget. The apply
+  bullets that name a maintenance scan name that bounded leg.
 
 These consequences are testable:
 
 - No semantic background turn feeds while its entry's stance is refuse.
-- Owed work starts without a poll tick.
+- Owed lane work starts without a poll tick.
+- A due claim-bound slice starts without a poll tick: at once over a free claim, and at
+  the claim's release where the claim was held when the slice came due, including after an
+  apply that hands on no reconcile.
+- A watcher poll never schedules a maintenance leg.
 - A background turn ends within its budget plus one unit, and a budget too small for any
   unit runs exactly one unit per background turn.
+- A maintenance leg ends within its budget plus one unit, and a budget too small for any
+  unit runs exactly one unit per leg.
 - One vault with a large backlog cannot starve another vault's background turns.
+- No worker-pool job runs a background unit.
 - An apply completes while its vault's semantic background turn is in flight.
-- With one lane thread inside another store's read-only verification, a leg whose
-  full-text check or sweep step is due hands the claim on as it would have, and that
-  vault's writes and reconciles proceed.
-- A leg hands the claim to a claim-bound slice only with a reserved lane thread, and the
-  slice starts without waiting for other work.
-- Under continuous edits, the full-text check and the shadow sweep each run within one
-  reconcile turn of a lane thread becoming free.
 - A write completes while its vault's read-only verification runs.
+- Under continuous edits, the full-text check and the shadow sweep each run within one
+  reconcile turn of coming due.
 - Each refusal of the install rule holds: a disable, a reload that replaces the section, a
   detach followed by a re-attach, and a store replacement each refuse a late
   initialization.
@@ -1369,7 +1379,8 @@ These consequences are testable:
 - A verification verdict over a replaced store schedules nothing.
 - A detach that meets a semantic unit in its embedding phase returns without waiting for
   the embedding, and that unit commits nothing.
-- A search waits behind at most one unit.
+- A search waits behind at most one unit, and under continuous search the lane still runs
+  its units.
 - Host shutdown waits for at most one unit for each lane thread, and interrupts a
   verification in flight.
 - `coverage` equals the true counts.
@@ -1382,8 +1393,8 @@ These costs are accepted:
 - With the production value of one thread, a read-only verification delays every other
   derived store's background turns for the length of one verification.
 - Each enabled engine holds one feed connection outside the request read budget.
-- A lane thread reserved for a claim-bound slice sits idle for up to one reconcile turn and
-  the applies queued ahead of the slice.
+- A maintenance leg holds the claim and one worker slot for at most the background turn
+  budget plus one unit. The full-text check is the longest such unit.
 - A semantic background turn's overrun is one page. The real-model runtime will have to
   size the page so that one page stays within human scale.
 

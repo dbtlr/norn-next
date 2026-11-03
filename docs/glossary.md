@@ -223,7 +223,7 @@ One of two maintenance disciplines for derived state. Lane 1 is deterministic pr
 _Avoid_: Sync/async indexing (unqualified)
 
 **Background lane**:
-The host's capacity for work no request waits on, kept apart from the capacity that serves writes and readiness so that it never takes theirs. It is not a derivation lane: it carries work of both lanes.
+The host's capacity for background work that needs no vault claim, kept apart from the capacity that serves writes, readiness and claim-bound maintenance so that it never takes theirs. It is not a derivation lane: it carries work of both lanes.
 _Avoid_: Worker, maintenance worker, lane 3
 
 **Engine**:
