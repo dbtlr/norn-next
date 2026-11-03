@@ -9750,7 +9750,7 @@ mod tests {
             fs::write(f.vault().join("note.md"), "status draft\n").unwrap();
             let (_engines, ops) = engines_and_ops(&f);
             let (host, name, _lease) = ready_host(&f, ops);
-            wait_for_engine(&host, &name, |engine| caught_up(engine));
+            wait_for_engine(&host, &name, caught_up);
             let drained = host.lane_reading().units;
             assert!(drained > 0, "the lane ran none of the engine's work");
             assert_eq!(
@@ -9801,7 +9801,7 @@ mod tests {
             let (_engines, ops) = engines_and_ops(&f);
             let (host, name, _lease) = polling_ready_host(&f, ops);
 
-            wait_for_engine(&host, &name, |engine| caught_up(engine));
+            wait_for_engine(&host, &name, caught_up);
             assert_eq!(engine_reported(&host, &name).0, EngineSection::enabled());
         }
 
@@ -9977,7 +9977,7 @@ mod tests {
             fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
             let (_engines, ops) = engines_and_ops(&f);
             let (host, name, _lease) = polling_ready_host(&f, ops);
-            wait_for_engine(&host, &name, |engine| caught_up(engine));
+            wait_for_engine(&host, &name, caught_up);
 
             let (section, engine) = engine_reported(&host, &name);
             assert_eq!(
@@ -10095,7 +10095,7 @@ mod tests {
             fs::write(f.vault().join("docs/alpha.md"), "alpha alpha\n").unwrap();
             let (_engines, ops) = engines_and_ops(&f);
             let (host, name, _lease) = polling_ready_host(&f, ops);
-            wait_for_engine(&host, &name, |engine| caught_up(engine));
+            wait_for_engine(&host, &name, caught_up);
             hold_the_sidecar(&f, &name);
 
             fs::write(f.vault().join("docs/beta.md"), "beta beta\n").unwrap();
@@ -10126,7 +10126,7 @@ mod tests {
             // reload is the only leg that meets the exhausted document open, and
             // the background lane still runs the engine's units.
             let (host, name, _lease, _armed, _) = overflowing_ready_host(&f);
-            wait_for_engine(&host, &name, |engine| caught_up(engine));
+            wait_for_engine(&host, &name, caught_up);
 
             let denied = f.vault().join("zz.md");
             let exhausted = exhausted_document(&denied);
@@ -10276,7 +10276,7 @@ mod tests {
             .unwrap();
             let lease = host.demand(&name).unwrap();
             wait_state(&host, &name, norn_wire::TrustState::Ready);
-            wait_for_engine(&host, &name, |engine| caught_up(engine));
+            wait_for_engine(&host, &name, caught_up);
             control
                 .active
                 .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -10333,7 +10333,7 @@ mod tests {
             fs::write(f.vault().join("alpha.md"), "alpha\n").unwrap();
             let (engines, ops) = engines_and_ops(&f);
             let (host, name, _lease) = polling_ready_host(&f, ops);
-            wait_for_engine(&host, &name, |engine| caught_up(engine));
+            wait_for_engine(&host, &name, caught_up);
             hold_the_sidecar(&f, &name);
             let SemanticStatus::On {
                 sidecar: before, ..
@@ -10402,7 +10402,7 @@ mod tests {
                 norn_db::Attempt::Unreadable { detail } => panic!("{detail}"),
             }
             fs::write(f.vault().join("gamma.md"), "gamma\n").unwrap();
-            wait_for_engine(&host, &name, |engine| caught_up(engine));
+            wait_for_engine(&host, &name, caught_up);
             assert_eq!(
                 engines.nearest(&name, "gamma", 10).unwrap().neighbors.len(),
                 3
@@ -10478,7 +10478,7 @@ mod tests {
             drop(script);
             // The rolling heal's commits owe the engine its work, which the
             // background lane carries, off the claim the legs held.
-            wait_for_engine(&host, &name, |engine| caught_up(engine));
+            wait_for_engine(&host, &name, caught_up);
         }
 
         /// Production ops whose poll reports a watcher overflow once the case
@@ -10743,7 +10743,7 @@ mod tests {
             fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
             fs::write(f.vault().join("a.md"), "alpha alpha\n").unwrap();
             let (host, name, _lease, armed, _) = overflowing_ready_host(&f);
-            wait_for_engine(&host, &name, |engine| caught_up(engine));
+            wait_for_engine(&host, &name, caught_up);
 
             fs::write(f.vault().join("a.md"), "beta beta\n").unwrap();
             fs::write(f.vault().join("b.md"), "gamma gamma\n").unwrap();
@@ -10776,7 +10776,7 @@ mod tests {
             fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
             fs::write(f.vault().join("a.md"), "alpha alpha\n").unwrap();
             let (host, name, _lease, armed, recoveries) = overflowing_ready_host(&f);
-            wait_for_engine(&host, &name, |engine| caught_up(engine));
+            wait_for_engine(&host, &name, caught_up);
 
             fs::write(f.vault().join("a.md"), "beta beta\n").unwrap();
             fs::write(f.vault().join("b.md"), "gamma gamma\n").unwrap();
@@ -10845,7 +10845,7 @@ mod tests {
             fs::write(f.vault().join("docs/alpha.md"), "alpha alpha\n").unwrap();
             let (engines, ops) = engines_and_ops(&f);
             let (host, name, _lease) = polling_ready_host(&f, ops);
-            wait_for_engine(&host, &name, |engine| caught_up(engine));
+            wait_for_engine(&host, &name, caught_up);
             let host = Arc::new(host);
             // Hold the next drain: it reports through the first receiver once
             // it has entered, and waits for the second to be sent to.
@@ -10905,7 +10905,7 @@ mod tests {
                 doctor.engines,
                 [norn_wire::EngineHealth::new(name.clone(), section, engine)]
             );
-            wait_for_engine(&host, &name, |engine| caught_up(engine));
+            wait_for_engine(&host, &name, caught_up);
         }
 
         /// **What an entry publishes and its engine are one instant**: an
@@ -11386,7 +11386,7 @@ mod tests {
                     norn_wire::EngineStatus::preparing()
                 )
             );
-            wait_for_engine(&host, &name, |engine| caught_up(engine));
+            wait_for_engine(&host, &name, caught_up);
         }
 
         /// **An edit's settling read is answered before the engine consumes
@@ -11400,7 +11400,7 @@ mod tests {
             fs::write(f.vault().join("alpha.md"), "alpha alpha\n").unwrap();
             let (engines, ops) = engines_and_ops(&f);
             let (host, name, _lease) = polling_ready_host(&f, ops);
-            wait_for_engine(&host, &name, |engine| caught_up(engine));
+            wait_for_engine(&host, &name, caught_up);
             let (entered, drain_entered) = std::sync::mpsc::channel();
             let (resume, drain_resumes) = std::sync::mpsc::channel::<()>();
             engines.run_inside_next_drain(move || {
@@ -11435,7 +11435,7 @@ mod tests {
                 ),
                 "the engine is reported caught up with an edit it has not drained: {engine:?}"
             );
-            wait_for_engine(&host, &name, |engine| caught_up(engine));
+            wait_for_engine(&host, &name, caught_up);
         }
 
         /// Write `count` documents `docs/000.md`, … each holding `alpha`.
@@ -11538,7 +11538,7 @@ mod tests {
                 Some(Ok(1)),
                 "the fact was not reconciled beside the backlog"
             );
-            wait_for_engine(&*host, &name, |engine| caught_up(engine));
+            wait_for_engine(&*host, &name, caught_up);
         }
 
         /// **A reconcile records the store reading and the owe before its
@@ -11558,7 +11558,7 @@ mod tests {
             fs::write(f.vault().join("alpha.md"), "alpha\n").unwrap();
             let (engines, ops) = engines_and_ops(&f);
             let (host, name, _lease) = polling_ready_host(&f, ops);
-            wait_for_engine(&host, &name, |engine| caught_up(engine));
+            wait_for_engine(&host, &name, caught_up);
             let (entered, unit_entered) = std::sync::mpsc::channel();
             let (resume, unit_resumes) = std::sync::mpsc::channel::<()>();
             engines.run_inside_next_drain(move || {
@@ -11612,7 +11612,7 @@ mod tests {
                 ),
                 "a status before the unit ran called the engine caught up: {engine:?}"
             );
-            wait_for_engine(&host, &name, |engine| caught_up(engine));
+            wait_for_engine(&host, &name, caught_up);
         }
 
         /// **Outstanding semantic work holds no idle lease**: a vault whose
@@ -11648,7 +11648,7 @@ mod tests {
 
             let _again = host.demand(&name).unwrap();
             wait_state(&host, &name, norn_wire::TrustState::Ready);
-            wait_for_engine(&host, &name, |engine| caught_up(engine));
+            wait_for_engine(&host, &name, caught_up);
             let answer = engines.nearest(&name, "alpha", 1000).expect("an answer");
             assert_eq!(answer.neighbors.len(), 600);
         }
@@ -11691,7 +11691,7 @@ mod tests {
             fs::write(f.vault().join("note.md"), "status draft\n").unwrap();
             let (engines, ops) = engines_and_ops(&f);
             let (host, name, _lease) = polling_ready_host(&f, ops);
-            wait_for_engine(&host, &name, |engine| caught_up(engine));
+            wait_for_engine(&host, &name, caught_up);
             let (embedding_entered, resume) = hold_next_embedding(&engines);
             fs::write(f.vault().join("beta.md"), "beta\n").unwrap();
             embedding_entered
@@ -11734,7 +11734,7 @@ mod tests {
                 fs::read_to_string(f.vault().join("note.md")).unwrap(),
                 "status final\n"
             );
-            wait_for_engine(&*host, &name, |engine| caught_up(engine));
+            wait_for_engine(&*host, &name, caught_up);
         }
 
         /// **A page whose delivery or store lifetime is no longer current when
@@ -12229,7 +12229,7 @@ mod tests {
             );
             let waited = engines.reading().most_lane_holds_a_search_waited;
             assert!(waited <= 1, "a search waited behind {waited} lane holds");
-            wait_for_engine(&host, &name, |engine| caught_up(engine));
+            wait_for_engine(&host, &name, caught_up);
         }
 
         /// **A search's vector rung waits behind at most one hold of the
@@ -12325,7 +12325,7 @@ mod tests {
             );
             let waited = engines.reading().most_lane_holds_a_vector_rung_waited;
             assert_eq!(waited, 1, "a vector rung waited behind {waited} lane holds");
-            wait_for_engine(&*host, &name, |engine| caught_up(engine));
+            wait_for_engine(&*host, &name, caught_up);
         }
 
         /// **Under continuous search the lane still runs its units, and no
@@ -12356,7 +12356,7 @@ mod tests {
                 })
                 .collect();
             let (host, name, _lease) = polling_ready_host(&f, ops);
-            wait_for_engine(&host, &name, |engine| caught_up(engine));
+            wait_for_engine(&host, &name, caught_up);
             stop.store(true, std::sync::atomic::Ordering::SeqCst);
             for searcher in searchers {
                 searcher.join().expect("a searcher");

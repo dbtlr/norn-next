@@ -486,6 +486,11 @@ impl Engine {
     ///    death or rebirth landing between them lands at a generation a
     ///    later page or the next drain presents.
     ///
+    /// Before each step's page, the census behind [`Engine::coverage`] reads at most
+    /// one page of each feed past its own positions in the same snapshot and
+    /// commits what moved, so the coverage counts describe the store state the
+    /// step read. A census still catching up owes another step.
+    ///
     /// Every page commits its writes and its advanced cursor in one sidecar
     /// transaction: progress recorded is exactly progress written, and a
     /// replayed page is an idempotent set of upserts and deletes.
