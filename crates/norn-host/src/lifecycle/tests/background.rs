@@ -225,13 +225,13 @@ fn the_scheduler_asks_once_per_wake_or_deadline_and_never_spins_on_a_held_claim(
 }
 
 /// **A detached entry contributes no deadline and gets no maintenance leg.**
-/// The release that left the entry unattached ended its clocks: the fake's
-/// clock comes due again and again after the detach, and nothing runs or
-/// wakes for it.
+/// The release that left the entry unattached ended its clocks: the clock the
+/// entry last read off its coverage, still ahead at the detach, comes due
+/// after it, and no deadline reaches the scheduler for it and nothing runs.
 #[test]
 fn a_detached_entry_contributes_no_deadline_and_gets_no_maintenance() {
     let ops = Arc::new(FakeOps::default());
-    *ops.maintenance_period.lock().unwrap() = Some(Duration::from_millis(20));
+    *ops.maintenance_period.lock().unwrap() = Some(Duration::from_millis(100));
     let (host, name, lease) = a_ready_vault(&ops);
     wait_for_maintenances(&ops, 1);
     drop(lease);
@@ -263,8 +263,7 @@ fn a_detached_entry_contributes_no_deadline_and_gets_no_maintenance() {
         )
     };
     let at_detach = detached();
-    *ops.maintenance_clock.lock().unwrap() = Some(Instant::now());
-    thread::sleep(Duration::from_millis(80));
+    thread::sleep(Duration::from_millis(250));
     assert_eq!(
         detached(),
         at_detach,
