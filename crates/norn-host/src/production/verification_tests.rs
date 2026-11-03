@@ -386,3 +386,24 @@ fn an_idle_vaults_verification_comes_due_again_at_each_deadline() {
     assert!(scheduler.deadlines >= 3, "{scheduler:?}");
     assert_eq!(host.maintenance_reading().legs, 0);
 }
+
+/// **A copy a crash left beside the store is gone once the attach is
+/// Ready**, before any verification of the store has run: the attach clears
+/// it, rather than leaving it on disk for an hour until the first
+/// verification clears the copy's place.
+#[test]
+fn a_copy_a_crash_left_is_cleared_at_attach() {
+    let f = Fixture::new("verification-leftover-at-attach");
+    write_a_vault_of_documents(&f, 4);
+    let derived = ConfigDirs::new(f.root.join("config"), f.root.join("data"))
+        .unwrap()
+        .derived_dir(&f.registration().name);
+    fs::create_dir_all(&derived).unwrap();
+    let copy = derived.join(STORE_FILE).with_extension("verification-copy");
+    fs::write(&copy, b"a copy a crash left").unwrap();
+    let ops = fixture_ops(&f);
+    let verifications = Arc::clone(&ops.verifications);
+    let (_host, _name, _lease) = ready_host(&f, ops);
+    assert_eq!(verifications.reading().runs, 0);
+    assert!(!copy.exists(), "the attach left a crash's copy");
+}

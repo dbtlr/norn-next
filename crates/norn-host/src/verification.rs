@@ -128,8 +128,10 @@ impl StoreVerifications {
     /// A lifetime still bound is retired first, so a slot verifies one
     /// lifetime at a time; the attach and the rebuild that bind have each
     /// retired the lifetime before theirs already, and this finds none. A
-    /// leftover copy the environment will not let go is left for the next
-    /// verification, which clears the copy's place before it writes.
+    /// rebuild's discard has removed the copy already; an attach over a store
+    /// it opened as it stood meets a crash's copy only here. A leftover copy
+    /// the environment will not let go is left for the next verification,
+    /// which clears the copy's place before it writes.
     pub(crate) fn bind(&self, vault: &VaultName, source: VerificationSource) {
         let _ = source.discard_copy();
         let slot = Arc::clone(
