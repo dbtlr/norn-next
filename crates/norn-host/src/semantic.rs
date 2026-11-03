@@ -88,8 +88,9 @@
 //! out for the sidecar-damage rebuild is abandoned, which every later reader
 //! answers as the self-disabled state.
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 
 use norn_config::ConfigDirs;
@@ -688,6 +689,9 @@ struct EngineSlot {
     /// Holds of the slot lock the lane has taken, which is what a search's
     /// wait is counted in.
     lane_holds: AtomicU64,
+    /// Whether the lane holds the slot lock now: the hold a search taking its
+    /// ticket waits behind first.
+    lane_holding: AtomicBool,
 }
 
 impl EngineSlot {
@@ -702,6 +706,7 @@ impl EngineSlot {
             binding: Mutex::new(Binding::default()),
             tickets: Tickets::default(),
             lane_holds: AtomicU64::new(0),
+            lane_holding: AtomicBool::new(false),
         })
     }
 
@@ -723,7 +728,7 @@ impl EngineSlot {
 
     /// Take the slot lock for the lane: after every search already waiting
     /// for it has held it.
-    fn lane_lock(&self, engines: &SemanticEngines) -> MutexGuard<'_, Slot> {
+    fn lane_lock(&self, engines: &SemanticEngines) -> Held<'_> {
         if let Some(last) = self.tickets.lane_comes()
             && !engines.lane_skips_its_yield()
         {
@@ -734,27 +739,38 @@ impl EngineSlot {
         }
         let guard = tolerant(&self.slot);
         self.lane_holds.fetch_add(1, Ordering::SeqCst);
+        self.lane_holding.store(true, Ordering::SeqCst);
         if self.tickets.lane_holds() {
             engines.count(|reading| reading.lane_holds_ahead_of_a_waiting_search += 1);
         }
-        guard
+        Held {
+            slot: guard,
+            engine_slot: self,
+        }
     }
 
     /// Take the slot lock for a search, behind at most the one hold of the
     /// lane's already under way or about to begin.
+    ///
+    /// What it waited behind is counted in lane holds: the one under way when
+    /// it took its ticket, and any the lane began while it waited. The flag is
+    /// read before the count, and the lane counts a hold before it raises the
+    /// flag, so no hold is counted twice.
     fn search_lock(&self, engines: &SemanticEngines) -> MutexGuard<'_, Slot> {
         let mut ticket = self.tickets.issue();
+        let under_way = u64::from(self.lane_holding.load(Ordering::SeqCst));
         let before = self.lane_holds.load(Ordering::SeqCst);
         #[cfg(test)]
         engines.hooks.run_after_a_ticket();
         self.tickets.wait_behind_the_lane(ticket.number);
         let guard = tolerant(&self.slot);
         ticket.serve();
-        let waited = self.lane_holds.load(Ordering::SeqCst) - before;
+        let waited = under_way + (self.lane_holds.load(Ordering::SeqCst) - before);
         engines.count(|reading| {
             reading.most_lane_holds_a_search_waited =
                 reading.most_lane_holds_a_search_waited.max(waited);
         });
+        VECTOR_RUNG_WAITED.with(|rung| rung.set(rung.get().map(|sum| sum + waited)));
         guard
     }
 
@@ -785,7 +801,8 @@ impl EngineSlot {
     }
 }
 
-/// One hold of a slot, which writes the slot's report as the hold ends — on
+/// One hold of the lane's of a slot, which writes the slot's report as the
+/// hold ends — on
 /// every path out of it, an unwind included, so a panic that abandoned the
 /// engine is reported as the self-disabled state every later reader of the
 /// slot meets. A retired slot's report is left as the slot last stood: no
@@ -797,6 +814,7 @@ struct Held<'a> {
 
 impl Drop for Held<'_> {
     fn drop(&mut self) {
+        self.engine_slot.lane_holding.store(false, Ordering::SeqCst);
         if !self.engine_slot.retired() {
             *tolerant(&self.engine_slot.report) = read_slot(&self.slot);
         }
@@ -867,6 +885,15 @@ pub struct SemanticReading {
     /// Holds of a slot lock the lane took while a search that took its ticket
     /// before the lane came to the lock had not yet held it.
     pub lane_holds_ahead_of_a_waiting_search: u64,
+    /// The most lane holds one search's vector rung waited behind, across
+    /// every hold of the slot lock the rung took ([`SemanticEngines::vector_rung`]).
+    pub most_lane_holds_a_vector_rung_waited: u64,
+}
+
+thread_local! {
+    /// The lane holds the vector rung running on this thread has waited
+    /// behind so far, or `None` where no rung is running on it.
+    static VECTOR_RUNG_WAITED: Cell<Option<u64>> = const { Cell::new(None) };
 }
 
 /// The host's set of semantic engines, one delivery per attached vault and a
@@ -889,6 +916,29 @@ pub struct SemanticEngines {
 /// judged by its readers, not abandoned with the unwinding thread.
 fn tolerant<T>(lock: &Mutex<T>) -> MutexGuard<'_, T> {
     lock.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// `engine`'s `limit` nearest paths to `text` among those `admits`, with the
+/// reading they were taken under, sampled in the caller's hold of its slot.
+fn answer_nearest(
+    engine: &Engine,
+    text: &str,
+    limit: usize,
+    admits: impl Fn(&str) -> bool,
+) -> Result<SemanticAnswer, SemanticRefusal> {
+    let nearest =
+        engine
+            .nearest_among(text, limit, admits)
+            .map_err(|error| SemanticRefusal::Failed {
+                detail: engine_refusal_told(&error),
+            })?;
+    Ok(SemanticAnswer {
+        neighbors: nearest.neighbors,
+        model: engine.model().clone(),
+        sidecar: engine.revision(),
+        watermarks: engine.watermarks().clone(),
+        work: nearest.work,
+    })
 }
 
 /// What `slot` is doing, as a status read reports it.
@@ -984,6 +1034,23 @@ impl SemanticEngines {
         }
     }
 
+    /// Run one search's vector rung, `rung`, on this thread, and count the
+    /// lane holds every hold of a slot lock it takes waits behind: a rung
+    /// waits behind at most one, which
+    /// [`SemanticReading::most_lane_holds_a_vector_rung_waited`] records.
+    pub(crate) fn vector_rung<T>(&self, rung: impl FnOnce() -> T) -> T {
+        let outer = VECTOR_RUNG_WAITED.with(|waited| waited.replace(Some(0)));
+        let answered = rung();
+        let waited = VECTOR_RUNG_WAITED
+            .with(|waited| waited.replace(outer))
+            .unwrap_or(0);
+        self.count(|reading| {
+            reading.most_lane_holds_a_vector_rung_waited =
+                reading.most_lane_holds_a_vector_rung_waited.max(waited);
+        });
+        answered
+    }
+
     /// The section reading the last config delivery handed `vault`, or `None`
     /// where no delivery stands for it — the vault is not attached, or was
     /// detached since.
@@ -1070,26 +1137,43 @@ impl SemanticEngines {
         limit: usize,
         admits: impl Fn(&str) -> bool,
     ) -> Result<SemanticAnswer, SemanticRefusal> {
+        self.with_engine(vault, |engine| answer_nearest(engine, text, limit, admits))
+    }
+
+    /// The nearest paths to `text` in `vault`, restricted as `restrict`
+    /// decides from the engine's own watermarks, with the restriction and the
+    /// reading they were taken under; or `restrict`'s own refusal, or the
+    /// typed refusal that no engine answers.
+    ///
+    /// **One hold of the slot lock**: the watermarks the restriction is drawn
+    /// from and the scan it bounds are one sample of the slot, so a search's
+    /// vector rung waits behind at most one hold of the lane's. `restrict`
+    /// runs only where an engine stands, so a refused rung draws no
+    /// restriction; it answers how many rows the scan holds and what the scan
+    /// scores a path by, through `admits`.
+    pub(crate) fn nearest_restricted<R, E>(
+        &self,
+        vault: &VaultName,
+        text: &str,
+        restrict: impl FnOnce(&Watermarks) -> Result<(usize, R), E>,
+        admits: impl Fn(&R, &str) -> bool,
+    ) -> Result<Result<(SemanticAnswer, R), E>, SemanticRefusal> {
         self.with_engine(vault, |engine| {
-            let nearest = engine.nearest_among(text, limit, admits).map_err(|error| {
-                SemanticRefusal::Failed {
-                    detail: engine_refusal_told(&error),
-                }
-            })?;
-            Ok(SemanticAnswer {
-                neighbors: nearest.neighbors,
-                model: engine.model().clone(),
-                sidecar: engine.revision(),
-                watermarks: engine.watermarks().clone(),
-                work: nearest.work,
-            })
+            let (limit, restriction) = match restrict(engine.watermarks()) {
+                Ok(restricted) => restricted,
+                Err(refused) => return Ok(Err(refused)),
+            };
+            let answer = answer_nearest(engine, text, limit, |path| admits(&restriction, path))?;
+            Ok(Ok((answer, restriction)))
         })
     }
 
     /// Whether an engine stands for `vault` here and now and, where one does,
     /// how far it had drained each feed; or the refusal a nearest answer would
     /// meet instead, read through the lookup a nearest answer takes. A reading
-    /// and not a reservation: the answer that follows samples the slot again.
+    /// and not a reservation: an early hold reads it in place of the rung it
+    /// does not sample, and a rung that answers samples the slot once, in
+    /// [`SemanticEngines::nearest_restricted`].
     pub(crate) fn standing(&self, vault: &VaultName) -> Result<Watermarks, SemanticRefusal> {
         self.with_engine(vault, |engine| Ok(engine.watermarks().clone()))
     }
@@ -1118,7 +1202,7 @@ impl SemanticEngines {
             }) => Arc::clone(slot),
         };
         let held = slot.search_lock(self);
-        match &*held {
+        let answered = match &*held {
             Slot::Preparing => Err(SemanticRefusal::Preparing),
             Slot::Running {
                 engine: Some(engine),
@@ -1130,7 +1214,11 @@ impl SemanticEngines {
             Slot::SelfDisabled { detail } => Err(SemanticRefusal::SelfDisabled {
                 detail: detail.clone(),
             }),
-        }
+        };
+        drop(held);
+        #[cfg(test)]
+        self.hooks.run_after_a_search_hold();
+        answered
     }
 
     /// Record that a leg holding `vault`'s attachment may have committed
@@ -1195,10 +1283,7 @@ impl SemanticEngines {
         let Some(serial) = engine_slot.current() else {
             return BackgroundUnit::NothingOwed;
         };
-        let mut held = Held {
-            slot: engine_slot.lane_lock(self),
-            engine_slot: &engine_slot,
-        };
+        let mut held = engine_slot.lane_lock(self);
         match &mut *held.slot {
             Slot::Preparing => {
                 drop(held);
@@ -1247,10 +1332,7 @@ impl SemanticEngines {
         self.hooks.run_before_install();
         let sidecar = self.dirs.derived_dir(vault).join(SIDECAR_FILE);
         let installed = {
-            let mut held = Held {
-                slot: engine_slot.lane_lock(self),
-                engine_slot,
-            };
+            let mut held = engine_slot.lane_lock(self);
             let current =
                 engine_slot.current() == Some(serial) && matches!(&*held.slot, Slot::Preparing);
             if current {
@@ -1349,10 +1431,7 @@ impl SemanticEngines {
         self.hooks.run_inside_embedding();
         let embedded = pending.embed();
 
-        let mut held = Held {
-            slot: engine_slot.lane_lock(self),
-            engine_slot,
-        };
+        let mut held = engine_slot.lane_lock(self);
         let current = engine_slot.current() == Some(serial);
         let Slot::Running {
             engine: Some(running),
@@ -1687,6 +1766,7 @@ pub(crate) mod tests {
         lane_yield: Mutex<Option<Arranged>>,
         page_read: Mutex<Option<Arranged>>,
         feed_out: Mutex<Option<Arranged>>,
+        search_hold: Mutex<Option<Arranged>>,
         /// While set, no vault's engine owes work, so nothing starts a unit.
         owed_work_held: std::sync::atomic::AtomicBool,
         /// While set, the lane takes a slot lock without yielding to the
@@ -1746,6 +1826,10 @@ pub(crate) mod tests {
 
         pub(super) fn run_with_the_feed_out(&self) {
             run(&self.feed_out);
+        }
+
+        pub(super) fn run_after_a_search_hold(&self) {
+            run(&self.search_hold);
         }
     }
 
@@ -1822,6 +1906,12 @@ pub(crate) mod tests {
         /// holds the slot.
         pub(crate) fn run_after_next_page_read(&self, arranged: impl FnOnce() + Send + 'static) {
             *tolerant(&self.hooks.page_read) = Some(Box::new(arranged));
+        }
+
+        /// Run `arranged` once, in the next search to hold a slot's lock, as
+        /// soon as it has let the lock go.
+        pub(crate) fn run_after_next_search_hold(&self, arranged: impl FnOnce() + Send + 'static) {
+            *tolerant(&self.hooks.search_hold) = Some(Box::new(arranged));
         }
 
         /// Run `arranged` once, the next time the lane waits for a search's

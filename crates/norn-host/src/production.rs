@@ -11641,7 +11641,8 @@ mod tests {
                 ops.maintain_quiet(&name, &mut attachment, quiet, &mut turn, &progress)
                     .expect("a maintenance leg");
             }
-            ops.maintain(&name, &mut attachment).expect("the maintenance call");
+            ops.maintain(&name, &mut attachment)
+                .expect("the maintenance call");
 
             assert_eq!(
                 engines.reading().units,
@@ -11924,6 +11925,97 @@ mod tests {
             let waited = engines.reading().most_lane_holds_a_search_waited;
             assert!(waited <= 1, "a search waited behind {waited} lane holds");
             wait_for_engine(&host, &name, |engine| {
+                *engine == norn_wire::EngineStatus::on(None, Some(Freshness::trailing(0)))
+            });
+        }
+
+        /// **A search's vector rung waits behind at most one hold of the
+        /// lane's**, counted through `Host::search` across every hold of the
+        /// slot lock the rung takes. The rung takes its ticket while the lane
+        /// holds the lock to commit a page, so it waits behind that hold;
+        /// once it has let the lock go the lane holds it again, for the next
+        /// unit's read phase, and a rung that took the lock a second time
+        /// would wait behind that hold too.
+        #[test]
+        fn a_vector_rung_waits_behind_at_most_one_hold_of_the_lane() {
+            use std::sync::mpsc::channel;
+            let f = Fixture::new("semantic-rung-one-hold");
+            fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+            many_documents(&f, 600);
+            let (engines, ops) = engines_and_ops(&f);
+            let (embedding_entered, resume_embedding) = hold_next_embedding(&engines);
+            let (host, name, _lease) = polling_ready_host(&f, ops);
+            let host = Arc::new(host);
+            embedding_entered
+                .recv_timeout(Duration::from_secs(15))
+                .expect("the lane to embed the backlog's first page");
+
+            // The lane comes back for the lock to commit, and holds it.
+            let (committing, lane_commits) = channel();
+            let (commit_goes, commit_resumes) = channel::<()>();
+            engines.run_as_next_drain_ends(move || {
+                committing.send(()).unwrap();
+                let _ = commit_resumes.recv_timeout(Duration::from_secs(30));
+            });
+            resume_embedding.send(()).unwrap();
+            lane_commits
+                .recv_timeout(Duration::from_secs(15))
+                .expect("the lane to hold the lock for its commit");
+
+            // The rung takes its ticket behind that hold, and stops once it
+            // has let the lock go.
+            let (ticketed, ticket_taken) = channel();
+            engines.run_after_next_ticket(move || ticketed.send(()).unwrap());
+            let (let_go, search_let_go) = channel();
+            let (search_goes, search_resumes) = channel::<()>();
+            engines.run_after_next_search_hold(move || {
+                let_go.send(()).unwrap();
+                let _ = search_resumes.recv_timeout(Duration::from_secs(30));
+            });
+            let searching = Arc::clone(&host);
+            let vault = name.clone();
+            let search = thread::spawn(move || {
+                let params =
+                    norn_wire::SearchParams::new(norn_wire::VaultAddress::name(vault), "alpha")
+                        .with_rungs(norn_wire::RungSelection::exactly(
+                            norn_wire::RungSet::of([norn_wire::Rung::Vector]).unwrap(),
+                        ));
+                searching.search(&params).map(|_| ())
+            });
+            ticket_taken
+                .recv_timeout(Duration::from_secs(15))
+                .expect("the rung to take its ticket");
+
+            // The lane's next unit holds the lock for its read phase.
+            let (reading, lane_reads) = channel();
+            let (read_goes, read_resumes) = channel::<()>();
+            engines.run_inside_next_drain(move || {
+                reading.send(()).unwrap();
+                let _ = read_resumes.recv_timeout(Duration::from_secs(30));
+            });
+            commit_goes.send(()).unwrap();
+            search_let_go
+                .recv_timeout(Duration::from_secs(15))
+                .expect("the rung to hold the lock and let it go");
+            lane_reads
+                .recv_timeout(Duration::from_secs(15))
+                .expect("the lane to hold the lock for its next read phase");
+
+            // A rung that takes the lock again takes another ticket behind
+            // that hold; one that answered in one hold takes none.
+            let (ticketed_again, second_ticket) = channel();
+            engines.run_after_next_ticket(move || ticketed_again.send(()).unwrap());
+            search_goes.send(()).unwrap();
+            let _ = second_ticket.recv_timeout(Duration::from_secs(3));
+            read_goes.send(()).unwrap();
+            search
+                .join()
+                .expect("the search")
+                .expect("the vector rung answers");
+
+            let waited = engines.reading().most_lane_holds_a_vector_rung_waited;
+            assert_eq!(waited, 1, "a vector rung waited behind {waited} lane holds");
+            wait_for_engine(&*host, &name, |engine| {
                 *engine == norn_wire::EngineStatus::on(None, Some(Freshness::trailing(0)))
             });
         }

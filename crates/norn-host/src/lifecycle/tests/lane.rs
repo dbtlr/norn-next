@@ -407,7 +407,12 @@ fn damage_a_feed_read_meets_after_the_stance_refuses_schedules_nothing() {
     assert_eq!(ops.rebuilds.load(Ordering::SeqCst), 0);
     let entry = host.shared.entries.get(&name).unwrap();
     assert!(
-        entry.gate.lock().unwrap().damage_met_under_a_claim.is_none(),
+        entry
+            .gate
+            .lock()
+            .unwrap()
+            .damage_met_under_a_claim
+            .is_none(),
         "the verdict was carried for a later publication"
     );
     drop((leases, host));
@@ -432,7 +437,9 @@ fn damage_a_feed_read_meets_during_a_rebuild_schedules_no_second_rebuild() {
 
     // A read meets the damage first, and its rebuild is under way.
     ops.block_rebuild.store(true, Ordering::SeqCst);
-    let hold = host.begin_read(&name).expect("a ready entry answers a read");
+    let hold = host
+        .begin_read(&name)
+        .expect("a ready entry answers a read");
     host.withdraw_for_read_damage(&hold, "the store is damaged".to_string());
     drop(hold);
     wait_for_flag("rebuild_started", &ops.rebuild_started);
@@ -448,7 +455,12 @@ fn damage_a_feed_read_meets_during_a_rebuild_schedules_no_second_rebuild() {
     );
     let entry = host.shared.entries.get(&name).unwrap();
     assert!(
-        entry.gate.lock().unwrap().damage_met_under_a_claim.is_none(),
+        entry
+            .gate
+            .lock()
+            .unwrap()
+            .damage_met_under_a_claim
+            .is_none(),
         "a stale verdict is carried to the end of the rebuild"
     );
     drop((leases, host));
