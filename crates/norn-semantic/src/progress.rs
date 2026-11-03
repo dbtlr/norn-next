@@ -16,7 +16,7 @@
 
 use norn_db::rusqlite::Connection;
 
-use crate::census::Counts;
+use crate::census::{Counts, Coverage};
 use crate::ddl;
 use crate::error::EngineError;
 
@@ -212,11 +212,35 @@ pub(crate) fn read(connection: &Connection) -> Result<Recorded, Unread> {
         }
         Err(error) => return Err(classify(error)),
     };
+    counts.last_whole = read_last_whole(connection)?;
     Ok(Recorded {
         revision,
         watermarks,
         counts,
     })
+}
+
+/// The last whole count, recorded as both of its counts or neither.
+fn read_last_whole(connection: &Connection) -> Result<Option<Coverage>, Unread> {
+    let read = |key: &str| match norn_db::meta::read_meta::<i64>(connection, key) {
+        Ok(None) => Ok(None),
+        Ok(Some(recorded)) => u64::try_from(recorded).map(Some).map_err(|_| {
+            Unread::Damaged(format!(
+                "the recorded `{key}` count {recorded} is below zero"
+            ))
+        }),
+        Err(error) => Err(classify(error)),
+    };
+    match (
+        read(ddl::meta::CENSUS_LAST_WHOLE_TOTAL)?,
+        read(ddl::meta::CENSUS_LAST_WHOLE_EMBEDDED)?,
+    ) {
+        (Some(total), Some(embedded)) => Ok(Some(Coverage { embedded, total })),
+        (None, None) => Ok(None),
+        _ => Err(Unread::Damaged(
+            "the sidecar records half of a last whole count".to_string(),
+        )),
+    }
 }
 
 /// A driver refusal of a progress read, split by the substrate's one damage

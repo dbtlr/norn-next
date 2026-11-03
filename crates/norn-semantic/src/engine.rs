@@ -80,13 +80,6 @@ pub struct Engine {
     /// engine opened afresh starts on the document feed, which a step passes
     /// through to the tombstones when it has nothing to present.
     tombstones_turn: bool,
-    /// The counts the census left when it last stopped being whole, which is
-    /// what [`Engine::coverage`] answers while it catches up; `None` where it
-    /// has been whole in no step since this engine opened, and once a reset
-    /// has emptied it for a new store epoch. Held in memory only: the
-    /// recorded counts are the last whole ones where an engine opens over
-    /// counts recorded whole, and none are where they were recorded part way.
-    last_complete: Option<Coverage>,
 }
 
 /// What one drain did, in rows.
@@ -352,7 +345,6 @@ impl Engine {
             outcome,
             recorded,
             tombstones_turn: false,
-            last_complete: None,
         })
     }
 
@@ -390,14 +382,11 @@ impl Engine {
     /// census last read both feeds to their ends; `None` until both counts
     /// have been taken whole. A census still catching up over a burst wider
     /// than its page answers what it last counted whole, and so does an
-    /// engine reopened over counts recorded whole. A census catching up over
-    /// a new store epoch or a fresh sidecar has no whole count to answer.
+    /// engine reopened part way through that catch-up: the sidecar records
+    /// the last whole count. A census catching up over a new store epoch or a
+    /// fresh sidecar has no whole count to answer.
     pub fn coverage(&self) -> Option<Coverage> {
-        if self.recorded.counts.whole {
-            Some(self.recorded.counts.coverage())
-        } else {
-            self.last_complete
-        }
+        self.recorded.counts.answer()
     }
 
     /// The model this engine embeds with. The sidecar records it — opening
@@ -438,7 +427,6 @@ impl Engine {
             }),
             recorded,
             tombstones_turn: false,
-            last_complete: None,
         })
     }
 
@@ -621,12 +609,6 @@ impl Engine {
         // A step that reads nothing past counts left part way, by a page
         // that ended exactly at a feed's end, still records them whole.
         if !pages.is_empty() || advance.complete != self.recorded.counts.whole {
-            if pages.reset {
-                // The last whole count describes another database.
-                self.last_complete = None;
-            } else if self.recorded.counts.whole && !advance.complete {
-                self.last_complete = Some(self.recorded.counts.coverage());
-            }
             let model = self.embedder.model().clone();
             let mut counts = self.recorded.counts;
             let transaction = self

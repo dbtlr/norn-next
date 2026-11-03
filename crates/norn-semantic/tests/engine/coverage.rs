@@ -475,13 +475,13 @@ fn a_count_catching_up_over_a_burst_answers_the_last_whole_count() {
     assert_eq!(coverage, recount(&mut store, &engine));
 }
 
-/// **A reopened engine answers its last whole count while it catches up.**
-/// The sidecar's counts were last whole when the engine closed; a burst
-/// wider than one census page lands while it is closed, and the reopened
-/// engine answers that whole count, at open and after the step that reads
-/// the burst's first page, until the census is whole again.
+/// **An engine opened after a burst landed while it was closed answers its
+/// last whole count.** The sidecar's counts were whole when the engine
+/// closed; a burst wider than one census page lands while it is closed, and
+/// the reopened engine answers that whole count, at open and after the step
+/// that reads the burst's first page, until the census is whole again.
 #[test]
-fn a_reopened_engine_answers_its_last_whole_count_while_it_catches_up() {
+fn an_engine_opened_after_a_burst_landed_answers_its_last_whole_count() {
     let scratch = Scratch::new("coverage-reopen-burst");
     let mut store = scratch.store();
     write_numbered(&mut store, 3);
@@ -497,5 +497,79 @@ fn a_reopened_engine_answers_its_last_whole_count_while_it_catches_up() {
 
     let coverage = settled(&mut engine, &mut store);
     assert_eq!(coverage.total, 1_103, "{coverage:?}");
+    assert_eq!(coverage, recount(&mut store, &engine));
+}
+
+/// **An engine reopened part way through a catch-up answers the last whole
+/// count.** A burst wider than one census page lands while the engine is
+/// open, and one step reads its first page, so the counts the sidecar holds
+/// are part way when the engine closes. The reopened engine answers the
+/// count last taken whole, neither nothing nor the part the census has read,
+/// until its next step reads the burst's last census page and counts whole.
+#[test]
+fn an_engine_reopened_mid_catch_up_answers_the_last_whole_count() {
+    let scratch = Scratch::new("coverage-reopen-mid-burst");
+    let mut store = scratch.store();
+    write_numbered(&mut store, 3);
+    let mut engine = scratch.engine(CountingEmbedder::new());
+    let before = settled(&mut engine, &mut store);
+
+    write_burst(&mut store, 1_100);
+    one_step(&mut engine, &mut store);
+    assert_eq!(engine.coverage(), Some(before), "before the reopen");
+    drop(engine);
+
+    let mut engine = scratch.engine(CountingEmbedder::new());
+    assert_eq!(engine.coverage(), Some(before), "at open");
+    one_step(&mut engine, &mut store);
+    let whole = engine.coverage().expect("the next step counts whole");
+    assert_eq!(whole.total, 1_103, "{whole:?}");
+
+    let coverage = settled(&mut engine, &mut store);
+    assert_eq!(coverage.total, 1_103, "{coverage:?}");
+    assert_eq!(coverage, recount(&mut store, &engine));
+}
+
+/// **A rescan clears the last whole count a burst's catch-up left.** A burst
+/// wider than one census page leaves a last whole count while the census
+/// catches up; the store is then rebuilt from zero over more than one census
+/// page, and the step that reads the new epoch's first page answers no count,
+/// never the old epoch's last whole one.
+#[test]
+fn a_rescan_clears_the_last_whole_count_a_burst_left() {
+    let scratch = Scratch::new("coverage-burst-then-rescan");
+    let mut store = scratch.store();
+    write_numbered(&mut store, 3);
+    let mut engine = scratch.engine(CountingEmbedder::new());
+    let before = settled(&mut engine, &mut store);
+    write_burst(&mut store, 1_100);
+    one_step(&mut engine, &mut store);
+    assert_eq!(
+        engine.coverage(),
+        Some(before),
+        "the burst left a last whole count"
+    );
+    assert_eq!(settled(&mut engine, &mut store).total, 1_103);
+
+    let mut store = store
+        .discard_and_reopen(norn_store::StoredPathOrder::Sensitive)
+        .expect("a store rebuilt from zero");
+    write_numbered(&mut store, 1_200);
+    one_step(&mut engine, &mut store);
+    assert_eq!(
+        engine.coverage(),
+        None,
+        "the new epoch is not yet counted whole"
+    );
+    drop(engine);
+    let mut engine = scratch.engine(CountingEmbedder::new());
+    assert_eq!(
+        engine.coverage(),
+        None,
+        "a reopen answers no old count either"
+    );
+
+    let coverage = settled(&mut engine, &mut store);
+    assert_eq!(coverage.total, 1_200, "{coverage:?}");
     assert_eq!(coverage, recount(&mut store, &engine));
 }

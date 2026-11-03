@@ -18,8 +18,8 @@
 //! that has a whole vault or a large burst to read catches up over several
 //! steps; until it does, the engine answers the counts its last complete
 //! reading left, and the step owes another. Whether the recorded counts are
-//! whole is recorded beside them, so an engine opened afresh answers the last
-//! whole count too. A store epoch the census was not taken in empties it and
+//! whole, and the last whole count while they are not, are recorded beside
+//! them, so an engine opened afresh answers the last whole count too. A store epoch the census was not taken in empties it and
 //! clears that last whole count, so a rescan never carries a count across two
 //! databases: until the new epoch is counted whole, there is no count to
 //! answer. A sidecar rebuilt from zero starts with an empty census, as it
@@ -68,6 +68,10 @@ pub(crate) struct Counts {
     /// ends, so the counts are exact at its snapshot, moved since only by
     /// the drain's vector rows. Emptied counts are not whole.
     pub(crate) whole: bool,
+    /// The counts as they stood when they last stopped being whole, which is
+    /// what a status answers while the census catches up; `None` where the
+    /// counts have not yet been whole in the census's store epoch.
+    pub(crate) last_whole: Option<Coverage>,
 }
 
 impl Counts {
@@ -81,11 +85,35 @@ impl Counts {
         }
     }
 
+    /// The counts a status answers: these where they are whole, else the
+    /// last whole ones.
+    pub(crate) fn answer(self) -> Option<Coverage> {
+        if self.whole {
+            Some(self.coverage())
+        } else {
+            self.last_whole
+        }
+    }
+
     /// Record the counts in `transaction`, beside the rows that moved them.
     pub(crate) fn put(self, transaction: &Connection) -> Result<(), EngineError> {
         norn_db::meta::put_meta(transaction, ddl::meta::CENSUS_TOTAL, self.total)?;
         norn_db::meta::put_meta(transaction, ddl::meta::CENSUS_EMBEDDED, self.embedded)?;
         norn_db::meta::put_meta(transaction, ddl::meta::CENSUS_WHOLE, i64::from(self.whole))?;
+        let (total, embedded) = (
+            ddl::meta::CENSUS_LAST_WHOLE_TOTAL,
+            ddl::meta::CENSUS_LAST_WHOLE_EMBEDDED,
+        );
+        match self.last_whole {
+            Some(last) => {
+                norn_db::meta::put_meta(transaction, total, clamp(last.total))?;
+                norn_db::meta::put_meta(transaction, embedded, clamp(last.embedded))?;
+            }
+            None => {
+                norn_db::meta::delete_meta(transaction, total)?;
+                norn_db::meta::delete_meta(transaction, embedded)?;
+            }
+        }
         Ok(())
     }
 
@@ -159,6 +187,13 @@ impl Counts {
             - i64::from(held.as_deref() == Some(counted.as_str()));
         Ok(())
     }
+}
+
+/// A count as the sidecar's integer column records it. A count comes from a
+/// recorded count that read at or above zero, so it fits; the clamp only
+/// keeps the conversion total.
+fn clamp(count: u64) -> i64 {
+    i64::try_from(count).unwrap_or(i64::MAX)
 }
 
 /// What one census step read.
@@ -261,7 +296,10 @@ impl Pages {
     /// Apply the pages in `transaction`, moving `counts` row by row, and
     /// record the census's positions, its store epoch, the counts and
     /// whether they are now whole. A reset empties the counts, which are then
-    /// whole only where this one step read both feeds to their ends.
+    /// whole only where this one step read both feeds to their ends, and
+    /// clears the last whole count, which describes another database. A step
+    /// that leaves whole counts part way records them as the last whole
+    /// count, so an engine opened while the census catches up answers it too.
     pub(crate) fn apply(
         &self,
         transaction: &Connection,
@@ -269,6 +307,14 @@ impl Pages {
         store_epoch: &str,
         counts: &mut Counts,
     ) -> Result<(), EngineError> {
+        let complete = self.advance().complete;
+        let last_whole = if self.reset {
+            None
+        } else if counts.whole && !complete {
+            Some(counts.coverage())
+        } else {
+            counts.last_whole
+        };
         if self.reset {
             transaction
                 .execute("DELETE FROM census", [])
@@ -287,7 +333,8 @@ impl Pages {
         for (_, path) in &self.tombstones {
             counts.census_remove(transaction, model, path)?;
         }
-        counts.whole = self.advance().complete;
+        counts.whole = complete;
+        counts.last_whole = last_whole;
         if let Some((last, _, _)) = self.documents.last() {
             norn_db::meta::put_meta(
                 transaction,

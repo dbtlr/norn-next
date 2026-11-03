@@ -142,4 +142,13 @@ pub(crate) mod meta {
     /// `0`, and set to `0` by every census step that empties the census or
     /// stops short of a feed's end.
     pub(crate) const CENSUS_WHOLE: &str = "census_whole";
+    /// The `total` count as it stood when the counts last stopped being
+    /// whole, which a status answers while [`CENSUS_WHOLE`] is `0`. Absent,
+    /// with [`CENSUS_LAST_WHOLE_EMBEDDED`], until the counts first stop being
+    /// whole in the census's store epoch, and removed by the census step that
+    /// empties the census for a new one.
+    pub(crate) const CENSUS_LAST_WHOLE_TOTAL: &str = "census_last_whole_total";
+    /// The `embedded` count beside [`CENSUS_LAST_WHOLE_TOTAL`], recorded and
+    /// removed with it.
+    pub(crate) const CENSUS_LAST_WHOLE_EMBEDDED: &str = "census_last_whole_embedded";
 }
