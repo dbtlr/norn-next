@@ -83,12 +83,13 @@
 //! Every slot lock tolerates poison: a panic that escaped the engine never
 //! becomes a second panic on a lane thread or a caller's thread. What it
 //! leaves depends on where it escaped — an engine borrowed for a unit's hold
-//! or a nearest answer stays in the slot, and an engine taken out for the
-//! sidecar-damage rebuild is abandoned, which every later reader answers as
-//! the self-disabled state.
+//! or a nearest answer stays in the slot, the feed source a unit had out goes
+//! back to the binding ([`FeedOut`]), the work stays owed, and an engine taken
+//! out for the sidecar-damage rebuild is abandoned, which every later reader
+//! answers as the self-disabled state.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 
 use norn_config::ConfigDirs;
@@ -602,6 +603,59 @@ impl Drop for Ticket<'_> {
     }
 }
 
+/// What a slot owes, kept so that no owe is lost to a unit that ran beside it.
+///
+/// **An owe is a generation, and a unit settles only the owes it saw.** A leg
+/// records an owe without the slot lock, so it can land while a unit is in
+/// any phase. A unit reads the owes recorded so far before its read phase
+/// takes its snapshot ([`Owed::seen`]), and where it ends with nothing more
+/// to do it settles those and no later one ([`Owed::settle`]): an owe a leg
+/// records after that snapshot, over work the snapshot did not see, stays
+/// owed. Every other way a unit ends — more owed, a refusal, damage, a page
+/// discarded, an unwind — settles nothing, so the work stays owed by default.
+struct Owed {
+    recorded: AtomicU64,
+    settled: AtomicU64,
+}
+
+impl Owed {
+    fn new(owed: bool) -> Self {
+        Owed {
+            recorded: AtomicU64::new(u64::from(owed)),
+            settled: AtomicU64::new(0),
+        }
+    }
+
+    /// Record that the slot owes a unit.
+    fn owe(&self) {
+        self.recorded.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// Whether an owe is recorded that no unit has settled. The settled count
+    /// is read first, so an owe recorded before this call and not settled is
+    /// never missed.
+    fn owes(&self) -> bool {
+        let settled = self.settled.load(Ordering::Acquire);
+        self.recorded.load(Ordering::Acquire) > settled
+    }
+
+    /// The owes recorded so far: what a unit reads before its snapshot.
+    fn seen(&self) -> u64 {
+        self.recorded.load(Ordering::Acquire)
+    }
+
+    /// Settle every owe up to `seen`, leaving any recorded after it owed.
+    fn settle(&self, seen: u64) {
+        self.settled.fetch_max(seen, Ordering::AcqRel);
+    }
+
+    /// Settle every owe recorded so far: a slot that took itself out of
+    /// service owes nothing until a delivery replaces it.
+    fn settle_all(&self) {
+        self.settle(self.seen());
+    }
+}
+
 /// One vault's engine slot, and the report of it a status reads.
 ///
 /// **The report is read without the slot's lock.** Every act that changes the
@@ -628,7 +682,7 @@ struct EngineSlot {
     /// or feed a leg may have committed past the engine's positions. Read
     /// without the slot's lock, so the scheduler's cheap check never waits
     /// behind a unit.
-    owed: AtomicBool,
+    owed: Owed,
     binding: Mutex<Binding>,
     tickets: Tickets,
     /// Holds of the slot lock the lane has taken, which is what a search's
@@ -639,7 +693,7 @@ struct EngineSlot {
 impl EngineSlot {
     fn new(slot: Slot, settings: Settings) -> Arc<Self> {
         let report = Arc::new(Mutex::new(read_slot(&slot)));
-        let owed = AtomicBool::new(matches!(slot, Slot::Preparing));
+        let owed = Owed::new(matches!(slot, Slot::Preparing));
         Arc::new(EngineSlot {
             slot: Mutex::new(slot),
             report,
@@ -743,6 +797,48 @@ impl Drop for Held<'_> {
     fn drop(&mut self) {
         if !self.engine_slot.retired() {
             *tolerant(&self.engine_slot.report) = read_slot(&self.slot);
+        }
+    }
+}
+
+/// A feed source out of its slot's binding for one hold of the slot lock,
+/// put back on every way out of that hold.
+///
+/// **An unwind inside the read phase leaves the feed connection with the
+/// engine**, as it leaves the engine in its slot: the guard returns the
+/// source to the binding as the stack unwinds, so the next unit reads the
+/// feed again. A source the binding no longer wants — its delivery retired
+/// or its lifetime replaced while it was out — goes to the displaced set on
+/// an unwind, which the next unit or detach closes outside every lock; on
+/// the ordinary path [`FeedOut::give_back`] answers it for the caller to
+/// close once the hold ends.
+struct FeedOut<'a> {
+    engines: &'a SemanticEngines,
+    slot: &'a EngineSlot,
+    serial: u64,
+    feed: Option<FeedSource>,
+}
+
+impl FeedOut<'_> {
+    fn source(&mut self) -> &mut FeedSource {
+        self.feed
+            .as_mut()
+            .expect("a feed out of its binding until it is given back")
+    }
+
+    /// Put the source back, or answer it to be closed outside every lock.
+    fn give_back(mut self) -> Option<FeedSource> {
+        let feed = self.feed.take()?;
+        self.slot.return_feed(self.serial, feed)
+    }
+}
+
+impl Drop for FeedOut<'_> {
+    fn drop(&mut self) {
+        if let Some(feed) = self.feed.take()
+            && let Some(closing) = self.slot.return_feed(self.serial, feed)
+        {
+            tolerant(&self.engines.displaced).push(closing);
         }
     }
 }
@@ -1027,7 +1123,7 @@ impl SemanticEngines {
     /// which the leg's wake starts.
     pub(crate) fn owe(&self, vault: &VaultName) {
         if let Some(slot) = self.slot(vault) {
-            slot.owed.store(true, Ordering::Release);
+            slot.owed.owe();
         }
     }
 
@@ -1044,7 +1140,7 @@ impl SemanticEngines {
             delivery
                 .slot
                 .as_ref()
-                .is_some_and(|slot| slot.owed.load(Ordering::Acquire) && slot.current().is_some())
+                .is_some_and(|slot| slot.owed.owes() && slot.current().is_some())
         })
     }
 
@@ -1077,7 +1173,7 @@ impl SemanticEngines {
         let Some(engine_slot) = self.slot(vault) else {
             return BackgroundUnit::NothingOwed;
         };
-        if !engine_slot.owed.load(Ordering::Acquire) {
+        if !engine_slot.owed.owes() {
             return BackgroundUnit::NothingOwed;
         }
         let Some(serial) = engine_slot.current() else {
@@ -1103,11 +1199,11 @@ impl SemanticEngines {
                 *slot = Slot::SelfDisabled {
                     detail: ABANDONED.to_string(),
                 };
-                engine_slot.owed.store(false, Ordering::Release);
+                engine_slot.owed.settle_all();
                 BackgroundUnit::NothingOwed
             }
             Slot::SelfDisabled { .. } => {
-                engine_slot.owed.store(false, Ordering::Release);
+                engine_slot.owed.settle_all();
                 BackgroundUnit::NothingOwed
             }
         }
@@ -1154,12 +1250,12 @@ impl SemanticEngines {
                         ),
                     },
                 };
-                // A running engine owes the drain that converges it; an
-                // engine that did not open owes nothing until a delivery.
-                engine_slot.owed.store(
-                    matches!(&*held.slot, Slot::Running { .. }),
-                    Ordering::Release,
-                );
+                // A running engine owes the drain that converges it, which
+                // the preparing slot's owe still records; an engine that did
+                // not open owes nothing until a delivery.
+                if matches!(&*held.slot, Slot::SelfDisabled { .. }) {
+                    engine_slot.owed.settle_all();
+                }
             }
             current
         };
@@ -1171,42 +1267,59 @@ impl SemanticEngines {
             }
         });
         BackgroundUnit::Ran {
-            owed: installed && engine_slot.owed.load(Ordering::Acquire),
+            owed: installed && engine_slot.owed.owes(),
         }
     }
 
     /// One step of a running engine, in the three phases
     /// [`SemanticEngines::unit`] states, its read phase run in `held`, the
     /// hold `unit` took.
+    ///
+    /// The owes the step answers for are those recorded before its read
+    /// phase takes its snapshot, and it settles them only where it ends with
+    /// nothing more owed ([`Owed`]).
     fn drain_step(&self, mut held: Held<'_>, serial: u64) -> BackgroundUnit {
         let engine_slot = held.engine_slot;
         #[cfg(test)]
         self.hooks.run_inside_drain();
-        let Some(mut feed) = engine_slot.take_feed(serial) else {
+        // The binding moved on since `unit` read it: a later unit runs for
+        // the lifetime that replaced it, or the delivery retired.
+        let Some(feed) = engine_slot.take_feed(serial) else {
             return BackgroundUnit::Ran { owed: false };
         };
-        let epoch = feed.epoch().to_string();
+        let mut feed = FeedOut {
+            engines: self,
+            slot: engine_slot,
+            serial,
+            feed: Some(feed),
+        };
+        let epoch = feed.source().epoch().to_string();
+        let seen = engine_slot.owed.seen();
+        #[cfg(test)]
+        self.hooks.run_with_the_feed_out();
         let step = match &mut *held.slot {
             Slot::Running {
                 engine: Some(running),
                 ..
-            } => match feed.page() {
+            } => match feed.source().page() {
                 Ok(mut page) => running.step(&mut page),
                 Err(refused) => Err(EngineError::Store(refused)),
             },
             _ => Ok(DrainStep::Done(norn_semantic::DrainReport::default())),
         };
-        let closing = engine_slot.return_feed(serial, feed);
+        let closing = feed.give_back();
+        #[cfg(test)]
+        self.hooks.run_after_page_read();
         let pending = match step {
             Ok(DrainStep::Embed(pending)) => pending,
             Ok(DrainStep::Done(report)) => {
-                let ended = self.ended(&mut held.slot, engine_slot, Ok(report.owed), &epoch);
+                let ended = self.ended(&mut held.slot, engine_slot, Ok(report.owed), &epoch, seen);
                 drop(held);
                 drop(closing);
                 return ended;
             }
             Err(error) => {
-                let ended = self.ended(&mut held.slot, engine_slot, Err(error), &epoch);
+                let ended = self.ended(&mut held.slot, engine_slot, Err(error), &epoch, seen);
                 drop(held);
                 drop(closing);
                 return ended;
@@ -1234,7 +1347,8 @@ impl SemanticEngines {
             return BackgroundUnit::Ran { owed: false };
         };
         if !current {
-            // Retired while it embedded: the page commits nothing.
+            // Retired while it embedded: the page commits nothing, and
+            // settles nothing, so a lifetime that replaced it is still owed.
             self.count(|reading| reading.pages_discarded += 1);
             return BackgroundUnit::Ran { owed: false };
         }
@@ -1243,17 +1357,20 @@ impl SemanticEngines {
             self.count(|reading| reading.pages_committed += 1);
         }
         let owed = committed.map(|report| report.owed);
-        self.ended(&mut held.slot, engine_slot, owed, &epoch)
+        self.ended(&mut held.slot, engine_slot, owed, &epoch, seen)
     }
 
     /// Record how a step ended on the slot it holds, and answer it to the
-    /// lane: whether more is owed, or the refusal or damage it met.
+    /// lane: whether more is owed, or the refusal or damage it met. `seen`
+    /// is the owes the step's snapshot answers for, which only a step that
+    /// leaves nothing more owed, or one that failed, settles.
     fn ended(
         &self,
         slot: &mut Slot,
         engine_slot: &EngineSlot,
         ended: Result<bool, EngineError>,
         epoch: &str,
+        seen: u64,
     ) -> BackgroundUnit {
         let Slot::Running {
             engine,
@@ -1263,10 +1380,14 @@ impl SemanticEngines {
             return BackgroundUnit::Ran { owed: false };
         };
         let answer = match ended {
-            Ok(owed) => {
+            Ok(more) => {
                 *last_drain_error = None;
-                engine_slot.owed.store(owed, Ordering::Release);
-                BackgroundUnit::Ran { owed }
+                if !more {
+                    engine_slot.owed.settle(seen);
+                }
+                BackgroundUnit::Ran {
+                    owed: engine_slot.owed.owes(),
+                }
             }
             Err(error) if error.sidecar_damage().is_some() => {
                 let taken = engine.take().expect("the engine this step ran on");
@@ -1275,8 +1396,7 @@ impl SemanticEngines {
                         *engine = Some(Box::new(rebuilt));
                         *last_drain_error = None;
                         // The rebuilt sidecar's reset cursors are the next
-                        // unit's to drain.
-                        engine_slot.owed.store(true, Ordering::Release);
+                        // unit's to drain: nothing is settled.
                         BackgroundUnit::Ran { owed: true }
                     }
                     Err(failed) => {
@@ -1287,7 +1407,7 @@ impl SemanticEngines {
                                 engine_refusal_told(&failed)
                             ),
                         };
-                        engine_slot.owed.store(false, Ordering::Release);
+                        engine_slot.owed.settle_all();
                         BackgroundUnit::Ran { owed: false }
                     }
                 }
@@ -1301,17 +1421,21 @@ impl SemanticEngines {
                         epoch: epoch.to_string(),
                         detail: crate::refusal::store_refusal_told(&error),
                     },
-                    // The environment refused the read: the work stays owed.
+                    // The environment refused the read: nothing is settled,
+                    // so the work stays owed.
                     None => BackgroundUnit::Refused,
                 }
             }
-            // A failed step owes nothing more until the next leg commits: the
-            // rows it did not write are still owed by the cursor, and a retry
-            // on every turn would only repeat the refusal.
+            // A failed step settles what it saw: the rows it did not write
+            // are still owed by the cursor, and a retry on every turn would
+            // only repeat the refusal. An owe a leg recorded after its
+            // snapshot is the next leg's commit, and is still owed.
             Err(error) => {
                 *last_drain_error = Some(engine_refusal_told(&error));
-                engine_slot.owed.store(false, Ordering::Release);
-                BackgroundUnit::Ran { owed: false }
+                engine_slot.owed.settle(seen);
+                BackgroundUnit::Ran {
+                    owed: engine_slot.owed.owes(),
+                }
             }
         };
         #[cfg(test)]
@@ -1402,7 +1526,7 @@ impl SemanticEngines {
             if retiring == Retiring::StoreLifetime {
                 *tolerant(&slot.report) = read_slot(&held);
                 if matches!(&*held, Slot::Preparing) {
-                    slot.owed.store(true, Ordering::Release);
+                    slot.owed.owe();
                 }
             }
             (engine, feed)
@@ -1545,6 +1669,8 @@ pub(crate) mod tests {
         install: Mutex<Option<Arranged>>,
         ticket: Mutex<Option<Arranged>>,
         lane_yield: Mutex<Option<Arranged>>,
+        page_read: Mutex<Option<Arranged>>,
+        feed_out: Mutex<Option<Arranged>>,
         /// While set, no vault's engine owes work, so nothing starts a unit.
         owed_work_held: std::sync::atomic::AtomicBool,
     }
@@ -1588,6 +1714,14 @@ pub(crate) mod tests {
 
         pub(super) fn run_as_the_lane_yields(&self) {
             run(&self.lane_yield);
+        }
+
+        pub(super) fn run_after_page_read(&self) {
+            run(&self.page_read);
+        }
+
+        pub(super) fn run_with_the_feed_out(&self) {
+            run(&self.feed_out);
         }
     }
 
@@ -1641,6 +1775,21 @@ pub(crate) mod tests {
         /// slot's lock: after the ticket is issued, before the lock is taken.
         pub(crate) fn run_after_next_ticket(&self, arranged: impl FnOnce() + Send + 'static) {
             *tolerant(&self.hooks.ticket) = Some(Box::new(arranged));
+        }
+
+        /// Run `arranged` once, inside the next drain step of any vault's
+        /// engine, while its read phase holds the slot with the feed source
+        /// out of the binding, before the page is read.
+        pub(crate) fn run_with_the_feed_next_out(&self, arranged: impl FnOnce() + Send + 'static) {
+            *tolerant(&self.hooks.feed_out) = Some(Box::new(arranged));
+        }
+
+        /// Run `arranged` once, inside the next drain step of any vault's
+        /// engine, once its read phase has read its page and ended the page's
+        /// snapshot, before the step records its outcome, while it still
+        /// holds the slot.
+        pub(crate) fn run_after_next_page_read(&self, arranged: impl FnOnce() + Send + 'static) {
+            *tolerant(&self.hooks.page_read) = Some(Box::new(arranged));
         }
 
         /// Run `arranged` once, the next time the lane waits for a search's

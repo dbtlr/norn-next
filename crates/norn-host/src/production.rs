@@ -11619,6 +11619,130 @@ mod tests {
             }
         }
 
+        /// **An unwind in a unit's read phase leaves the engine draining.**
+        /// The engine unwinds while its read phase holds the feed source out
+        /// of the binding; the engine stays in its slot, the source goes back
+        /// to it, and the work stays owed, so the units after a later commit
+        /// read the feed again and embed what it committed.
+        #[test]
+        fn an_unwind_in_the_read_phase_leaves_the_engine_draining() {
+            let f = Fixture::new("semantic-read-phase-unwind");
+            fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+            fs::create_dir_all(f.vault().join("docs")).unwrap();
+            fs::write(f.vault().join("docs/alpha.md"), "alpha alpha\n").unwrap();
+            let (engines, ops) = engines_and_ops(&f);
+            let name = f.registration().name;
+            let progress = ProgressReporter::disconnected();
+            let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+            settle(&engines, &name, &mut attachment);
+
+            engines.owe(&name);
+            engines.run_with_the_feed_next_out(|| panic!("the engine unwound mid-read"));
+            let unwound =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| engines.unit(&name)));
+            assert!(unwound.is_err(), "the read phase did not unwind");
+            assert!(
+                engines.owes_work(&name),
+                "the unwound unit settled the work it never did"
+            );
+
+            fs::write(f.vault().join("docs/beta.md"), "beta beta\n").unwrap();
+            ops.reconcile(
+                &name,
+                &mut attachment,
+                ReconcileWork {
+                    batch: norn_fs::Batch::rescan(RescanScope::Vault),
+                },
+                &progress,
+            )
+            .expect("the rescan reconcile");
+            for _ in 0..8 {
+                if engines.unit(&name) != (crate::BackgroundUnit::Ran { owed: true }) {
+                    break;
+                }
+            }
+            assert!(!engines.owes_work(&name), "the drain never settled");
+            let answer = engines.nearest(&name, "beta beta", 5).expect("an answer");
+            assert!(
+                answer
+                    .neighbors
+                    .iter()
+                    .any(|neighbor| neighbor.path == "docs/beta.md"),
+                "the engine never drained a commit after the unwind: {answer:?}"
+            );
+            ops.detach(&name, attachment);
+        }
+
+        /// **An owe a leg records after a unit's snapshot is not lost.** The
+        /// engine has drained everything and a leg that committed nothing
+        /// still owes it a look; the unit that look starts reads its page, and
+        /// before it records how it ended a reconcile commits a new document
+        /// and owes the engine again. The unit's outcome covers only what its
+        /// snapshot saw, so the engine still owes work after it, and the
+        /// units that follow embed the new document.
+        #[test]
+        fn an_owe_recorded_after_a_units_snapshot_is_not_lost() {
+            let f = Fixture::new("semantic-owe-after-snapshot");
+            fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+            fs::create_dir_all(f.vault().join("docs")).unwrap();
+            fs::write(f.vault().join("docs/alpha.md"), "alpha alpha\n").unwrap();
+            let (engines, ops) = engines_and_ops(&f);
+            let ops = Arc::new(ops);
+            let name = f.registration().name;
+            let mut attachment = ops
+                .attach(&f.registration(), &ProgressReporter::disconnected())
+                .unwrap();
+            settle(&engines, &name, &mut attachment);
+            assert!(!engines.owes_work(&name), "the engine settled");
+
+            engines.owe(&name);
+            let attachment = Arc::new(Mutex::new(attachment));
+            {
+                let (ops, attachment, name, vault) = (
+                    Arc::clone(&ops),
+                    Arc::clone(&attachment),
+                    name.clone(),
+                    f.vault(),
+                );
+                engines.run_after_next_page_read(move || {
+                    fs::write(vault.join("docs/beta.md"), "beta beta\n").unwrap();
+                    ops.reconcile(
+                        &name,
+                        &mut attachment.lock().unwrap(),
+                        ReconcileWork {
+                            batch: norn_fs::Batch::rescan(RescanScope::Vault),
+                        },
+                        &ProgressReporter::disconnected(),
+                    )
+                    .expect("the rescan reconcile");
+                });
+            }
+            engines.unit(&name);
+            assert!(
+                engines.owes_work(&name),
+                "the unit's outcome overwrote the owe the reconcile recorded"
+            );
+            for _ in 0..8 {
+                if engines.unit(&name) == crate::BackgroundUnit::NothingOwed {
+                    break;
+                }
+            }
+            let answer = engines.nearest(&name, "beta beta", 5).expect("an answer");
+            assert!(
+                answer
+                    .neighbors
+                    .iter()
+                    .any(|neighbor| neighbor.path == "docs/beta.md"),
+                "the committed document was never embedded: {answer:?}"
+            );
+            let attachment = Arc::try_unwrap(attachment)
+                .ok()
+                .expect("the hook let the attachment go")
+                .into_inner()
+                .unwrap();
+            ops.detach(&name, attachment);
+        }
+
         /// **A detach returns while a semantic unit is held in its
         /// embedding**, and that unit commits nothing. The detach waits for
         /// at most one hold of the slot lock, never for an embedding; the
