@@ -137,4 +137,9 @@ pub(crate) mod meta {
     /// the same hash. Seeded at zero and moved in every transaction that moves
     /// a census row or a vector row.
     pub(crate) const CENSUS_EMBEDDED: &str = "census_embedded";
+    /// `1` where the census step that last moved the census read both feeds
+    /// to their ends, so the two counts are whole; `0` otherwise. Seeded at
+    /// `0`, and set to `0` by every census step that empties the census or
+    /// stops short of a feed's end.
+    pub(crate) const CENSUS_WHOLE: &str = "census_whole";
 }

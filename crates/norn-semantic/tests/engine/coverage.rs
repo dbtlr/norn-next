@@ -279,9 +279,10 @@ fn a_rebuilt_sidecar_leaves_no_stale_count() {
     assert_eq!(coverage, recount(&mut store, &engine));
 }
 
-/// **A reopened engine counts nothing until it steps, and its first step over
-/// a quiescent store reads no census row.** The counts persist in the
-/// sidecar, so a reopen recounts nothing.
+/// **A reopened engine answers its last whole count before it steps, and its
+/// first step over a quiescent store reads no census row.** The counts and
+/// whether they were whole persist in the sidecar, so a reopen recounts
+/// nothing.
 #[test]
 fn a_reopened_engine_keeps_its_counts_without_recounting() {
     let scratch = Scratch::new("coverage-reopen");
@@ -292,7 +293,7 @@ fn a_reopened_engine_keeps_its_counts_without_recounting() {
     drop(engine);
 
     let mut engine = scratch.engine(CountingEmbedder::new());
-    assert_eq!(engine.coverage(), None);
+    assert_eq!(engine.coverage(), Some(before));
     let report = engine.drain(&mut store.feed_read()).expect("a drain");
     assert_eq!(report.censused, 0, "{report:?}");
     assert_eq!(engine.coverage(), Some(before));
@@ -379,4 +380,122 @@ fn a_census_behind_the_drain_owes_steps_until_it_is_whole() {
     assert_eq!(report.censused, 1_200, "{report:?}");
     assert_eq!(engine.coverage(), Some(before));
     assert_eq!(before, recount(&mut store, &engine));
+}
+
+/// Run one step over `store`'s current state, committing its page where the
+/// step hands one back to embed.
+fn one_step(engine: &mut Engine, store: &mut Store) {
+    let mut source = store.feed_source();
+    let step = engine
+        .step(&mut source.page().expect("a page"))
+        .expect("a step");
+    if let norn_semantic::DrainStep::Embed(pending) = step {
+        engine
+            .commit(pending.embed().expect("an embedding"))
+            .expect("a commit");
+    }
+}
+
+/// Write `count` documents `burst/0000.md`, … into `store`: more than one
+/// census page when `count` exceeds it.
+fn write_burst(store: &mut Store, count: usize) {
+    for serial in 0..count {
+        write_document(
+            store,
+            &document(
+                &format!("burst/{serial:04}.md"),
+                &format!("burst-{serial}"),
+                &format!("burst {serial}\n"),
+            ),
+        );
+    }
+}
+
+/// **A rescan answers no count until the new store lifetime is counted
+/// whole.** The store is rebuilt from zero over more documents than one
+/// census page, so the census's first step in the new lifetime empties it
+/// and reads one page; the old lifetime's whole count describes another
+/// database and is never answered for this one, by this engine or by one
+/// reopened over the same sidecar.
+#[test]
+fn a_rescan_answers_no_count_until_the_new_lifetime_is_counted_whole() {
+    let scratch = Scratch::new("coverage-rescan-wide");
+    let mut store = scratch.store();
+    write_numbered(&mut store, 1_200);
+    let mut engine = scratch.engine(CountingEmbedder::new());
+    assert_eq!(settled(&mut engine, &mut store).total, 1_200);
+
+    let mut store = store
+        .discard_and_reopen(norn_store::StoredPathOrder::Sensitive)
+        .expect("a store rebuilt from zero");
+    write_burst(&mut store, 1_100);
+    one_step(&mut engine, &mut store);
+    assert_eq!(
+        engine.coverage(),
+        None,
+        "the new lifetime is not yet counted whole"
+    );
+    drop(engine);
+    let mut engine = scratch.engine(CountingEmbedder::new());
+    assert_eq!(
+        engine.coverage(),
+        None,
+        "a reopen keeps no old count either"
+    );
+
+    let coverage = settled(&mut engine, &mut store);
+    assert_eq!(
+        coverage,
+        Coverage {
+            embedded: 1_100,
+            total: 1_100
+        }
+    );
+    assert_eq!(coverage, recount(&mut store, &engine));
+}
+
+/// **A count catching up over a burst answers the last whole count.** A
+/// settled count, then a burst wider than one census page: the step that
+/// reads the burst's first page answers what the census last counted whole,
+/// neither nothing nor the part it has read.
+#[test]
+fn a_count_catching_up_over_a_burst_answers_the_last_whole_count() {
+    let scratch = Scratch::new("coverage-burst");
+    let mut store = scratch.store();
+    write_numbered(&mut store, 3);
+    let mut engine = scratch.engine(CountingEmbedder::new());
+    let before = settled(&mut engine, &mut store);
+
+    write_burst(&mut store, 1_100);
+    one_step(&mut engine, &mut store);
+    assert_eq!(engine.coverage(), Some(before));
+
+    let coverage = settled(&mut engine, &mut store);
+    assert_eq!(coverage.total, 1_103, "{coverage:?}");
+    assert_eq!(coverage, recount(&mut store, &engine));
+}
+
+/// **A reopened engine answers its last whole count while it catches up.**
+/// The sidecar's counts were last whole when the engine closed; a burst
+/// wider than one census page lands while it is closed, and the reopened
+/// engine answers that whole count, at open and after the step that reads
+/// the burst's first page, until the census is whole again.
+#[test]
+fn a_reopened_engine_answers_its_last_whole_count_while_it_catches_up() {
+    let scratch = Scratch::new("coverage-reopen-burst");
+    let mut store = scratch.store();
+    write_numbered(&mut store, 3);
+    let mut engine = scratch.engine(CountingEmbedder::new());
+    let before = settled(&mut engine, &mut store);
+    drop(engine);
+
+    write_burst(&mut store, 1_100);
+    let mut engine = scratch.engine(CountingEmbedder::new());
+    assert_eq!(engine.coverage(), Some(before), "at open");
+    one_step(&mut engine, &mut store);
+    assert_eq!(engine.coverage(), Some(before), "after the first step");
+
+    let coverage = settled(&mut engine, &mut store);
+    assert_eq!(coverage.total, 1_103, "{coverage:?}");
+    assert_eq!(coverage, recount(&mut store, &engine));
 }

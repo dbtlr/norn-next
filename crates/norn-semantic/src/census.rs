@@ -17,9 +17,12 @@
 //! back short.** Each step reads at most one page of each feed, so a census
 //! that has a whole vault or a large burst to read catches up over several
 //! steps; until it does, the engine answers the counts its last complete
-//! reading left, and the step owes another. A store lifetime the census was
-//! not taken in empties it, so a rescan never carries a count across two
-//! databases. A sidecar rebuilt from zero starts with an empty census, as it
+//! reading left, and the step owes another. Whether the recorded counts are
+//! whole is recorded beside them, so an engine opened afresh answers the last
+//! whole count too. A store lifetime the census was not taken in empties it
+//! and clears that last whole count, so a rescan never carries a count across
+//! two databases: until the new lifetime is counted whole, there is no count
+//! to answer. A sidecar rebuilt from zero starts with an empty census, as it
 //! starts with empty cursors.
 //!
 //! The census lives in the sidecar because the sidecar is the engine's whole
@@ -55,11 +58,16 @@ pub struct Coverage {
     pub total: u64,
 }
 
-/// The two counts as the sidecar records them, adjusted row by row.
+/// The two counts as the sidecar records them, adjusted row by row, and
+/// whether they are whole.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct Counts {
     pub(crate) embedded: i64,
     pub(crate) total: i64,
+    /// The census step that last moved the census read both feeds to their
+    /// ends, so the counts are exact at its snapshot, moved since only by
+    /// the drain's vector rows. Emptied counts are not whole.
+    pub(crate) whole: bool,
 }
 
 impl Counts {
@@ -77,6 +85,7 @@ impl Counts {
     pub(crate) fn put(self, transaction: &Connection) -> Result<(), EngineError> {
         norn_db::meta::put_meta(transaction, ddl::meta::CENSUS_TOTAL, self.total)?;
         norn_db::meta::put_meta(transaction, ddl::meta::CENSUS_EMBEDDED, self.embedded)?;
+        norn_db::meta::put_meta(transaction, ddl::meta::CENSUS_WHOLE, i64::from(self.whole))?;
         Ok(())
     }
 
@@ -128,6 +137,13 @@ impl Counts {
     /// This engine's vector row at `path` is about to hold `input_hash`, or
     /// none where it is about to be removed. Called before the vector write
     /// it describes, in the same transaction.
+    ///
+    /// The removals (a reconcile's dead path, an unreadable read's or a
+    /// death's retraction) find no census row today: the census reads up to
+    /// a page of each feed before the drain's smaller page in the same step,
+    /// so it has already removed the path's row. They still call this,
+    /// because that holds only while the census reads first and at least as
+    /// far as the drain, and a count must not depend on it.
     pub(crate) fn vector_moves(
         &mut self,
         transaction: &Connection,
@@ -243,7 +259,9 @@ impl Pages {
     }
 
     /// Apply the pages in `transaction`, moving `counts` row by row, and
-    /// record the census's positions, its store lifetime and the counts.
+    /// record the census's positions, its store lifetime, the counts and
+    /// whether they are now whole. A reset empties the counts, which are then
+    /// whole only where this one step read both feeds to their ends.
     pub(crate) fn apply(
         &self,
         transaction: &Connection,
@@ -269,6 +287,7 @@ impl Pages {
         for (_, path) in &self.tombstones {
             counts.census_remove(transaction, model, path)?;
         }
+        counts.whole = self.advance().complete;
         if let Some((last, _, _)) = self.documents.last() {
             norn_db::meta::put_meta(
                 transaction,

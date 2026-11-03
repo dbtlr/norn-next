@@ -317,8 +317,9 @@ fn out_of_band(path: &std::path::Path, statement: &str) {
 }
 
 /// **Progress that will not read is a rebuild, not a refusal.** A sidecar
-/// recording no revision, or a watermark no reader of this build wrote, is a
-/// file this build did not write, and resolves by the rebuild floor.
+/// recording no revision, a watermark no reader of this build wrote, or census
+/// counts that are absent, below zero or neither whole nor part way, is a file
+/// this build did not write, and resolves by the rebuild floor.
 #[test]
 fn recorded_progress_that_will_not_read_is_rebuilt_from_zero() {
     for (label, statement) in [
@@ -337,6 +338,22 @@ fn recorded_progress_that_will_not_read_is_rebuilt_from_zero() {
         (
             "watermark-epoch",
             "INSERT INTO meta (key, value) VALUES ('document_watermark', '12:')",
+        ),
+        (
+            "no-census-total",
+            "DELETE FROM meta WHERE key = 'census_total'",
+        ),
+        (
+            "census-below-zero",
+            "UPDATE meta SET value = -1 WHERE key = 'census_embedded'",
+        ),
+        (
+            "no-census-whole",
+            "DELETE FROM meta WHERE key = 'census_whole'",
+        ),
+        (
+            "census-whole",
+            "UPDATE meta SET value = 2 WHERE key = 'census_whole'",
         ),
     ] {
         let scratch = Scratch::new(&format!("progress-unreadable-{label}"));

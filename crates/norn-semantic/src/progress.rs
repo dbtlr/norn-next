@@ -131,7 +131,8 @@ fn decode_watermark(key: &str, recorded: &str) -> Result<Watermark, String> {
 pub(crate) struct Recorded {
     pub(crate) revision: i64,
     pub(crate) watermarks: Watermarks,
-    /// The census counts as the last commit left them.
+    /// The census counts, and whether they are whole, as the last commit left
+    /// them.
     pub(crate) counts: Counts,
 }
 
@@ -195,6 +196,22 @@ pub(crate) fn read(connection: &Connection) -> Result<Recorded, Unread> {
             Err(error) => return Err(classify(error)),
         }
     }
+    let key = ddl::meta::CENSUS_WHOLE;
+    counts.whole = match norn_db::meta::read_meta::<i64>(connection, key) {
+        Ok(Some(0)) => false,
+        Ok(Some(1)) => true,
+        Ok(Some(recorded)) => {
+            return Err(Unread::Damaged(format!(
+                "the recorded `{key}` value {recorded} is neither 0 nor 1"
+            )));
+        }
+        Ok(None) => {
+            return Err(Unread::Damaged(format!(
+                "the sidecar records no `{key}` value"
+            )));
+        }
+        Err(error) => return Err(classify(error)),
+    };
     Ok(Recorded {
         revision,
         watermarks,
