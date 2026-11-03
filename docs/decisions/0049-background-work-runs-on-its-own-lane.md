@@ -1358,7 +1358,7 @@ moves adjusts the two counts in the same transaction. Each unit reads at most on
 page of each feed, beside its drain page. A count that has more rows to read than that,
 such as the first count of a vault or the count after a store rebuild, takes several units.
 Until it is whole the status reports the counts the census last took whole, and the sidecar
-records whether its counts are whole, so an engine opened again reports them too. A first
+records those last whole counts, so an engine opened again reports them too. A first
 count has no whole count to report, and neither does a count over a new store epoch: the
 census empties when the store epoch changes, so no count is carried from one database to
 another. `EngineStatus::On` is `#[non_exhaustive]`, so the new field is an additive
