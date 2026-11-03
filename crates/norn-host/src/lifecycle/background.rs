@@ -54,6 +54,8 @@ struct Signals {
 pub(super) struct Scheduler {
     signals: Mutex<Signals>,
     ready: Condvar,
+    #[cfg(test)]
+    before_sleep: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl Scheduler {
@@ -137,7 +139,19 @@ impl Scheduler {
 
     /// Record the earliest deadline the ask that just ended found, which is
     /// what the scheduler sleeps until where no wake arrives first.
+    #[cfg(test)]
+    pub(super) fn run_before_next_sleep(&self, hook: impl FnOnce() + Send + 'static) {
+        *self.before_sleep.lock().unwrap() = Some(Box::new(hook));
+    }
+
     pub(super) fn sleep_until(&self, earliest: Option<Instant>) {
+        #[cfg(test)]
+        {
+            let hook = self.before_sleep.lock().unwrap().take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
         self.signals().earliest = earliest;
     }
 

@@ -11788,6 +11788,75 @@ mod tests {
             ops.detach(&name, attachment);
         }
 
+        // A failure settles only the snapshot it attempted; a later commit still drains.
+        #[test]
+        fn an_owe_recorded_after_a_failed_units_snapshot_is_not_lost() {
+            let f = Fixture::new("semantic-owe-after-failed-snapshot");
+            fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+            fs::create_dir_all(f.vault().join("docs")).unwrap();
+            fs::write(f.vault().join("docs/alpha.md"), "alpha alpha\n").unwrap();
+            let (engines, ops) = engines_and_ops(&f);
+            let ops = Arc::new(ops);
+            let name = f.registration().name;
+            let mut attachment = ops
+                .attach(&f.registration(), &ProgressReporter::disconnected())
+                .unwrap();
+            settle(&engines, &name, &mut attachment);
+            assert!(!engines.owes_work(&name), "the engine settled");
+
+            engines.owe(&name);
+            let attachment = Arc::new(Mutex::new(attachment));
+            {
+                let (ops, attachment, name, vault) = (
+                    Arc::clone(&ops),
+                    Arc::clone(&attachment),
+                    name.clone(),
+                    f.vault(),
+                );
+                engines.run_after_next_page_read(move || {
+                    fs::write(vault.join("docs/beta.md"), "beta beta\n").unwrap();
+                    ops.reconcile(
+                        &name,
+                        &mut attachment.lock().unwrap(),
+                        ReconcileWork {
+                            batch: norn_fs::Batch::rescan(RescanScope::Vault),
+                        },
+                        &ProgressReporter::disconnected(),
+                    )
+                    .expect("the rescan reconcile");
+                });
+            }
+            engines.fail_next_step();
+            assert_eq!(
+                engines.unit(&name),
+                crate::BackgroundUnit::Ran { owed: true }
+            );
+            assert!(
+                engines.owes_work(&name),
+                "the unit's outcome overwrote the owe the reconcile recorded"
+            );
+            for _ in 0..8 {
+                if engines.unit(&name) == crate::BackgroundUnit::NothingOwed {
+                    break;
+                }
+            }
+            assert!(!engines.owes_work(&name), "the later owe never drained");
+            let answer = engines.nearest(&name, "beta beta", 5).expect("an answer");
+            assert!(
+                answer
+                    .neighbors
+                    .iter()
+                    .any(|neighbor| neighbor.path == "docs/beta.md"),
+                "the committed document was never embedded: {answer:?}"
+            );
+            let attachment = Arc::try_unwrap(attachment)
+                .ok()
+                .expect("the hook let the attachment go")
+                .into_inner()
+                .unwrap();
+            ops.detach(&name, attachment);
+        }
+
         /// **A detach returns while a semantic unit is held in its
         /// embedding**, and that unit commits nothing. The detach waits for
         /// at most one hold of the slot lock, never for an embedding; the
@@ -11983,6 +12052,8 @@ mod tests {
                 let_go.send(()).unwrap();
                 let _ = search_resumes.recv_timeout(Duration::from_secs(30));
             });
+            let (finished, outcome) = channel();
+            let second_ticket = finished.clone();
             let searching = Arc::clone(&host);
             let vault = name.clone();
             let search = thread::spawn(move || {
@@ -11991,7 +12062,9 @@ mod tests {
                         .with_rungs(norn_wire::RungSelection::exactly(
                             norn_wire::RungSet::of([norn_wire::Rung::Vector]).unwrap(),
                         ));
-                searching.search(&params).map(|_| ())
+                let answer = searching.search(&params).map(|_| ());
+                finished.send(true).unwrap();
+                answer
             });
             ticket_taken
                 .recv_timeout(Duration::from_secs(15))
@@ -12014,16 +12087,19 @@ mod tests {
 
             // A rung that takes the lock again takes another ticket behind
             // that hold; one that answered in one hold takes none.
-            let (ticketed_again, second_ticket) = channel();
-            engines.run_after_next_ticket(move || ticketed_again.send(()).unwrap());
+            engines.run_after_next_ticket(move || second_ticket.send(false).unwrap());
             search_goes.send(()).unwrap();
-            let _ = second_ticket.recv_timeout(Duration::from_secs(3));
+            let finished_in_one_hold = outcome.recv_timeout(Duration::from_secs(15));
             read_goes.send(()).unwrap();
             search
                 .join()
                 .expect("the search")
                 .expect("the vector rung answers");
 
+            assert!(
+                finished_in_one_hold.unwrap(),
+                "the rung took a second ticket before finishing"
+            );
             let waited = engines.reading().most_lane_holds_a_vector_rung_waited;
             assert_eq!(waited, 1, "a vector rung waited behind {waited} lane holds");
             wait_for_engine(&*host, &name, |engine| {

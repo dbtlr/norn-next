@@ -1405,6 +1405,16 @@ impl SemanticEngines {
             },
             _ => Ok(DrainStep::Done(norn_semantic::DrainReport::default())),
         };
+        #[cfg(test)]
+        let step = if self.hooks.fail_next_step.swap(false, Ordering::SeqCst) {
+            Err(EngineError::WrongWidth {
+                path: "docs/alpha.md".to_string(),
+                promised: 2,
+                produced: 1,
+            })
+        } else {
+            step
+        };
         let closing = feed.give_back();
         #[cfg(test)]
         self.hooks.run_after_page_read();
@@ -1757,6 +1767,7 @@ pub(crate) mod tests {
     /// The places a case can arrange to run something inside.
     #[derive(Default)]
     pub(crate) struct Hooks {
+        pub(super) fail_next_step: std::sync::atomic::AtomicBool,
         drain: Mutex<Option<Arranged>>,
         drain_end: Mutex<Option<Arranged>>,
         embedding: Mutex<Option<Arranged>>,
@@ -1834,6 +1845,13 @@ pub(crate) mod tests {
     }
 
     impl SemanticEngines {
+        /// Make the next step fail after reading its snapshot, without damaging the sidecar.
+        pub(crate) fn fail_next_step(&self) {
+            self.hooks
+                .fail_next_step
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+
         /// Answer that no vault's engine owes work from here on, so no unit
         /// starts and an enabled engine stays as its delivery left it: a case
         /// reads an engine that is preparing without racing the wake that

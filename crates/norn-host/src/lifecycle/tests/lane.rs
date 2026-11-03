@@ -282,6 +282,36 @@ fn a_refused_unit_is_retried_at_a_deadline_without_a_wake() {
     drop((leases, host));
 }
 
+/// An ask finishing after a refusal cannot overwrite the lane's retry deadline.
+#[test]
+fn an_ask_finishing_after_a_refusal_keeps_its_retry_deadline() {
+    let ops = Arc::new(FakeOps::default());
+    let name = VaultName::new("notes").unwrap();
+    let (host, leases) = ready_vaults_under(&ops, &[&name], crate::BACKGROUND_TURN_BUDGET);
+    let (entered, entering) = std::sync::mpsc::channel();
+    let (resume, resumed) = std::sync::mpsc::channel();
+    host.shared.scheduler.run_before_next_sleep(move || {
+        entered.send(()).unwrap();
+        resumed.recv_timeout(Duration::from_secs(10)).unwrap();
+    });
+    let began = Instant::now();
+    ops.refuse_lane_unit.store(true, Ordering::SeqCst);
+    owe(&ops, &name, 1);
+    let turns = host.lane_reading().turns;
+    host.wake_background();
+    entering.recv_timeout(Duration::from_secs(10)).unwrap();
+    wait_for_units_not_run(&ops, 1);
+    wait_for_lane_turns(&host, turns + 1);
+    let wakes = host.scheduler_reading().wakes;
+    let deadlines = host.scheduler_reading().deadlines;
+    assert!(began.elapsed() < super::super::lane::BACKGROUND_RETRY_AFTER);
+    resume.send(()).unwrap();
+    wait_for_lane_units(&ops, 1);
+    assert_eq!(host.scheduler_reading().wakes, wakes);
+    assert!(host.scheduler_reading().deadlines > deadlines);
+    drop((leases, host));
+}
+
 /// **A store whose turn unwound is queued again.** The unwind is caught at
 /// the lane's seam and takes none of the work owed; the store is asked again
 /// at the retry deadline, with no wake, and its unit runs.
