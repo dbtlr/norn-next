@@ -11281,10 +11281,22 @@ mod tests {
                                     norn_wire::RungSet::of([norn_wire::Rung::Lexical]).unwrap(),
                                 ),
                             );
-                            *observed.lock().unwrap() = Some(
-                                host.search(&params)
-                                    .map(|answer| answer.answer.report.page.rows.len()),
-                            );
+                            // The next poll delivers the fact, and nothing
+                            // orders that poll before this unit begins, so the
+                            // unit waits here, holding its slot, until the
+                            // reconcile has published the edit: a reconcile
+                            // that waited for the backlog would never get there.
+                            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                            let rows = loop {
+                                let rows = host
+                                    .search(&params)
+                                    .map(|answer| answer.answer.report.page.rows.len());
+                                if matches!(rows, Ok(1)) || std::time::Instant::now() >= deadline {
+                                    break rows;
+                                }
+                                std::thread::sleep(Duration::from_millis(5));
+                            };
+                            *observed.lock().unwrap() = Some(rows);
                             second_entered.send(()).unwrap();
                         });
                     });
@@ -11298,7 +11310,7 @@ mod tests {
                 .expect("the first unit of the backlog");
             go.send(()).unwrap();
             second_drain
-                .recv_timeout(Duration::from_secs(15))
+                .recv_timeout(Duration::from_secs(30))
                 .expect("the next unit of the backlog");
 
             assert_eq!(
