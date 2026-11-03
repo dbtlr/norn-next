@@ -13502,7 +13502,7 @@ mod tests {
         host: &Host<Arc<FakeOps>>,
         name: &VaultName,
     ) -> Option<DemandLease<Arc<FakeOps>>> {
-        owe_maintenance(&host, &ops, name);
+        owe_maintenance(host, ops, name);
         poll_watchers(&host.shared);
         None
     }
@@ -15811,7 +15811,7 @@ mod tests {
         a_job_legs_coverage_loss_gives_the_coverage_back(
             "maintenance",
             |host, ops, name, lease| {
-                owe_maintenance(&host, &ops, name);
+                owe_maintenance(host, ops, name);
                 arrange_for(&ops.block_maintenance_at, name);
                 poll_watchers(&host.shared);
                 wait_for_flag("maintenance_started", &ops.maintenance_started);

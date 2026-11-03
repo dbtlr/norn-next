@@ -233,7 +233,7 @@ impl BackgroundWake {
 
     /// A handle no scheduler thread listens on, for an entry a case builds
     /// outside a host.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "induced-failure"))]
     pub(super) fn unheard() -> Self {
         Self(Arc::new(Scheduler::default()))
     }
