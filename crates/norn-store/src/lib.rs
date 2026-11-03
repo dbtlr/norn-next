@@ -185,7 +185,7 @@ pub use facts::{
 };
 #[cfg(feature = "induced-failure")]
 pub use faults::induced_failure;
-pub use feed::FeedRead;
+pub use feed::{FeedRead, FeedSource};
 pub use fields::{
     ContentModel, FieldContainer, FieldDeclaration, FieldRow, FieldRows, FieldValueType, LinkKey,
     OffsetSpelling, TAG_CARRIER, TypedOrder,

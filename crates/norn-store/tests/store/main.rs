@@ -22,6 +22,7 @@ mod describe;
 mod drive;
 mod equivalence;
 mod facts;
+mod feed;
 mod fields;
 mod find;
 mod find_advisory;

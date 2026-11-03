@@ -2,10 +2,9 @@
 //! reconcile, deaths that retract.
 
 use crate::common::{
-    CountingEmbedder, InterferingEmbedder, Scratch, document, path, recompute, record_death,
-    write_document,
+    CountingEmbedder, Scratch, document, path, recompute, record_death, write_document,
 };
-use norn_store::{ContentModel, FrontmatterValue};
+use norn_store::{ContentModel, FrontmatterValue, induced_failure};
 
 /// An empty store drains to an empty sidecar; the drain after it is the
 /// settled all-zero reading.
@@ -278,6 +277,9 @@ fn a_drain_pages_past_its_page_bound() {
 /// generation past the feed row's. The stale reading is dropped, and the
 /// successor — at its strictly higher generation — converges on a later
 /// drain.
+///
+/// A page fetches every body it embeds before it embeds any, so the write is
+/// placed right after the page is read, through the store's own seam for it.
 #[test]
 fn a_row_superseded_mid_drain_is_deferred_and_converges() {
     let scratch = Scratch::new("deferred");
@@ -285,12 +287,15 @@ fn a_row_superseded_mid_drain_is_deferred_and_converges() {
     write_document(&mut store, &document("docs/a.md", "hash-a1", "alpha\n"));
     write_document(&mut store, &document("docs/b.md", "hash-b1", "bravo\n"));
 
-    // Embedding a.md rewrites b.md through the embedder's own store handle,
-    // after the page holding both was already read.
-    let embedder = InterferingEmbedder::rewriting(
-        scratch.store_path(),
-        document("docs/b.md", "hash-b2", "bravo rewritten\n"),
-    );
+    // b.md is rewritten after the page holding both was read, and before
+    // either is fetched.
+    induced_failure::write_after_feed_pages(1, |store| {
+        write_document(
+            store,
+            &document("docs/b.md", "hash-b2", "bravo rewritten\n"),
+        );
+    });
+    let embedder = CountingEmbedder::new();
     let mut engine = scratch.engine(embedder.clone());
     let report = engine.drain(&mut store.feed_read()).expect("a drain");
     assert_eq!(report.embedded, 1, "{report:?}");
@@ -333,10 +338,11 @@ fn a_death_mid_drain_defers_and_the_same_drain_retracts_it() {
         &document("docs/b.md", "hash-b2", "bravo edited\n"),
     );
 
-    // Embedding the edited a.md kills b.md through the embedder's own store
-    // handle, after the page holding both edits was already read. Same
-    // model, so the reopened engine adopts the sidecar and its cursors.
-    let embedder = InterferingEmbedder::killing(scratch.store_path(), "docs/b.md");
+    // b.md dies after the page holding both edits was read, and before
+    // either is fetched. Same model, so the reopened engine adopts the
+    // sidecar and its cursors.
+    induced_failure::write_after_feed_pages(1, |store| record_death(store, "docs/b.md"));
+    let embedder = CountingEmbedder::new();
     let mut engine = scratch.engine(embedder.clone());
     let report = engine.drain(&mut store.feed_read()).expect("a drain");
     assert_eq!(report.embedded, 1, "{report:?}");
