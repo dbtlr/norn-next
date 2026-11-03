@@ -15861,8 +15861,10 @@ mod tests {
         a_job_legs_coverage_loss_gives_the_coverage_back(
             "maintenance",
             |host, ops, name, lease| {
-                owe_maintenance(host, ops, name);
+                // The block stands before the owe: the owe wakes the background
+                // scheduler, which may start the leg before the next statement runs.
                 arrange_for(&ops.block_maintenance_at, name);
+                owe_maintenance(host, ops, name);
                 poll_watchers(&host.shared);
                 wait_for_flag("maintenance_started", &ops.maintenance_started);
                 report_coverage_lost(ops, name);
@@ -16018,8 +16020,10 @@ mod tests {
 
         // A maintenance leg is held open over b, so the drain that ends it is
         // what reaches the watcher next.
-        owe_maintenance(&host, &ops, &b);
+        // The block stands before the owe: the owe wakes the background
+        // scheduler, which may start the leg before the next statement runs.
         arrange_for(&ops.block_maintenance_at, &b);
+        owe_maintenance(&host, &ops, &b);
         poll_watchers(&host.shared);
         wait_for_flag("maintenance_started", &ops.maintenance_started);
 
@@ -26399,8 +26403,10 @@ mod tests {
         // The leg under test: a maintenance whose own handoff drain saturates,
         // so it hands the entry a reconcile carrying no fact of its own — the
         // entry a tick would otherwise find idle and attached.
-        owe_maintenance(&host, &ops, &working);
+        // The block stands before the owe: the owe wakes the background
+        // scheduler, which may start the leg before the next statement runs.
         arrange_for(&ops.block_maintenance_at, &working);
+        owe_maintenance(&host, &ops, &working);
         poll_watchers(&host.shared);
         wait_for_flag("maintenance_started", &ops.maintenance_started);
         ops.handoff_poll_batches
