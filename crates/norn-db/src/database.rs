@@ -70,7 +70,8 @@ const OPEN_FLAGS: OpenFlags = OpenFlags::SQLITE_OPEN_READ_WRITE
 /// Create is absent as well as write: a read-only open answers for a database
 /// that is already there, so a path that names no file is a refusal rather
 /// than an empty database nothing wrote. `SQLITE_OPEN_URI` is absent for the
-/// reason it is absent above.
+/// reason it is absent above; a copy connection adds it and spells each of
+/// its names as a URI with no parameter in it (see [`ReadOnlyRole::Copying`]).
 const READ_ONLY_FLAGS: OpenFlags =
     OpenFlags::SQLITE_OPEN_READ_ONLY.union(OpenFlags::SQLITE_OPEN_NO_MUTEX);
 
@@ -116,6 +117,10 @@ pub struct Database {
     /// Whether the connection is read-only, and so sealed by the authorizer
     /// [`arm_the_snapshot_control`] installs. A writable connection has none.
     sealed: bool,
+    /// The URI filename of the one target a copy connection writes a copy
+    /// to, and `None` on every other connection: [`Database::copy_into`]
+    /// refuses a connection without one, or another target.
+    copy_target: Option<String>,
 }
 
 #[cfg(test)]
@@ -184,6 +189,7 @@ impl Database {
             epoch,
             snapshot_control,
             sealed,
+            copy_target: None,
         })
     }
 
@@ -523,17 +529,21 @@ pub fn connect_read_only(path: &Path) -> Result<Connection, DbError> {
 /// caller counting a whole open passes one tally through every step of it.
 #[allow(clippy::disallowed_methods)] // The substrate seam: this is the one place a SQLite connection is opened.
 fn connect_read_only_counting(path: &Path, statements: &mut u64) -> Result<Connection, DbError> {
-    connect_read_only_bounded(path, statements, None, QueryOnly::Set)
+    connect_read_only_bounded(path, statements, None, ReadOnlyRole::Reading)
 }
 
-/// Whether a read-only open sets `query_only` on the connection. Every open
-/// does but the copy connection's: `VACUUM INTO` writes the copy through the
-/// connection, which `query_only` refuses, while the read-only open flag
-/// still refuses every write to the database it copies.
+/// What a read-only connection is opened for.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum QueryOnly {
-    Set,
-    Unset,
+enum ReadOnlyRole {
+    /// Reading: `query_only` is set, and the path is a filesystem path.
+    Reading,
+    /// Copying through `VACUUM INTO`. `query_only` is not set, because it
+    /// refuses the write to the copy too, while the read-only open flag still
+    /// refuses every write to the database copied. `SQLITE_OPEN_URI` is set,
+    /// and the database is opened by its [`uri_filename`]: the copy's target
+    /// reaches SQLite as SQL text, and a URI is the one spelling of a path
+    /// that is not UTF-8 SQL text can carry.
+    Copying,
 }
 
 #[allow(clippy::disallowed_methods)] // All connection opens are substrate-owned.
@@ -541,15 +551,21 @@ fn connect_read_only_bounded(
     path: &Path,
     statements: &mut u64,
     deadline: Option<std::time::Instant>,
-    query_only: QueryOnly,
+    role: ReadOnlyRole,
 ) -> Result<Connection, DbError> {
     refuse_a_name_that_is_not_a_file("opening the database read-only", path)?;
-    let connection =
-        Connection::open_with_flags(path, READ_ONLY_FLAGS).map_err(|error| DbError::Lifecycle {
-            operation: "opening the database read-only",
-            path: path.to_path_buf(),
-            message: error.to_string(),
-        })?;
+    let opened = match role {
+        ReadOnlyRole::Reading => Connection::open_with_flags(path, READ_ONLY_FLAGS),
+        ReadOnlyRole::Copying => Connection::open_with_flags(
+            uri_filename(path),
+            READ_ONLY_FLAGS.union(OpenFlags::SQLITE_OPEN_URI),
+        ),
+    };
+    let connection = opened.map_err(|error| DbError::Lifecycle {
+        operation: "opening the database read-only",
+        path: path.to_path_buf(),
+        message: error.to_string(),
+    })?;
     connection
         .busy_timeout(deadline.map_or(BUSY_TIMEOUT, |end| {
             end.saturating_duration_since(std::time::Instant::now())
@@ -574,7 +590,7 @@ fn connect_read_only_bounded(
     connection
         .pragma_update(None, "foreign_keys", true)
         .map_err(|error| error::sql("turning foreign keys on", error))?;
-    if query_only == QueryOnly::Set {
+    if role == ReadOnlyRole::Reading {
         connection
             .pragma_update(None, "query_only", true)
             .map_err(|error| error::sql("making the connection read-only", error))?;
@@ -660,21 +676,57 @@ pub fn open_read_only_to_verify(path: &Path) -> Result<Database, DbError> {
 /// only into the schema SQLite names for the copy. `query_only` is not set,
 /// because it refuses that write to the copy too.
 ///
+/// **Both names reach SQLite as URI filenames** ([`uri_filename`]), so a path
+/// that is not UTF-8 is opened and written at exactly the bytes it holds, and
+/// no name is read as carrying a parameter.
+///
 /// Reading the database to copy it is one snapshot read, so the writer is
 /// never held behind the copy.
 pub fn open_read_only_to_copy(path: &Path, target: &Path) -> Result<Database, DbError> {
     let mut statements = 0;
-    let database = connect_read_only_bounded(path, &mut statements, None, QueryOnly::Unset)
-        .and_then(|connection| Database::adopt_counting(connection, path, &mut statements))?;
+    let mut database =
+        connect_read_only_bounded(path, &mut statements, None, ReadOnlyRole::Copying)
+            .and_then(|connection| Database::adopt_counting(connection, path, &mut statements))?;
     let control = Arc::clone(&database.snapshot_control);
-    let target = target.to_string_lossy().into_owned();
+    let target = uri_filename(target);
+    let admitted = target.clone();
     database
         .connection
         .authorizer(Some(move |context: AuthContext<'_>| {
-            copy_verdict(&control, &target, context)
+            copy_verdict(&control, &admitted, context)
         }))
         .map_err(|error| error::sql("sealing the copy connection", error))?;
+    database.copy_target = Some(target);
     Ok(database)
+}
+
+/// `path` as a SQLite URI filename: `file:` and every byte of the path, each
+/// outside the unreserved characters and `/` percent-encoded.
+///
+/// SQLite decodes the escapes back into the bytes they stand for, so the name
+/// it opens is the path's own, a name that is not UTF-8 included, and a `?`
+/// or `#` in the path is part of the name rather than the start of a
+/// parameter. An absolute path takes the empty authority, `file:///…`.
+fn uri_filename(path: &Path) -> String {
+    use std::fmt::Write as _;
+
+    #[cfg(unix)]
+    let bytes = std::os::unix::ffi::OsStrExt::as_bytes(path.as_os_str()).to_vec();
+    #[cfg(not(unix))]
+    let bytes = path.to_string_lossy().into_owned().into_bytes();
+    let mut uri = String::from(if bytes.first() == Some(&b'/') {
+        "file://"
+    } else {
+        "file:"
+    });
+    for byte in bytes {
+        if byte.is_ascii_alphanumeric() || b"-._~/".contains(&byte) {
+            uri.push(char::from(byte));
+        } else {
+            let _ = write!(uri, "%{byte:02X}");
+        }
+    }
+    uri
 }
 
 /// What a copy connection's authorizer answers: while its own copy runs, the
@@ -699,16 +751,27 @@ impl Database {
     /// Write a copy of this database, as one snapshot of it reads, to
     /// `target`: a `VACUUM INTO`, which never holds the database's writer.
     ///
-    /// Only a connection [`open_read_only_to_copy`] opened for `target` is
-    /// admitted to run it; any other connection, or another target, is
-    /// refused at preparation. `target` must not exist. A driver error that
-    /// describes the database's own contents is damage; every other failure —
-    /// the target's directory refusing the file, a full disk — is the refused
-    /// operation.
+    /// **Only a connection [`open_read_only_to_copy`] opened for `target`
+    /// copies.** Any other connection — the store's writer, a read or a
+    /// verification connection — and any other target is refused here, as a
+    /// [`DbError::Lifecycle`] naming the copy, before anything is run; the
+    /// copy connection's authorizer refuses every other attachment besides.
+    /// `target` must not exist. A driver error that describes the database's
+    /// own contents is damage; every other failure — the target's directory
+    /// refusing the file, a full disk — is the refused operation.
     pub fn copy_into(&mut self, target: &Path) -> Result<(), DbError> {
+        let target_uri = uri_filename(target);
+        if self.copy_target.as_deref() != Some(target_uri.as_str()) {
+            return Err(DbError::Lifecycle {
+                operation: "copying the database",
+                path: target.to_path_buf(),
+                message: "only a copy connection opened for this target writes a copy to it"
+                    .to_string(),
+            });
+        }
         let _control = SnapshotControl::raise(&self.snapshot_control);
         self.connection
-            .execute("VACUUM INTO ?1", [target.to_string_lossy()])
+            .execute("VACUUM INTO ?1", [target_uri])
             .map(|_| ())
             .map_err(|error| error::sql("copying the database", error))
     }
@@ -729,21 +792,22 @@ fn verification_verdict(control: &AtomicBool, context: AuthContext<'_>) -> Autho
 /// All SQLite busy waits in a cold open consume the caller's remaining deadline.
 pub fn open_read_only_until(path: &Path, deadline: std::time::Instant) -> ReadOnlyOpen {
     let mut statements = 0;
-    let adopted = connect_read_only_bounded(path, &mut statements, Some(deadline), QueryOnly::Set)
-        .and_then(|connection| {
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            if remaining.is_zero() {
-                return Err(DbError::Lifecycle {
-                    operation: "opening a snapshot reader",
-                    path: path.to_path_buf(),
-                    message: "the reader acquisition deadline passed".into(),
-                });
-            }
-            connection
-                .busy_timeout(remaining.min(BUSY_TIMEOUT))
-                .map_err(|error| error::sql("bounding reader open", error))?;
-            Database::adopt_counting(connection, path, &mut statements)
-        });
+    let adopted =
+        connect_read_only_bounded(path, &mut statements, Some(deadline), ReadOnlyRole::Reading)
+            .and_then(|connection| {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    return Err(DbError::Lifecycle {
+                        operation: "opening a snapshot reader",
+                        path: path.to_path_buf(),
+                        message: "the reader acquisition deadline passed".into(),
+                    });
+                }
+                connection
+                    .busy_timeout(remaining.min(BUSY_TIMEOUT))
+                    .map_err(|error| error::sql("bounding reader open", error))?;
+                Database::adopt_counting(connection, path, &mut statements)
+            });
     ReadOnlyOpen {
         adopted,
         statements,
@@ -1057,6 +1121,13 @@ mod tests {
     fn sealed_database(label: &str, table: &str, column: &str) -> (Scratch, Database) {
         let scratch = Scratch::new(label);
         let path = scratch.join("trial.sqlite3");
+        let database = sealed_database_at(&path, table, column);
+        (scratch, database)
+    }
+
+    /// [`sealed_database`], written at `path`.
+    fn sealed_database_at(path: &Path, table: &str, column: &str) -> Database {
+        let path = path.to_path_buf();
         let connection = match connect(&path).expect("opening the database for setup") {
             Attempt::Connected(connection) => connection,
             Attempt::Unreadable { detail } => {
@@ -1085,7 +1156,69 @@ mod tests {
             database.sealed,
             "a read-only open is what recording_reads records against a seal"
         );
-        (scratch, database)
+        database
+    }
+
+    /// **A copy lands at the bytes its target names, UTF-8 or not.** A data
+    /// directory whose name is not UTF-8 holds the store and its copy, and
+    /// the copy connection opens the one and writes the other at exactly
+    /// those names: a target spelled lossily would name a directory that is
+    /// not there, and the verification would be refused every time it ran.
+    /// Gated to the platforms whose filesystems take such a name.
+    #[test]
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: arranging the directory and reading the copy.
+    fn a_copy_connection_copies_where_the_path_is_not_utf8() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let scratch = Scratch::new("copy-not-utf8");
+        let directory = scratch.join(std::ffi::OsStr::from_bytes(b"derived-\xff?#%41"));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("trial.sqlite3");
+        drop(sealed_database_at(&path, "trial", "value"));
+        let target = directory.join("copy.sqlite3");
+
+        let mut copying = open_read_only_to_copy(&path, &target).expect("a copy connection");
+        copying.copy_into(&target).expect("the copy");
+        let copied = Connection::open(&target).unwrap();
+        let value: String = copied
+            .query_row("SELECT value FROM trial", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(value, "x");
+    }
+
+    /// **Only a copy connection copies.** The store's writer, a read
+    /// connection and a verification connection are each refused
+    /// [`Database::copy_into`] as the refused operation, before anything is
+    /// written at the target.
+    #[test]
+    fn a_connection_not_opened_to_copy_is_refused_the_copy() {
+        let (scratch, sealed) = sealed_database("copy-refused", "trial", "value");
+        let path = sealed.path().to_path_buf();
+        let target = scratch.join("copy.sqlite3");
+        let Attempt::Connected(writable) = connect(&path).expect("the writer") else {
+            panic!("the trial database read as unreadable");
+        };
+        let writer = Database::adopt(writable, &path).expect("the writer adopted");
+        let verifying = open_read_only_to_verify(&path).expect("a verification connection");
+        for (label, mut database) in [
+            ("the writer", writer),
+            ("a read connection", sealed),
+            ("a verification connection", verifying),
+        ] {
+            let refused = database.copy_into(&target);
+            assert!(
+                matches!(
+                    refused,
+                    Err(DbError::Lifecycle {
+                        operation: "copying the database",
+                        ..
+                    })
+                ),
+                "{label}: {refused:?}"
+            );
+            assert!(!target.exists(), "{label} wrote a copy");
+        }
     }
 
     /// **A copy connection copies, and does nothing else.** Inside

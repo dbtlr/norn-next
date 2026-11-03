@@ -487,3 +487,37 @@ fn a_copy_its_place_refuses_is_refused_rather_than_called_damage() {
     };
     assert_eq!(error.damage(), None, "{error:?}");
 }
+
+/// **A store whose directory's name is not UTF-8 is verified like any
+/// other.** The data directory is read from the environment as raw bytes,
+/// and the copy is written beside the store at exactly those bytes: a copy
+/// spelled lossily would be refused every time, and damage would never be
+/// found. Gated to the platforms whose filesystems take such a name.
+#[test]
+#[cfg(all(unix, not(target_os = "macos")))]
+fn a_store_whose_directory_is_not_utf8_is_verified() {
+    use std::os::unix::ffi::OsStrExt;
+
+    let scratch = norn_testkit::scratch::Scratch::new("norn-store-source-not-utf8");
+    let database = scratch
+        .join(std::ffi::OsStr::from_bytes(b"derived-\xff"))
+        .join("store.sqlite3");
+    let mut store = Store::open(
+        &database,
+        StoredPathOrder::Sensitive,
+        crate::common::DERIVATION,
+    )
+    .expect("opening a store");
+    write_document(
+        &mut store.begin_request(),
+        &document("a.md", "hash-1", "a body\n"),
+    );
+    verified_through_a_source(&store).expect("a sound store");
+    induced_failure::execute_out_of_band(
+        &mut store,
+        "INSERT INTO documents_fts (rowid, body) VALUES (99999, 'a body no document holds')",
+    )
+    .expect("damaging the full-text index");
+    let error = verified_through_a_source(&store).expect_err("a damaged store");
+    assert!(error.damage().is_some(), "{error:?}");
+}
