@@ -1186,9 +1186,10 @@ lock, and retirement closes the feed connection before the removal.
 **The bounds of a retirement are these.**
 
 - A detach, a disable, a replacement, and a rebuild's discard each wait for at most one
-  slot-lock hold of a unit in flight, plus the return of an interrupted verification:
-  one progress-handler interval or one document's recompute.
-  None of them waits for a model setup or an embedding.
+  slot-lock hold of a unit in flight. A detach and a rebuild's discard retire the store
+  lifetime, so each waits besides for the return of an interrupted verification: one
+  progress-handler interval or one document's recompute. None of them waits for a model
+  setup or an embedding.
 - Host shutdown starts no new unit, retires every delivery as above, and waits for each
   lane thread to end the unit it has in flight: at most one unit for each thread. A
   verification in flight is interrupted. A semantic unit in flight finishes its embedding
@@ -1213,7 +1214,7 @@ cleanup that reconciles an unwound worker-pool leg today.
 
 `Store::verify_integrity` runs read-only checks and one write, the full-text check. The
 periodic verification runs all of them as one background unit through read-only
-connections, and runs the write on a copy of the store. Nothing in it holds the claim, the
+connections to the store, and runs the write on a copy of the store. Nothing in it holds the claim, the
 attachment or the store's writer. Every check keeps its classification of a failure: only
 a driver error that describes the file's own contents is reported as damage, and every
 other failure is reported as the refused operation it was. A verdict of damage is what
@@ -1225,8 +1226,10 @@ foreign-key check, the `json_valid` scan of the frontmatter projection, the clos
 vocabularies, the rule rows and rule sets, the pillar and quarantine checks and the body
 sub-fingerprint recomputes read through a read-only connection of the verification's own,
 over one WAL snapshot. `norn-store` mints the verification's source from the live store,
-as it mints the feed source, with no I/O. Its connections open for the verification, sit
-outside the request read budget, and close when the verification ends.
+as it mints the feed source, with no I/O. Its connections open for the verification and sit
+outside the request read budget. Each closes when its step ends: the snapshot connection
+before the copy is written, the copying connection once the copy is written, and the
+copy's connection when its check ends.
 
 **The full-text check runs on a copy.** `INSERT INTO documents_fts(documents_fts, rank)
 VALUES ('integrity-check', 1)` is a write, and it takes the write lock on any connection
@@ -1242,7 +1245,13 @@ check on the copy:
    the copy's write lock, which nothing else wants.
 
 A verdict about the copy's index is a verdict about the store lifetime the copy was taken
-from. A `VACUUM INTO` that fails on the store's own contents is damage. A failure of the
+from. `VACUUM INTO` rewrites every page, but it keeps every rowid the full-text check
+compares: `documents` keys its rowid as `id`, which the index names as its content rowid,
+and each of the index's shadow tables either keys its rows explicitly or is `WITHOUT
+ROWID`. The copy's index therefore disagrees with the copy's documents exactly where the
+store's index disagrees with the store's documents. Damage to the pages themselves does not
+survive the rewrite, and `PRAGMA integrity_check` catches it on the store's own snapshot. A
+`VACUUM INTO` that fails on the store's own contents is damage. A failure of the
 scratch write itself, such as a full disk or a directory that refuses the file, is a
 refused operation and never damage. The copy reads a later snapshot than the read-only
 checks, which is no gap: each verdict is about the lifetime both snapshots read.
@@ -1271,7 +1280,7 @@ on the worker pool.
 
 The verification may hold a lane thread for its whole duration, once an hour per
 attachment. While it reads, the WAL cannot checkpoint past its snapshot. Its copy takes
-about as much disk as the store for the length of the copy's check. These costs are
+about as much disk as the store from its write to the end of the copy's check. These costs are
 accepted. Measured in a release build at 10,000 documents of 2 KiB, the unit takes about
 0.6 s, of which the copy takes about 0.12 s and the copy's check about 0.13 s; the copy is
 about 54 MB; and a second writer waits at most about 1 ms for a write while the unit runs.
@@ -1475,7 +1484,7 @@ These costs are accepted:
 - With the production value of one thread, a verification delays every other derived
   store's background turns for the length of one verification.
 - Each verification writes a copy of the store into its derived directory, about as large
-  as the store, which stands for the length of the copy's full-text check.
+  as the store, which stands from its write to the end of the copy's full-text check.
 - Each enabled engine holds one feed connection outside the request read budget.
 - A maintenance leg holds the claim and one worker slot for at most the background turn
   budget plus one unit. A rolling-heal slice is the longest such unit.

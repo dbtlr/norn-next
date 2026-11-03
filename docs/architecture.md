@@ -202,9 +202,9 @@ the verdict, because every other route is an entry that holds the store the rung
 **Silent damage is asked about on a schedule.** The verification that compares the database
 against itself is the only thing that meets damage no read fails on, so it runs hourly as one
 background unit on the background lane — off the request path, never per request, and off the
-vault's claim. It runs every check through read-only connections: the read-only checks over
-one snapshot, and the full-text check, which is a write, on a copy of the store written into
-its derived directory, so it never holds the store's writer. A from-zero build and a rebuild
+vault's claim. It runs every check through read-only connections to the store: the read-only
+checks over one snapshot, and the full-text check, which is a write, on a copy of the store
+written into its derived directory, so it never holds the store's writer. A from-zero build and a rebuild
 still close with the whole verification on the writer they hold.
 
 **Every rung is reached by a test, across two suites**, and both are built: the churn suite
@@ -2607,7 +2607,7 @@ publishes, unless the entry has reached `Ready` again before that retake; no tea
 it. While a maintenance leg holds the entry — for its units' background turn budget plus one
 unit, then the drain of the watcher batches observed meanwhile — the entry stays `Ready` without yet seeing an edit made moments before, so a read in
 that window can miss it. The store's verification opens no such window: it runs on the
-background lane through read-only connections, and its full-text check runs on a copy.
+background lane through read-only connections to the store, and its full-text check runs on a copy.
 
 **A canonical read whose store finds its derived data damaged is answered by the entry.** After the
 builder returns, where the read finds the entry gate free, one hold of it withdraws trust under

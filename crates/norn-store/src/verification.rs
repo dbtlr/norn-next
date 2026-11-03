@@ -822,6 +822,14 @@ impl VerificationSource {
             }
         };
         let armed = arm(&self.mark, &connection)?;
+        // The copy's verdict stands for the store because `VACUUM INTO` keeps
+        // every rowid this check compares: `documents` keys its rowid as `id`,
+        // the index's content rowid, and each FTS5 shadow table keys its rows
+        // explicitly or is `WITHOUT ROWID`. A schema change that dropped the
+        // rowid alias would let the copy renumber documents under an index
+        // that still names the old rowids, so it must move this check back
+        // onto the store. Page damage does not survive the rewrite; the
+        // snapshot's `integrity_check` is what meets it.
         let checked = full_text(&connection);
         drop(armed);
         drop(connection);
