@@ -41,24 +41,27 @@
 //! check reads one row at a time, so what it costs in memory is one document
 //! rather than the table.
 //!
-//! **The verification splits along its one write.** The full-text check is an
-//! `INSERT` into the index's command column, so it takes the write lock on any
-//! connection that runs it, and it stays with the holder of the store's
-//! writer ([`crate::Store::verify_full_text`]). Every other check only reads,
-//! and runs through a [`VerificationSource`]: a read-only connection of its
-//! own, over one write-ahead-log snapshot, so the writer is never held behind
-//! it however long the scan takes. The whole verification a from-zero build
-//! closes with ([`crate::Store::verify_integrity`]) is both halves on the
-//! writer, in the order they share.
+//! **The full-text check is a write, and the periodic verification runs it on
+//! a copy.** It is an `INSERT` into the index's command column, so it takes
+//! the write lock on any connection that runs it. The whole verification a
+//! from-zero build closes with ([`crate::Store::verify_integrity`]) runs every
+//! check on the store's writer, which that build holds anyway. The periodic
+//! verification runs through a [`VerificationSource`] and never holds the
+//! writer: the read-only checks over one write-ahead-log snapshot of a
+//! read-only connection of its own, then a `VACUUM INTO` through another
+//! read-only connection that writes a copy of the store beside it, and the
+//! full-text check on that copy. The copy is the store as one snapshot reads
+//! it, so a verdict about the copy's index is a verdict about the store
+//! lifetime the copy was taken from.
 //!
-//! **Both halves classify a failure the one way.** Only a driver error that
+//! **Every check classifies a failure the one way.** Only a driver error that
 //! describes the file's own contents, or a check that finds the contents
 //! disagreeing with themselves, is reported as damage; every other failure is
 //! the refused operation it was. A verdict of damage is what authorizes
 //! discarding the database, so the classification decides which failures
 //! schedule a rebuild.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -80,18 +83,36 @@ use crate::store::Store;
 /// the reading costs nothing a scan would notice.
 const STOP_MARK_INTERVAL: i32 = 1_000;
 
-/// What the read-only half of a verification came to.
+/// What a [`VerificationSource`]'s verification came to.
 #[derive(Debug)]
-pub enum ReadOnlyVerification {
-    /// Every read-only check passed, over one snapshot of the store.
+pub enum Verification {
+    /// Every check passed: the read-only checks over one snapshot of the
+    /// store, and the full-text check over a copy of it.
     Sound,
     /// The verification was stopped before it reached a verdict. It says
     /// nothing about the store, damage least of all.
     Interrupted,
     /// A check failed: [`StoreError::Damaged`] where the store's own contents
     /// are wrong, and the refused operation otherwise — the file gone, the
-    /// environment refusing the open, another store lifetime at the path.
+    /// environment refusing an open, another store lifetime at the path, the
+    /// copy's directory refusing the copy or a disk too full to hold it.
     Failed(StoreError),
+}
+
+/// Where a verification is when it meets a point at which a stop is met, as
+/// [`VerificationSource::verify`] hands it to its caller's hook.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VerificationPoint {
+    /// Before a statement of the read-only checks. The snapshot they share is
+    /// open from the first statement on.
+    Check,
+    /// Before a row the sub-fingerprint recompute reads.
+    Row,
+    /// Before the copy is written: the read-only checks have passed and
+    /// their snapshot is closed.
+    Copy,
+    /// After the copy is written, before its full-text check.
+    CopyCheck,
 }
 
 /// Why the checks stopped short of their end.
@@ -113,18 +134,26 @@ impl From<StoreError> for Halt {
 struct Checks<'a> {
     connection: &'a Connection,
     mark: Option<&'a StopMark>,
-    between: &'a mut dyn FnMut(),
+    between: &'a mut dyn FnMut(VerificationPoint),
+}
+
+/// A point between two steps of a verification: the caller's hook runs, then
+/// a set stop mark ends the verification here.
+fn point(
+    mark: Option<&StopMark>,
+    between: &mut dyn FnMut(VerificationPoint),
+    at: VerificationPoint,
+) -> Result<(), Halt> {
+    between(at);
+    match mark {
+        Some(mark) if mark.stopped.load(Ordering::SeqCst) => Err(Halt::Stopped),
+        _ => Ok(()),
+    }
 }
 
 impl Checks<'_> {
-    /// A point between two steps of the verification: the caller's hook runs,
-    /// then a set stop mark ends the verification here.
     fn point(&mut self) -> Result<(), Halt> {
-        (self.between)();
-        match self.mark {
-            Some(mark) if mark.stopped.load(Ordering::SeqCst) => Err(Halt::Stopped),
-            _ => Ok(()),
-        }
+        point(self.mark, self.between, VerificationPoint::Check)
     }
 
     /// One `count(*)` the verification asks, behind a point.
@@ -412,7 +441,7 @@ impl Checks<'_> {
             ))
         };
         loop {
-            self.point()?;
+            point(self.mark, self.between, VerificationPoint::Row)?;
             let Some(row) = rows.next().map_err(|error| error::sql(operation, error))? else {
                 return Ok(());
             };
@@ -460,7 +489,7 @@ fn quoted<'a>(values: impl Iterator<Item = &'a str>) -> String {
 /// The whole verification on the store's writer: the pages and the foreign
 /// keys, the full-text check, then the rest of the read-only checks.
 pub(crate) fn whole(connection: &Connection) -> Result<(), StoreError> {
-    let mut nothing = || {};
+    let mut nothing = |_| {};
     let mut checks = Checks {
         connection,
         mark: None,
@@ -503,26 +532,35 @@ pub(crate) fn full_text(connection: &Connection) -> Result<(), StoreError> {
 }
 
 impl Store {
-    /// Mint the source this store lifetime's read-only verification reads
+    /// Mint the source this store lifetime's periodic verification runs
     /// through.
     ///
     /// **The mint opens no database and runs no SQL**, as the feed source's
-    /// mint does, so it can run wherever the store is held. The connection
-    /// opens when [`VerificationSource::verify`] runs, read-only, bound to
-    /// this store's epoch, and closes when it returns. The source holds
-    /// nothing of the store itself, so the writer is never borrowed by it.
+    /// mint does, so it can run wherever the store is held. Its connections
+    /// open when [`VerificationSource::verify`] runs, read-only, bound to this
+    /// store's epoch, and close before it returns. The source holds nothing of
+    /// the store itself, so the writer is never borrowed by it.
     pub fn verification_source(&self) -> VerificationSource {
+        let path = self.database.path().to_path_buf();
         VerificationSource {
-            path: self.database.path().to_path_buf(),
+            copy: verification_copy(&path),
+            path,
             epoch: self.epoch().to_string(),
             mark: Arc::new(StopMark::default()),
         }
     }
 }
 
-/// The read-only half of one store lifetime's verification: a source that
-/// opens a read-only connection of its own when it verifies, outside every
-/// read budget, and closes it when the verification returns.
+/// Where the verification of the store at `store` writes its copy: beside the
+/// store, in the directory that holds it, so the copy is on the store's own
+/// machine and filesystem and never in the vault.
+pub(crate) fn verification_copy(store: &Path) -> PathBuf {
+    store.with_extension("verification-copy")
+}
+
+/// One store lifetime's periodic verification: a source that opens its
+/// read-only connections when it verifies, outside every read budget, and
+/// closes them when the verification returns.
 ///
 /// **An establishment against another store lifetime is refused**, as a feed
 /// source's is, so a source that outlived the store it was minted from — the
@@ -538,6 +576,7 @@ impl Store {
 /// [`crate::SnapshotReader`] gives.
 pub struct VerificationSource {
     path: PathBuf,
+    copy: PathBuf,
     epoch: String,
     mark: Arc<StopMark>,
 }
@@ -558,7 +597,7 @@ impl std::fmt::Debug for VerificationSource {
 #[derive(Default)]
 struct StopMark {
     stopped: AtomicBool,
-    /// The interrupt of the open verification's connection, set while it is
+    /// The interrupt of the verification's open connection, set while one is
     /// open and taken back before it closes. A leaf lock: held only to set,
     /// take or fire the handle.
     interrupt: Mutex<Option<InterruptHandle>>,
@@ -569,6 +608,58 @@ impl StopMark {
         self.interrupt
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn stopped(&self) -> bool {
+        self.stopped.load(Ordering::SeqCst)
+    }
+}
+
+/// Make `connection` stoppable by `mark` until the guard drops: its progress
+/// handler reads the mark, and a stop interrupts it. A mark already set is
+/// met here, under the interrupt's lock, so a stop is either met here or
+/// finds the handle.
+fn arm<'a>(mark: &'a Arc<StopMark>, connection: &Connection) -> Result<Armed<'a>, Halt> {
+    let reading = Arc::clone(mark);
+    connection
+        .progress_handler(STOP_MARK_INTERVAL, Some(move || reading.stopped()))
+        .map_err(|error| error::sql("arming the verification's stop", error))?;
+    let mut interrupt = mark.interrupt();
+    if mark.stopped() {
+        return Err(Halt::Stopped);
+    }
+    *interrupt = Some(connection.get_interrupt_handle());
+    Ok(Armed(mark))
+}
+
+/// Takes a connection's interrupt back out of the stop mark before the
+/// connection closes, on every way out.
+struct Armed<'a>(&'a StopMark);
+
+impl Drop for Armed<'_> {
+    fn drop(&mut self) {
+        *self.0.interrupt() = None;
+    }
+}
+
+/// The verification's copy of the store, removed with its journal files on
+/// every way out of the verification that wrote it: a verdict, a refusal, a
+/// stop and an unwind alike.
+struct ScratchCopy<'a>(&'a Path);
+
+impl<'a> ScratchCopy<'a> {
+    /// Clear `path` for a copy: a copy a crash left there is removed first,
+    /// so the copy written is the one this verification takes. A removal the
+    /// environment refuses is the refused operation.
+    fn clear(path: &'a Path) -> Result<Self, Halt> {
+        norn_db::remove_database(path).map_err(StoreError::from)?;
+        Ok(ScratchCopy(path))
+    }
+}
+
+impl Drop for ScratchCopy<'_> {
+    fn drop(&mut self) {
+        let _ = norn_db::remove_database(self.0);
     }
 }
 
@@ -581,7 +672,7 @@ impl std::fmt::Debug for VerificationStop {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("VerificationStop")
-            .field("stopped", &self.0.stopped.load(Ordering::SeqCst))
+            .field("stopped", &self.0.stopped())
             .finish()
     }
 }
@@ -590,17 +681,23 @@ impl VerificationStop {
     /// Stop the verification, whatever it is doing, and every one after it.
     ///
     /// **The mark is set first, then the statement in flight is
-    /// interrupted.** A verification reads the mark before each statement
-    /// and before each row it recomputes, and its connection reads it every
-    /// few thousand steps of a statement, so a statement that starts between
-    /// the verification's last reading and the interrupt is stopped too. The
-    /// verification returns [`ReadOnlyVerification::Interrupted`] within one
-    /// such interval, or one document's recompute, of this call.
+    /// interrupted** — a read-only check, the copy or the copy's full-text
+    /// check. A verification reads the mark at each of its points, and each
+    /// of its connections reads it every few thousand steps of a statement,
+    /// so a statement that starts between the verification's last reading and
+    /// the interrupt is stopped too. The verification returns
+    /// [`Verification::Interrupted`] within one such interval, or one
+    /// document's recompute, of this call.
     pub fn stop(&self) {
         self.0.stopped.store(true, Ordering::SeqCst);
         if let Some(handle) = self.0.interrupt().as_ref() {
             handle.interrupt();
         }
+    }
+
+    /// Whether this verification has been stopped.
+    pub fn is_stopped(&self) -> bool {
+        self.0.stopped()
     }
 }
 
@@ -615,78 +712,75 @@ impl VerificationSource {
         VerificationStop(Arc::clone(&self.mark))
     }
 
-    /// Run every read-only check of the verification over one snapshot of a
-    /// read-only connection of the source's own: every check but the
-    /// full-text one, in the whole verification's order, reporting the first
-    /// failure.
+    /// Remove a copy a verification of this store left behind, as a crash
+    /// leaves one: the clearing an attach runs. A verification clears the
+    /// copy's place itself before it writes, so this is cleanup and never a
+    /// precondition.
+    pub fn discard_copy(&self) -> Result<(), StoreError> {
+        Ok(norn_db::remove_database(&self.copy)?)
+    }
+
+    /// Run every check of the verification without holding the store's
+    /// writer, and report the first failure.
     ///
-    /// `between` runs at each point a stop is met: before each statement and
-    /// before each row the recompute reads, with the snapshot open from the
-    /// first statement on.
+    /// 1. The read-only checks, in the whole verification's order, over one
+    ///    snapshot of a read-only connection of the source's own.
+    /// 2. A `VACUUM INTO` through a second read-only connection, which writes
+    ///    a copy of the store, as one snapshot reads it, beside the store.
+    /// 3. The full-text check on the copy, through a connection to the copy
+    ///    alone.
     ///
-    /// The connection opens here and closes before this returns. The file
-    /// gone, the environment refusing the open and another store lifetime at
-    /// the path are refusals, never damage. A stop, wherever it lands, is
-    /// [`ReadOnlyVerification::Interrupted`], whatever the checks had found.
-    pub fn verify(&self, mut between: impl FnMut()) -> ReadOnlyVerification {
-        if self.mark.stopped.load(Ordering::SeqCst) {
-            return ReadOnlyVerification::Interrupted;
+    /// `between` runs at each point a stop is met, and says which: before
+    /// each read-only check and each row the recompute reads, before the copy
+    /// and before the copy's check.
+    ///
+    /// The connections open here and close before this returns, and the copy
+    /// is removed on every way out, an unwind included. The file gone, the
+    /// environment refusing an open, another store lifetime at the path and a
+    /// copy its directory or disk refused are refusals, never damage. A
+    /// `VACUUM INTO` the store's own contents fail is damage, and so is a
+    /// copy's index that disagrees with the copy's documents: the copy is
+    /// what the store held. A stop, wherever it lands, is
+    /// [`Verification::Interrupted`], whatever the checks had found.
+    pub fn verify(&self, mut between: impl FnMut(VerificationPoint)) -> Verification {
+        if self.mark.stopped() {
+            return Verification::Interrupted;
         }
-        let checked = self.open().and_then(|mut database| {
-            let checked = self.checked_over(&mut database, &mut between);
-            *self.mark.interrupt() = None;
-            checked
-        });
-        if self.mark.stopped.load(Ordering::SeqCst) {
-            return ReadOnlyVerification::Interrupted;
+        let checked = self
+            .read_only_checks(&mut between)
+            .and_then(|()| self.full_text_on_a_copy(&mut between));
+        if self.mark.stopped() {
+            return Verification::Interrupted;
         }
         match checked {
-            Ok(()) => ReadOnlyVerification::Sound,
-            Err(Halt::Stopped) => ReadOnlyVerification::Interrupted,
-            Err(Halt::Failed(error)) => ReadOnlyVerification::Failed(error),
+            Ok(()) => Verification::Sound,
+            Err(Halt::Stopped) => Verification::Interrupted,
+            Err(Halt::Failed(error)) => Verification::Failed(error),
         }
     }
 
-    /// Open the verification's connection, bound to the source's lifetime.
-    fn open(&self) -> Result<norn_db::Database, Halt> {
-        let database = norn_db::open_read_only_to_verify(&self.path).map_err(StoreError::from)?;
-        if database.epoch() != self.epoch {
-            return Err(StoreError::Sql {
-                operation: "opening a verification source",
-                condition: None,
-                message: "the store at the source's path is another lifetime than the source was \
-                          minted from"
-                    .to_string(),
-            }
-            .into());
+    /// Refuse `database` where it is another store lifetime than the one the
+    /// source was minted from.
+    fn same_lifetime(&self, database: &norn_db::Database) -> Result<(), Halt> {
+        if database.epoch() == self.epoch {
+            return Ok(());
         }
-        Ok(database)
+        Err(StoreError::Sql {
+            operation: "opening a verification source",
+            condition: None,
+            message: "the store at the source's path is another lifetime than the source was \
+                      minted from"
+                .to_string(),
+        }
+        .into())
     }
 
-    /// Arm `database`'s connection to be stopped, then run the checks over
-    /// one snapshot of it.
-    fn checked_over(
-        &self,
-        database: &mut norn_db::Database,
-        between: &mut dyn FnMut(),
-    ) -> Result<(), Halt> {
-        let mark = Arc::clone(&self.mark);
-        database
-            .connection()
-            .progress_handler(
-                STOP_MARK_INTERVAL,
-                Some(move || mark.stopped.load(Ordering::SeqCst)),
-            )
-            .map_err(|error| error::sql("arming the verification's stop", error))?;
-        {
-            // Under the interrupt's lock, so a stop that set the mark before
-            // this reading is met here, and one after it finds the handle.
-            let mut interrupt = self.mark.interrupt();
-            if self.mark.stopped.load(Ordering::SeqCst) {
-                return Err(Halt::Stopped);
-            }
-            *interrupt = Some(database.connection().get_interrupt_handle());
-        }
+    /// The read-only checks over one snapshot of a connection of their own.
+    fn read_only_checks(&self, between: &mut dyn FnMut(VerificationPoint)) -> Result<(), Halt> {
+        let mut database =
+            norn_db::open_read_only_to_verify(&self.path).map_err(StoreError::from)?;
+        self.same_lifetime(&database)?;
+        let armed = arm(&self.mark, database.connection())?;
         database.open_snapshot().map_err(StoreError::from)?;
         let mut checks = Checks {
             connection: database.connection(),
@@ -695,7 +789,44 @@ impl VerificationSource {
         };
         let checked = checks.pages_and_keys().and_then(|()| checks.rows());
         let _ = database.close_snapshot();
+        drop(armed);
         checked
+    }
+
+    /// Copy the store beside itself through a read-only connection, and run
+    /// the full-text check on the copy.
+    fn full_text_on_a_copy(&self, between: &mut dyn FnMut(VerificationPoint)) -> Result<(), Halt> {
+        point(Some(&self.mark), between, VerificationPoint::Copy)?;
+        let copy = ScratchCopy::clear(&self.copy)?;
+        {
+            let mut source =
+                norn_db::open_read_only_to_copy(&self.path, copy.0).map_err(StoreError::from)?;
+            self.same_lifetime(&source)?;
+            let armed = arm(&self.mark, source.connection())?;
+            source.copy_into(copy.0).map_err(StoreError::from)?;
+            drop(armed);
+        }
+        point(Some(&self.mark), between, VerificationPoint::CopyCheck)?;
+        let connection = match norn_db::connect(copy.0).map_err(StoreError::from)? {
+            norn_db::Attempt::Connected(connection) => connection,
+            norn_db::Attempt::Unreadable { detail } => {
+                // The copy was just written, so a copy that reads as no
+                // database is the disk refusing it rather than the store's
+                // contents: those were read whole to write it.
+                return Err(StoreError::Sql {
+                    operation: "opening the verification's copy",
+                    condition: None,
+                    message: detail,
+                }
+                .into());
+            }
+        };
+        let armed = arm(&self.mark, &connection)?;
+        let checked = full_text(&connection);
+        drop(armed);
+        drop(connection);
+        drop(copy);
+        Ok(checked?)
     }
 }
 
@@ -710,19 +841,15 @@ mod tests {
     fn a_statement_begun_after_the_mark_is_set_is_stopped_by_the_connection() {
         let connection = Connection::open_in_memory().unwrap();
         let mark = Arc::new(StopMark::default());
-        let reading = Arc::clone(&mark);
-        connection
-            .progress_handler(
-                STOP_MARK_INTERVAL,
-                Some(move || reading.stopped.load(Ordering::SeqCst)),
-            )
-            .unwrap();
+        let armed = arm(&mark, &connection).unwrap_or_else(|_| panic!("a mark nothing set"));
         let counted = "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n \
                        WHERE i < 1000000) SELECT count(*) FROM n";
         let all: i64 = connection.query_row(counted, [], |row| row.get(0)).unwrap();
         assert_eq!(all, 1_000_000);
 
-        VerificationStop(Arc::clone(&mark)).stop();
+        // The mark alone, with no interrupt fired: what stops the statement
+        // is the connection's own reading of it.
+        mark.stopped.store(true, Ordering::SeqCst);
         let error = connection
             .query_row(counted, [], |row| row.get::<_, i64>(0))
             .expect_err("a statement begun after the stop");
@@ -731,5 +858,6 @@ mod tests {
             Some(rusqlite::ErrorCode::OperationInterrupted),
             "{error:?}"
         );
+        drop(armed);
     }
 }

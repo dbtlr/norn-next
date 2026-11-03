@@ -1,35 +1,52 @@
-//! The store's verification in its two halves: the read-only checks, which
-//! run over one snapshot of a read connection of their own, and the full-text
-//! check, which is a write and runs on the store's writer.
+//! The store's periodic verification through a [`VerificationSource`]: the
+//! read-only checks over one snapshot of a read connection of their own, then
+//! a copy of the store written through another read-only connection, and the
+//! full-text check — the one check that writes — on the copy. Nothing in it
+//! holds the store's writer.
 //!
-//! The whole verification a from-zero build closes with is both halves, and
-//! what the halves report together is what it reports: the same verdict on a
-//! sound store and the same damage, named the same way, on a store damaged in
-//! each way the verification looks for. The read-only half can be stopped
-//! from another thread, and a stopped verification reaches no verdict.
+//! What it reports is what the whole verification a from-zero build closes
+//! with reports: the same verdict on a sound store, and the same damage,
+//! named the same way, on a store damaged in each way the verification looks
+//! for. It can be stopped from another thread wherever it is, a stopped
+//! verification reaches no verdict, and its copy is gone on every way out.
 
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::common::{
     Scratch, document, document_with_every_fact, path, path_names_no_document_in_class,
     record_death, unread_block, violation, write_document,
 };
 use norn_store::{
-    Provenance, ReadOnlyVerification, Store, StoreError, StoredPathOrder, induced_failure,
+    Provenance, Store, StoreError, StoredPathOrder, Verification, VerificationPoint,
+    induced_failure,
 };
 use norn_wire::{FindingKind, Severity};
 
-/// The store's verification as its two halves run it, in the order the
-/// whole verification asks: the read-only half's verdict, then the full-text
-/// check's. A stopped read-only half is a failure of the case: nothing here
-/// stops it.
-fn verified_in_halves(store: &Store) -> Result<(), StoreError> {
-    match store.verification_source().verify(|| {}) {
-        ReadOnlyVerification::Sound => store.verify_full_text(),
-        ReadOnlyVerification::Failed(error) => Err(error),
-        ReadOnlyVerification::Interrupted => panic!("a verification nothing stopped was stopped"),
+/// Where a source minted from the store at `scratch` writes its copy: beside
+/// the store, in the directory that holds it.
+fn copy_of(scratch: &Scratch) -> PathBuf {
+    scratch.database().with_extension("verification-copy")
+}
+
+/// Whether anything of a copy at `copy` is left: the file or a journal's.
+fn copy_left(copy: &Path) -> bool {
+    ["", "-wal", "-shm", "-journal"].iter().any(|suffix| {
+        let mut name = copy.as_os_str().to_os_string();
+        name.push(suffix);
+        PathBuf::from(name).exists()
+    })
+}
+
+/// The source's verdict as the whole verification spells one. A stop is a
+/// failure of the case: nothing here stops it.
+fn verified_through_a_source(store: &Store) -> Result<(), StoreError> {
+    match store.verification_source().verify(|_| {}) {
+        Verification::Sound => Ok(()),
+        Verification::Failed(error) => Err(error),
+        Verification::Interrupted => panic!("a verification nothing stopped was stopped"),
     }
 }
 
@@ -74,8 +91,8 @@ fn a_store_with_a_row_for_every_check(scratch: &Scratch) -> Store {
 
 /// Each way the whole verification's own cases damage a store, one per
 /// check and each damaging nothing a second check reads, so the first
-/// failure is the one failure; with the half that meets it: `true` where it is the full-text
-/// check, which is the only check the read-only half leaves out.
+/// failure is the one failure; `true` where the check that meets it is the
+/// full-text check, which the source runs on its copy.
 const DAMAGE: &[(&str, bool)] = &[
     (
         "INSERT INTO documents_fts (rowid, body) VALUES (99999, 'a body no document holds')",
@@ -126,19 +143,24 @@ const DAMAGE: &[(&str, bool)] = &[
     ),
 ];
 
-/// **The halves report what the whole verification reports.** On a sound
-/// store both are sound; on a store damaged in each way the verification's
-/// own cases damage one, both report the same damage in the same words, and
-/// the half that reports it is the one whose check it is.
+/// **The verification through a source reports what the whole verification
+/// reports.** On a sound store both are sound; on a store damaged in each way
+/// the verification's own cases damage one, both report the same damage in
+/// the same words — the full-text check's on the copy included — and the
+/// copy is gone afterwards either way.
 #[test]
-fn the_two_halves_report_exactly_what_the_whole_verification_reports() {
-    let scratch = Scratch::new("halves-sound");
+fn a_source_reports_exactly_what_the_whole_verification_reports() {
+    let scratch = Scratch::new("through-source-sound");
     let store = a_store_with_a_row_for_every_check(&scratch);
     store.verify_integrity().expect("a store just written to");
-    verified_in_halves(&store).expect("the halves of a sound store");
+    verified_through_a_source(&store).expect("a source over a sound store");
+    assert!(
+        !copy_left(&copy_of(&scratch)),
+        "a sound verification left its copy"
+    );
 
     for (index, (arrange, full_text)) in DAMAGE.iter().enumerate() {
-        let scratch = Scratch::new(&format!("halves-{index}"));
+        let scratch = Scratch::new(&format!("through-source-{index}"));
         let mut store = a_store_with_a_row_for_every_check(&scratch);
         induced_failure::execute_out_of_band(&mut store, arrange)
             .unwrap_or_else(|error| panic!("`{arrange}` was refused: {error:?}"));
@@ -148,46 +170,23 @@ fn the_two_halves_report_exactly_what_the_whole_verification_reports() {
             matches!(whole, Err(StoreError::Damaged { .. })),
             "`{arrange}`: the whole verification reported {whole:?}"
         );
+        let through = verified_through_a_source(&store);
         assert_eq!(
-            format!("{:?}", verified_in_halves(&store)),
+            format!("{through:?}"),
             format!("{whole:?}"),
-            "`{arrange}`: the halves reported otherwise than the whole"
+            "`{arrange}`: the source reported otherwise than the whole"
         );
-        let read_only = store.verification_source().verify(|| {});
         if *full_text {
             assert!(
-                matches!(read_only, ReadOnlyVerification::Sound),
-                "`{arrange}`: the read-only half reported {read_only:?}"
+                format!("{through:?}").contains("full-text index"),
+                "{through:?}"
             );
-        } else {
-            assert!(
-                matches!(&read_only, ReadOnlyVerification::Failed(error) if error.damage().is_some()),
-                "`{arrange}`: the read-only half reported {read_only:?}"
-            );
-            store
-                .verify_full_text()
-                .unwrap_or_else(|error| panic!("`{arrange}`: the full-text check said {error:?}"));
         }
+        assert!(
+            !copy_left(&copy_of(&scratch)),
+            "`{arrange}`: the copy was left"
+        );
     }
-}
-
-/// **The full-text check keeps its classification.** It is a write, so on a
-/// connection that cannot write it fails, and the failure is the refused
-/// operation it was, never damage.
-#[test]
-fn a_full_text_check_that_cannot_write_is_refused_rather_than_called_damage() {
-    let scratch = Scratch::new("full-text-read-only");
-    let mut store = a_store_with_a_row_for_every_check(&scratch);
-    induced_failure::execute_out_of_band(&mut store, "PRAGMA query_only = ON")
-        .expect("making the connection read-only");
-    let error = store
-        .verify_full_text()
-        .expect_err("a full-text check that cannot write");
-    let StoreError::Sql { operation, .. } = &error else {
-        panic!("it was reported as {error:?} rather than as a refused operation");
-    };
-    assert!(operation.contains("full-text index"), "{operation}");
-    assert_eq!(error.damage(), None);
 }
 
 /// **A source outlives nothing it was minted from.** Minted from one store
@@ -196,67 +195,78 @@ fn a_full_text_check_that_cannot_write_is_refused_rather_than_called_damage() {
 /// rebuilt store for the state of the one before it.
 #[test]
 fn a_source_over_a_store_that_was_replaced_is_refused_and_not_damage() {
-    let scratch = Scratch::new("halves-replaced");
+    let scratch = Scratch::new("source-replaced");
     let store = a_store_with_a_row_for_every_check(&scratch);
     let source = store.verification_source();
     let _rebuilt = store
         .discard_and_reopen(StoredPathOrder::Sensitive)
         .expect("a rebuild of the store");
-    let ReadOnlyVerification::Failed(error) = source.verify(|| {}) else {
+    let Verification::Failed(error) = source.verify(|_| {}) else {
         panic!("a source over a replaced store reached a verdict");
     };
     assert_eq!(error.damage(), None, "{error:?}");
 }
 
-/// **The read-only half holds one snapshot, and the writer is never held
-/// behind it.** Held open between two of its checks, the verification lets a
-/// write commit and reads none of it: the damage the write leaves stands
-/// after the snapshot the verification reads.
+/// **A write commits wherever the verification is.** Held with its snapshot
+/// open, before its copy and with its copy written, the verification lets a
+/// write commit each time, and reads none of it: the damage each write leaves
+/// is where only the snapshot already taken looks — a row the read-only
+/// checks read, or the index the copy's check reads.
 #[test]
-fn a_write_commits_while_the_read_only_half_is_in_flight() {
-    let scratch = Scratch::new("halves-writer");
-    let mut store = a_store_with_a_row_for_every_check(&scratch);
-    // Held at its second point: the first check has run, so the snapshot
-    // every later check reads is established.
-    let source = store.verification_source();
-    let (entered, entry) = mpsc::channel();
-    let (resume, resumed) = mpsc::channel::<()>();
-    let verifying = thread::spawn(move || {
-        let mut calls = 0;
-        source.verify(move || {
-            calls += 1;
-            if calls == 2 {
-                entered.send(()).unwrap();
-                resumed.recv_timeout(Duration::from_secs(30)).unwrap();
-            }
-        })
-    });
-    entry.recv_timeout(Duration::from_secs(15)).unwrap();
-    write_document(
-        &mut store.begin_request(),
-        &document("arrived.md", "hash-2", "a body\n"),
-    );
-    induced_failure::execute_out_of_band(&mut store, "UPDATE findings SET severity = 'urgent'")
-        .expect("a write while the verification holds its snapshot");
-    resume.send(()).unwrap();
-    let verdict = verifying.join().unwrap();
-    assert!(
-        matches!(verdict, ReadOnlyVerification::Sound),
-        "the verification read past its snapshot: {verdict:?}"
-    );
-    assert!(matches!(
-        store.verification_source().verify(|| {}),
-        ReadOnlyVerification::Failed(StoreError::Damaged { .. })
-    ));
+fn a_write_commits_wherever_the_verification_is() {
+    const A_ROW: &str = "UPDATE findings SET severity = 'urgent'";
+    const THE_INDEX: &str =
+        "INSERT INTO documents_fts (rowid, body) VALUES (99999, 'a body no document holds')";
+    for (held_at, nth, damage) in [
+        (VerificationPoint::Check, 2, A_ROW),
+        (VerificationPoint::Copy, 1, A_ROW),
+        (VerificationPoint::CopyCheck, 1, THE_INDEX),
+    ] {
+        let scratch = Scratch::new("source-writer");
+        let mut store = a_store_with_a_row_for_every_check(&scratch);
+        let source = store.verification_source();
+        let (entered, entry) = mpsc::channel();
+        let (resume, resumed) = mpsc::channel::<()>();
+        let verifying = thread::spawn(move || {
+            let mut seen = 0;
+            source.verify(move |at| {
+                if at == held_at {
+                    seen += 1;
+                    if seen == nth {
+                        entered.send(()).unwrap();
+                        resumed.recv_timeout(Duration::from_secs(30)).unwrap();
+                    }
+                }
+            })
+        });
+        entry.recv_timeout(Duration::from_secs(15)).unwrap();
+        write_document(
+            &mut store.begin_request(),
+            &document("arrived.md", "hash-2", "a body\n"),
+        );
+        induced_failure::execute_out_of_band(&mut store, damage)
+            .expect("a write while the verification is held");
+        resume.send(()).unwrap();
+        let verdict = verifying.join().unwrap();
+        assert!(
+            matches!(verdict, Verification::Sound),
+            "held at {held_at:?}: the verification read past its snapshot: {verdict:?}"
+        );
+        assert!(matches!(
+            store.verification_source().verify(|_| {}),
+            Verification::Failed(StoreError::Damaged { .. })
+        ));
+    }
 }
 
 /// **A stopped verification reaches no verdict**, wherever the stop finds
-/// it: before it opens, between two of its checks, or between two of the
-/// rows it recomputes. The store is damaged where only the last check looks,
-/// so a verification that ran on past the stop would report damage.
+/// it: before it opens, at any point of its read-only checks or the rows it
+/// recomputes, before its copy, or before the copy's check. The store is
+/// damaged where only the copy's check looks, so a verification that ran on
+/// past the stop would report damage; and the copy is gone however it ended.
 #[test]
 fn a_stopped_verification_reaches_no_verdict_wherever_it_stops() {
-    let scratch = Scratch::new("halves-stopped");
+    let scratch = Scratch::new("source-stopped");
     let mut store = scratch.open();
     let mut request = store.begin_request();
     for at in 0..8 {
@@ -267,26 +277,37 @@ fn a_stopped_verification_reaches_no_verdict_wherever_it_stops() {
     }
     induced_failure::execute_out_of_band(
         &mut store,
-        "UPDATE documents SET body_hash = 'not the hash of anything' WHERE path = '7.md'",
+        "INSERT INTO documents_fts (rowid, body) VALUES (99999, 'a body no document holds')",
     )
     .unwrap();
-    let mut points = 0;
-    store.verification_source().verify(|| points += 1);
-    assert!(points > 8, "the verification stops at {points} points");
+    let mut points = Vec::new();
+    let verdict = store.verification_source().verify(|at| points.push(at));
+    assert!(matches!(
+        verdict,
+        Verification::Failed(StoreError::Damaged { .. })
+    ));
+    for kind in [
+        VerificationPoint::Check,
+        VerificationPoint::Row,
+        VerificationPoint::Copy,
+        VerificationPoint::CopyCheck,
+    ] {
+        assert!(
+            points.contains(&kind),
+            "the verification met no {kind:?} point"
+        );
+    }
 
     let source = store.verification_source();
     source.stop_handle().stop();
-    assert!(matches!(
-        source.verify(|| {}),
-        ReadOnlyVerification::Interrupted
-    ));
+    assert!(matches!(source.verify(|_| {}), Verification::Interrupted));
 
-    for stop_at in [1, points / 2, points] {
+    for stop_at in 1..=points.len() {
         let source = store.verification_source();
         let stop = source.stop_handle();
         let mut reached = 0;
         let mut after = 0;
-        let verdict = source.verify(|| {
+        let verdict = source.verify(|_| {
             reached += 1;
             if reached > stop_at {
                 after += 1;
@@ -296,24 +317,29 @@ fn a_stopped_verification_reaches_no_verdict_wherever_it_stops() {
             }
         });
         assert!(
-            matches!(verdict, ReadOnlyVerification::Interrupted),
-            "stopped at {stop_at} of {points}: {verdict:?}"
+            matches!(verdict, Verification::Interrupted),
+            "stopped at {:?}, point {stop_at} of {}: {verdict:?}",
+            points[stop_at - 1],
+            points.len()
         );
         assert_eq!(
             after, 0,
             "the verification went on past a stop at {stop_at}"
         );
+        assert!(
+            !copy_left(&copy_of(&scratch)),
+            "a stop at {stop_at} left the copy"
+        );
     }
 }
 
-/// **A stop meets a statement in flight.** A verification over a store large
-/// enough that its page check takes a while is stopped from another thread
-/// while that check runs, and returns without a verdict long before the
-/// check would have ended: the statement itself is stopped, rather than the
-/// verification at the next point between two checks.
-#[test]
-fn a_stop_from_another_thread_interrupts_the_statement_in_flight() {
-    let scratch = Scratch::new("halves-interrupted");
+/// A store large enough that each step of its verification takes a while,
+/// and how long each of the three statements a stop is aimed at took in a
+/// verification nothing stopped: the page check, the copy and the copy's
+/// full-text check, each from the point before it to the point after it.
+fn a_store_with_long_steps(
+    scratch: &Scratch,
+) -> (Store, [(VerificationPoint, usize, Duration); 3]) {
     let mut store = scratch.open();
     let body = "a body long enough to fill pages of the database\n".repeat(64);
     let mut request = store.begin_request();
@@ -323,43 +349,138 @@ fn a_stop_from_another_thread_interrupts_the_statement_in_flight() {
             &document(&format!("{at}.md"), "hash-1", &body),
         );
     }
-    // The first check is the page check: time it as the verification runs it.
     let mut marks = Vec::new();
     assert!(matches!(
         store
             .verification_source()
-            .verify(|| marks.push(std::time::Instant::now())),
-        ReadOnlyVerification::Sound
+            .verify(|at| marks.push((at, Instant::now()))),
+        Verification::Sound
     ));
-    let page_check = marks[1] - marks[0];
-    assert!(
-        page_check >= Duration::from_millis(10),
-        "a page check of {page_check:?} is too short to be stopped inside"
-    );
+    let ended = Instant::now();
+    let at = |kind: VerificationPoint| marks.iter().position(|(seen, _)| *seen == kind).unwrap();
+    let page_check = marks[1].1 - marks[0].1;
+    let copy = marks[at(VerificationPoint::CopyCheck)].1 - marks[at(VerificationPoint::Copy)].1;
+    let copy_check = ended - marks[at(VerificationPoint::CopyCheck)].1;
+    let steps = [
+        (VerificationPoint::Check, 1, page_check),
+        (VerificationPoint::Copy, 1, copy),
+        (VerificationPoint::CopyCheck, 1, copy_check),
+    ];
+    for (kind, _, took) in steps {
+        assert!(
+            took >= Duration::from_millis(10),
+            "the statement after {kind:?} took {took:?}, too short to be stopped inside"
+        );
+    }
+    (store, steps)
+}
 
+/// **A stop meets the statement in flight**: the page check, the copy and the
+/// copy's full-text check alike. Stopped from another thread a tenth of the
+/// way into each, the verification returns without a verdict long before the
+/// statement would have ended, and the copy is gone.
+#[test]
+fn a_stop_from_another_thread_interrupts_the_statement_in_flight() {
+    let scratch = Scratch::new("source-interrupted");
+    let (store, steps) = a_store_with_long_steps(&scratch);
+    for (kind, nth, took) in steps {
+        let source = store.verification_source();
+        let stop = source.stop_handle();
+        let (entered, entry) = mpsc::channel();
+        let verifying = thread::spawn(move || {
+            let mut seen = 0;
+            source.verify(move |at| {
+                if at == kind {
+                    seen += 1;
+                    if seen == nth {
+                        entered.send(Instant::now()).unwrap();
+                    }
+                }
+            })
+        });
+        let began = entry.recv_timeout(Duration::from_secs(15)).unwrap();
+        thread::sleep(took / 10);
+        stop.stop();
+        let verdict = verifying.join().unwrap();
+        let returned = began.elapsed();
+        assert!(
+            matches!(verdict, Verification::Interrupted),
+            "{kind:?}: {verdict:?}"
+        );
+        assert!(
+            returned < took / 2,
+            "a stop {:?} into the {took:?} statement after {kind:?} returned after {returned:?}",
+            took / 10
+        );
+        assert!(
+            !copy_left(&copy_of(&scratch)),
+            "{kind:?}: the stop left the copy"
+        );
+    }
+}
+
+/// **The copy goes with an unwind too.** A verification that unwinds with its
+/// copy written leaves no copy behind it.
+#[test]
+fn an_unwind_out_of_a_verification_leaves_no_copy() {
+    let scratch = Scratch::new("source-unwind");
+    let store = a_store_with_a_row_for_every_check(&scratch);
     let source = store.verification_source();
-    let stop = source.stop_handle();
-    let (entered, entry) = mpsc::channel();
-    let verifying = thread::spawn(move || {
-        let mut first = true;
-        source.verify(move || {
-            if std::mem::take(&mut first) {
-                entered.send(std::time::Instant::now()).unwrap();
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        source.verify(|at| {
+            if at == VerificationPoint::CopyCheck {
+                panic!("an unwind with the copy written");
             }
         })
-    });
-    let began = entry.recv_timeout(Duration::from_secs(15)).unwrap();
-    thread::sleep(page_check / 10);
-    stop.stop();
-    let verdict = verifying.join().unwrap();
-    let took = began.elapsed();
+    }));
+    assert!(unwound.is_err());
+    assert!(!copy_left(&copy_of(&scratch)), "the unwind left the copy");
+}
+
+/// **A copy a crash left is not this verification's copy.** Whatever stands
+/// at the copy's place — a file that is no database, a journal beside it —
+/// is cleared before the copy is written, so it is never what the full-text
+/// check reads; and the clearing an attach runs removes it outright.
+#[test]
+fn a_copy_a_crash_left_is_cleared_before_the_next_copy() {
+    let scratch = Scratch::new("source-leftover");
+    let store = a_store_with_a_row_for_every_check(&scratch);
+    let copy = copy_of(&scratch);
+    let mut journal = copy.as_os_str().to_os_string();
+    journal.push("-journal");
+    std::fs::write(&copy, b"not a database").unwrap();
+    std::fs::write(&journal, b"not a journal").unwrap();
+    verified_through_a_source(&store).expect("a sound store with a leftover copy beside it");
+    assert!(!copy_left(&copy));
+
+    std::fs::write(&copy, b"not a database").unwrap();
+    store
+        .verification_source()
+        .discard_copy()
+        .expect("clearing a leftover copy");
+    assert!(!copy_left(&copy));
+
+    std::fs::write(&copy, b"not a database").unwrap();
+    let path = store.path().to_path_buf();
+    store.close().unwrap();
+    Store::discard_at(&path).expect("discarding the derived state");
     assert!(
-        matches!(verdict, ReadOnlyVerification::Interrupted),
-        "{verdict:?}"
+        !copy_left(&copy),
+        "discarding the store left its verification's copy"
     );
-    assert!(
-        took < page_check / 2,
-        "a stop {:?} into a {page_check:?} page check returned after {took:?}",
-        page_check / 10
-    );
+}
+
+/// **A copy the environment refuses is a refusal, never damage.** Where the
+/// copy's place cannot be cleared — something that is not a file stands
+/// there — the verification is refused, and the store it never finished
+/// checking is not called damaged.
+#[test]
+fn a_copy_its_place_refuses_is_refused_rather_than_called_damage() {
+    let scratch = Scratch::new("source-copy-refused");
+    let store = a_store_with_a_row_for_every_check(&scratch);
+    std::fs::create_dir_all(copy_of(&scratch).join("occupied")).unwrap();
+    let Verification::Failed(error) = store.verification_source().verify(|_| {}) else {
+        panic!("a verification whose copy was refused reached a verdict");
+    };
+    assert_eq!(error.damage(), None, "{error:?}");
 }

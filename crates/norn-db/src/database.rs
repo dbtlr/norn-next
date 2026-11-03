@@ -523,7 +523,17 @@ pub fn connect_read_only(path: &Path) -> Result<Connection, DbError> {
 /// caller counting a whole open passes one tally through every step of it.
 #[allow(clippy::disallowed_methods)] // The substrate seam: this is the one place a SQLite connection is opened.
 fn connect_read_only_counting(path: &Path, statements: &mut u64) -> Result<Connection, DbError> {
-    connect_read_only_bounded(path, statements, None)
+    connect_read_only_bounded(path, statements, None, QueryOnly::Set)
+}
+
+/// Whether a read-only open sets `query_only` on the connection. Every open
+/// does but the copy connection's: `VACUUM INTO` writes the copy through the
+/// connection, which `query_only` refuses, while the read-only open flag
+/// still refuses every write to the database it copies.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum QueryOnly {
+    Set,
+    Unset,
 }
 
 #[allow(clippy::disallowed_methods)] // All connection opens are substrate-owned.
@@ -531,6 +541,7 @@ fn connect_read_only_bounded(
     path: &Path,
     statements: &mut u64,
     deadline: Option<std::time::Instant>,
+    query_only: QueryOnly,
 ) -> Result<Connection, DbError> {
     refuse_a_name_that_is_not_a_file("opening the database read-only", path)?;
     let connection =
@@ -563,9 +574,11 @@ fn connect_read_only_bounded(
     connection
         .pragma_update(None, "foreign_keys", true)
         .map_err(|error| error::sql("turning foreign keys on", error))?;
-    connection
-        .pragma_update(None, "query_only", true)
-        .map_err(|error| error::sql("making the connection read-only", error))?;
+    if query_only == QueryOnly::Set {
+        connection
+            .pragma_update(None, "query_only", true)
+            .map_err(|error| error::sql("making the connection read-only", error))?;
+    }
     // Last, because it refuses the pragmas above: everything this function had
     // to set is set before the connection stops accepting settings at all.
     connection
@@ -635,6 +648,72 @@ pub fn open_read_only_to_verify(path: &Path) -> Result<Database, DbError> {
     Ok(database)
 }
 
+/// Open a read-only connection a database is copied through into `target`,
+/// bound to its file.
+///
+/// **The read-only open flag is what keeps the database itself unwritten**, as
+/// it is for every read-only connection. The connection is sealed as a read
+/// connection is, and admits one act besides, and only while
+/// [`Database::copy_into`] runs it: the `VACUUM INTO` that writes a copy of
+/// the database's snapshot to `target`. That statement attaches `target`,
+/// which is the one attachment admitted, runs its own transaction, and writes
+/// only into the schema SQLite names for the copy. `query_only` is not set,
+/// because it refuses that write to the copy too.
+///
+/// Reading the database to copy it is one snapshot read, so the writer is
+/// never held behind the copy.
+pub fn open_read_only_to_copy(path: &Path, target: &Path) -> Result<Database, DbError> {
+    let mut statements = 0;
+    let database = connect_read_only_bounded(path, &mut statements, None, QueryOnly::Unset)
+        .and_then(|connection| Database::adopt_counting(connection, path, &mut statements))?;
+    let control = Arc::clone(&database.snapshot_control);
+    let target = target.to_string_lossy().into_owned();
+    database
+        .connection
+        .authorizer(Some(move |context: AuthContext<'_>| {
+            copy_verdict(&control, &target, context)
+        }))
+        .map_err(|error| error::sql("sealing the copy connection", error))?;
+    Ok(database)
+}
+
+/// What a copy connection's authorizer answers: while its own copy runs, the
+/// attachment of `target`, the copy's transaction and every act on the schema
+/// SQLite writes the copy through; otherwise [`sealed_verdict`].
+fn copy_verdict(control: &AtomicBool, target: &str, context: AuthContext<'_>) -> Authorization {
+    if control.load(Ordering::SeqCst) {
+        let copying = match context.action {
+            AuthAction::Attach { filename } => filename == target,
+            _ => context
+                .database_name
+                .is_some_and(|schema| schema.starts_with("vacuum_")),
+        };
+        if copying {
+            return Authorization::Allow;
+        }
+    }
+    sealed_verdict(control, context)
+}
+
+impl Database {
+    /// Write a copy of this database, as one snapshot of it reads, to
+    /// `target`: a `VACUUM INTO`, which never holds the database's writer.
+    ///
+    /// Only a connection [`open_read_only_to_copy`] opened for `target` is
+    /// admitted to run it; any other connection, or another target, is
+    /// refused at preparation. `target` must not exist. A driver error that
+    /// describes the database's own contents is damage; every other failure —
+    /// the target's directory refusing the file, a full disk — is the refused
+    /// operation.
+    pub fn copy_into(&mut self, target: &Path) -> Result<(), DbError> {
+        let _control = SnapshotControl::raise(&self.snapshot_control);
+        self.connection
+            .execute("VACUUM INTO ?1", [target.to_string_lossy()])
+            .map(|_| ())
+            .map_err(|error| error::sql("copying the database", error))
+    }
+}
+
 /// What a verification connection's authorizer answers: the two verification
 /// pragmas, asked with no value, and otherwise [`sealed_verdict`].
 fn verification_verdict(control: &AtomicBool, context: AuthContext<'_>) -> Authorization {
@@ -650,8 +729,8 @@ fn verification_verdict(control: &AtomicBool, context: AuthContext<'_>) -> Autho
 /// All SQLite busy waits in a cold open consume the caller's remaining deadline.
 pub fn open_read_only_until(path: &Path, deadline: std::time::Instant) -> ReadOnlyOpen {
     let mut statements = 0;
-    let adopted =
-        connect_read_only_bounded(path, &mut statements, Some(deadline)).and_then(|connection| {
+    let adopted = connect_read_only_bounded(path, &mut statements, Some(deadline), QueryOnly::Set)
+        .and_then(|connection| {
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             if remaining.is_zero() {
                 return Err(DbError::Lifecycle {
@@ -1007,6 +1086,51 @@ mod tests {
             "a read-only open is what recording_reads records against a seal"
         );
         (scratch, database)
+    }
+
+    /// **A copy connection copies, and does nothing else.** Inside
+    /// [`Database::copy_into`] it writes a copy of the database to the target
+    /// it was opened for; outside it, it reads as a sealed connection does.
+    /// It never copies to another target, never attaches anything, and never
+    /// writes the database it copies.
+    #[test]
+    fn a_copy_connection_copies_to_its_own_target_alone() {
+        let (scratch, sealed) = sealed_database("copy-connection", "trial", "value");
+        let path = sealed.path().to_path_buf();
+        drop(sealed);
+        let target = scratch.join("copy.sqlite3");
+        let elsewhere = scratch.join("elsewhere.sqlite3");
+        let mut copying = open_read_only_to_copy(&path, &target).expect("a copy connection");
+
+        let refused = copying.copy_into(&elsewhere);
+        assert!(refused.is_err() && !elsewhere.exists(), "{refused:?}");
+        for statement in [
+            format!("ATTACH '{}' AS other", elsewhere.display()),
+            format!("VACUUM INTO '{}'", target.display()),
+            "INSERT INTO trial (value) VALUES ('y')".to_string(),
+            "PRAGMA query_only = 0".to_string(),
+        ] {
+            assert!(
+                copying.connection().execute_batch(&statement).is_err(),
+                "`{statement}` ran outside the copy"
+            );
+        }
+        assert!(
+            !target.exists(),
+            "a statement outside the copy wrote the target"
+        );
+
+        copying.copy_into(&target).expect("the copy");
+        let copied = Connection::open(&target).unwrap();
+        let value: String = copied
+            .query_row("SELECT value FROM trial", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(value, "x");
+        let rows: i64 = copying
+            .connection()
+            .query_row("SELECT count(*) FROM trial", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, 1, "the copy wrote the database it copied");
     }
 
     /// A `prepare` that panics before touching the connection, standing in for

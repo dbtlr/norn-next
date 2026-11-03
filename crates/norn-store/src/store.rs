@@ -1472,13 +1472,15 @@ impl Store {
     }
 
     /// Check the database against itself, and report the first way it is not
-    /// consistent: both halves of the verification, on the store's writer.
+    /// consistent, on the store's writer.
     ///
     /// This is the whole verification a from-zero build and a rebuild close
-    /// with, before the under-construction mark is cleared, and it asks the
-    /// checks in the order the two halves share: the pages and the foreign
-    /// keys, then the full-text check ([`Store::verify_full_text`]), then the
-    /// rest of the read-only half. What each check asks, and why, is
+    /// with, before the under-construction mark is cleared: the pages and the
+    /// foreign keys, the full-text check, then the rest of the read-only
+    /// checks. The full-text check is a write, which the build's holder of the
+    /// writer can run in place; the periodic verification of a finished store
+    /// runs the same checks without the writer, through
+    /// [`Store::verification_source`]. What each check asks, and why, is
     /// [`crate::verification`]'s.
     ///
     /// This is a maintenance act rather than a request: it derives nothing, so
@@ -1491,20 +1493,6 @@ impl Store {
     /// everything else is reported as the refused operation it was.
     pub fn verify_integrity(&self) -> Result<(), StoreError> {
         crate::verification::whole(self.connection())
-    }
-
-    /// The full-text check alone: the one check of the verification that
-    /// writes, run on the store's writer.
-    ///
-    /// `INSERT INTO documents_fts(documents_fts, rank) VALUES
-    /// ('integrity-check', 1)` takes the write lock on any connection that
-    /// runs it, so it is the half of the verification that stays with the
-    /// writer's holder; the rest reads through a
-    /// [`crate::VerificationSource`]. Its classification is the whole
-    /// verification's: damage only where the driver says the index disagrees
-    /// with the documents it indexes, and the refused operation otherwise.
-    pub fn verify_full_text(&self) -> Result<(), StoreError> {
-        crate::verification::full_text(self.connection())
     }
 
     /// What store schema this database records having been written under.
@@ -1557,15 +1545,19 @@ impl Store {
         Ok(())
     }
 
-    /// Discard the database at `path`, and every sidecar a journal leaves
-    /// beside it, without opening it.
+    /// Discard the database at `path`, every sidecar a journal leaves beside
+    /// it, and the copy a verification of it writes beside it, without
+    /// opening it.
     ///
     /// For derived state nothing is going to open again: the vault it was
     /// derived from is no longer served. The caller holds the maintainer lock
     /// over the directory, so no store is open on the file. A database that is
     /// not there is already discarded.
     pub fn discard_at(path: &Path) -> Result<(), StoreError> {
-        Ok(norn_db::remove_database(path)?)
+        norn_db::remove_database(path)?;
+        Ok(norn_db::remove_database(
+            &crate::verification::verification_copy(path),
+        )?)
     }
 
     /// Discard the database and open a store on the one that replaces it — heal
