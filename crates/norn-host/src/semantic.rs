@@ -97,13 +97,13 @@ use norn_config::ConfigDirs;
 use norn_config::vault::EngineConfig;
 use norn_embed::{Model, StubEmbedder};
 use norn_semantic::{
-    DrainStep, Engine, EngineError, NearestWork, Neighbor, Settings, SidecarRevision, Watermark,
-    Watermarks,
+    Coverage, DrainStep, Engine, EngineError, NearestWork, Neighbor, Settings, SidecarRevision,
+    Watermark, Watermarks,
 };
 use norn_store::{FeedSource, StoreReading};
 use norn_wire::{
-    EngineSection, EngineStatus, ErrorDetail, ErrorEnvelope, Freshness, Rung, RungSkipReason,
-    VaultName,
+    EmbeddingCoverage, EngineSection, EngineStatus, ErrorDetail, ErrorEnvelope, Freshness, Rung,
+    RungSkipReason, VaultName,
 };
 
 use crate::lifecycle::BackgroundUnit;
@@ -164,6 +164,10 @@ pub enum SemanticStatus {
         /// How far each feed was drained; judged against a store reading by
         /// [`freshness`].
         watermarks: Watermarks,
+        /// How many of the documents the engine would embed have embeddings,
+        /// counted at the store state the last unit read; `None` until a
+        /// unit has counted ([`Engine::coverage`]).
+        coverage: Option<Coverage>,
     },
     SelfDisabled {
         detail: String,
@@ -952,6 +956,7 @@ fn read_slot(slot: &Slot) -> SemanticStatus {
             last_drain_error: last_drain_error.clone(),
             sidecar: engine.revision(),
             watermarks: engine.watermarks().clone(),
+            coverage: engine.coverage(),
         },
         Slot::Running { engine: None, .. } => SemanticStatus::SelfDisabled {
             detail: ABANDONED.to_string(),
@@ -972,8 +977,10 @@ fn read_slot(slot: &Slot) -> SemanticStatus {
 /// watermark names another store lifetime or a feed has none. It is `None`
 /// where no feed has recorded a watermark or no store reading is recorded,
 /// which is the wire's own reading of an engine that has reported nothing to
-/// judge. The match carries no wildcard, so a status minted without a report
-/// does not compile.
+/// judge. Its coverage is the engine's own count, carried as the last hold of
+/// the slot left it and judged against nothing: it describes the store state
+/// that hold's unit read, and is `None` until a unit has counted. The match
+/// carries no wildcard, so a status minted without a report does not compile.
 pub(crate) fn engine_status(status: SemanticStatus, store: Option<&StoreReading>) -> EngineStatus {
     match status {
         SemanticStatus::Off => EngineStatus::off(),
@@ -981,13 +988,16 @@ pub(crate) fn engine_status(status: SemanticStatus, store: Option<&StoreReading>
         SemanticStatus::On {
             last_drain_error,
             watermarks,
+            coverage,
             sidecar: _,
         } => {
             let recorded = watermarks.documents.is_some() || watermarks.tombstones.is_some();
             let freshness = store
                 .filter(|_| recorded)
                 .map(|store| freshness(&watermarks, store));
-            EngineStatus::on(last_drain_error, freshness)
+            let coverage =
+                coverage.map(|counted| EmbeddingCoverage::new(counted.embedded, counted.total));
+            EngineStatus::on(last_drain_error, freshness, coverage)
         }
         SemanticStatus::SelfDisabled { detail } => EngineStatus::self_disabled(detail),
     }
@@ -2218,12 +2228,21 @@ mod freshness_tests {
                 revision: 3,
             },
             watermarks,
+            coverage: Some(norn_semantic::Coverage {
+                embedded: 2,
+                total: 3,
+            }),
         }
     }
 
-    /// The standing engine report carrying `freshness`.
+    /// The standing engine report carrying `freshness`, and the coverage
+    /// [`on`] counted.
     fn reported(freshness: Option<Freshness>) -> EngineStatus {
-        EngineStatus::on(Some("the last drain refused".to_string()), freshness)
+        EngineStatus::on(
+            Some("the last drain refused".to_string()),
+            freshness,
+            Some(norn_wire::EmbeddingCoverage::new(2, 3)),
+        )
     }
 
     /// **A standing engine is reported with how far it trails the store

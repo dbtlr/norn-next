@@ -230,7 +230,7 @@ impl Drift {
 /// On the wire an engine status is an object tagged `state`:
 /// `{"state":"off"}`,
 /// `{"state":"preparing"}`,
-/// `{"state":"on","last_drain_error":null,"freshness":null}`,
+/// `{"state":"on","last_drain_error":null,"freshness":null,"coverage":null}`,
 /// `{"state":"self_disabled","detail":"…"}`.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
@@ -254,6 +254,12 @@ pub enum EngineStatus {
         /// How far the engine's derived state trails the store, and `null`
         /// until the engine reports a watermark.
         freshness: Option<Freshness>,
+        /// How many of the documents the engine would embed have embeddings
+        /// over their current content, and `null` until a background unit
+        /// has counted. Not a lag: `freshness` says how far behind the store
+        /// the engine is, and a vault whose every document is embedded can
+        /// still trail an edit.
+        coverage: Option<EmbeddingCoverage>,
     },
     /// The engine took itself out of service.
     #[non_exhaustive]
@@ -276,12 +282,18 @@ impl EngineStatus {
     }
 
     /// An engine stands, whose last drain refused with `last_drain_error` —
-    /// `None` where it did not — and whose derived state is at `freshness`,
-    /// `None` until the engine reports a watermark.
-    pub const fn on(last_drain_error: Option<String>, freshness: Option<Freshness>) -> Self {
+    /// `None` where it did not — whose derived state is at `freshness`,
+    /// `None` until the engine reports a watermark, and which has embedded
+    /// `coverage` of what it would embed, `None` until it has counted.
+    pub const fn on(
+        last_drain_error: Option<String>,
+        freshness: Option<Freshness>,
+        coverage: Option<EmbeddingCoverage>,
+    ) -> Self {
         EngineStatus::On {
             last_drain_error,
             freshness,
+            coverage,
         }
     }
 
@@ -290,6 +302,30 @@ impl EngineStatus {
         EngineStatus::SelfDisabled {
             detail: detail.into(),
         }
+    }
+}
+
+/// How many of the documents a vault's engine would embed have embeddings over
+/// their current content.
+///
+/// On the wire a coverage is `{"embedded":3,"total":4}`. Both counts describe
+/// one store state, the one the engine's last background unit read. `total`
+/// counts the documents whose content the store read: a document whose names
+/// stand while its content is unreadable has nothing to embed and is not
+/// among them.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[non_exhaustive]
+pub struct EmbeddingCoverage {
+    /// Documents whose current content has embeddings.
+    pub embedded: u64,
+    /// Documents the engine would embed.
+    pub total: u64,
+}
+
+impl EmbeddingCoverage {
+    /// `embedded` of `total` documents covered.
+    pub const fn new(embedded: u64, total: u64) -> Self {
+        EmbeddingCoverage { embedded, total }
     }
 }
 
