@@ -157,23 +157,54 @@ fn a_budget_too_small_for_any_unit_runs_exactly_one_unit_per_turn() {
     drop((leases, host));
 }
 
-/// **One store with a large backlog cannot starve another.** Both owe work
-/// at the same wake, one fifty units and the other three, and each turn runs
-/// one unit: the store still owed goes to the back of the set, so the turns
+/// **One store with a large backlog cannot starve another.** The large
+/// store owes fifty units and the small one three, and each turn runs one
+/// unit: a store still owed goes to the back of the set, so the turns
 /// alternate and the small backlog is done within its first three turns
-/// rather than after the large one.
+/// rather than after the large one. The large store's first unit is held
+/// until the small store is in the set: a turn costs microseconds here, and
+/// fairness is among the stores in the set, so without the hold the lane can
+/// drain the large store before the scheduler's ask reaches the small one.
 #[test]
 fn one_store_with_a_large_backlog_cannot_starve_another() {
     let ops = Arc::new(FakeOps::default());
     let large = VaultName::new("large").unwrap();
     let small = VaultName::new("small").unwrap();
     let (host, leases) = ready_vaults_under(&ops, &[&large, &small], Duration::ZERO);
-    {
-        let mut owed = ops.lane_owed.lock().unwrap();
-        owed.insert(large.clone(), 50);
-        owed.insert(small.clone(), 3);
-    }
+    ops.block_lane_unit.store(true, Ordering::SeqCst);
+    ops.lane_owed.lock().unwrap().insert(large.clone(), 50);
     host.wake_background();
+    wait_until(
+        "the large store's first unit to start",
+        lifecycle_wait_budget(),
+        || {
+            if ops.lane_unit_started.load(Ordering::SeqCst) {
+                Observed::Met(())
+            } else {
+                Observed::pending("no unit has started")
+            }
+        },
+    )
+    .unwrap_or_else(|failure| panic!("{failure}"));
+
+    // The small store comes to be owed while the large store's unit runs.
+    // One scheduler thread asks in turn, so once a second ask has begun the
+    // first, which put the small store in the set, has ended.
+    ops.lane_owed.lock().unwrap().insert(small.clone(), 3);
+    for _ in 0..2 {
+        let asks = host.scheduler_reading().asks;
+        host.wake_background();
+        wait_until("the scheduler to ask", lifecycle_wait_budget(), || {
+            if host.scheduler_reading().asks > asks {
+                Observed::Met(())
+            } else {
+                Observed::pending("the scheduler has not asked")
+            }
+        })
+        .unwrap_or_else(|failure| panic!("{failure}"));
+    }
+    ops.lane_unit_release.store(true, Ordering::SeqCst);
+
     wait_for_lane_units(&ops, 53);
     let ran = ops.lane_ran.lock().unwrap().clone();
     let small_at: Vec<usize> = ran
@@ -184,7 +215,7 @@ fn one_store_with_a_large_backlog_cannot_starve_another() {
         .collect();
     assert_eq!(small_at.len(), 3);
     assert!(
-        small_at.iter().all(|at| *at < 6),
+        small_at.iter().all(|at| *at < 7),
         "the small store waited behind the large one: its units ran at {small_at:?}"
     );
     drop((leases, host));

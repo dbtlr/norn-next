@@ -9751,8 +9751,23 @@ mod tests {
             let (_engines, ops) = engines_and_ops(&f);
             let (host, name, _lease) = ready_host(&f, ops);
             wait_for_engine(&host, &name, caught_up);
+            // The engine's report lands as each unit ends, and the lane counts
+            // a turn's units only once the turn ends, so the count is waited
+            // for rather than read at the moment the engine reports caught up.
+            wait_until(
+                "the lane to count the engine's work",
+                lifecycle_budget(),
+                || {
+                    let units = host.lane_reading().units;
+                    if units > 0 {
+                        Observed::Met(())
+                    } else {
+                        Observed::Pending("the lane has counted no unit".to_string())
+                    }
+                },
+            )
+            .unwrap_or_else(|failure| panic!("the lane ran none of the engine's work: {failure}"));
             let drained = host.lane_reading().units;
-            assert!(drained > 0, "the lane ran none of the engine's work");
             assert_eq!(
                 host.maintenance_reading().legs,
                 0,
