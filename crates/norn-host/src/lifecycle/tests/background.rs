@@ -446,3 +446,107 @@ fn a_scheduler_turn_that_unwinds_ends_no_later_turn() {
     wait_for_maintenances(&ops, 1);
     drop((lease, host));
 }
+
+/// Whether the entry is marked, whether anything holds its claim, and how
+/// many maintenance legs the fake has run, read under one hold.
+fn mark_claim_and_legs(host: &Host<Arc<FakeOps>>, ops: &FakeOps, name: &VaultName) -> (bool, bool, usize) {
+    let entry = host.shared.entries.get(name).unwrap();
+    let state = entry.gate.lock().unwrap();
+    (
+        state.claim.owes_maintenance(),
+        state.claim.is_held(),
+        ops.maintenances.load(Ordering::SeqCst),
+    )
+}
+
+/// **A stale arrival that drops its marker over a marked entry wakes the
+/// scheduler.** The scheduler finds maintenance owed while a job the entry
+/// has moved past still holds the gate, and marks the entry. That job's
+/// arrival at a worker drops its marker and opens the gate, and that is the
+/// only wake the case sends: the maintenance starts from it.
+#[test]
+fn a_stale_arrival_dropping_its_marker_wakes_the_scheduler_for_a_marked_entry() {
+    let ops = Arc::new(FakeOps::default());
+    let (host, name, lease) = a_ready_vault(&ops);
+    wait_for_no_claim(&host, &name);
+    let entry = host.shared.entries.get(&name).unwrap();
+    let stale = {
+        let mut state = entry.gate.lock().unwrap();
+        let stale = state.claim.epoch();
+        // The job in the channel, and the entry moved on from it.
+        state.claim.mark(Job::Reconcile(name.clone(), stale));
+        state.claim.supersede();
+        stale
+    };
+    owe_maintenance(&host, &ops, &name);
+    wait_for_the_mark(&host, &name);
+    assert_eq!(ops.maintenances.load(Ordering::SeqCst), 0);
+
+    run_job(&host.shared, Job::Reconcile(name.clone(), stale));
+    wait_for_maintenances(&ops, 1);
+    drop((lease, host));
+}
+
+/// **No maintenance leg is scheduled over an entry that owes a heal rung**,
+/// though its coverage is in hand and its claim is free: the entry is
+/// marked, and the rung's release asks it again. The watcher's loss leaves
+/// a recovery owed over coverage the entry keeps, and a demand runs it.
+#[test]
+fn an_entry_owing_a_rung_is_marked_and_its_maintenance_starts_at_the_rungs_release() {
+    let ops = Arc::new(FakeOps::default());
+    let (host, name, lease) = a_ready_vault(&ops);
+    *ops.terminal_poll.lock().unwrap() = Some(WatchError::Backend("lost".into()));
+    poll_watchers(&host.shared);
+    wait_for_state(&host, &name, backend_lost());
+    wait_for_no_claim(&host, &name);
+    {
+        let entry = host.shared.entries.get(&name).unwrap();
+        let state = entry.gate.lock().unwrap();
+        assert!(state.owes_a_rung() && state.coverage.in_hand());
+    }
+
+    // A leg scheduled here would hold the claim beside the mark.
+    arrange_for(&ops.block_maintenance_at, &name);
+    owe_maintenance(&host, &ops, &name);
+    wait_for_the_mark(&host, &name);
+    assert_eq!(
+        mark_claim_and_legs(&host, &ops, &name),
+        (true, false, 0),
+        "a maintenance leg was scheduled over an entry owing a rung"
+    );
+
+    *ops.block_maintenance_at.lock().unwrap() = None;
+    let recovering = host.demand(&name).unwrap();
+    wait_for_maintenances(&ops, 1);
+    drop((recovering, lease, host));
+}
+
+/// **No maintenance leg is scheduled over an entry whose teardown is due.**
+/// The case stands the teardown due over coverage in hand and a free claim,
+/// the instant between the reap marking it due and scheduling it, and holds
+/// it there: the entry is only marked.
+#[test]
+fn no_maintenance_leg_is_scheduled_over_an_entry_whose_teardown_is_due() {
+    let ops = Arc::new(FakeOps::default());
+    let (host, name, lease) = a_ready_vault(&ops);
+    drop(lease);
+    wait_for_no_claim(&host, &name);
+    {
+        let entry = host.shared.entries.get(&name).unwrap();
+        let mut state = entry.gate.lock().unwrap();
+        state.detach_due = true;
+        assert!(state.coverage.in_hand() && !state.claim.is_held());
+    }
+
+    // A leg scheduled here would hold the claim beside the mark.
+    arrange_for(&ops.block_maintenance_at, &name);
+    owe_maintenance(&host, &ops, &name);
+    wait_for_the_mark(&host, &name);
+    assert_eq!(
+        mark_claim_and_legs(&host, &ops, &name),
+        (true, false, 0),
+        "a maintenance leg was scheduled over an entry whose teardown is due"
+    );
+    *ops.block_maintenance_at.lock().unwrap() = None;
+    drop(host);
+}

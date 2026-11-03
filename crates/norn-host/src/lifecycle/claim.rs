@@ -65,8 +65,10 @@
 //! omit the wake. The scheduler marks an entry where a claim-bound slice is
 //! due, whether it scheduled the leg or found the claim held, and a marked
 //! entry contributes no deadline until this wake asks it again. Pinned by
-//! `a_due_slice_over_a_held_claim_starts_at_the_claims_release` and
-//! `the_second_deadline_after_attach_starts_a_maintenance_leg_as_the_first_did`.
+//! `a_due_slice_over_a_held_claim_starts_at_the_claims_release`,
+//! `the_second_deadline_after_attach_starts_a_maintenance_leg_as_the_first_did`
+//! and, for the marker a stale arrival drops,
+//! `a_stale_arrival_dropping_its_marker_wakes_the_scheduler_for_a_marked_entry`.
 //!
 //! **A gate held across a hand-on is an entry nothing takes between the work it
 //! moves on from and the work it moves on to.** Carried by [`Claim::hold`],
