@@ -948,7 +948,7 @@ impl SemanticEngines {
     /// the read seam — gates it by that vault's trust label itself. Runs on the
     /// caller's thread against the engine and its sidecar alone — never the
     /// vault's store — and takes the slot's lock behind at most one hold of
-    /// the lane's ([`Tickets`]), holding it across the rows and the reading
+    /// the lane's, holding it across the rows and the reading
     /// alike. The scan holds at most `limit` scored rows
     /// ([`Engine::nearest_among`]).
     pub fn nearest_among(

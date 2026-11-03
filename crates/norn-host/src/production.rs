@@ -10154,7 +10154,7 @@ mod tests {
             }
             wait_until("the scheduler to ask again", lifecycle_budget(), || {
                 let asked = host.scheduler_reading().asks;
-                if asked >= asks + 1 {
+                if asked > asks {
                     Observed::Met(())
                 } else {
                     Observed::Pending(format!("{asked} asks"))

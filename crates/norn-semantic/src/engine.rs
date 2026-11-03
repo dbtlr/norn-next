@@ -143,7 +143,7 @@ pub enum DrainStep {
     Done(DrainReport),
     /// A document page whose bodies must be embedded before it can commit:
     /// [`PendingPage::embed`], then [`Engine::commit`].
-    Embed(PendingPage),
+    Embed(Box<PendingPage>),
 }
 
 /// A document page read and triaged, whose bodies are still to embed.
@@ -633,7 +633,7 @@ impl Engine {
                 .commit(embedded)
                 .map(|done| Some((DrainStep::Done(done), !full)));
         }
-        Ok(Some((DrainStep::Embed(pending), !full)))
+        Ok(Some((DrainStep::Embed(Box::new(pending)), !full)))
     }
 
     /// The next tombstone page, committed whole: a death embeds nothing.
