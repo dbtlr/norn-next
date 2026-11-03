@@ -210,6 +210,26 @@ fn damage_the_verification_meets_schedules_the_rebuild_once() {
     assert_eq!(verifications.reading().damaged, 1);
     assert_eq!(host.ops().evidence.read().rebuilds_run - rebuilds_before, 1);
     assert_eq!(host.state(&name), Ok(norn_wire::TrustState::Ready));
+    assert_next_due_a_whole_interval_on(&verifications, &name, "a sound verdict");
+}
+
+/// That `vault`'s next verification is a whole interval away, not the lane's
+/// retry backoff only damage over the bound lifetime earns: a sound or
+/// refused verdict that came due again each second would rewrite the store's
+/// copy every second.
+fn assert_next_due_a_whole_interval_on(
+    verifications: &crate::verification::StoreVerifications,
+    vault: &VaultName,
+    after: &str,
+) {
+    let due = verifications
+        .deadline(vault)
+        .unwrap_or_else(|| panic!("{after} left no next verification due"));
+    assert!(
+        due > Instant::now() + Duration::from_secs(60),
+        "{after} brought the next verification due within a minute, at {:?} from now",
+        due.saturating_duration_since(Instant::now())
+    );
 }
 
 /// **A refused verification schedules nothing.** The copy's place is taken
@@ -246,6 +266,7 @@ fn a_refused_verification_schedules_nothing() {
     assert_eq!(verifications.reading().damaged, 0);
     assert_eq!(host.ops().evidence.read().rebuilds_run, rebuilds_before);
     assert_eq!(host.state(&name), Ok(norn_wire::TrustState::Ready));
+    assert_next_due_a_whole_interval_on(&verifications, &name, "a refused verification");
 }
 
 /// **A rebuild's discard stops a verification in flight over the store it
