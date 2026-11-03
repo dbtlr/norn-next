@@ -123,10 +123,13 @@ impl FeedSource {
     /// the handle shares, ended when the handle is dropped.
     ///
     /// The connection is opened here the first time, read-only, and checked
-    /// against the epoch the source was minted for. A refusal — the file
-    /// gone, the environment refusing the open, or another store lifetime at
-    /// the path — is a refusal of the environment and never damage, and a
-    /// connection that refused is not kept, so the next page opens again.
+    /// against the epoch the source was minted for. The file gone, the
+    /// environment refusing the open, and another store lifetime at the path
+    /// are refusals of the environment, never damage. Damage the open or the
+    /// snapshot meets is [`StoreError::Damaged`], as it is for a reader's
+    /// open, so the consumer's caller judges it as damage met in this
+    /// source's lifetime. A connection that refused or met damage is not
+    /// kept, so the next page opens again.
     pub fn page(&mut self) -> Result<FeedRead<'_>, StoreError> {
         if self.connection.is_none() {
             let database = norn_db::open_read_only(&self.path)

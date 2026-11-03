@@ -889,7 +889,9 @@ units of that store's owed work until the background turn budget runs out or not
 owed. A store that still owes work when its background turn ends goes to the back of the
 set. One store with a large backlog therefore takes one background turn while every other
 owed store takes one, and it cannot starve them. At most one background turn runs for a
-derived store at a time.
+derived store at a time. A store whose unit its environment refused, or whose background
+turn unwound, still owes its work with no wake coming, so the lane asks the background
+scheduler to ask for that store again after a short fixed backoff.
 
 The shared worker pool keeps correctness work (reconciles, applies and heals), readiness
 work (attach, the from-zero build, recovery, rebuild, detach and reload) and the
@@ -1060,8 +1062,8 @@ feed page runs in three phases:
 
 The currency check reads only the slot's own retirement mark, under the slot lock. It never
 takes the engine map's lock. The existing lock order is the entry gate, then the map lock,
-then the slot lock, and a unit takes neither of the first two, so it cannot invert that
-order.
+then the slot lock. A unit takes neither the entry gate nor the map lock while it holds the
+slot lock, so it cannot invert that order.
 
 An initialization runs its model setup holding no lock. It opens, creates, inspects or
 rebuilds the sidecar under the slot lock, after the same currency check. A reconcile page
@@ -1192,8 +1194,9 @@ background turn's unit in flight ends.
 **An unwind out of a unit is caught at the lane's seam,** and the lane thread outlives
 it. The engine slot reads the unwind as an unwinding drain does today. An unwind during
 the embedding phase leaves the engine in its slot and commits nothing. An engine borrowed
-under the slot lock stays in its slot, and an engine taken out for its sidecar rebuild is
-abandoned and reads as self-disabled. An unwind out of a maintenance leg goes through the
+under the slot lock stays in its slot with the feed connection the unit had out, and the
+unit's work stays owed. An engine taken out for its sidecar rebuild is abandoned and reads
+as self-disabled. An unwind out of a maintenance leg goes through the
 cleanup that reconciles an unwound worker-pool leg today.
 
 ### The store's verification splits in two
