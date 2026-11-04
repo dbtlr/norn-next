@@ -159,6 +159,12 @@ pub trait ReadSource: Send + Sync + 'static {
         Ok(self.wait_for_the_connection_until(deadline))
     }
     fn retire(&self) {}
+    /// A handle that retires this source's pool without holding the source,
+    /// for a wake that runs where the source's last reference must not drop.
+    /// `None` where no capacity wait can sleep on the source.
+    fn retirement(&self) -> Option<norn_store::Retirement> {
+        None
+    }
     fn last_open_failure(&self) -> Option<ReaderUnavailable> {
         None
     }

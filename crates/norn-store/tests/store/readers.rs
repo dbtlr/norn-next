@@ -274,6 +274,17 @@ fn waiting_vaults_take_turns_and_new_reads_cannot_bypass_them() {
 
 #[test]
 fn retirement_wakes_capacity_waiters_and_checked_out_reads_finish() {
+    retirement_wakes_capacity_waiters(false);
+}
+
+/// The detached retirement handle retires the pool as the reader does, while
+/// holding no reader of its own.
+#[test]
+fn a_detached_retirement_wakes_capacity_waiters_as_the_reader_does() {
+    retirement_wakes_capacity_waiters(true);
+}
+
+fn retirement_wakes_capacity_waiters(detached: bool) {
     use norn_store::{ReadBudget, ReadBudgetPolicy, ReadNeed};
     let scratch = Scratch::new("retired-reader-waiters");
     let store = scratch.open();
@@ -297,7 +308,11 @@ fn retirement_wakes_capacity_waiters_and_checked_out_reads_finish() {
             .is_none()
     });
     wait_for_readers(&budget, 1);
-    reader.retire();
+    if detached {
+        reader.retirement().unwrap().retire();
+    } else {
+        reader.retire();
+    }
     assert!(thread.join().unwrap());
     assert_eq!(one.reading().epoch(), store.epoch());
     drop((one, two));

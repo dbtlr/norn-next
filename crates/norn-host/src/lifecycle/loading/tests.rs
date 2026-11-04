@@ -205,12 +205,26 @@ fn watcher_signal(record_first: bool) {
             assert_eq!(entry.gate.stance_generation(), seen);
             assert!(building.authority.admits());
         }
+        let pool = Arc::clone(&building.pool);
         // Invalidate the actual bound authority while the gate is unavailable.
         // A watcher wake must touch only the signal and cannot rely on end_hold.
         building.authority.invalidate();
         assert_eq!(entry.gate.stance_generation(), seen.wrapping_add(1));
         assert_eq!(entry.gate.times_taken(), takes);
         drop(state);
+        // The same wake retired the build's pool, so a capacity wait on it
+        // gives up at once instead of sleeping to its deadline.
+        let began = std::time::Instant::now();
+        assert!(
+            pool.acquire(
+                norn_store::ReadNeed::Source,
+                began + std::time::Duration::from_secs(30)
+            )
+            .unwrap()
+            .is_none(),
+            "a withdrawn build's pool admits no acquisition"
+        );
+        assert!(began.elapsed() < BUDGET.work());
         let refusal = request.join().unwrap().unwrap_err();
         assert_eq!(refusal.code(), &norn_wire::ReasonCode::HostEntryNotReady);
         assert_eq!(host.read_evidence().settle_expiries, 0);

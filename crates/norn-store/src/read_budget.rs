@@ -504,18 +504,21 @@ impl Drop for Waiting {
         }
     }
 }
-impl Pool {
-    pub(crate) fn is_live(&self) -> bool {
-        self.budget.upgrade().is_some_and(|budget| {
-            budget
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .pools
-                .contains_key(&self.id)
-        })
-    }
-    pub(crate) fn retire(&self) {
+/// The right to retire one pool, apart from the reader that owns it.
+///
+/// It holds no connection, reader or pool state, only a weak reference to the
+/// shared budget and the pool's id, so a holder that outlives the reader keeps
+/// nothing open. Retiring moves the pool's idle connections to the budget's
+/// garbage for a later acquisition to close, so it does no I/O, and takes only
+/// the budget's own lock, a leaf no holder takes another lock under.
+pub struct Retirement {
+    budget: Weak<ReadBudget>,
+    id: u64,
+}
+impl Retirement {
+    /// Stop new acquisitions from the pool and wake every read waiting on the
+    /// budget, so a waiter for this pool gives up at once. Idempotent.
+    pub fn retire(&self) {
         if let Some(budget) = self.budget.upgrade() {
             let mut state = budget
                 .state
@@ -529,6 +532,34 @@ impl Pool {
             }
             drop(state);
             budget.changed.notify_all();
+        }
+    }
+}
+impl fmt::Debug for Retirement {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Retirement")
+            .field("pool", &self.id)
+            .finish()
+    }
+}
+impl Pool {
+    pub(crate) fn is_live(&self) -> bool {
+        self.budget.upgrade().is_some_and(|budget| {
+            budget
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .pools
+                .contains_key(&self.id)
+        })
+    }
+    pub(crate) fn retire(&self) {
+        self.retirement().retire();
+    }
+    pub(crate) fn retirement(&self) -> Retirement {
+        Retirement {
+            budget: self.budget.clone(),
+            id: self.id,
         }
     }
     pub(crate) fn failure(&self, error: Option<StoreError>) {
