@@ -687,6 +687,9 @@ impl ReadSource for norn_store::SnapshotReader {
     fn retire(&self) {
         norn_store::SnapshotReader::retire(self);
     }
+    fn retirement(&self) -> Option<norn_store::Retirement> {
+        norn_store::SnapshotReader::retirement(self)
+    }
     fn last_open_failure(&self) -> Option<ReaderUnavailable> {
         norn_store::SnapshotReader::last_open_failure(self).map(|error| reader_unavailable(&error))
     }

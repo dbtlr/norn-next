@@ -16,6 +16,7 @@ use norn_fs::watch::BuildAuthority;
 use norn_store::Step;
 use norn_store::early::Boundary;
 use norn_wire::{Column, FindParams, GetParams, SearchParams, ValidateParams};
+use std::task::Waker;
 
 /// What a read asks of its entry: the shape early admission classifies, or
 /// a canonical read only `Ready` serves.
@@ -337,6 +338,33 @@ impl<R> Admitted<R> {
     }
 }
 
+/// The wake a build's watcher authority sends when it stops admitting reads:
+/// withdrawn by a filesystem fact, or closed with its subscription.
+///
+/// It moves the entry's stance, which wakes reads waiting for a capability,
+/// and retires the build's reader pool, which wakes reads waiting for reader
+/// capacity: those sleep on the shared read budget, which no stance move
+/// reaches, and would otherwise wait out their deadline while the build is
+/// still running and its pool not yet retired with its construction. No read
+/// can be admitted on an authority that sent this wake, so the pool has no
+/// acquisition left to serve; a held read keeps its connection to the end.
+/// Both halves keep the authority's wake rules: neither takes an entry gate
+/// or watcher bookkeeping, and the retirement holds no reader and does no I/O.
+struct AuthorityWake {
+    stance: Waker,
+    retirement: norn_store::Retirement,
+}
+
+impl std::task::Wake for AuthorityWake {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.retirement.retire();
+        self.stance.wake_by_ref();
+    }
+}
+
 impl<A: SnapshotSource> ProgressReporter<A> {
     /// Begin this claim's from-zero construction, replacing any earlier one.
     ///
@@ -358,6 +386,15 @@ impl<A: SnapshotSource> ProgressReporter<A> {
             state.retired_readers.push(pool);
             return None;
         }
+        // A capacity wait sleeps on the read budget, which the stance does not
+        // move, so the build's authority wake also retires the build's pool.
+        let waker = match pool.retirement() {
+            Some(retirement) => Waker::from(Arc::new(AuthorityWake {
+                stance: waker,
+                retirement,
+            })),
+            None => waker,
+        };
         begun.authority.register_waker(&waker);
         state.construction_revision += 1;
         let token = BuildToken(state.construction_revision);

@@ -288,10 +288,12 @@ impl BuildAuthority {
     /// administratively closed authority wakes immediately, including when it
     /// races registration. No bridge thread or polling is needed.
     ///
-    /// The adapter must retain only the stance signal, never an entry, gate,
-    /// subscription or coverage. Its wake may run under watcher bookkeeping or
-    /// the registering entry gate: it must never acquire an entry gate or watcher
-    /// bookkeeping, perform I/O, wait for work, or call back into this API.
+    /// The adapter retains only notification state, such as the stance signal
+    /// and a leaf handle that retires the build's readers, never an entry,
+    /// gate, subscription or coverage. Its wake may run under watcher
+    /// bookkeeping or the registering entry gate: it must never acquire an
+    /// entry gate or watcher bookkeeping, perform I/O, wait for work, or call
+    /// back into this API.
     /// Signal bookkeeping must be released before the host takes an entry gate
     /// or calls authority checks. Thus both entry→signal and watcher→signal are
     /// allowed, and signal→entry/watcher is forbidden. The proof's notification

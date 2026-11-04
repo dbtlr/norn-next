@@ -153,7 +153,9 @@ mod moved;
 mod path;
 mod read;
 mod read_budget;
-pub use read_budget::{ReadBudget, ReadBudgetCensus, ReadBudgetPolicy, ReadGroup, ReadNeed};
+pub use read_budget::{
+    ReadBudget, ReadBudgetCensus, ReadBudgetPolicy, ReadGroup, ReadNeed, Retirement,
+};
 mod repair_advisory;
 mod request;
 mod resolve;

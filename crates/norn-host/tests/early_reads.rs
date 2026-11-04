@@ -1517,10 +1517,12 @@ fn early_capacity_waits_keep_the_deadline_and_reselect_after_promotion_or_withdr
         policy.read_budget = norn_store::ReadBudgetPolicy::new(2, Duration::ZERO).unwrap();
         // The closing checkpoint waits out the held reads' snapshots before
         // Ready, so a promotion is given the room to outlast that wait.
+        // A withdrawal's bound outlasts the work budget the waiting read is
+        // given to answer, so only the withdrawal can refuse it in time.
         let bound = match transition {
             "deadline" => Duration::from_millis(500),
             "promotion" => Duration::from_secs(30),
-            _ => norn_host::READ_SETTLE_BOUND,
+            _ => Duration::from_secs(60),
         };
         let host = fixture.host_over(
             ProductionEntryOps::new(fixture.dirs.clone(), policy).with_loading_probe(Arc::new(

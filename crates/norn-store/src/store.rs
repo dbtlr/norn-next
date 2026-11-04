@@ -263,6 +263,12 @@ impl SnapshotReader {
             pool.retire();
         }
     }
+    /// A handle that retires this reader's pool without holding the reader,
+    /// for a caller that must retire it from where dropping the reader's last
+    /// reference could close a connection. `None` for a standalone reader.
+    pub fn retirement(&self) -> Option<crate::Retirement> {
+        self.pool.as_ref().map(crate::read_budget::Pool::retirement)
+    }
     pub fn last_open_failure(&self) -> Option<StoreError> {
         self.pool.as_ref()?.last_failure()
     }
