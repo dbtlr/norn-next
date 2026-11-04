@@ -1045,7 +1045,14 @@ fn a_turns_end_hands_the_claim_to_the_queued_apply_ahead_of_due_maintenance() {
     );
     retry_pending_dispatches(&host.shared);
     applied(answer_of(pending));
-    assert_eq!(ops.maintenances.load(Ordering::SeqCst), 0);
+    // The due maintenance may run as soon as the apply's turn ends, so the
+    // order is read off what had run when the apply itself ran.
+    let ran = ops.applies_ran.lock().unwrap().first().copied();
+    assert_eq!(
+        ran.map(|when| when.maintenances),
+        Some(0),
+        "the due maintenance ran ahead of the queued apply"
+    );
     drop((leases, host));
 }
 
