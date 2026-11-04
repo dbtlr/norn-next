@@ -86,10 +86,16 @@ fn owed_maintenance_starts_at_its_wake_without_a_poll_tick() {
 /// **A clock that comes due starts maintenance at its deadline, with no poll
 /// tick and no wake.** The fake's clock runs from the attach, and nothing but
 /// the scheduler's own deadline is left to start the leg.
+///
+/// The period has to outlast the delay between the attach starting the clock
+/// and the scheduler's ask answering the wake `Ready` sends: an ask that
+/// finds the clock already due starts the leg from that wake. On an
+/// oversubscribed machine that delay passed 30 ms, so the period is a
+/// lifecycle state look's bound.
 #[test]
 fn a_due_clock_starts_maintenance_at_its_deadline_without_a_poll_tick() {
     let ops = Arc::new(FakeOps::default());
-    *ops.maintenance_period.lock().unwrap() = Some(Duration::from_millis(30));
+    *ops.maintenance_period.lock().unwrap() = Some(Duration::from_millis(250));
     let (host, _name, lease) = a_ready_vault(&ops);
     wait_for_maintenances(&ops, 1);
     assert!(

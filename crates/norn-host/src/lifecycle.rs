@@ -22889,7 +22889,8 @@ mod tests {
     /// **The rounds counted are the refused read's alone.** The gate's count
     /// is the entry's, so the case brackets a stretch in which nothing but
     /// that read takes the gate: the attach leg that published `Ready` has
-    /// ended, the teardown has run to its end, and the first read's snapshot
+    /// ended, the teardown has run to its end, the scheduler has answered
+    /// every wake, and the first read's snapshot
     /// ends by hand, which hands the connection on and takes no gate. The
     /// first read's hold drops once the count is read, so its rounds fall
     /// outside the bracket: the hold's drop takes the gate to unpin, and its
@@ -22907,6 +22908,9 @@ mod tests {
         // The teardown while the second read waits is what its retake answers:
         // the entry the retake finds is one that has stopped serving.
         refuse_identity_error(&host.shared, &name, "the root cannot be read".into());
+        // The scheduler's ask answering the wake `Ready` sent takes the gate
+        // too, so the bracket opens only once it has run.
+        wait_for_a_quiet_entry(&host, &name);
         let before = entry.gate.times_taken();
 
         drop(first.snapshot.take());
