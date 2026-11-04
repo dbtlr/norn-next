@@ -2548,7 +2548,7 @@ newer than admission even if the root no longer owes derivation. Facts newer tha
 meeting never extend a wait; they refuse the read instead. A Get with known relations
 also checks every root because its relation data reads the vault.
 Watcher callbacks never take the entry gate. Recording a fact wakes nothing;
-coverage withdrawal moves the stance signal. Each early acquisition checks its build's root identity outside the entry gate and
+coverage withdrawal moves the stance signal and retires the construction's reader pool, so a read waiting there for capacity, which sleeps on the reader budget rather than the stance, refuses at once. Each early acquisition checks its build's root identity outside the entry gate and
 watcher locks, and after a capacity or cold-open wait the establishing hold rechecks the
 build, claim, authority and request shape. Before an early result is exposed — an answer
 or a refusal its rows derived, such as an unknown or ambiguous target or a cursor
