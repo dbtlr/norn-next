@@ -519,6 +519,9 @@ impl Retirement {
     /// Stop new acquisitions from the pool and wake every read waiting on the
     /// budget, so a waiter for this pool gives up at once. Idempotent.
     pub fn retire(&self) {
+        // Accepted window: where the host drops its last hold on the budget
+        // while this upgrade stands, the budget drops here and closes its
+        // garbage. That is host teardown only, which no read observes.
         if let Some(budget) = self.budget.upgrade() {
             let mut state = budget
                 .state
