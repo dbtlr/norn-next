@@ -8346,12 +8346,15 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                         // an ops whose legs run no units while maintenance
                         // stays due would turn this arm back to back. That is
                         // an accepted limitation: only a fake has reached it.
-                        // A leg runs zero units in production when it may not
-                        // be quiet, which means owed facts (handed to a
-                        // reconcile above) or an owed rung (which this arm
-                        // refuses). The semantic slot owed before its delivery
-                        // publishes was the other cause, and semantic work no
-                        // longer runs on the claim. A guard would need a
+                        // Each production reason a leg runs zero units is
+                        // settled before this arm or by it: facts owed or
+                        // arriving mid-leg go to the reconcile above, applies
+                        // or a detach that arrived take their arms above, an
+                        // owed rung is refused here, and a trust label that
+                        // forbade quiet work is published `Ready` at this leg
+                        // end. The semantic slot owed before its delivery
+                        // publishes was the remaining cause, and semantic work
+                        // no longer runs on the claim. A guard would need a
                         // blocked-until-woken state whose waking event depends
                         // on why the leg ran nothing.
                         next = Some(
