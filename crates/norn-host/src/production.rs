@@ -14320,13 +14320,11 @@ mod tests {
                 .collect();
             let since = authority.visit_roots(|sequence, _| sequence);
             change();
-            // A look takes the build's fact lock, which the watcher holds
-            // while it records each report the change made, so one look can
-            // wait out a burst of recording, and a loaded machine stretches
-            // that wait. A 10 ms bound failed the wait at its first look under
-            // load (NORN-509); the bound is sized for that slowest look, as a
-            // state look elsewhere in this crate is.
-            let budget = Budget::new(Duration::from_secs(20), Duration::from_millis(250));
+            // A look takes about half a millisecond, but a machine busy with a
+            // cargo build can deschedule it far longer: a 10 ms bound failed
+            // this wait at a 31.6 ms first look (NORN-509). So the look is
+            // bounded as every lifecycle state look here is.
+            let budget = Budget::new(Duration::from_secs(20), lifecycle_budget().probe());
             wait_until("a report at each changed root", budget, || {
                 let missing: Vec<PathBuf> = authority.visit_roots(|_, accepted| {
                     let fresh: BTreeSet<PathBuf> = accepted
@@ -14385,7 +14383,9 @@ mod tests {
                         .unwrap();
                 }
             }
-            let budget = Budget::new(Duration::from_secs(20), Duration::from_millis(10));
+            // Bounded as the wait for a report at each changed root is, for
+            // the same descheduled look (NORN-509).
+            let budget = Budget::new(Duration::from_secs(20), lifecycle_budget().probe());
             wait_until("the injected build fact", budget, || {
                 if self.account.read().build_facts_recorded > before {
                     Observed::Met(())
@@ -14524,6 +14524,10 @@ mod tests {
             .unwrap();
         let spent = ops.evidence.read();
         let account = requeue_account(&spent);
+        // A backend rescan withdraws the build's authority and leaves every
+        // root to the reconcile before Ready. That is a legal path this case
+        // does not tolerate; it fails here with a coverage withdrawal in its
+        // account, not as a product defect.
         assert!(
             spent.requeue_takes >= 1,
             "the build takes the facts: {account}"
