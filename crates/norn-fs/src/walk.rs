@@ -10,8 +10,10 @@
 //!
 //! Symbolic links are facts about names, never traversal edges. Host exclusions
 //! are roots, not schema rules, and Norn's cross-device shadow fallback is the
-//! one built-in mechanism root. Ordinary dotfiles and dot-directories belong to
-//! the vault and are walked normally.
+//! one built-in mechanism root. A file or folder whose name leads with a dot is
+//! not part of the vault, because Obsidian ignores every one: the walk states
+//! its outermost dot-led name as a [`SkipReason::DotLed`] root and reads
+//! nothing beneath it, so `.git`, `.obsidian` and `.trash` are never entered.
 //!
 //! A walk is always identified by the vault root, whether it traverses the whole
 //! vault or one subtree of it. Paths, exclusion membership and link containment
@@ -402,7 +404,7 @@ impl Vault {
         let subtree = self.normalize(relative)?;
         if let Some((root, reason)) = self.exclusions.covering_root(&subtree) {
             return Ok(Reach::Refused(SkipFact {
-                path: root.clone(),
+                path: root.into_owned(),
                 reason: reason.into(),
             }));
         }
@@ -1406,6 +1408,9 @@ pub enum SkipReason {
     HostExclusion,
     /// Norn's exact `.norn/tmp` fallback subtree.
     Mechanism,
+    /// A name that leads with a dot, which Obsidian ignores and the vault
+    /// does not hold: the outermost dot-led segment of a path.
+    DotLed,
     /// A Norn shadow basename, read under the root's own case behavior.
     Shadow,
     /// A symbolic link, which is never traversed.
@@ -1459,6 +1464,7 @@ impl SkipReason {
         match self {
             Self::HostExclusion
             | Self::Mechanism
+            | Self::DotLed
             | Self::Shadow
             | Self::SymbolicLink(_)
             | Self::SpecialFile(_)
@@ -1473,6 +1479,7 @@ impl From<Excluded> for SkipReason {
         match excluded {
             Excluded::Host => Self::HostExclusion,
             Excluded::Mechanism => Self::Mechanism,
+            Excluded::DotLed => Self::DotLed,
         }
     }
 }
@@ -2499,8 +2506,11 @@ mod tests {
         .collect()
     }
 
+    /// Non-Markdown files are walked beside Markdown ones in lexicographic
+    /// order, while a dot-led file or folder is stated as one `DotLed` skip at
+    /// its own name and nothing beneath it is visited.
     #[test]
-    fn walks_dot_content_and_non_markdown_files_in_lexicographic_order() {
+    fn dot_led_names_are_one_skip_each_and_other_files_walk_in_lexicographic_order() {
         let scratch = Scratch::new("walk-order");
         scratch.place("z.md", b"z");
         scratch.place(".hidden.md", b"hidden");
@@ -2514,20 +2524,20 @@ mod tests {
         assert_eq!(
             facts,
             [
-                ".hidden.md",
-                ".obsidian/state.json",
-                "a.md",
-                "a/x.bin",
-                "z.md"
+                (".hidden.md", Some(SkipReason::DotLed)),
+                (".obsidian", Some(SkipReason::DotLed)),
+                ("a.md", None),
+                ("a/x.bin", None),
+                ("z.md", None),
             ]
             .into_iter()
-            .map(|path| (PathBuf::from(path), None))
+            .map(|(path, reason)| (PathBuf::from(path), reason))
             .collect::<Vec<_>>()
         );
     }
 
     #[test]
-    fn exclusions_mechanism_and_shadows_are_one_root_fact_each() {
+    fn exclusions_dot_led_roots_and_shadows_are_one_root_fact_each() {
         let scratch = Scratch::new("walk-skips");
         scratch.directory("vault/excluded/deep");
         scratch.place("excluded/deep/no.md", b"no");
@@ -2540,7 +2550,8 @@ mod tests {
         assert_eq!(
             facts,
             vec![
-                (PathBuf::from(".norn/tmp"), Some(SkipReason::Mechanism)),
+                // The walk meets `.norn` first, so it never reaches `.norn/tmp`.
+                (PathBuf::from(".norn"), Some(SkipReason::DotLed)),
                 (PathBuf::from("excluded"), Some(SkipReason::HostExclusion)),
                 (PathBuf::from("norn-shadow-7-2"), Some(SkipReason::Shadow)),
                 (PathBuf::from("norn-shadow-notes.md"), None),
@@ -3785,17 +3796,18 @@ mod tests {
         assert_eq!(count, FRONTIER_PAGE * 3 + 17);
     }
 
+    /// A `.norn/tmp` spelled below the vault root is not the mechanism root:
+    /// it is excluded as dot-led at its outermost dot-led segment, so the
+    /// walk states `notes/.norn` once and never reports a `Mechanism` skip.
     #[test]
-    fn only_the_root_mechanism_directory_is_special() {
+    fn a_nested_norn_tmp_is_dot_led_at_its_outermost_segment_never_the_mechanism_root() {
         let scratch = Scratch::new("walk-nested-mechanism-spelling");
         scratch.directory("vault/notes/.norn/tmp");
         scratch.place("notes/.norn/tmp/theirs.md", b"ordinary nested content");
         let facts = paths(walk(&scratch.at(""), &[]).expect("walk"));
-        assert!(facts.contains(&(PathBuf::from("notes/.norn/tmp/theirs.md"), None)));
-        assert!(
-            !facts
-                .iter()
-                .any(|(_, reason)| matches!(reason, Some(SkipReason::Mechanism)))
+        assert_eq!(
+            facts,
+            vec![(PathBuf::from("notes/.norn"), Some(SkipReason::DotLed))]
         );
     }
 
@@ -3803,10 +3815,10 @@ mod tests {
     /// that subtree, spelled from the vault root, so a caller can compare them
     /// against vault-relative state without repairing them first.
     ///
-    /// The forbidden shape is a walk identified by where it starts. A subtree
-    /// named `.norn` holding `tmp`, or any directory holding a `.norn/tmp` of
-    /// its own, is vault content: reading it as the mechanism root would drop
-    /// live documents from an inventory the vault walk includes.
+    /// The forbidden shape is a walk identified by where it starts. A directory
+    /// holding a `.norn/tmp` of its own is not the mechanism root; the walk
+    /// states the dot-led `notes/.norn` as one skip spelled from the vault root,
+    /// the same fact the vault walk states.
     #[test]
     fn a_subtree_walk_yields_vault_relative_facts_and_the_vault_s_own_exclusions() {
         let scratch = Scratch::new("walk-subtree-vault-relative");
@@ -3819,17 +3831,18 @@ mod tests {
         assert_eq!(
             facts,
             vec![
-                (PathBuf::from("notes/.norn/tmp/theirs.md"), None),
+                (PathBuf::from("notes/.norn"), Some(SkipReason::DotLed)),
                 (PathBuf::from("notes/today.md"), None),
             ]
         );
     }
 
-    /// **The bar on the built-in root under a subtree walk.** The mechanism root
-    /// hangs from the vault root wherever a walk starts, so a subtree walk of
-    /// `.norn` cuts `tmp` without being told about it.
+    /// **The bar on the built-in root under a subtree walk.** The vault's
+    /// `.norn` is dot-led wherever a walk starts, so a subtree walk of `.norn`
+    /// states it as one `DotLed` skip and reads nothing beneath it, neither
+    /// `tmp` nor the document beside it.
     #[test]
-    fn a_subtree_walk_cuts_the_vault_s_mechanism_root() {
+    fn a_subtree_walk_of_the_vault_s_norn_directory_yields_only_its_dot_led_skip() {
         let scratch = Scratch::new("walk-subtree-mechanism");
         scratch.directory("vault/.norn/tmp/deep");
         scratch.place(".norn/tmp/deep/staged", b"staged bytes");
@@ -3838,10 +3851,7 @@ mod tests {
         let facts = paths(walk_subtree(&scratch.at(""), Path::new(".norn"), &[]).expect("walk"));
         assert_eq!(
             facts,
-            vec![
-                (PathBuf::from(".norn/notes.md"), None),
-                (PathBuf::from(".norn/tmp"), Some(SkipReason::Mechanism)),
-            ]
+            vec![(PathBuf::from(".norn"), Some(SkipReason::DotLed))]
         );
     }
 

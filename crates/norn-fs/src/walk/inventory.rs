@@ -300,7 +300,7 @@ mod tests {
         std::os::unix::fs::symlink("visible", scratch.at("inside")).unwrap();
         let mut inventory =
             InventoryWalk::new(&scratch.at(""), &[PathBuf::from("excluded")]).unwrap();
-        let mut records = bounded_inventory(&mut inventory, 2, 7);
+        let mut records = bounded_inventory(&mut inventory, 2, 6);
         records.sort_by(|left, right| left.key.cmp(&right.key));
         let paths: Vec<_> = records
             .iter()
@@ -309,7 +309,7 @@ mod tests {
         assert_eq!(
             paths,
             [
-                b".norn/tmp".as_slice(),
+                b".norn".as_slice(),
                 b"excluded",
                 b"inside",
                 b"outbound",
@@ -320,8 +320,8 @@ mod tests {
         for record in &records {
             let fact = inventory.replay(&record.value).unwrap();
             match record.value.as_slice() {
-                b".norn/tmp" => assert!(matches!(fact,
-                    WalkFact::Skipped(skip) if skip.reason() == SkipReason::Mechanism)),
+                b".norn" => assert!(matches!(fact,
+                    WalkFact::Skipped(skip) if skip.reason() == SkipReason::DotLed)),
                 b"excluded" => assert!(matches!(fact,
                     WalkFact::Skipped(skip) if skip.reason() == SkipReason::HostExclusion)),
                 b"inside" | b"outbound" => assert!(matches!(fact,

@@ -1455,6 +1455,74 @@ fn a_get_of_an_ambiguous_target_refuses_with_its_head_and_hint() {
     assert_eq!(hint, &Hint::resolves(a_target("zz-twin")));
 }
 
+/// **A document under a dot-led path is no part of the vault**, as Obsidian
+/// ignores every file and folder whose name leads with a dot. A trashed copy
+/// beside a live document leaves a link to it healthy rather than ambiguous,
+/// a trashed copy alone leaves a link to it broken, and neither a find nor a
+/// get answers a document under a dot-led folder or a dotfile document.
+#[test]
+fn a_document_under_a_dot_led_path_is_no_part_of_the_vault() {
+    let (_sandbox, vault, host) = a_verb_vault(
+        "host-reads-dot-led",
+        &[
+            (
+                "zz-dots/zz-linker.md",
+                "# Linker\n\n[[zz-dot-live]] and [[zz-dot-trashed]]\n",
+            ),
+            ("zz-dots/zz-dot-live.md", "# Live\n"),
+            (".trash/zz-dot-live.md", "# Trashed copy\n\n#zzdottedtag\n"),
+            (".trash/zz-dot-trashed.md", "# Trashed\n\n#zzdottedtag\n"),
+            ("zz-dots/.zz-draft.md", "# Draft\n\n#zzdottedtag\n"),
+            (".github/zz-readme.md", "# Readme\n\n#zzdottedtag\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+
+    let answered = host
+        .validate(
+            &ValidateParams::new(address(vault.name()))
+                .with_kinds([FindingKind::Broken, FindingKind::Ambiguous]),
+        )
+        .expect("an attached vault answers a validate");
+    let ValidateReport::Findings { page, .. } = &answered.answer.report else {
+        panic!("a validate answered {:?}", answered.answer.report);
+    };
+    let linker: Vec<_> = page
+        .rows
+        .iter()
+        .filter(|row| row.path.as_str() == "zz-dots/zz-linker.md")
+        .map(|row| (row.kind, row.target.as_deref()))
+        .collect();
+    assert_eq!(
+        linker,
+        [(FindingKind::Broken, Some("zz-dot-trashed"))],
+        "a dot-led copy changed a link's verdict"
+    );
+
+    let found = host
+        .find(
+            &FindParams::new(address(vault.name()))
+                .with_predicates([Predicate::tag("zzdottedtag")]),
+        )
+        .expect("a find on a tag answers");
+    assert_eq!(
+        paths_of(&found.answer.report),
+        Vec::<String>::new(),
+        "a find answered a dot-led document"
+    );
+
+    for target in [".trash/zz-dot-trashed", "zz-dots/.zz-draft"] {
+        let refused = host
+            .get(&GetParams::new(address(vault.name()), a_target(target)))
+            .expect_err("a get answered a dot-led document");
+        assert_eq!(
+            refused.detail(),
+            &ErrorDetail::unknown_target(a_target(target)),
+            "a get of {target}"
+        );
+    }
+}
+
 /// A get whose target names no document is refused as an unknown target,
 /// echoing the target as the request named it.
 #[test]

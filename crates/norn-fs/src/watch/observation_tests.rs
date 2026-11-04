@@ -30,7 +30,7 @@ fn fixture() -> (isolation::Lease, Scratch, Subscription) {
     std::fs::write(&schema, "version: 1\n").unwrap();
     #[cfg(feature = "induced-failure")]
     settle_prior_changes(scratch.root(), Duration::from_secs(5)).unwrap();
-    let (watch, _) = watch_polling(&root, &schema).unwrap();
+    let (watch, _) = watch_polling(&root, &schema, &[]).unwrap();
     watch.synchronize(Duration::from_secs(5)).unwrap();
     (lease, scratch, watch)
 }
@@ -60,7 +60,7 @@ fn observation_accepts_unchanged_coverage_and_never_recovers_after_a_held_fact()
         guard.is_current(),
         "accesses and excluded non-facts retain eligibility"
     );
-    let (foreign, _) = super::watch_polling(&root, &root.join("schema.yaml")).unwrap();
+    let (foreign, _) = super::watch_polling(&root, &root.join("schema.yaml"), &[]).unwrap();
     foreign.synchronize(Duration::from_secs(5)).unwrap();
     let foreign_guard = foreign.unchanged_observation().unwrap();
     assert!(!watch.accepts_observation(&foreign_guard));
@@ -109,6 +109,7 @@ fn observation_stays_invalid_after_terminal_consumption_and_revision_exhaustion(
     let (second, _) = super::watch_polling(
         watch.covered_root(),
         &watch.covered_root().join("schema.yaml"),
+        &[],
     )
     .unwrap();
     second.synchronize(Duration::from_secs(5)).unwrap();
@@ -145,6 +146,7 @@ fn observation_rejects_overflow_control_loss_and_a_replaced_root() {
     let (second, _) = super::watch_polling(
         watch.covered_root(),
         &watch.covered_root().join("schema.yaml"),
+        &[],
     )
     .unwrap();
     second.synchronize(Duration::from_secs(5)).unwrap();
@@ -158,6 +160,7 @@ fn observation_rejects_overflow_control_loss_and_a_replaced_root() {
     let (mut third, _) = super::watch_polling(
         watch.covered_root(),
         &watch.covered_root().join("schema.yaml"),
+        &[],
     )
     .unwrap();
     third.synchronize(Duration::from_secs(5)).unwrap();
@@ -343,6 +346,7 @@ fn build_authority_withdrawal_wakes_an_existing_condvar_and_racing_registration(
     let (second, _) = super::watch_polling(
         watch.covered_root(),
         &watch.covered_root().join("schema.yaml"),
+        &[],
     )
     .unwrap();
     second.synchronize(Duration::from_secs(5)).unwrap();

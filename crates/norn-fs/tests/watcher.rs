@@ -35,7 +35,7 @@ const CANARY: &str = "watch-canary";
 
 /// One way to establish coverage: [`watch`] for the native backend,
 /// [`watch_polling`] for the poll backend.
-type Establish = fn(&Path, &Path) -> Result<(Subscription, OwnWrites), WatchError>;
+type Establish = fn(&Path, &Path, &[&Path]) -> Result<(Subscription, OwnWrites), WatchError>;
 
 const fn budget() -> Budget {
     Budget::new(Duration::from_secs(15), Duration::from_millis(250))
@@ -204,7 +204,7 @@ impl Collector {
     /// hands the same lease over here: the lease is not reentrant.
     fn start_holding(lease: Lease, establish: Establish, vault: &Path, schema: &Path) -> Self {
         let (subscription, _own_writes) =
-            establish(vault, schema).expect("watch coverage is active");
+            establish(vault, schema, &[]).expect("watch coverage is active");
         let mut collector = Self::adopt(subscription, lease);
         let canary = vault.join(CANARY);
         wait_until("the backend to report a canary write", budget(), || {
@@ -579,7 +579,7 @@ fn a_write_issued_before_synchronization_is_reported_for_its_own_path() {
     let vault = scratch.vault();
     let lease = Lease::hold(isolation::REAL_WATCHER, lease_budget());
     let (subscription, _own_writes) =
-        watch(&vault, &scratch.schema()).expect("watch coverage is active");
+        watch(&vault, &scratch.schema(), &[]).expect("watch coverage is active");
 
     let racing = subscription.state();
     std::fs::write(vault.join("raced.md"), b"raced\n").expect("the racing write");
@@ -605,6 +605,50 @@ fn a_write_issued_before_synchronization_is_reported_for_its_own_path() {
                 ))
             }
         },
+    );
+}
+
+/// **A dot-led path is no part of the vault, and a control file beneath one
+/// still reports.** The subscription is given `.norn/config.toml` as a
+/// control file: a write to it is reported for its own path though `.norn` is
+/// dot-led, while a write under `.trash` is dropped before it reaches a batch.
+/// An ordinary write after both bounds the wait.
+#[test]
+fn a_dot_led_write_is_dropped_and_a_control_file_beneath_one_reports() {
+    let scratch = Scratch::new("dot-led-control");
+    let vault = scratch.vault();
+    std::fs::create_dir_all(vault.join(".norn")).expect("the control folder");
+    std::fs::create_dir_all(vault.join(".trash")).expect("a dot-led folder");
+    let lease = Lease::hold(isolation::REAL_WATCHER, lease_budget());
+    let (subscription, _own_writes) =
+        watch(&vault, &scratch.schema(), &[Path::new(".norn/config.toml")])
+            .expect("watch coverage is active");
+    subscription
+        .synchronize(SYNCHRONIZATION_DEADLINE)
+        .expect("coverage to become live");
+    let mut collector = Collector::adopt(subscription, lease);
+
+    std::fs::write(vault.join(".trash/note.md"), b"trashed\n").expect("the dot-led write");
+    std::fs::write(vault.join(".norn/config.toml"), b"").expect("the control write");
+    std::fs::write(vault.join("after.md"), b"after\n").expect("the ordinary write");
+    collector.wait_within(
+        Budget::new(Duration::from_secs(60), Duration::from_millis(250)),
+        "the control and ordinary writes to be reported",
+        |seen| {
+            if seen.reported(Path::new(".norn/config.toml")) && seen.reported(Path::new("after.md"))
+            {
+                Observed::Met(())
+            } else {
+                Observed::Pending(seen.state())
+            }
+        },
+    );
+    collector.drain();
+    assert!(
+        !collector.seen.reported(Path::new(".trash/note.md"))
+            && !collector.seen.reported(Path::new(".trash")),
+        "a dot-led write reached a batch: {}",
+        collector.seen.state()
     );
 }
 
@@ -641,7 +685,7 @@ fn a_plan_spanning_two_volumes_synchronizes_and_reports_from_both() {
     norn_fs::watch::settle_prior_changes(volume.mount(), budget().work())
         .expect("the schema's first write has passed through the backend");
     let (subscription, _own_writes) =
-        watch(&scratch.vault(), &schema).expect("watch coverage is active across two volumes");
+        watch(&scratch.vault(), &schema, &[]).expect("watch coverage is active across two volumes");
 
     // Both changes are made before the boundary is waited on, so what has to
     // cover the second volume's change is the replay the boundary closes. A
@@ -735,7 +779,7 @@ fn a_subscription_reports_the_case_behaviour_its_root_proved() {
     let vault = scratch.vault();
     let _lease = Lease::hold(isolation::REAL_WATCHER, lease_budget());
     let (subscription, _own_writes) =
-        watch(&vault, &scratch.schema()).expect("watch coverage is active");
+        watch(&vault, &scratch.schema(), &[]).expect("watch coverage is active");
     let proven = PathNormalizer::detect(subscription.covered_root())
         .expect("the covered root's case behaviour")
         .case_sensitivity();

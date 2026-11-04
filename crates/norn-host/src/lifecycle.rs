@@ -21031,7 +21031,7 @@ mod tests {
         norn_fs::watch::settle_prior_changes(scratch.root(), lifecycle_wait_budget().work())
             .unwrap();
         let (subscription, _own) =
-            norn_fs::watch::watch(&root, &root.join(".norn/schema.yaml")).unwrap();
+            norn_fs::watch::watch(&root, &root.join(".norn/schema.yaml"), &[]).unwrap();
         subscription
             .synchronize(lifecycle_wait_budget().work())
             .unwrap();
@@ -21114,7 +21114,7 @@ mod tests {
         norn_fs::watch::settle_prior_changes(scratch.root(), lifecycle_wait_budget().work())
             .unwrap();
         let (subscription, _own) =
-            norn_fs::watch::watch(&root, &root.join(".norn/schema.yaml")).unwrap();
+            norn_fs::watch::watch(&root, &root.join(".norn/schema.yaml"), &[]).unwrap();
         subscription
             .synchronize(lifecycle_wait_budget().work())
             .unwrap();
@@ -21188,7 +21188,7 @@ mod tests {
         norn_fs::watch::settle_prior_changes(scratch.root(), lifecycle_wait_budget().work())
             .unwrap();
         let (subscription, _own) =
-            norn_fs::watch::watch(&root, &root.join(".norn/schema.yaml")).unwrap();
+            norn_fs::watch::watch(&root, &root.join(".norn/schema.yaml"), &[]).unwrap();
         subscription
             .synchronize(lifecycle_wait_budget().work())
             .unwrap();

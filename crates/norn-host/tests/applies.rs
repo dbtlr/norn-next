@@ -174,6 +174,65 @@ fn a_preview_whose_operation_does_not_resolve_is_refused_with_the_operation_left
     );
 }
 
+/// **A plan that creates or moves a document into a dot-led path is refused,
+/// and nothing is written.** A file or folder whose name leads with a dot is
+/// no part of the vault, so a document made there would be one the vault
+/// cannot see: a create under `.trash` and a move to a dotfile name each
+/// answer `vault/plan-refused` with the operation left for the caller.
+#[test]
+fn a_plan_into_a_dot_led_path_is_refused_and_writes_nothing() {
+    let (_sandbox, vault) = a_vault("host-applies-dot-led");
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let operations = [
+        OperationKind::create_document(
+            DocumentPath::new(".trash/made.md").expect("a document path"),
+            "# Made\n",
+        ),
+        OperationKind::move_document(
+            DocumentPath::new(SUBJECT).expect("a document path"),
+            DocumentPath::new("notes/.moved.md").expect("a document path"),
+        ),
+    ];
+    for kind in operations {
+        let operation = Operation::new(kind);
+        let plan = PlanDocument::operations(AuthoredPlan::new(
+            VaultAddress::name(vault.name().clone()),
+            vec![operation.clone()],
+        ));
+        let refused = host
+            .apply(ApplyParams::new(ApplyMode::Preview, plan))
+            .expect("a preview is answered")
+            .wait()
+            .expect_err("a plan into a dot-led path was reported");
+        assert_eq!(
+            refused.code(),
+            &ReasonCode::VaultPlanRefused,
+            "{operation:?}"
+        );
+        let ErrorDetail::PlanRefused {
+            plan, unresolved, ..
+        } = refused.detail()
+        else {
+            panic!("the refusal carries {:?}", refused.detail());
+        };
+        assert!(plan.transitions.is_empty(), "{operation:?}");
+        assert_eq!(
+            unresolved
+                .iter()
+                .map(|left| &left.operation)
+                .collect::<Vec<_>>(),
+            vec![&operation]
+        );
+    }
+    assert!(!vault.path().join(".trash/made.md").exists());
+    assert!(!vault.path().join("notes/.moved.md").exists());
+    assert_eq!(
+        std::fs::read_to_string(vault.path().join(SUBJECT)).unwrap(),
+        BEFORE
+    );
+}
+
 /// **A move whose link cascade into one holder cannot be proven within the
 /// text layer's reads is refused, says to send fewer at once, and writes
 /// nothing**, in preview and apply alike. A hub links every document of a folder in one paragraph, and

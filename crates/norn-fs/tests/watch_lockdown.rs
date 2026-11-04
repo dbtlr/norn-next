@@ -134,7 +134,8 @@ fn the_child_role_watches_under_whatever_it_was_armed_at() {
 /// behind at all.
 fn watch_under_whatever_is_armed(root: &Path, watch: u64) {
     let record = |fields: &str| record(root, &format!("watch={watch} {fields}"));
-    let (subscription, _own_writes) = match norn_fs::watch_polling(&vault(root), &schema(root)) {
+    let (subscription, _own_writes) = match norn_fs::watch_polling(&vault(root), &schema(root), &[])
+    {
         Ok(watched) => watched,
         Err(WatchError::Backend(_)) => {
             record("outcome=refused kind=backend");

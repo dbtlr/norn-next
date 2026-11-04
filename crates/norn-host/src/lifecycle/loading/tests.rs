@@ -273,7 +273,7 @@ fn begun(
     std::fs::write(root.join(".norn/schema.yaml"), "version: 1\n").unwrap();
     norn_fs::watch::settle_prior_changes(scratch.root(), BUDGET.work()).unwrap();
     let (subscription, _own) =
-        norn_fs::watch::watch(&root, &root.join(".norn/schema.yaml")).unwrap();
+        norn_fs::watch::watch(&root, &root.join(".norn/schema.yaml"), &[]).unwrap();
     subscription.synchronize(BUDGET.work()).unwrap();
     let store = norn_store::Store::open(
         scratch.join("store.sqlite3"),

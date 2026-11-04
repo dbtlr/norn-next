@@ -538,6 +538,16 @@ A directory open or listing path failure marks the directory and withholds its r
 folder component answers that folder, including a contained document open beneath it.
 Process-resource failures still refuse.
 
+**A dot-led name is no part of the vault.** Obsidian ignores every file and folder whose
+name leads with a dot, and so does norn: the walk states the outermost dot-led name on a path
+as one root it does not enter, the watcher drops every event beneath one except an event at
+or above a control file it was given (the host gives it `.norn/config.toml`, so a config
+change still reaches the host), and a plan that creates or moves a document there is
+refused as a place the vault does not read documents at. So `.git`, `.obsidian`, `.trash` and a dotfile document hold no document, no vault file
+and no link target, and no read answers one. The `.norn` control files are read by their
+own paths and are not documents. `.norn/tmp` stays a mechanism root of its own, so an
+explicit reach beneath it answers that root rather than `.norn`.
+
 **The walk's own windows converge on the same answer, and there is more than one of them.**
 A walk observes a name several times before it is done with it: the listing that names it,
 the stat of the name that listing returned, and the open or the link read that follows that
@@ -558,8 +568,8 @@ at that name, so they are pruned — while the findings under it stay **withheld
 nothing in this job read a place under a name it never entered, what is at that name now is
 a question this walk never asked, and a job that took them would be claiming an enumeration
 it never made. **A root the walk deliberately does not enter is the other answer**, and the
-two axes converge together there: an exclusion root, a mechanism subtree, a shadow basename,
-a link, a device-like entry, a name below an entry the walk reads rather than descends into —
+two axes converge together there: an exclusion root, a mechanism subtree, a dot-led name, a
+shadow basename, a link, a device-like entry, a name below an entry the walk reads rather than descends into —
 each is a fact about an entry that stands, so a derivation begun from zero over the same
 tree refuses it the same way and holds nothing beneath it. The findings under such a root go
 the way the rows go, on the job's own schedule: the rows die inside the prune's increment and
@@ -595,15 +605,11 @@ withheld while a rendering collision stands, as below — and keeps going; the e
 `Ready` and serves every other document.
 Every rung-2 path answers the three cause classes the same way: the full tree heal, a scoped
 subtree heal, and the warm scoped increment. A dirty **directory** whose own spelling the
-grammar refuses splits by what it still addresses, because naming no document and holding no
-document are different things. A spelling refused only for the stem its leaf reduces to —
-`..md` — names no document and is where ordinary documents such as `..md/note.md` are
-stored, so it addresses every row beneath it as a segment-aligned prefix range: the warm path
-merges its walk against that range and derives, quarantines and **prunes** there, converging
-a deletion under it without a vault-wide heal. A spelling refused for anything else — a
-backslash, a control byte, bytes that are not UTF-8 — spoils every path beneath it too, so no
-document under it is storable and there is no row to prune; the warm path reads what is under
-it and quarantines what it finds.
+grammar refuses is a spelling refused for a backslash, a control byte or bytes that are not
+UTF-8, which spoils every path beneath it too, so no document under it is storable and there
+is no row to prune; the warm path reads what is under it and quarantines what it finds. A
+spelling refused only for the stem its leaf reduces to, such as `..md`, leads with a dot, so
+it is a dot-led name the walk does not enter and holds nothing.
 
 **A document a heal cannot open holds names alone.** Every broken document has the same
 state, whether read before or never read: path, suffix key, path key and admitting segments
@@ -2732,10 +2738,9 @@ Where contextual lowercasing depends on what follows a name's last character, as
 final capital sigma, a suffix-addressed link spelling the folded character itself may
 not reach a vault file that the file's own spelling reaches.
 Path keys remain the comparison key of the file's own path.
-Extensionless files, dotfiles, files under a dot-led folder (`.git`, `.obsidian`, `.trash`),
-which Obsidian ignores, excluded and mechanism paths, control files and refused
-spellings contribute no target, though a document under a dot-led folder is indexed as
-any other; refused file spellings produce no finding. No file bytes
+Extensionless files, dot-led names (which the walk does not enter), excluded and
+mechanism paths, control files and refused spellings contribute no target; refused file
+spellings produce no finding. No file bytes
 are read, and a file has neither a hash nor a tombstone. File births and deaths land in
 the document changeset's transaction and re-judge the links under their class and path
 keys. Heal and prune merge bounded pages of documents and files in the walk's order.
