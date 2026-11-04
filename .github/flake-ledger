@@ -151,3 +151,15 @@ signature: a_reconcile_publishes_ready_before_the_semantic_slice_it_owes
 class: harness racing the watcher it relies on not to deliver
 first-seen: 2026-10-29
 disposition: Opened 2026-10-29 off the macOS ARM64 'determinism and filesystem' job (run 40910346053, job 123594044038, PR #400 at 7dd7001d), where the slice the case armed ran while the entry answered `Ready` but before its edit was searchable: 'a semantic slice ran before the edit was readable', 0 rows against 1. The same job passed twice before at that head. The case's `polling_ready_host` attaches without settling the fixture's pre-attach writes, which its sibling host settles because FSEvents can deliver them after the watch's history marker; a late delivery would owe a slice ahead of the edit's. The PR pushed past it deliberately, with this entry, to read its own macOS early-reads step again. Fixed 2026-10-29: every reconcile owes the engine a slice, so a late delivery of the fixture's own writes reconciled and ran the armed slice before the edit was taken in; `polling_ready_host` now settles those writes before it attaches, as its sibling does. A recurrence is a defect rather than a flake.
+
+id: lifecycle-ready-before-the-scheduler-answers
+signature: a_read_that_meets_damage_publishes_it_and_schedules_the_rebuild
+class: harness reading a published state as a quiet entry
+first-seen: 2026-11-04
+disposition: Opened 2026-11-04 off the hosted Linux 'build and test' job (run 41779860919, job 126408767518, PR #442 at 975218e5), where the read-damage withdrawal's single try of the entry gate found another hold, so the read was refused as ReaderUnavailable rather than with the damage it published. Publishing `Ready` moves the entry's read stance and wakes the background scheduler, and the leg that published it ends its claim in two more holds; the case began its read the instant it saw `Ready`, and the scheduler's ask answering that wake took the gate between the read's begin and its withdrawal. Reproduced on demand by holding that ask until the read had begun. Fixed 2026-11-04: the case and every lifecycle read-damage case that reads right after `Ready`, and the shared ready fixtures of the apply, background and lane suites, wait for a quiet entry (no claim, no leg, every scheduler wake answered) before they act. A recurrence is a defect rather than a flake.
+
+id: lifecycle-delivery-wake-counted-after-its-leg
+signature: the_commit_of_an_engine_delivery_wakes_the_scheduler
+class: harness reading a published state as a quiet entry
+first-seen: 2026-11-04
+disposition: Opened 2026-11-04 off the deliberate re-run of the same job (run 41779860919, job 126411865939), where the case counted four wakes against three. The delivery's own wake started an ask that found the case's arranged maintenance due and scheduled a leg, and that leg's release woke the scheduler again before the case read the count after its hold. Reproduced on demand by delaying that reading 20 ms. Fixed 2026-11-04: the case reads the count on both sides of the commit inside the one hold, where every other wake site waits for the gate. A recurrence is a defect rather than a flake.

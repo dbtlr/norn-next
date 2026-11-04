@@ -9,7 +9,8 @@
 use super::*;
 
 /// A host over one vault whose dispatcher ticks once a minute, running each
-/// maintenance leg under `budget`, holding the vault `Ready`.
+/// maintenance leg under `budget`, holding the vault `Ready` and quiet: the
+/// attach's leg has ended and the scheduler has answered its wakes.
 fn a_ready_vault_under(
     ops: &Arc<FakeOps>,
     budget: Duration,
@@ -26,6 +27,7 @@ fn a_ready_vault_under(
     .unwrap();
     let lease = host.demand(&name).unwrap();
     wait_for_state(&host, &name, TrustState::Ready);
+    wait_for_a_quiet_entry(&host, &name);
     (host, name, lease)
 }
 
@@ -399,7 +401,7 @@ fn an_unwind_in_the_schedulers_dispatch_leaves_every_other_vault_scheduled() {
     let leases = (host.demand(&alpha).unwrap(), host.demand(&beta).unwrap());
     for name in [&alpha, &beta] {
         wait_for_state(&host, name, TrustState::Ready);
-        wait_for_no_claim(&host, name);
+        wait_for_a_quiet_entry(&host, name);
     }
 
     let entry = host.shared.entries.get(&alpha).unwrap();
@@ -457,7 +459,7 @@ fn an_unwind_in_one_vaults_dispatch_still_asks_the_vaults_after_it_in_that_turn(
     let leases = (host.demand(&alpha).unwrap(), host.demand(&beta).unwrap());
     for name in [&alpha, &beta] {
         wait_for_state(&host, name, TrustState::Ready);
-        wait_for_no_claim(&host, name);
+        wait_for_a_quiet_entry(&host, name);
     }
 
     let entry = host.shared.entries.get(&alpha).unwrap();
@@ -656,6 +658,14 @@ fn a_hold_returning_the_stance_from_refuse_to_serve_wakes_the_scheduler() {
 /// too, or follows a recovery's rescan with a reconcile, so the case runs the
 /// publishing hold's commit itself, over coverage parked back by the leg the
 /// case stands in for.
+///
+/// The wakes are counted inside that one hold. The commit's wake starts an
+/// ask, which finds the arranged maintenance due and schedules a leg whose
+/// release wakes the scheduler again, and on a busy machine all of that can
+/// land before a reading taken after the hold. Every wake site but a case's
+/// own [`Host::wake_background`] runs under an entry's gate, and this host
+/// has one entry, so a count read on both sides of the commit, under the
+/// gate, moves by the commit's wake alone.
 #[test]
 fn the_commit_of_an_engine_delivery_wakes_the_scheduler() {
     use crate::reload::EngineConfigReceiver;
@@ -670,15 +680,14 @@ fn the_commit_of_an_engine_delivery_wakes_the_scheduler() {
         ..FakeOps::default()
     });
     let (host, name, lease) = a_ready_vault(&ops);
-    wait_for_no_claim(&host, &name);
     engines.receive(&name, None);
 
     // What the engine owes once its delivery is committed.
     arrange_for(&ops.maintenance_due_at, &name);
-    let wakes = host.scheduler_reading().wakes;
     {
         let entry = host.shared.entries.get(&name).unwrap();
         let mut state = entry.gate.lock().unwrap();
+        let wakes = host.scheduler_reading().wakes;
         let leg = state.claim.epoch();
         let coverage = state.coverage.take(leg).expect("the coverage is parked");
         record_active_declaration(&mut state, &*host.shared.ops, &name, &coverage);
@@ -687,12 +696,12 @@ fn the_commit_of_an_engine_delivery_wakes_the_scheduler() {
             state.delivered_engine.is_some(),
             "no delivery was committed"
         );
+        assert_eq!(
+            host.scheduler_reading().wakes,
+            wakes + 1,
+            "the delivery's commit sent no wake"
+        );
     }
-    assert_eq!(
-        host.scheduler_reading().wakes,
-        wakes + 1,
-        "the delivery's commit sent no wake"
-    );
     wait_for_maintenances(&ops, 1);
     drop((lease, host));
 }

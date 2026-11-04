@@ -14434,6 +14434,46 @@ mod tests {
         .unwrap_or_else(|failure| panic!("{failure}"));
     }
 
+    /// Wait until `name`'s entry is quiet: no claim stands on it, no leg is
+    /// registered against it, and the background scheduler has answered every
+    /// wake sent so far.
+    ///
+    /// **An entry that has just reached `Ready` is not yet quiet.** The leg
+    /// that published `Ready` ends its claim in two more holds of the gate
+    /// (`end_job_leg`), and the publication woke the scheduler, whose ask
+    /// takes the gate after both. A case that acts the instant it sees
+    /// `Ready` can find either one holding the gate, or find the ask
+    /// queueing, scheduling or counting against what the case arranged next.
+    /// Once the entry is quiet, nothing takes its gate until the case acts or
+    /// a deadline comes due.
+    ///
+    /// The scheduler is read on both sides of the gate's reading, and the
+    /// entry counts as quiet only where no wake or ask moved between them: a
+    /// leg starts only from an ask or from the case, so an idle scheduler on
+    /// both sides of a free claim is a free entry.
+    fn wait_for_a_quiet_entry(host: &Host<Arc<FakeOps>>, name: &VaultName) {
+        let entry = host.shared.entries.get(name).expect("the vault is served");
+        let scheduler = &host.shared.scheduler;
+        wait_until("the entry to be quiet", lifecycle_wait_budget(), || {
+            let before = scheduler.reading();
+            if !scheduler.has_answered_every_wake() {
+                return Observed::pending("the scheduler has a wake to answer");
+            }
+            let free = {
+                let state = entry.gate.lock().expect("entry gate poisoned");
+                !state.claim.is_held() && state.claim.leg().is_none()
+            };
+            if !free {
+                return Observed::pending("a claim or a leg stands on the entry");
+            }
+            if scheduler.reading() != before || !scheduler.has_answered_every_wake() {
+                return Observed::pending("the scheduler was woken while the claim was read");
+            }
+            Observed::Met(())
+        })
+        .unwrap_or_else(|failure| panic!("{failure}"));
+    }
+
     /// A reload of `name` scheduled on its entry and never sent, which is
     /// where a dispatch the full queue refused leaves it: the job stands as
     /// the entry's marker with no queue slot, and only a retry of refused
@@ -18298,6 +18338,7 @@ mod tests {
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let _lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
+        wait_for_a_quiet_entry(&host, &name);
         ops.block_rebuild.store(true, Ordering::SeqCst);
 
         let hold = host
@@ -18345,6 +18386,7 @@ mod tests {
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let _lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
+        wait_for_a_quiet_entry(&host, &name);
 
         let hold = host
             .begin_read(&name)
@@ -18402,6 +18444,7 @@ mod tests {
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let _lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
+        wait_for_a_quiet_entry(&host, &name);
 
         let hold = host
             .begin_read(&name)
@@ -18455,6 +18498,7 @@ mod tests {
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let _lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
+        wait_for_a_quiet_entry(&host, &name);
 
         let hold = host
             .begin_read(&name)
@@ -18502,6 +18546,7 @@ mod tests {
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let _lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
+        wait_for_a_quiet_entry(&host, &name);
         ops.block_rebuild.store(true, Ordering::SeqCst);
 
         let hold = host
@@ -18855,6 +18900,7 @@ mod tests {
         ));
         let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
+        wait_for_a_quiet_entry(&host, &name);
 
         let hold = host
             .begin_read(&name)
@@ -19004,6 +19050,7 @@ mod tests {
         ));
         let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
+        wait_for_a_quiet_entry(&host, &name);
 
         let hold = host
             .begin_read(&name)
