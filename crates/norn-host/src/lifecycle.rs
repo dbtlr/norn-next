@@ -14445,7 +14445,9 @@ mod tests {
     /// `Ready` can find either one holding the gate, or find the ask
     /// queueing, scheduling or counting against what the case arranged next.
     /// Once the entry is quiet, nothing takes its gate until the case acts or
-    /// a deadline comes due.
+    /// a deadline comes due, with one exception this wait does not cover: a
+    /// lane turn for work an ask already queued takes the gate after that ask
+    /// has ended. A case that owes lane work waits for its turn itself.
     ///
     /// The scheduler is read on both sides of the gate's reading, and the
     /// entry counts as quiet only where no wake or ask moved between them: a

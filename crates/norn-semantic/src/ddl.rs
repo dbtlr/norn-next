@@ -15,7 +15,8 @@
 //! a row whose hash equals the feed's current one needs no recompute, which is
 //! what lets expensive derived state survive the cheap state's rebuild (ADR
 //! 0047). Nothing here references the main database's rows; the two databases
-//! share no ids, no transactions and no store epoch.
+//! share no ids and no transactions, and this one outlives each store epoch,
+//! recording only which epoch its progress was taken in.
 //!
 //! # A rowid table, because the rows are wide
 //!
