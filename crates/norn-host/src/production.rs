@@ -3704,6 +3704,15 @@ fn scoped_increment_closed(
             merge_file(&mut pending, path, standing.first(), false)?;
             continue;
         }
+        // **A requeued report re-derives without comparing bytes.** The
+        // ordinary path below reads the file and keeps a row whose hash still
+        // matches; here every report sets the document back to a provisional
+        // name, so a late or spurious report for an unchanged file derives it
+        // again and re-decides each link that resolves to it. That is accepted
+        // as the cheap choice: the result stays exact, the extra work is
+        // bounded by that one file's in-links, and it occurs only while a
+        // from-zero build runs. A hash check here would add a read per
+        // requeued report to every build to save work no reader observes.
         if pending.names {
             pending.settle_content()?;
             pending.push(Change::Named {
