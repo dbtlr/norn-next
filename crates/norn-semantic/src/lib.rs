@@ -18,7 +18,7 @@
 //! domain. Rows are keyed by `(path, model id, model version)` and carry the
 //! `body_hash` they were computed over — content-addressed, so the cheap
 //! state's rebuild never forces the expensive state's recompute, and never
-//! keyed by a main-database rowid, so the two databases share no lifetime.
+//! keyed by a main-database rowid, so the rows outlive every store epoch.
 //!
 //! # Eventual consistency is the stated contract
 //!

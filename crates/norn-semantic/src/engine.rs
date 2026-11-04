@@ -94,7 +94,7 @@ pub struct DrainReport {
     pub rescan: bool,
     /// Paths the rescan's reconcile removed: they no longer stand in the
     /// store, and the store's own tombstones did not survive into its new
-    /// lifetime to say so.
+    /// epoch to say so.
     pub reconciled_away: u64,
     /// Documents whose body was embedded and written.
     pub embedded: u64,
@@ -122,9 +122,9 @@ impl DrainReport {
     /// A reading of this drain's work, not a proof of convergence: a
     /// converged sidecar can still report work (a rescan re-triages every
     /// row it kept), and quiescence holds only until the next write. The
-    /// drain reads one store lifetime, because the handle's epoch is pinned
+    /// drain reads one store epoch, because the handle's epoch is pinned
     /// at its open — a writer borrow, or a feed source that refuses a page
-    /// over another lifetime; a store file replaced underneath a live handle
+    /// over another epoch; a store file replaced underneath a live handle
     /// is the maintainer singleton's to prevent (ADR 0016, one maintainer
     /// per derived store), not this reading's to detect.
     pub fn is_settled(&self) -> bool {
@@ -453,12 +453,12 @@ impl Engine {
     /// 1. **Epoch first.** A store epoch that differs from the observed one
     ///    means the cursors name positions in a database that no longer
     ///    exists: reconcile away rows whose paths the store no longer holds
-    ///    (its tombstones did not survive into the new lifetime), a page of
+    ///    (its tombstones did not survive into the new epoch), a page of
     ///    held paths at a time, each page committing its removals and its
     ///    position together. Only the page that completes the pass resets
     ///    both cursors and records the new epoch as observed, so a slice or
     ///    a crash that stops part way leaves the old epoch observed and the
-    ///    next slice resumes the pass. A pass recorded for another lifetime
+    ///    next slice resumes the pass. A pass recorded for another epoch
     ///    than the store's starts over.
     /// 2. **Documents, triaged before fetched.** A feed row whose `body_hash`
     ///    is absent has no content to embed: every held vector at its path is
@@ -926,7 +926,7 @@ impl Engine {
     /// the same transaction it resets both cursors, records `store_epoch` as
     /// observed and clears the position, so the observed epoch never moves
     /// ahead of a whole pass. A recorded position is resumed only for the
-    /// lifetime it was recorded in. A reconcile page embeds nothing, so it
+    /// epoch it was recorded in. A reconcile page embeds nothing, so it
     /// runs whole inside its step.
     fn reconcile_page(
         &mut self,
