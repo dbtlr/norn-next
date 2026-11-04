@@ -190,6 +190,60 @@ fn a_source_reports_exactly_what_the_whole_verification_reports() {
     }
 }
 
+/// What a store's full-text config holds as written: the one `version` row,
+/// at the format version the check holds the config to.
+#[test]
+#[allow(clippy::disallowed_methods)] // Harness scaffolding: reading the config table as written.
+fn a_new_stores_full_text_config_is_the_one_version_row() {
+    let scratch = Scratch::new("fts-config-as-written");
+    let _store = a_store_with_a_row_for_every_check(&scratch);
+    let connection = norn_db::rusqlite::Connection::open(scratch.database()).unwrap();
+    let rows: Vec<(String, i64)> = connection
+        .prepare("SELECT k, v FROM documents_fts_config ORDER BY k")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(rows, vec![("version".to_string(), 4)]);
+}
+
+/// **A damaged full-text config is damage, through both verifications.** The
+/// index's config table holds the format version FTS5 reads the index under;
+/// a version it does not accept, or no version at all, fails every full-text
+/// read as "invalid fts5 file format", which the driver reports as an
+/// ordinary error rather than as a damaged file. The verification has to
+/// read the table itself to call it damage, so the store is rebuilt rather
+/// than refusing the check every interval.
+#[test]
+fn a_damaged_full_text_config_is_damage_through_both_verifications() {
+    for (index, damage) in [
+        "UPDATE documents_fts_config SET v = 3 WHERE k = 'version'",
+        "UPDATE documents_fts_config SET v = 'four' WHERE k = 'version'",
+        "DELETE FROM documents_fts_config",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let scratch = Scratch::new(&format!("fts-config-{index}"));
+        let mut store = a_store_with_a_row_for_every_check(&scratch);
+        induced_failure::execute_out_of_band(&mut store, damage)
+            .unwrap_or_else(|error| panic!("`{damage}` was refused: {error:?}"));
+
+        let whole = store.verify_integrity();
+        assert!(
+            matches!(whole, Err(StoreError::Damaged { .. })),
+            "`{damage}`: the whole verification reported {whole:?}"
+        );
+        let through = verified_through_a_source(&store);
+        assert!(
+            matches!(through, Err(StoreError::Damaged { .. })),
+            "`{damage}`: the source reported {through:?}"
+        );
+        assert!(format!("{through:?}").contains("full-text"), "{through:?}");
+    }
+}
+
 /// **A source outlives nothing it was minted from.** Minted from one store
 /// lifetime, it reaches no verdict about the store a rebuild put at the same
 /// path, and the refusal is not damage: a verdict of damage would discard the
