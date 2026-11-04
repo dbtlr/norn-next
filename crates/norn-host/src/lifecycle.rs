@@ -8341,6 +8341,22 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                                 .hand_on(|epoch| Job::Reconcile(name.clone(), epoch)),
                         );
                     } else if maintenance_due && !state.owes_a_rung() {
+                        // **A leg that ran zero units reschedules at once.**
+                        // Nothing here asks whether this leg made progress, so
+                        // an ops whose legs run no units while maintenance
+                        // stays due would turn this arm back to back. That is
+                        // an accepted limitation: only a fake has reached it.
+                        // Each production reason a leg runs zero units is
+                        // settled before this arm or by it: facts owed or
+                        // arriving mid-leg go to the reconcile above, applies
+                        // or a detach that arrived take their arms above, an
+                        // owed rung is refused here, and a trust label that
+                        // forbade quiet work is published `Ready` at this leg
+                        // end. The semantic slot owed before its delivery
+                        // publishes was the remaining cause, and semantic work
+                        // no longer runs on the claim. A guard would need a
+                        // blocked-until-woken state whose waking event depends
+                        // on why the leg ran nothing.
                         next = Some(
                             state
                                 .claim
