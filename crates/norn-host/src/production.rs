@@ -14320,7 +14320,13 @@ mod tests {
                 .collect();
             let since = authority.visit_roots(|sequence, _| sequence);
             change();
-            let budget = Budget::new(Duration::from_secs(20), Duration::from_millis(10));
+            // A look takes the build's fact lock, which the watcher holds
+            // while it records each report the change made, so one look can
+            // wait out a burst of recording, and a loaded machine stretches
+            // that wait. A 10 ms bound failed the wait at its first look under
+            // load (NORN-509); the bound is sized for that slowest look, as a
+            // state look elsewhere in this crate is.
+            let budget = Budget::new(Duration::from_secs(20), Duration::from_millis(250));
             wait_until("a report at each changed root", budget, || {
                 let missing: Vec<PathBuf> = authority.visit_roots(|_, accepted| {
                     let fresh: BTreeSet<PathBuf> = accepted
@@ -14455,6 +14461,32 @@ mod tests {
         }
     }
 
+    /// The counters that tell how a from-zero build's requeues went, for an
+    /// assertion message: a take the watcher refused or withdrew leaves its
+    /// roots to the reconcile before `Ready`, and only these say so.
+    #[cfg(feature = "induced-failure")]
+    fn requeue_account(spent: &crate::EvidenceReading) -> String {
+        format!(
+            "calls {}, takes {}, roots {}, documents {}, commits {}; \
+             facts recorded {}, withdrawals {} (coverage {}, control {}, capacity {}); \
+             rescans reported {}; builds {}, rebuilds {}, recoveries {}",
+            spent.requeue_calls,
+            spent.requeue_takes,
+            spent.requeued_roots,
+            spent.requeued_documents,
+            spent.requeue_commits,
+            spent.build_facts_recorded,
+            spent.build_fact_withdrawals,
+            spent.build_fact_withdrawals_coverage,
+            spent.build_fact_withdrawals_control,
+            spent.build_fact_withdrawals_capacity,
+            spent.watcher_rescans_reported,
+            spent.from_zero_builds,
+            spent.rebuilds_run,
+            spent.recoveries_run,
+        )
+    }
+
     /// **A construction requeue over unrelated roots commits per changeset
     /// bound, not per root.** Edits and removals taken while a from-zero
     /// build stands in its content step share the requeue's changesets, and
@@ -14491,13 +14523,17 @@ mod tests {
             .attach(&f.registration(), &ProgressReporter::disconnected())
             .unwrap();
         let spent = ops.evidence.read();
-        assert!(spent.requeue_takes >= 1, "the build takes the facts");
+        let account = requeue_account(&spent);
+        assert!(
+            spent.requeue_takes >= 1,
+            "the build takes the facts: {account}"
+        );
         // Every changed root is requeued. macOS FSEvents may report one
         // path's change in two deliveries; a report arriving after a take
         // took the path is a new fact, so a later take takes it again.
         assert!(
             spent.requeued_roots >= 2 * roots as u64,
-            "{} roots requeued of {}",
+            "{} roots requeued of {}: {account}",
             spent.requeued_roots,
             2 * roots
         );
@@ -14509,7 +14545,7 @@ mod tests {
             + spent.requeued_documents.div_ceil(changeset_size as u64) * 2;
         assert!(
             spent.requeue_commits <= bound,
-            "{} roots and {} documents over {} takes committed {} times, past {bound}",
+            "{} roots and {} documents over {} takes committed {} times, past {bound}: {account}",
             spent.requeued_roots,
             spent.requeued_documents,
             spent.requeue_takes,
