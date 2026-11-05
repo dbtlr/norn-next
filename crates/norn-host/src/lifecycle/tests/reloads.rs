@@ -440,3 +440,47 @@ fn an_unregistration_while_a_reload_waits_is_refused_and_the_reload_runs() {
     assert_eq!(answer_of(&answer), judged());
     drop((lease, host));
 }
+
+/// **A reload waiting behind a watcher poll that unwinds answers the untrusted
+/// reading the unwind publishes**, not the release it passes through.
+#[test]
+fn a_reload_waiting_behind_a_poll_that_unwinds_answers_the_unwinds_reading() {
+    let ops = Arc::new(FakeOps::default());
+    let (host, name, lease) = a_ready_vault(&ops);
+    let poll = hold_a_poll(&host, &ops);
+    let answer = a_waiting_reload(&host, &name, false);
+
+    *ops.panic_in_poll_at.lock().unwrap() = Some(name.clone());
+    ops.poll_release.store(true, Ordering::SeqCst);
+
+    assert_eq!(
+        answer_of(&answer),
+        Err(ReloadRefusal::Unavailable(Demand::State(unwound(
+            POLL_PANIC
+        ))))
+    );
+    poll.join().unwrap();
+    drop((lease, host));
+}
+
+/// **A reload waiting behind a maintenance leg that unwinds answers the
+/// untrusted reading the unwind publishes**, not the release it passes
+/// through.
+#[test]
+fn a_reload_waiting_behind_a_maintenance_leg_that_unwinds_answers_the_unwinds_reading() {
+    let ops = Arc::new(FakeOps::default());
+    let (host, name, lease) = a_ready_vault(&ops);
+    hold_a_maintenance_leg(&host, &ops, &name);
+    let answer = a_waiting_reload(&host, &name, false);
+
+    ops.panic_in_maintenance.store(true, Ordering::SeqCst);
+    ops.maintenance_release.store(true, Ordering::SeqCst);
+
+    assert_eq!(
+        answer_of(&answer),
+        Err(ReloadRefusal::Unavailable(Demand::State(unwound(
+            MAINTENANCE_PANIC
+        ))))
+    );
+    drop((lease, host));
+}

@@ -3708,8 +3708,10 @@ fn reclaim_unwound_leg<O: EntryOps>(
     let epoch = leg.epoch();
     // The apply the leg was running is answered last, once the unwind has
     // published over the entry: from its progress, with the cause the entry
-    // then publishes, fixed there however late its caller asks.
-    let (running, attachment) = {
+    // then publishes, fixed there however late its caller asks. A reload
+    // waiting behind the leg goes then too, so its asker reads that reading
+    // rather than the release in between.
+    let (running, waiting_reload, attachment) = {
         let mut state = entry.gate.lock().expect("entry gate poisoned");
         if state.claim.leg() != Some(leg) {
             // The pin is the one thing a moved-on entry does not answer for.
@@ -3722,13 +3724,14 @@ fn reclaim_unwound_leg<O: EntryOps>(
         }
         state.unpin_leg(leg);
         let running = state.running_apply.take();
+        let waiting_reload = state.claim.take_waiting_reload();
         // Every leg carrying an earlier epoch answers for itself alone from
         // here, so the gate the release below puts back is put back over an
         // entry nothing else can write a verdict into.
         state.claim.invalidate();
         let attachment = state.coverage.give_up();
         begin_release(&mut state);
-        (running, attachment)
+        (running, waiting_reload, attachment)
     };
     release_identity_claims(shared, name);
     if attachment.is_none() {
@@ -3750,11 +3753,13 @@ fn reclaim_unwound_leg<O: EntryOps>(
     if state.trust == TrustState::Unattached && state.parked().is_none() {
         state.withdraw_trust(UntrustedReason::leg_unwound(detail));
     }
-    if let Some(running) = running {
-        let cause = state.apply_cause(name);
-        drop(state);
+    let cause = running.as_ref().map(|_| state.apply_cause(name));
+    drop(state);
+    if let (Some(running), Some(cause)) = (running, cause) {
         running.answer_unanswered(cause);
     }
+    // Dropped unanswered, its asker reads where the entry now stands.
+    drop(waiting_reload);
 }
 
 /// What is running against an entry at the instant it was read.
@@ -10345,6 +10350,9 @@ mod tests {
         panic_in_recover: std::sync::atomic::AtomicBool,
         panic_in_reload: std::sync::atomic::AtomicBool,
         panic_in_judge_reload: std::sync::atomic::AtomicBool,
+        /// Whether every maintenance leg panics once its block, if any, is
+        /// released.
+        panic_in_maintenance: std::sync::atomic::AtomicBool,
         /// The one vault whose polls panic. A dispatcher tick polls every
         /// attached vault, so the arming names which of them unwinds and the
         /// rest of the tick is what a case reads.
@@ -10504,6 +10512,7 @@ mod tests {
     const DETACH_PANIC: &str = "the fake detach unwound";
     const RELOAD_PANIC: &str = "the fake reload unwound";
     const JUDGE_RELOAD_PANIC: &str = "the fake reload judgment unwound";
+    const MAINTENANCE_PANIC: &str = "the fake maintenance unwound";
     const RETIRE_PANIC: &str = "the fake retirement unwound";
     const AMEND_PANIC: &str = "the fake amendment unwound";
     const APPLY_PANIC: &str = "the fake apply unwound";
@@ -11131,6 +11140,9 @@ mod tests {
             if stands_for_the_vault(&self.block_maintenance_at, name) {
                 self.maintenance_started.store(true, Ordering::SeqCst);
                 wait_for_release("maintenance_release", &self.maintenance_release);
+            }
+            if self.panic_in_maintenance.load(Ordering::SeqCst) {
+                panic!("{MAINTENANCE_PANIC}");
             }
             if self.lost_maintenance.swap(false, Ordering::SeqCst) {
                 return Err(JobFailure::LostMaintainership);
