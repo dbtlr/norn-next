@@ -484,3 +484,185 @@ fn a_reload_waiting_behind_a_maintenance_leg_that_unwinds_answers_the_unwinds_re
     );
     drop((lease, host));
 }
+
+/// **A maintenance leg a leg's end handed on, not yet running, holds a reload
+/// as a running one does**: the reload waits, an apply asked after it queues,
+/// and where the leg begins it runs rather than yielding to the apply, so the
+/// reload takes the claim at its end and the apply runs after the reload.
+#[test]
+fn a_reload_waiting_behind_a_handed_on_maintenance_leg_runs_before_an_apply_asked_after_it() {
+    let ops = Arc::new(FakeOps::default());
+    let (host, name, lease) = a_ready_vault(&ops);
+    let entry = host.shared.entries.get(&name).unwrap();
+    // The hand-on a leg's end makes, with the send held back so the leg has
+    // not begun.
+    let handed_on = {
+        let mut state = entry.gate.lock().unwrap();
+        let job = state
+            .claim
+            .hand_on(|epoch| Job::Maintenance(name.clone(), epoch));
+        state.claim.take_slot(job.epoch());
+        job
+    };
+    let answer = a_waiting_reload(&host, &name, false);
+    let pending = host.admit_apply(&name, a_plan(&name)).expect("admitted");
+
+    ops.block_reload.store(true, Ordering::SeqCst);
+    dispatch_followup(&host.shared, handed_on);
+    wait_for_flag("reload_started", &ops.reload_started);
+    assert_eq!(ops.maintenances.load(Ordering::SeqCst), 1);
+    assert!(
+        ops.applies_ran.lock().unwrap().is_empty(),
+        "the apply ran ahead of the reload waiting before it"
+    );
+
+    ops.reload_release.store(true, Ordering::SeqCst);
+    assert_eq!(answer_of(&answer), judged());
+    pending.wait().expect("the apply applied");
+    drop((entry, lease, host));
+}
+
+/// **A reload waiting behind a watcher poll that meets an environmental
+/// refusal is answered with the untrusted state the poll published**, and
+/// does not run.
+#[test]
+fn a_reload_waiting_behind_a_poll_refused_by_its_environment_answers_untrusted_and_does_not_run() {
+    let ops = Arc::new(FakeOps::default());
+    let (host, name, lease) = a_ready_vault(&ops);
+    let poll = hold_a_poll(&host, &ops);
+    let answer = a_waiting_reload(&host, &name, false);
+
+    ops.block_reload.store(true, Ordering::SeqCst);
+    ops.environmental_poll.store(true, Ordering::SeqCst);
+    ops.poll_release.store(true, Ordering::SeqCst);
+
+    let answered = answer_of(&answer);
+    assert!(
+        matches!(
+            answered,
+            Err(ReloadRefusal::Unavailable(Demand::State(
+                TrustState::Untrusted {
+                    reason: UntrustedReason::EnvironmentalRefusal { .. },
+                    ..
+                }
+            )))
+        ),
+        "the waiting reload was answered {answered:?}"
+    );
+    poll.join().unwrap();
+    assert!(
+        !ops.reload_started.load(Ordering::SeqCst),
+        "the reload ran over an entry the poll left untrusted"
+    );
+    ops.reload_release.store(true, Ordering::SeqCst);
+    drop((lease, host));
+}
+
+/// **An apply asked while a reload waits behind a watcher poll queues behind
+/// the reload**: the poll's end gives the reload the claim, and the apply
+/// runs at the reload's end.
+#[test]
+fn an_apply_asked_while_a_reload_waits_behind_a_poll_runs_after_the_reload() {
+    let ops = Arc::new(FakeOps::default());
+    let (host, name, lease) = a_ready_vault(&ops);
+    let poll = hold_a_poll(&host, &ops);
+    let answer = a_waiting_reload(&host, &name, false);
+    let pending = host.admit_apply(&name, a_plan(&name)).expect("admitted");
+
+    ops.block_reload.store(true, Ordering::SeqCst);
+    ops.poll_release.store(true, Ordering::SeqCst);
+    wait_for_flag("reload_started", &ops.reload_started);
+    assert!(
+        ops.applies_ran.lock().unwrap().is_empty(),
+        "the apply ran ahead of the reload waiting before it"
+    );
+
+    ops.reload_release.store(true, Ordering::SeqCst);
+    assert_eq!(answer_of(&answer), judged());
+    pending.wait().expect("the apply applied");
+    poll.join().unwrap();
+    drop((lease, host));
+}
+
+/// The answer a reload waiting behind routine work that lost maintainership
+/// gets while the release that loss opened is still giving the coverage back.
+fn releasing() -> Answer {
+    Err(ReloadRefusal::Unavailable(Demand::State(
+        TrustState::warming(WarmingPhase::ReleasingCoverage, 0, None),
+    )))
+}
+
+/// **A reload waiting behind a watcher poll that loses maintainership is
+/// answered with the release the loss opens**, rather than left waiting for
+/// work that will not end in its favour.
+#[test]
+fn a_reload_waiting_behind_a_poll_that_loses_maintainership_answers_the_release() {
+    let ops = Arc::new(FakeOps::default());
+    let (host, name, lease) = a_ready_vault(&ops);
+    let poll = hold_a_poll(&host, &ops);
+    let answer = a_waiting_reload(&host, &name, false);
+
+    // The detach is held, so the release stands where the loss opened it.
+    ops.block_detach.store(true, Ordering::SeqCst);
+    ops.lost_poll.store(true, Ordering::SeqCst);
+    ops.poll_release.store(true, Ordering::SeqCst);
+
+    assert_eq!(answer_of(&answer), releasing());
+    ops.detach_release.store(true, Ordering::SeqCst);
+    poll.join().unwrap();
+    wait_for_state(&host, &name, TrustState::Ready);
+    drop((lease, host));
+}
+
+/// **A reload waiting behind a maintenance leg that loses maintainership is
+/// answered with the release the loss opens**, rather than left waiting for
+/// work that will not end in its favour.
+#[test]
+fn a_reload_waiting_behind_a_maintenance_leg_that_loses_maintainership_answers_the_release() {
+    let ops = Arc::new(FakeOps::default());
+    let (host, name, lease) = a_ready_vault(&ops);
+    hold_a_maintenance_leg(&host, &ops, &name);
+    let answer = a_waiting_reload(&host, &name, false);
+
+    // The detach is held, so the release stands where the loss opened it.
+    ops.block_detach.store(true, Ordering::SeqCst);
+    ops.lost_maintenance.store(true, Ordering::SeqCst);
+    ops.maintenance_release.store(true, Ordering::SeqCst);
+
+    assert_eq!(answer_of(&answer), releasing());
+    ops.detach_release.store(true, Ordering::SeqCst);
+    wait_for_state(&host, &name, TrustState::Ready);
+    drop((lease, host));
+}
+
+/// **A reload waiting behind a watcher poll that a root refusal moves past is
+/// answered with the park the refusal raises**, though the poll still holds
+/// the coverage and runs on.
+#[test]
+fn a_reload_waiting_behind_a_poll_a_root_refusal_moves_past_answers_the_park() {
+    let ops = Arc::new(FakeOps::default());
+    let (host, name, lease) = a_ready_vault(&ops);
+    let poll = hold_a_poll(&host, &ops);
+    let answer = a_waiting_reload(&host, &name, false);
+
+    refuse_identity_error(&host.shared, &name, "the root cannot be read".into());
+    let parked = host
+        .shared
+        .entries
+        .get(&name)
+        .unwrap()
+        .gate
+        .lock()
+        .unwrap()
+        .published_demand();
+    assert_ne!(
+        parked,
+        Demand::State(TrustState::Ready),
+        "no park was raised"
+    );
+
+    assert_eq!(answer_of(&answer), Err(ReloadRefusal::Unavailable(parked)));
+    ops.poll_release.store(true, Ordering::SeqCst);
+    poll.join().unwrap();
+    drop((lease, host));
+}

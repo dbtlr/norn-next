@@ -7559,8 +7559,10 @@ fn end_job_leg<O: EntryOps>(
             {
                 schedule_demanded_work(&mut state, name);
             }
-            // Whatever moved the entry past this leg dropped a reload waiting
-            // for it; one still standing here waits for nothing that will end.
+            // Defensive: every move past a leg drops a reload waiting for it,
+            // and a maintenance leg's own end answers one, so none is known to
+            // reach here. One that did would wait for nothing that will end,
+            // so it is answered rather than left blocking its asker.
             if !state.claim.held_by_routine() {
                 answer_waiting_reload(&mut state);
             }
