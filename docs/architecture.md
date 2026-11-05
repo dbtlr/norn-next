@@ -2988,18 +2988,18 @@ publishing `Ready` is a watcher poll or a maintenance leg; a reconcile never doe
 scheduling one publishes warming first, so a reload asked while one settles answers where the
 entry stands. An entry that is `Ready`, whose claim a poll or a maintenance leg holds and whose
 coverage it accounts for — in its own hand, or out with that poll or leg — admits the reload
-to wait. A maintenance leg a leg's end handed on, sent but not yet running, counts as running.
-A maintenance leg scheduled and not yet sent gives the claim to the reload, and the pass it
-served stays due. Running routine work ends first, and while a reload waits a maintenance leg
+to wait. A maintenance leg a leg's end handed on, not yet running, counts as running. A maintenance
+leg scheduled, sent or not, gives the claim to the reload, and the pass it served stays due. Running routine work ends first, and while a reload waits a maintenance leg
 does not run again or hand on to another maintenance leg, so the wait is the current poll or
 the current maintenance leg, which the background turn budget bounds. Routine work that ends
 with watcher facts left to derive still hands on to their reconcile, which publishes warming,
-as a poll does. Where the routine work ends, the reload is judged again: it runs where the
+as a poll schedules one. Where the routine work ends, the reload is judged again: it runs where the
 entry still stands `Ready` with its coverage in hand, and otherwise answers where the entry
-stands — warming or untrusted where the routine work left facts to derive. The claim goes
-first to the rebuild owed for damage a read met, then to the reconcile owed for facts the
-routine work left, then to the waiting reload, then to the queue's head, a due detach and
-other routine work. Explicit work over the entry refuses the reload at once: a reload already
+stands — warming or untrusted where the routine work left facts to derive. The rebuild owed
+for damage a read met and the reconcile owed for facts the routine work left both precede the
+waiting reload and answer it with where the entry then stands; a waiting reload still eligible
+precedes the queue's head, a due detach and other routine work. The order among those, and
+between the queue's head and a pending reconcile, is unchanged. Explicit work over the entry refuses the reload at once: a reload already
 waiting or running, a queued or running apply, or a detach scheduled or in flight. The answer
 is the entry's published demand: `vault/reload-busy` while the entry still publishes `Ready`,
 and the release's own not-ready state once a detach has begun. An apply asked while a reload
