@@ -346,7 +346,8 @@ impl ReloadRefusal {
     /// `host/maintainer-contended`, or `host/entry-untrusted` for a root the
     /// registry cannot read), an entry whose derived state cannot be trusted
     /// in `host/entry-untrusted`, an entry that holds nothing to reload yet in
-    /// `host/entry-not-ready`, and a `Ready` entry a warm job holds in
+    /// `host/entry-not-ready`, and a `Ready` entry that explicit work holds
+    /// (another reload, an apply, or a scheduled detach) in
     /// `vault/reload-busy`.
     ///
     /// `Err(HostError)` is the host being gone rather than the vault refusing.
@@ -379,17 +380,19 @@ impl ReloadRefusal {
 ///
 /// Two readings of that state, taken in the order that makes each of them
 /// true: a state that holds nothing yet is filed as not ready, and what is left
-/// is an entry that is ready and busy — a warm job holds it, which is what a
-/// reload is refused behind. A park and a state that refuses never reach here:
+/// is an entry that is ready and busy — explicit work holds it, which is what a
+/// reload is refused behind. A reload waits behind a watcher poll or a
+/// maintenance leg instead. A park and a state that refuses never reach here:
 /// [`Demand::answer`] renders them in their own codes.
 ///
 /// **`Ready` reaches here by three paths, and on each the reload did not
-/// run.** At the ask, a claim held or coverage out with a leg is a job holding
-/// the entry. At a reload leg's epilogue, a claim superseded by newer work is a
-/// reload that lost its turn, and the entry may stand `Ready` again by the
-/// time that epilogue reports. A reload the host moved past before any leg ran
-/// it is answered with the demand the entry publishes once it is dropped, and
-/// where no park stands that too may be `Ready` again. A release does not reach it as `Ready`:
+/// run.** At the ask, explicit work holds the entry: another reload, an apply,
+/// or a scheduled detach. At a reload leg's epilogue, a claim superseded by
+/// newer work is a reload that lost its turn, and the entry may stand `Ready`
+/// again by the time that epilogue reports. A reload the host moved past
+/// before any leg ran it — on its way to a worker, or waiting behind routine
+/// work — is answered with the demand the entry publishes once it is dropped,
+/// and where no park stands that too may be `Ready` again. A release does not reach it as `Ready`:
 /// `begin_release` sets `detach_in_flight` and sets the trust to
 /// `Warming(WarmingPhase::ReleasingCoverage)` in the same statement pair under
 /// one hold of the gate, so the epilogue that reads the flag reads that state

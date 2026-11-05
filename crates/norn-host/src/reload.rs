@@ -133,9 +133,10 @@ impl<O: EntryOps> Host<O> {
     /// candidate and activate it, or with `dry_run` validate it and activate
     /// nothing.
     ///
-    /// Both are admitted and run as one reload is, so a dry run is refused
-    /// whenever an activation asked at the same moment would be — among them
-    /// `vault/reload-busy` while something works over the vault — and answers
+    /// Both are admitted and run as one reload is, so a dry run waits behind
+    /// a watcher poll or a maintenance leg and is refused whenever an
+    /// activation asked at the same moment would be — among them
+    /// `vault/reload-busy` while explicit work holds the vault — and answers
     /// the outcome and fingerprints that activation would. A runtime failure
     /// either meets gets the same policy, and a reload the host drops without
     /// an answer — moved past before it ran, or lost with a leg that unwound —
