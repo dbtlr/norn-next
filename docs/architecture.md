@@ -2986,20 +2986,24 @@ activation applies to it: withdrawn trust and an owed rung, or a release.
 refuses at once on explicit work.** The routine work that holds the claim of an entry still
 publishing `Ready` is a watcher poll or a maintenance leg; a reconcile never does, because
 scheduling one publishes warming first, so a reload asked while one settles answers where the
-entry stands. An entry that is `Ready` with its coverage in hand, whose claim a poll or a
-maintenance leg holds, admits the reload to wait. A maintenance leg scheduled but not yet
-running gives the claim to the reload, and the pass it served stays due. Running routine work
-ends first, and while a reload waits a maintenance leg does not run again or hand on to more
-routine work, so the wait is the current poll or the current maintenance leg, which the
-background turn budget bounds. Where the routine work ends, the reload is judged again: it
-runs where the entry still stands `Ready` with its coverage in hand, and otherwise answers
-where the entry stands — warming where the poll found facts and scheduled their reconcile.
-The claim then goes first to the rebuild owed for damage a read met, then to the waiting
-reload, then to the queue's head, a due detach and routine work. Explicit work over the entry
-refuses the reload at once: a reload already waiting or running, a queued or running apply,
-or a detach scheduled or in flight. The answer is the entry's published demand:
-`vault/reload-busy` while the entry still publishes `Ready`, and the release's own not-ready
-state once a detach has begun. An apply asked while a reload waits queues behind it.
+entry stands. An entry that is `Ready`, whose claim a poll or a maintenance leg holds and whose
+coverage it accounts for — in its own hand, or out with that poll or leg — admits the reload
+to wait. A maintenance leg a leg's end handed on, sent but not yet running, counts as running.
+A maintenance leg scheduled and not yet sent gives the claim to the reload, and the pass it
+served stays due. Running routine work ends first, and while a reload waits a maintenance leg
+does not run again or hand on to another maintenance leg, so the wait is the current poll or
+the current maintenance leg, which the background turn budget bounds. Routine work that ends
+with watcher facts left to derive still hands on to their reconcile, which publishes warming,
+as a poll does. Where the routine work ends, the reload is judged again: it runs where the
+entry still stands `Ready` with its coverage in hand, and otherwise answers where the entry
+stands — warming or untrusted where the routine work left facts to derive. The claim goes
+first to the rebuild owed for damage a read met, then to the reconcile owed for facts the
+routine work left, then to the waiting reload, then to the queue's head, a due detach and
+other routine work. Explicit work over the entry refuses the reload at once: a reload already
+waiting or running, a queued or running apply, or a detach scheduled or in flight. The answer
+is the entry's published demand: `vault/reload-busy` while the entry still publishes `Ready`,
+and the release's own not-ready state once a detach has begun. An apply asked while a reload
+waits queues behind it.
 
 A reload of either mode that the entry is not in a state to run answers with where the entry
 stands: its published demand, rendered by the one mapping `vault status` and a demand lease answer
@@ -4300,7 +4304,8 @@ bound by the applier's lifecycle tests.
   apply takes it at admission. The host call blocks no longer than admission.
 - **Applies queue on the entry, ahead of routine derivation only.** Each entry keeps a
   first-in, first-out queue of admitted applies beside its claim. A reconcile turn holds the
-  claim through much of any edit stream, so refusing would hand every writer a retry. The
+  claim through much of any edit stream, so refusing an apply while the claim is held would
+  hand every writer a retry. The
   queue's head takes the claim before the next reconcile
   turn or maintenance leg would begin, and never ahead of an attach, a recovery, a rebuild,
   a detach, or a schema reload before it publishes `Ready`, because each of those owes work
@@ -4414,7 +4419,8 @@ record and `PendingApply`) and the apply job in `crates/norn-host/src/lifecycle.
   maintenance leg that is scheduled and has not begun, the apply is scheduled in its place; the
   superseded job, where it is already in the channel, holds the queue slot until it arrives, runs
   nothing, and sends the apply. A leg holding the claim hands it to the queue's head at a turn's
-  end, before a maintenance leg begins, and wherever it ends free. So under a sustained edit
+  end, before a maintenance leg begins, and wherever it ends free, unless a reload asked before
+  the apply waits for it; that reload takes the claim first. So under a sustained edit
   stream a queued apply runs within one turn while the entry stays trusted; a turn that ends
   over a watcher overflow withdraws trust, and that publication answers the queue instead.
 - **The one snapshot is the store's reading under the claim.** The planner reads the files, so
