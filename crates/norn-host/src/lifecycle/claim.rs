@@ -86,6 +86,20 @@
 //! it. Pinned by
 //! `a_stale_arrival_gives_its_marker_back_to_the_leg_running_against_the_entry`.
 //!
+//! ## The waiting reload
+//!
+//! **A reload waits behind routine work without moving the entry on.**
+//! Carried by [`Claim::wait_reload`], which records the reload beside the gate
+//! the poll or maintenance leg holds and leaves the epoch where it stands:
+//! moving it would leave that leg answering for itself alone and handing its
+//! coverage up for give-back. [`Claim::held_by_routine`] is what admits it, and
+//! reads the kind of the work the entry stands at off `maintenance_stands`,
+//! because neither [`Leg`] nor [`Gate::Held`] names it. The leg's own end
+//! takes the reload back out, through [`Claim::take_waiting_reload`], and
+//! gives it the claim or answers it. [`Claim::invalidate`] and [`Claim::open`]
+//! drop it with the work they end, so its asker reads where the entry then
+//! stands. Pinned by the cases in `lifecycle::tests::reloads`.
+//!
 //! ## The epoch
 //!
 //! **A leg answers for itself alone once the entry has moved past its epoch.**
@@ -492,8 +506,8 @@
 //! what couples a label to the instant it describes is the lock the two are
 //! written under, and that coupling is the entry's, not the claim's.
 
-use super::Job;
 use super::background::BackgroundWake;
+use super::{Job, WaitingReload};
 
 /// An entry's coverage, and who holds it.
 ///
@@ -561,6 +575,11 @@ impl<A> Coverage<A> {
     /// the leg ends.
     pub(super) fn out_with_leg(&self) -> bool {
         matches!(self.0, Custody::OnLeg(_))
+    }
+
+    /// Whether the leg at this epoch holds the entry's coverage.
+    pub(super) fn out_with(&self, leg: u64) -> bool {
+        matches!(self.0, Custody::OnLeg(held) if held == leg)
     }
 
     /// The coverage the entry itself holds, borrowed rather than taken.
@@ -780,6 +799,13 @@ pub(super) struct Claim {
     owes_maintenance: bool,
     /// Where the release of a marked entry sends its wake.
     wake: BackgroundWake,
+    /// Whether the job the entry stands at is a maintenance leg. Set where a
+    /// move schedules or hands on the entry's next job, and cleared by every
+    /// move past it.
+    maintenance_stands: bool,
+    /// A reload waiting for the poll or maintenance leg holding the gate to
+    /// end.
+    waiting_reload: Option<WaitingReload>,
 }
 
 impl Claim {
@@ -795,6 +821,8 @@ impl Claim {
             slot: Slot::default(),
             owes_maintenance: false,
             wake,
+            maintenance_stands: false,
+            waiting_reload: None,
         }
     }
 
@@ -845,7 +873,43 @@ impl Claim {
     /// earlier epoch answers for itself alone from here.
     pub(super) fn supersede(&mut self) -> u64 {
         self.epoch += 1;
+        self.maintenance_stands = false;
         self.epoch
+    }
+
+    /// Record the job the entry has moved on to as the work it stands at.
+    fn stand_for(&mut self, job: &Job) {
+        self.maintenance_stands = matches!(job, Job::Maintenance(..));
+    }
+
+    /// Whether the vault's own routine work holds the gate: a watcher poll
+    /// running at the epoch the entry stands at, or the maintenance leg the
+    /// entry stands at, running or handed on and not yet begun. A scheduled
+    /// maintenance leg is a marker, not this.
+    pub(super) fn held_by_routine(&self) -> bool {
+        matches!(self.gate, Gate::Held)
+            && (self.leg == Some(Leg::Poll(self.epoch)) || self.maintenance_stands)
+    }
+
+    /// Record a reload waiting for the routine work holding the gate to end.
+    /// The epoch stays where it stands, so that work runs to its own end.
+    pub(super) fn wait_reload(&mut self, reload: WaitingReload) {
+        debug_assert!(
+            self.held_by_routine() && self.waiting_reload.is_none(),
+            "a reload waits behind routine work alone, and one at a time"
+        );
+        self.waiting_reload = Some(reload);
+    }
+
+    /// Whether a reload waits for the routine work holding the gate.
+    pub(super) fn reload_waits(&self) -> bool {
+        self.waiting_reload.is_some()
+    }
+
+    /// Take the waiting reload out of the claim, for the routine work's end
+    /// to give the claim to or answer.
+    pub(super) fn take_waiting_reload(&mut self) -> Option<WaitingReload> {
+        self.waiting_reload.take()
     }
 
     /// Whether anything holds the gate: a claim under way, or a job scheduled
@@ -882,6 +946,7 @@ impl Claim {
     /// holds the gate until a dispatcher tick sends it.
     pub(super) fn schedule(&mut self, next: impl FnOnce(u64) -> Job) -> Job {
         let job = next(self.supersede());
+        self.stand_for(&job);
         self.gate = Gate::Scheduled(job.clone());
         job
     }
@@ -899,14 +964,18 @@ impl Claim {
     /// [`hand_off`]: Claim::hand_off
     pub(super) fn hand_on(&mut self, next: impl FnOnce(u64) -> Job) -> Job {
         let job = next(self.supersede());
+        self.stand_for(&job);
         self.hold();
         job
     }
 
     /// Put the gate back, and the job scheduled against the entry with it: work
-    /// nothing is left holding the entry for is work no dispatch reaches.
+    /// nothing is left holding the entry for is work no dispatch reaches. A
+    /// reload waiting behind the claim goes too, and its asker reads where the
+    /// entry stands.
     pub(super) fn open(&mut self) {
         self.gate = Gate::Open;
+        self.waiting_reload = None;
         self.wake_where_marked();
     }
 
@@ -957,16 +1026,19 @@ impl Claim {
     /// caller is naming the work the entry owes at the epoch it stands at, and
     /// a marker it displaces is work raised under an epoch the entry has left.
     pub(super) fn mark(&mut self, job: Job) {
+        self.stand_for(&job);
         self.gate = Gate::Scheduled(job);
     }
 
     /// Move the entry on from work an invalidation supersedes. The job it had
-    /// scheduled and the slot that job was waiting in go with the epoch they
-    /// were raised under; whether the gate itself goes back is the caller's,
-    /// because a leg still running is holding it.
+    /// scheduled, the slot that job was waiting in and a reload waiting behind
+    /// the claim go with the epoch they were raised under; whether the gate
+    /// itself goes back is the caller's, because a leg still running is
+    /// holding it.
     pub(super) fn invalidate(&mut self) {
         self.supersede();
         self.abandon_slot();
+        self.waiting_reload = None;
         self.drop_marker();
     }
 

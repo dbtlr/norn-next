@@ -2483,6 +2483,54 @@ impl<A: SnapshotSource> EntryState<A> {
             && self.read_stance() != ReadStance::Refuse
     }
 
+    /// Whether a reload may take the claim over this entry now: in service,
+    /// `Ready`, its coverage in hand, and no release in flight.
+    fn stands_ready_for_a_reload(&self) -> bool {
+        self.withdrawal_answer().is_none()
+            && self.trust == TrustState::Ready
+            && self.coverage.in_hand()
+            && !self.detach_in_flight
+    }
+
+    /// What a reload asked over this entry now is admitted to.
+    ///
+    /// Explicit work refuses it: a reload already waiting or running, a
+    /// queued or running apply, a detach scheduled or in flight. Routine work
+    /// does not: a poll or a maintenance leg holding the claim, whose coverage
+    /// is in the entry's hand or out with that work, admits it to wait, and a
+    /// maintenance leg scheduled and not yet begun gives the claim up to it.
+    fn reload_admission(&self) -> ReloadAdmission {
+        if self.withdrawal_answer().is_some()
+            || self.trust != TrustState::Ready
+            || self.detach_in_flight
+            || !self.applies.is_empty()
+            || self.claim.reload_waits()
+        {
+            return ReloadAdmission::Refused;
+        }
+        let epoch = self.claim.epoch();
+        let in_hand = self.coverage.in_hand();
+        if !self.claim.is_held() {
+            return if in_hand {
+                ReloadAdmission::Runs
+            } else {
+                ReloadAdmission::Refused
+            };
+        }
+        // A scheduled leg's supersession moves the epoch, which is safe only
+        // where no leg at this epoch is out with the coverage.
+        if matches!(self.claim.marker(), Some(Job::Maintenance(..)))
+            && in_hand
+            && self.claim.leg().is_none_or(|leg| leg.epoch() != epoch)
+        {
+            return ReloadAdmission::OverScheduledMaintenance;
+        }
+        if self.claim.held_by_routine() && (in_hand || self.coverage.out_with(epoch)) {
+            return ReloadAdmission::Waits;
+        }
+        ReloadAdmission::Refused
+    }
+
     /// Whether the head of the apply queue is owed the claim now: an apply
     /// is queued and the entry is fit to run it.
     fn applies_waiting(&self) -> bool {
@@ -2575,6 +2623,42 @@ enum Job {
 
 /// Where an explicit reload's asker waits for what the reload judged.
 type ReloadReply = mpsc::SyncSender<Result<ReloadJudgment, ReloadRefusal>>;
+
+/// A reload asked while a watcher poll or a maintenance leg holds its entry,
+/// waiting in the entry's claim for that work to end. Dropped unanswered, its
+/// asker is told where the entry then stands, as a reload the host moved past
+/// is.
+struct WaitingReload {
+    job: fn(VaultName, u64, ReloadReply) -> Job,
+    reply: ReloadReply,
+}
+
+impl WaitingReload {
+    /// The reload's job, at the epoch the claim gives it.
+    fn job(self, name: &VaultName, epoch: u64) -> Job {
+        (self.job)(name.clone(), epoch, self.reply)
+    }
+
+    /// Answer the asker with where the entry stands, the reload not run.
+    fn answer(self, stands: Demand) {
+        let _ = self.reply.send(Err(ReloadRefusal::Unavailable(stands)));
+    }
+}
+
+/// What a reload's admission makes of the entry it is asked over.
+enum ReloadAdmission {
+    /// Nothing holds the entry: the reload takes the claim.
+    Runs,
+    /// A maintenance leg is scheduled and has not begun: the reload takes the
+    /// claim in its place, and the pass stays due.
+    OverScheduledMaintenance,
+    /// A watcher poll or a maintenance leg holds the entry: the reload waits
+    /// for it to end.
+    Waits,
+    /// The entry is not in a state to run a reload, or explicit work holds
+    /// it: the reload is answered with where the entry stands.
+    Refused,
+}
 
 impl Job {
     fn epoch(&self) -> u64 {
@@ -2854,6 +2938,31 @@ fn schedule_queued_apply<A: SnapshotSource>(
             .claim
             .schedule(|epoch| Job::Apply(name.clone(), epoch)),
     )
+}
+
+/// Give the claim to the reload waiting behind routine work that has ended,
+/// where nothing was scheduled ahead of it and the entry still stands ready
+/// for it. A waiting reload this leaves is answered by
+/// [`answer_waiting_reload`] once the hold has published what it will.
+fn schedule_waiting_reload<A: SnapshotSource>(
+    state: &mut EntryState<A>,
+    name: &VaultName,
+) -> Option<Job> {
+    if state.claim.is_held() || !state.stands_ready_for_a_reload() {
+        return None;
+    }
+    let reload = state.claim.take_waiting_reload()?;
+    Some(state.claim.schedule(|epoch| reload.job(name, epoch)))
+}
+
+/// Answer a reload still waiting where the routine work it waited for ended
+/// without giving it the claim, with where the entry then stands: the warming
+/// or the damage of the work scheduled ahead of it, or the state the routine
+/// work published.
+fn answer_waiting_reload<A: SnapshotSource>(state: &mut EntryState<A>) {
+    if let Some(reload) = state.claim.take_waiting_reload() {
+        reload.answer(state.published_demand());
+    }
 }
 
 /// What one hold made of the damage a read's store met: the refusal the read
@@ -5554,10 +5663,10 @@ impl<O: EntryOps> Host<O> {
     /// into service, with nothing put into service.
     ///
     /// It is admitted and run as a reload is, holding the entry's claim and
-    /// coverage while it reads, so it is refused whenever a reload would be and
-    /// judges the candidate against the controls the attachment holds. It
-    /// records nothing about the candidate: no active fingerprint, no retained
-    /// diagnostic, and no config delivered. A runtime failure it meets — damaged
+    /// coverage while it reads, so it waits and is refused wherever a reload
+    /// would be and judges the candidate against the controls the attachment
+    /// holds. It records nothing about the candidate: no active fingerprint,
+    /// no retained diagnostic, and no config delivered. A runtime failure it meets — damaged
     /// derived state, a lost maintainership — is a fact about the entry, and it
     /// applies the policy a reload that met it applies.
     pub(crate) fn judge_reload(&self, name: &VaultName) -> Result<ReloadJudgment, ReloadRefusal> {
@@ -5565,8 +5674,17 @@ impl<O: EntryOps> Host<O> {
     }
 
     /// Admit one reload-shaped job against `name`, send it, and wait for its
-    /// answer. The entry must be `Ready`, hold its coverage, and have nothing
-    /// working over it.
+    /// answer.
+    ///
+    /// The entry must be `Ready`, and no explicit work may hold it, as
+    /// [`EntryState::reload_admission`] reads it. Over a free claim with its
+    /// coverage in hand, or a maintenance leg scheduled and not yet begun,
+    /// the reload takes the claim at once. Over a watcher poll or a
+    /// maintenance leg holding the claim it waits in the claim, without
+    /// moving the entry on, and the end of that work judges it again: it
+    /// runs where the entry still stands `Ready` with its coverage in hand
+    /// and nothing was scheduled ahead of it, and is answered with where the
+    /// entry stands otherwise.
     ///
     /// Where the entry stands is [`EntryState::published_demand`] on every
     /// path that tells the asker so — the refusal at admission, a leg that
@@ -5581,7 +5699,9 @@ impl<O: EntryOps> Host<O> {
     /// with no answer sent is one the host moved past, and the asker is told
     /// where the entry stands, read once every sender of its reply is gone:
     /// a job the entry was moved past on its marker, in the channel, or on
-    /// its way back to its marker; a job whose vault left the serving set;
+    /// its way back to its marker; a reload waiting behind routine work that
+    /// a teardown or an invalidation ended; a job whose vault left the
+    /// serving set;
     /// and a leg that unwound, whose worker holds the asker until the
     /// unwind has published over the entry. A turn that handed the reload on
     /// before it unwound leaves a sender with the turn it handed on to, and
@@ -5597,25 +5717,34 @@ impl<O: EntryOps> Host<O> {
             return Err(ReloadRefusal::Unavailable(Demand::UnknownVault));
         };
         let (reply, answer) = mpsc::sync_channel(1);
-        {
+        let scheduled = {
             let mut state = entry.gate.lock().expect("entry gate poisoned");
-            // An entry out of service after the lookup above publishes its
-            // withdrawal answer ahead of anything else.
-            if state.withdrawal_answer().is_some()
-                || state.trust != TrustState::Ready
-                || !state.coverage.in_hand()
-                || state.claim.is_held()
-                || state.detach_in_flight
-                // A queued apply is owed the claim ahead of any reload.
-                || !state.applies.is_empty()
-            {
-                return Err(ReloadRefusal::Unavailable(state.published_demand()));
+            match state.reload_admission() {
+                // An entry out of service after the lookup above publishes
+                // its withdrawal answer ahead of anything else.
+                ReloadAdmission::Refused => {
+                    return Err(ReloadRefusal::Unavailable(state.published_demand()));
+                }
+                ReloadAdmission::Waits => {
+                    state.claim.wait_reload(WaitingReload { job, reply });
+                    false
+                }
+                admitted => {
+                    // The superseded pass stays due: the mark wakes the
+                    // scheduler at the reload's release.
+                    if matches!(admitted, ReloadAdmission::OverScheduledMaintenance) {
+                        state.claim.mark_owing_maintenance();
+                    }
+                    state
+                        .claim
+                        .schedule(|epoch| job(name.clone(), epoch, reply));
+                    true
+                }
             }
-            state
-                .claim
-                .schedule(|epoch| job(name.clone(), epoch, reply));
+        };
+        if scheduled {
+            dispatch_pending(&self.shared, &entry).map_err(|_| ReloadRefusal::HostStopped)?;
         }
-        dispatch_pending(&self.shared, &entry).map_err(|_| ReloadRefusal::HostStopped)?;
         answer
             .recv()
             .unwrap_or_else(|_| Err(self.unanswered_reload(name)))
@@ -5663,7 +5792,9 @@ impl<O: EntryOps> Host<O> {
     /// takes the claim here. Over anything else it waits for the work holding
     /// the claim to end, which hands the claim to the queue's head: at a
     /// reconcile turn's end, before a maintenance scan begins, and where an
-    /// attach, a recovery, a rebuild or a reload publishes `Ready`.
+    /// attach, a recovery, a rebuild or a reload publishes `Ready`. A reload
+    /// waiting when the apply was asked takes the claim first, and the apply
+    /// runs at that reload's end.
     pub(crate) fn admit_apply(
         &self,
         name: &VaultName,
@@ -5737,7 +5868,11 @@ impl<O: EntryOps> Host<O> {
                     state.claim.marker(),
                     Some(Job::Reconcile(..) | Job::Maintenance(..))
                 );
-            let takes = state.applies_waiting() && (!state.claim.is_held() || over_routine);
+            // A reload waiting before this apply was asked takes the claim
+            // first.
+            let takes = state.applies_waiting()
+                && !state.claim.reload_waits()
+                && (!state.claim.is_held() || over_routine);
             if takes {
                 state
                     .claim
@@ -7175,6 +7310,13 @@ fn poll_claimed_entry<O: EntryOps>(
                 if schedule.is_none() {
                     schedule = publish_damage_a_read_met(&mut state, name);
                 }
+                // A reload waiting behind this poll takes the claim ahead of
+                // the apply queue and a due detach; the reconcile or rebuild
+                // scheduled above answers it instead.
+                if schedule.is_none() {
+                    schedule = schedule_waiting_reload(&mut state, name);
+                }
+                answer_waiting_reload(&mut state);
                 if schedule.is_none() {
                     schedule = schedule_queued_apply(&mut state, name);
                 }
@@ -7411,6 +7553,11 @@ fn end_job_leg<O: EntryOps>(
                 && schedule_queued_apply(&mut state, name).is_none()
             {
                 schedule_demanded_work(&mut state, name);
+            }
+            // Whatever moved the entry past this leg dropped a reload waiting
+            // for it; one still standing here waits for nothing that will end.
+            if !state.claim.held_by_routine() {
+                answer_waiting_reload(&mut state);
             }
             if state.claim.marker().is_some() {
                 drop(state);
@@ -8263,8 +8410,10 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                 // A queued apply takes the claim before a maintenance scan
                 // would begin. The scan is still due, and the entry the
                 // scheduler marked when it came due wakes it again at the
-                // apply's release.
-                if state.applies_waiting() {
+                // apply's release. A reload waiting for this leg was asked
+                // before any apply queued, so the leg runs and gives the
+                // reload the claim at its end.
+                if state.applies_waiting() && !state.claim.reload_waits() {
                     let next = state.claim.hand_on(|epoch| Job::Apply(name.clone(), epoch));
                     drop(state);
                     dispatch_handoff(shared, entry, epoch, next);
@@ -8327,7 +8476,23 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     // follows to say so. That holds where a teardown is due
                     // too, because a demand can withdraw it before it runs.
                     state.publish_ready_where_nothing_is_left(handoff_saturated);
+                    let facts_left = handoff_saturated || !state.pending.is_empty();
                     if let Some(job) = hand_on_carried_damage(&mut state, &name) {
+                        next = Some(job);
+                    } else if state.claim.reload_waits() && facts_left {
+                        // The facts left go to their reconcile ahead of the
+                        // waiting reload, which is answered below with the
+                        // warming it publishes.
+                        state.publish_pending_reconcile();
+                        next = Some(
+                            state
+                                .claim
+                                .hand_on(|epoch| Job::Reconcile(name.clone(), epoch)),
+                        );
+                    } else if let Some(job) = schedule_waiting_reload(&mut state, &name) {
+                        // A reload waiting for this leg takes the claim ahead
+                        // of the apply queue, a due detach and another
+                        // maintenance leg.
                         next = Some(job);
                     } else if state.applies_waiting() {
                         next = Some(state.claim.hand_on(|epoch| Job::Apply(name.clone(), epoch)));
@@ -8431,6 +8596,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     );
                 }
             }
+            answer_waiting_reload(&mut state);
             drop(state);
             // The watcher this leg drained reported that the root stopped
             // being covered, and this leg is the one caller that consumed the
@@ -11131,9 +11297,9 @@ mod tests {
     /// Every tick polls the attached entry, and the poll holds the entry's
     /// claim and takes its coverage out for as long as it runs. A case here
     /// that reads the claim, the queue slot or the coverage at one instant
-    /// races that poll, and so does a case that expects a reload admitted: a
-    /// reload is refused at admission while the claim is held or the coverage
-    /// is out. Such a case waits for the value it needs, or runs on
+    /// races that poll, and so does a case that expects a reload to run at
+    /// once: a reload asked while the poll holds the entry waits for it. Such
+    /// a case waits for the value it needs, or runs on
     /// `host_without_ambient_polling` and drives the poll itself.
     fn fixture(ops: Arc<FakeOps>, idle_after: Duration) -> (Host<Arc<FakeOps>>, VaultName) {
         let name = VaultName::new("notes").unwrap();
@@ -11212,8 +11378,8 @@ mod tests {
     /// A caller here drives those duties itself, which is what makes the
     /// interleaving under test the one the test set up rather than the one a
     /// tick arrived at first. A watcher poll holds an entry's claim and its
-    /// coverage for as long as it runs, so a case that expects a reload
-    /// admitted, or reads an entry's claim, queue slot or coverage at one
+    /// coverage for as long as it runs, so a case that expects a reload to run
+    /// at once, or reads an entry's claim, queue slot or coverage at one
     /// instant and expects it settled, runs here and drives any poll it needs
     /// itself.
     ///
@@ -11263,9 +11429,9 @@ mod tests {
     /// Every tick polls each attached entry, and the poll holds the entry's
     /// claim and takes its coverage out for as long as it runs. A case here
     /// that reads an entry's claim, queue slot or coverage at one instant races
-    /// that poll, and so does a case that expects a reload admitted: a reload
-    /// is refused at admission while the claim is held or the coverage is out.
-    /// Such a case waits for the value it needs, or runs on
+    /// that poll, and so does a case that expects a reload to run at once: a
+    /// reload asked while the poll holds the entry waits for it. Such a case
+    /// waits for the value it needs, or runs on
     /// `host_without_ambient_polling` over `Roots::Created` and drives the
     /// poll itself.
     fn host_over_roots(
@@ -13013,10 +13179,11 @@ mod tests {
         }
     }
 
-    /// **A `Ready` entry something is already working over refuses busy**,
-    /// and a dry run is refused behind that work as an activation is.
+    /// **A `Ready` entry a reload already holds refuses busy**, and a dry run
+    /// is refused behind that reload as an activation is. A reload waits only
+    /// behind routine work; `lifecycle::tests::reloads` holds those cases.
     #[test]
-    fn vault_reload_refuses_a_ready_entry_a_job_holds_as_busy() {
+    fn vault_reload_refuses_a_ready_entry_a_reload_holds_as_busy() {
         let ops = Arc::new(FakeOps::default());
         ops.reload_supported.store(true, Ordering::SeqCst);
         ops.block_reload.store(true, Ordering::SeqCst);
@@ -27988,6 +28155,7 @@ mod tests {
     mod applies;
     mod background;
     mod lane;
+    mod reloads;
 
     /// A vault the set gains while the host runs, and a vault it loses.
     ///
