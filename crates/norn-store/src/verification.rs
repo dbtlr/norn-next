@@ -1,6 +1,6 @@
 //! The store's verification of its own consistency, in two halves.
 //!
-//! A store has ten kinds of consistency to lose, and the verification asks
+//! A store has eleven kinds of consistency to lose, and the verification asks
 //! after each: the pages themselves, the foreign keys that carry cascade
 //! deletion, the full-text index against the column it is an index of, the
 //! frontmatter projection against being JSON at all, the closed vocabularies
@@ -40,6 +40,17 @@
 //! is a document that stops being re-derived and reports nothing wrong. The
 //! check reads one row at a time, so what it costs in memory is one document
 //! rather than the table.
+//!
+//! The eleventh is the index's own config table, which holds the format
+//! version FTS5 reads the index under. FTS5 reads that table once per
+//! connection and keeps it, so a version it does not accept fails every
+//! full-text read as an ordinary "invalid fts5 file format" error, which the
+//! driver does not describe as a damaged file, and a connection that read the
+//! config before it was damaged keeps answering. The check therefore reads
+//! the table's rows directly and holds the `version` row to the one value the
+//! store's tables are written with. It checks that row alone: the store never
+//! writes another, but it has no list of the rows SQLite may add, so a
+//! different row is not called damage here.
 //!
 //! **The full-text check is a write, and the periodic verification runs it on
 //! a copy.** It is an `INSERT` into the index's command column, so it takes
@@ -151,6 +162,10 @@ fn point(
     }
 }
 
+/// The FTS5 format version the store's `documents_fts` table is created
+/// under, as its config table records it.
+const FTS5_FORMAT_VERSION: i64 = 4;
+
 impl Checks<'_> {
     fn point(&mut self) -> Result<(), Halt> {
         point(self.mark, self.between, VerificationPoint::Check)
@@ -165,9 +180,14 @@ impl Checks<'_> {
             .map_err(|error| error::sql(operation, error))?)
     }
 
-    /// The pages and the foreign keys: the checks the whole verification asks
-    /// ahead of the full-text check.
+    /// The full-text config, the pages and the foreign keys: the checks the
+    /// whole verification asks ahead of the full-text check.
     fn pages_and_keys(&mut self) -> Result<(), Halt> {
+        // First, because the page check below reads the full-text index too
+        // and, on a connection that has not cached the config, fails on a
+        // damaged one with the same unclassified error.
+        self.full_text_config()?;
+
         self.point()?;
         let report: String = self
             .connection
@@ -184,6 +204,43 @@ impl Checks<'_> {
         if orphans != 0 {
             return Err(StoreError::Damaged {
                 what: format!("{orphans} rows reference a row that is not there"),
+            }
+            .into());
+        }
+        Ok(())
+    }
+
+    /// The full-text index's config: a `version` row holding the format
+    /// version the store's tables are written with. A missing row or any other
+    /// value fails every full-text read, and the full-text check reports that
+    /// failure as a refused operation, so it is called damage here.
+    ///
+    /// The value is read untyped, so text or a real where the integer belongs
+    /// is a wrong value like any other rather than a conversion the read
+    /// refuses.
+    ///
+    /// It takes no point of its own: it reads a few bytes, so a stop has no
+    /// statement here worth interrupting, and the page check that follows
+    /// stands at the first point.
+    fn full_text_config(&mut self) -> Result<(), Halt> {
+        let version: Option<rusqlite::types::Value> = self
+            .connection
+            .query_row(
+                "SELECT v FROM documents_fts_config WHERE k = 'version'",
+                [],
+                |row| row.get(0),
+            )
+            .map(Some)
+            .or_else(|error| match error {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(other),
+            })
+            .map_err(|error| error::sql("checking the full-text config", error))?;
+        if version != Some(rusqlite::types::Value::Integer(FTS5_FORMAT_VERSION)) {
+            return Err(StoreError::Damaged {
+                what: format!(
+                    "the full-text index's config holds version {version:?}, not {FTS5_FORMAT_VERSION}"
+                ),
             }
             .into());
         }

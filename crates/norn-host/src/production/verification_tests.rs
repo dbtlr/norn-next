@@ -51,6 +51,24 @@ fn damage_the_full_text_index(f: &Fixture, name: &VaultName) {
         .unwrap();
 }
 
+/// Leave the full-text index config of `name`'s store holding a format
+/// version FTS5 refuses, behind the host's back, through a connection of the
+/// case's own: damage that fails every full-text read and that the driver
+/// does not describe as a damaged file.
+fn damage_the_full_text_config(f: &Fixture, name: &VaultName) {
+    let store = ConfigDirs::new(f.root.join("config"), f.root.join("data"))
+        .unwrap()
+        .derived_dir(name)
+        .join(STORE_FILE);
+    let connection = norn_db::rusqlite::Connection::open(store).unwrap();
+    connection
+        .busy_timeout(Duration::from_secs(5))
+        .unwrap();
+    connection
+        .execute_batch("UPDATE documents_fts_config SET v = 3 WHERE k = 'version'")
+        .unwrap();
+}
+
 /// Bring `name`'s verification due and wake the scheduler, as its hourly
 /// deadline would.
 fn verification_comes_due<O: EntryOps>(
@@ -176,13 +194,32 @@ fn a_write_completes_while_its_vaults_verification_is_in_flight() {
 /// rebuilt store verifies sound, and nothing schedules a second rebuild.
 #[test]
 fn damage_the_verification_meets_schedules_the_rebuild_once() {
-    let f = Fixture::new("verification-damage");
+    damage_met_schedules_the_rebuild_once("verification-damage", damage_the_full_text_index);
+}
+
+/// **A damaged full-text config is damage the verification meets.** The
+/// config fails every full-text read as an ordinary error, so the
+/// verification has to call it damage itself; the rebuild then runs once, as
+/// it does for a disagreeing index.
+#[test]
+fn a_damaged_full_text_config_the_verification_meets_schedules_the_rebuild_once() {
+    damage_met_schedules_the_rebuild_once("verification-config-damage", damage_the_full_text_config);
+}
+
+/// A ready vault damaged by `damage` behind the host's back, whose due
+/// verification meets it: the rebuild runs once, the rebuilt store verifies
+/// sound, and nothing schedules a second rebuild.
+fn damage_met_schedules_the_rebuild_once(
+    fixture: &str,
+    damage: fn(&Fixture, &VaultName),
+) {
+    let f = Fixture::new(fixture);
     write_a_vault_of_documents(&f, 8);
     let ops = fixture_ops(&f);
     let verifications = Arc::clone(&ops.verifications);
     let (host, name, _lease) = ready_host(&f, ops);
     let rebuilds_before = host.ops().evidence.read().rebuilds_run;
-    damage_the_full_text_index(&f, &name);
+    damage(&f, &name);
     verification_comes_due(&host, &verifications, &name);
 
     wait_until("the damage to be rebuilt", lifecycle_budget(), || {

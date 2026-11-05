@@ -46,6 +46,10 @@ struct Signals {
     retry: Option<Instant>,
     stopping: bool,
     reading: SchedulerReading,
+    /// Asks that have ended, each in [`Scheduler::sleep_until`]: an ask began
+    /// and has not ended while this trails `reading.asks`.
+    #[cfg(test)]
+    asks_ended: u64,
 }
 
 /// The shared half of the background scheduler: what a wake is sent to, and
@@ -137,13 +141,15 @@ impl Scheduler {
         }
     }
 
-    /// Record the earliest deadline the ask that just ended found, which is
-    /// what the scheduler sleeps until where no wake arrives first.
+    /// Run `hook` once, as the next ask ends and before the scheduler records
+    /// what it found.
     #[cfg(test)]
     pub(super) fn run_before_next_sleep(&self, hook: impl FnOnce() + Send + 'static) {
         *self.before_sleep.lock().unwrap() = Some(Box::new(hook));
     }
 
+    /// Record the earliest deadline the ask that just ended found, which is
+    /// what the scheduler sleeps until where no wake arrives first.
     pub(super) fn sleep_until(&self, earliest: Option<Instant>) {
         #[cfg(test)]
         {
@@ -152,7 +158,22 @@ impl Scheduler {
                 hook();
             }
         }
-        self.signals().earliest = earliest;
+        let mut signals = self.signals();
+        signals.earliest = earliest;
+        #[cfg(test)]
+        {
+            signals.asks_ended += 1;
+        }
+    }
+
+    /// Whether every wake sent so far has been answered: no wake stands and
+    /// no ask is running. A case reads it to know that no ask is still to
+    /// take an entry gate for a wake sent before the case began; a deadline
+    /// still to come can start a later ask.
+    #[cfg(test)]
+    pub(super) fn has_answered_every_wake(&self) -> bool {
+        let signals = self.signals();
+        !signals.woken && signals.asks_ended == signals.reading.asks
     }
 
     pub(super) fn reading(&self) -> SchedulerReading {

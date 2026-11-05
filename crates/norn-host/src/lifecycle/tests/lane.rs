@@ -11,7 +11,8 @@
 use super::*;
 
 /// A host over `names`, whose dispatcher ticks once a minute, running each
-/// background turn under `budget`, with every vault demanded and `Ready`.
+/// background turn under `budget`, with every vault demanded, `Ready` and
+/// quiet.
 fn ready_vaults_under(
     ops: &Arc<FakeOps>,
     names: &[&VaultName],
@@ -34,6 +35,11 @@ fn ready_vaults_under(
             lease
         })
         .collect();
+    // Quiet once every vault is ready: a later vault's attach wakes the
+    // scheduler, which asks every entry again.
+    for name in names {
+        wait_for_a_quiet_entry(&host, name);
+    }
     (host, leases)
 }
 

@@ -30,14 +30,14 @@ use crate::error::EngineError;
 /// landing during the drain lands above the watermark and reads as lag.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Watermark {
-    /// The store lifetime the generation is a position in.
+    /// The store epoch the generation is a position in.
     pub store_epoch: String,
     /// The store's last committed write generation at that moment.
     pub generation: i64,
 }
 
 /// The two feeds' watermarks, each `None` until that feed first completes a
-/// drain in any store lifetime.
+/// drain in any store epoch.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Watermarks {
     /// The document feed's watermark.

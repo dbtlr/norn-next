@@ -15,7 +15,8 @@
 //! a row whose hash equals the feed's current one needs no recompute, which is
 //! what lets expensive derived state survive the cheap state's rebuild (ADR
 //! 0047). Nothing here references the main database's rows; the two databases
-//! share no ids, no transactions and no lifetime.
+//! share no ids and no transactions, and this one outlives each store epoch,
+//! recording only which epoch its progress was taken in.
 //!
 //! # A rowid table, because the rows are wide
 //!
@@ -69,7 +70,7 @@ const STATEMENTS: &[&str] = &[
 
 /// The engine's own pinned scalars, beside the substrate's
 /// (`norn_db::meta`). Together they are the whole of the engine's progress:
-/// the store lifetime the cursors are valid in, and the position each feed
+/// the store epoch the cursors are valid in, and the position each feed
 /// was consumed to.
 ///
 /// A cursor is one key holding `{generation}:{path}`, with the empty string
@@ -91,8 +92,8 @@ pub(crate) mod meta {
     /// The version half, beside the id.
     pub(crate) const ENGINE_MODEL_VERSION: &str = "engine_model_version";
     /// The lane-1 store epoch the recorded cursors are valid within. A store
-    /// whose epoch differs from this value is a different database lifetime,
-    /// and the recorded positions name nothing in it — the answer is a
+    /// whose epoch differs from this value is a different database, and the
+    /// recorded positions name nothing in it — the answer is a
     /// reconcile and a rescan from the start of the feed, never a seek.
     pub(crate) const OBSERVED_STORE_EPOCH: &str = "observed_store_epoch";
     /// The document feed position.
@@ -101,18 +102,18 @@ pub(crate) mod meta {
     pub(crate) const TOMBSTONE_CURSOR: &str = "tombstone_cursor";
     /// How far the document feed was drained: `{generation}:{store epoch}`,
     /// the store's write generation observed immediately before the page
-    /// that last completed the feed, with the store lifetime it is a
-    /// position in. Absent until the feed first completes. It carries its
+    /// that last completed the feed, with the store epoch it is a position
+    /// in. Absent until the feed first completes. It carries its
     /// own epoch rather than leaning on [`OBSERVED_STORE_EPOCH`], so a
     /// reconcile that moved the observed epoch and a drain that then failed
-    /// leave a watermark that still says which lifetime it was taken in.
+    /// leave a watermark that still says which epoch it was taken in.
     pub(crate) const DOCUMENT_WATERMARK: &str = "document_watermark";
     /// How far the tombstone feed was drained, spelled as
     /// [`DOCUMENT_WATERMARK`] is.
     pub(crate) const TOMBSTONE_WATERMARK: &str = "tombstone_watermark";
     /// The store epoch a paged reconcile is reconciling toward, absent where
     /// no reconcile is part way through. A pass recorded for another epoch
-    /// than the store's names a lifetime that no longer exists, and starts
+    /// than the store's names a database that no longer exists, and starts
     /// over rather than resuming: paths it checked as standing there may be
     /// gone here.
     pub(crate) const RECONCILE_STORE_EPOCH: &str = "reconcile_store_epoch";

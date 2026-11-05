@@ -35,12 +35,14 @@ fn the_plan(name: &VaultName) -> ResolvedPlan {
     }
 }
 
-/// A host over one vault with no ambient tick, holding the vault `Ready`.
+/// A host over one vault with no ambient tick, holding the vault `Ready` and
+/// quiet: the attach's leg has ended and the scheduler has answered its wakes.
 fn a_ready_vault(ops: &Arc<FakeOps>) -> (Host<Arc<FakeOps>>, VaultName, DemandLease<Arc<FakeOps>>) {
     let name = VaultName::new("notes").unwrap();
     let host = host_without_ambient_polling(Arc::clone(ops), Roots::Absent(&[&name]), 1);
     let lease = host.demand(&name).unwrap();
     wait_for_state(&host, &name, TrustState::Ready);
+    wait_for_a_quiet_entry(&host, &name);
     (host, name, lease)
 }
 
