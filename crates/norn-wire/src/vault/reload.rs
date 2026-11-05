@@ -19,7 +19,8 @@
 //! `vault status` answers it, `host/entry-not-ready` for an entry holding
 //! nothing to reload yet, `host/entry-untrusted` for an entry whose derived
 //! state cannot be trusted, `vault/reload-busy` for a vault that is serving
-//! and already has something working over it — a warm job among them — and
+//! and that explicit work holds — another reload, an apply, or a detach; a
+//! reload waits behind the vault's own reconciles and maintenance — and
 //! `vault/reload-failed`, carrying what the reload met, for every outcome of a
 //! reload that ran, its `unsupported` kind among them for an attachment that
 //! holds no reload at all.

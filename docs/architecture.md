@@ -2980,7 +2980,18 @@ judges the same candidate the same way. A dry run that completes activates nothi
 nothing about the candidate — no active fingerprint, retained error or config delivery. A
 runtime failure a dry run meets — damaged derived state, a moved path order, a lost
 maintainership — is a fact about the entry rather than the candidate, and gets the policy an
-activation applies to it: withdrawn trust and an owed rung, or a release. A reload of either
+activation applies to it: withdrawn trust and an owed rung, or a release.
+
+**A reload of either mode waits behind routine work and refuses only on explicit work.** An
+entry that is `Ready` with its coverage in hand, whose claim only routine work holds — a
+watcher poll, a reconcile turn or a maintenance leg — admits the reload. Routine work that is
+running ends first, and the waiting reload takes the claim ahead of any further routine work.
+Routine work scheduled but not yet running gives the claim to the reload, and what it owed
+stays owed. Every routine leg is bounded, a maintenance leg by the background turn budget, so
+the wait is one leg. Explicit work over the entry refuses the reload at once: a reload already
+waiting or running, a queued or running apply, or a detach in flight. The answer is the
+entry's published demand, which the wire answers as `vault/reload-busy`. An apply asked while
+a reload waits queues behind it. A reload of either
 mode that the entry is not in a state to run answers with where the entry stands: its
 published demand, rendered by the one mapping `vault status` and a demand lease answer
 through. An entry a registration change — `vault unregister` or `vault set` — holds answers

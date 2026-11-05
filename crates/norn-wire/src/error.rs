@@ -435,9 +435,11 @@ pub enum ReasonCode {
     /// The detail is the rule.
     #[serde(rename = "vault/unknown-rule")]
     VaultUnknownRule,
-    /// `vault/reload-busy` — the vault is serving and something is already
-    /// working over it, so the reload was not started. The detail carries
-    /// nothing: the ask is repeated rather than resolved.
+    /// `vault/reload-busy` — the vault is serving and explicit work holds it:
+    /// another reload, an apply, or a detach. The reload was not started. A
+    /// reload never meets this for the vault's own background work, a watcher
+    /// reconcile or a maintenance leg: it waits for that work instead. The
+    /// detail carries nothing: the ask is repeated rather than resolved.
     #[serde(rename = "vault/reload-busy")]
     VaultReloadBusy,
     /// `vault/reload-failed` — the reload ran and did not leave the vault
