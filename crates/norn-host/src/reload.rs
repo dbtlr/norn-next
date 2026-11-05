@@ -134,7 +134,7 @@ impl<O: EntryOps> Host<O> {
     /// nothing.
     ///
     /// Both are admitted and run as one reload is, so a dry run waits behind
-    /// a watcher reconcile or a maintenance leg and is refused whenever an
+    /// a watcher poll or a maintenance leg and is refused whenever an
     /// activation asked at the same moment would be — among them
     /// `vault/reload-busy` while explicit work holds the vault — and answers
     /// the outcome and fingerprints that activation would. A runtime failure

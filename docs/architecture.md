@@ -1681,8 +1681,8 @@ Two mechanisms carry trust, and both are contract:
   the next. No watcher poll starts one. A maintenance leg is also bounded by the background
   turn budget: its units run for at most that budget plus one unit, and it holds the claim
   beyond that only to drain the watcher batches observed meanwhile. An overdue pass
-  waits while the entry owes a heal rung, an apply is queued, or watcher facts remain
-  pending. Read traffic does not make an attached vault busy for this purpose. Watcher
+  waits while the entry owes a heal rung, an apply is queued, a reload waits, or watcher
+  facts remain pending. Read traffic does not make an attached vault busy for this purpose. Watcher
   batches drain between slices. Shadow cleanup and store verification retain their existing
   fairness under sustained watcher traffic: a reconcile leg that ends with maintenance due
   hands the claim on to it ahead of another reconcile turn, and store verification runs on
@@ -2982,18 +2982,27 @@ runtime failure a dry run meets — damaged derived state, a moved path order, a
 maintainership — is a fact about the entry rather than the candidate, and gets the policy an
 activation applies to it: withdrawn trust and an owed rung, or a release.
 
-**A reload of either mode waits behind routine work and refuses only on explicit work.** An
-entry that is `Ready` with its coverage in hand, whose claim only routine work holds — a
-watcher poll, a reconcile turn or a maintenance leg — admits the reload. Routine work that is
-running ends first, and the waiting reload takes the claim ahead of any further routine work.
-Routine work scheduled but not yet running gives the claim to the reload, and what it owed
-stays owed. Every routine leg is bounded, a maintenance leg by the background turn budget, so
-the wait is one leg. Explicit work over the entry refuses the reload at once: a reload already
-waiting or running, a queued or running apply, or a detach in flight. The answer is the
-entry's published demand, which the wire answers as `vault/reload-busy`. An apply asked while
-a reload waits queues behind it. A reload of either
-mode that the entry is not in a state to run answers with where the entry stands: its
-published demand, rendered by the one mapping `vault status` and a demand lease answer
+**A reload of either mode waits behind the routine work that holds a `Ready` entry, and
+refuses at once on explicit work.** The routine work that holds the claim of an entry still
+publishing `Ready` is a watcher poll or a maintenance leg; a reconcile never does, because
+scheduling one publishes warming first, so a reload asked while one settles answers where the
+entry stands. An entry that is `Ready` with its coverage in hand, whose claim a poll or a
+maintenance leg holds, admits the reload to wait. A maintenance leg scheduled but not yet
+running gives the claim to the reload, and the pass it served stays due. Running routine work
+ends first, and while a reload waits a maintenance leg does not run again or hand on to more
+routine work, so the wait is the current poll or the current maintenance leg, which the
+background turn budget bounds. Where the routine work ends, the reload is judged again: it
+runs where the entry still stands `Ready` with its coverage in hand, and otherwise answers
+where the entry stands — warming where the poll found facts and scheduled their reconcile.
+The claim then goes first to the rebuild owed for damage a read met, then to the waiting
+reload, then to the queue's head, a due detach and routine work. Explicit work over the entry
+refuses the reload at once: a reload already waiting or running, a queued or running apply,
+or a detach scheduled or in flight. The answer is the entry's published demand:
+`vault/reload-busy` while the entry still publishes `Ready`, and the release's own not-ready
+state once a detach has begun. An apply asked while a reload waits queues behind it.
+
+A reload of either mode that the entry is not in a state to run answers with where the entry
+stands: its published demand, rendered by the one mapping `vault status` and a demand lease answer
 through. An entry a registration change — `vault unregister` or `vault set` — holds answers
 as held, a vault unregistered answers as unknown, and a parked entry answers in the park's
 own code, not the label beneath it. That holds at admission, at a leg that no longer stands,
@@ -4290,16 +4299,17 @@ bound by the applier's lifecycle tests.
   demand owes, so a write never refuses because its vault went idle. Over a free claim the
   apply takes it at admission. The host call blocks no longer than admission.
 - **Applies queue on the entry, ahead of routine derivation only.** Each entry keeps a
-  first-in, first-out queue of admitted applies beside its claim. A reload refuses while the
-  claim is held, but a reconcile turn holds it through much of any edit stream, so refusing
-  would hand every writer a retry. The queue's head takes the claim before the next reconcile
+  first-in, first-out queue of admitted applies beside its claim. A reconcile turn holds the
+  claim through much of any edit stream, so refusing would hand every writer a retry. The
+  queue's head takes the claim before the next reconcile
   turn or maintenance leg would begin, and never ahead of an attach, a recovery, a rebuild,
   a detach, or a schema reload before it publishes `Ready`, because each of those owes work
-  an apply's intake does not do. Applies run in the order they were admitted, so operations
+  an apply's intake does not do. Nor does it take the claim ahead of a reload that was waiting
+  before the apply was asked. Applies run in the order they were admitted, so operations
   planned inside the registration's serialization plan against a determined predecessor. The
   queue is the producer the claim's slot carrier (`crates/norn-host/src/lifecycle/claim.rs`)
   was kept for. Queued applies are demand, so no idle detach begins over their entry; an
-  explicit reload refuses while any are queued, as it does while the claim is held; and
+  explicit reload refuses while any are queued or one runs; and
   `vault unregister` and `vault set` refuse as held while an apply is queued or running.
 - **An apply runs only over a store fit to plan against.** It takes the claim only where a
   reader stands, no damage is known — damage a read carried to the claim is published, with

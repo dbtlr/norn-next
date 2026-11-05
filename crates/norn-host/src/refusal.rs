@@ -347,7 +347,8 @@ impl ReloadRefusal {
     /// registry cannot read), an entry whose derived state cannot be trusted
     /// in `host/entry-untrusted`, an entry that holds nothing to reload yet in
     /// `host/entry-not-ready`, and a `Ready` entry that explicit work holds
-    /// (another reload, an apply, or a detach) in `vault/reload-busy`.
+    /// (another reload, an apply, or a scheduled detach) in
+    /// `vault/reload-busy`.
     ///
     /// `Err(HostError)` is the host being gone rather than the vault refusing.
     /// It carries no code and no detail: no reload outcome was learned, so
