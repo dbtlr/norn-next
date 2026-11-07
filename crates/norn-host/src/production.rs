@@ -3424,7 +3424,7 @@ fn scoped_increment_closed(
                 if unreadable.kind() == norn_fs::UnreadKind::Unknown {
                     pending.withhold_entry(unreadable.path().as_path());
                 }
-                places::read_places_of_a_refused_spelling(
+                places::read_rendered_places(
                     &mut pending,
                     &vault,
                     unreadable.path().as_path(),
@@ -3490,7 +3490,7 @@ fn scoped_increment_closed(
                 // root's spelling, so the places it rendered onto keep what the
                 // other spellings rendering there say.
                 if skip.reason().stands() {
-                    places::read_places_of_a_refused_spelling(
+                    places::read_rendered_places(
                         &mut pending,
                         &vault,
                         skip.path().as_path(),
@@ -3545,7 +3545,7 @@ fn scoped_increment_closed(
                 // A refused file that became this folder leaves its own place
                 // behind, and the places beneath a refused folder include the
                 // ones whose spellings left it.
-                places::read_places_of_a_refused_spelling(
+                places::read_rendered_places(
                     &mut pending,
                     &vault,
                     path,
@@ -3607,7 +3607,7 @@ fn scoped_increment_closed(
                 if identity.is_err() || prefix.is_none() {
                     pending.flush()?;
                 }
-                places::read_places_of_a_refused_spelling(
+                places::read_rendered_places(
                     &mut pending,
                     &vault,
                     path,
@@ -3647,7 +3647,7 @@ fn scoped_increment_closed(
                 }
                 // A refused folder that became this file leaves the places
                 // beneath it, which the reading takes with the file's own.
-                places::read_places_of_a_refused_spelling(
+                places::read_rendered_places(
                     &mut pending,
                     &vault,
                     path,
@@ -3690,6 +3690,16 @@ fn scoped_increment_closed(
                 .account
                 .walked(HealScope::Prefix(beneath), stored_path_order(sensitivity));
         }
+        // **A regular file is no folder**, so a mark standing at its place —
+        // a folder this name was until now — and the places beneath a name
+        // that carries the marker are read as every other arm reads them.
+        places::read_rendered_places(
+            &mut pending,
+            &vault,
+            path,
+            policy.store_page_size,
+            stored_path_order(sensitivity),
+        )?;
         if !is_markdown(path) {
             let standing = pending
                 .store
@@ -4591,6 +4601,11 @@ impl Account {
 /// finding another spelling rendering onto the place could state.
 const READ_SPELLING_DISCARD: norn_store::DiscardScope<'static> =
     norn_store::DiscardScope::Kinds(&[norn_store::CONTENT_FINDING_KIND]);
+
+/// What concluding a place's unreadable-directory mark takes there: the mark,
+/// and no other content finding a document at the place could state.
+const MARK_DISCARD: norn_store::DiscardScope<'static> =
+    norn_store::DiscardScope::Kinds(&[FindingKind::UnreadableDirectory]);
 
 /// One scope a walk of this job enumerated cleanly, with the order its bounds
 /// are read in.
@@ -5540,7 +5555,7 @@ impl<'s> Pending<'s> {
     }
 
     /// Re-derive the spelling findings at `place` from every spelling that
-    /// renders onto it, once per job.
+    /// renders onto it, once per job, and conclude the mark there.
     ///
     /// **A scoped leg files a refused spelling through its place rather than
     /// on its own**, because it was told about one spelling and the place is
@@ -5550,6 +5565,14 @@ impl<'s> Pending<'s> {
     /// end — the place renders nothing a build from zero would file at it.
     /// A reading that could not list a folder on the way concludes nothing,
     /// and the place keeps what it holds for the next walk that can.
+    ///
+    /// **The same reading concludes the place's unreadable-directory mark.** A
+    /// mark files at its folder's own place, which every folder rendering onto
+    /// it names too, so a scope that walked one of them cannot end it; this
+    /// reading found every one. Where none is a folder the vault walk cannot
+    /// list, and nothing on the way was hidden, a build from zero marks nothing
+    /// here and the mark ends. A mark this job filed is its own reading and
+    /// stands.
     fn read_place(
         &mut self,
         vault: &norn_fs::Vault,
@@ -5558,9 +5581,20 @@ impl<'s> Pending<'s> {
         if !self.account.places.first_reading(place) {
             return Ok(());
         }
-        let Some(spellings) = self.account.places.spellings(vault, place)? else {
+        // Only a mark this reading could end asks it to list the folders there.
+        let marked = !self.account.filed.holds(place, Decided::ByBytes) && self.marked(place)?;
+        let reading = self.account.places.read(vault, place, marked)?;
+        if marked && !reading.hidden && !reading.unlistable {
+            self.flush()?;
+            self.store
+                .begin_request()
+                .discard_findings_about(place, MARK_DISCARD)
+                .map_err(store_effect)?;
+        }
+        let spellings = reading.spellings;
+        if spellings.is_empty() && reading.hidden {
             return Ok(());
-        };
+        }
         if spellings.is_empty() {
             // Queued findings are recorded ahead of this discard rather than
             // over it, and none of them is this place's: it is read once.
@@ -6920,6 +6954,14 @@ mod tests {
     #[cfg(feature = "induced-failure")]
     mod broken_documents {
         include!("production/broken_tests.rs");
+    }
+
+    /// An unreadable-directory mark, and what stands beneath it, never
+    /// outlives its folder: each leg a folder leaves by holds the store to a
+    /// build from zero.
+    #[cfg(unix)]
+    mod marks {
+        include!("production/mark_tests.rs");
     }
 
     /// The store's periodic verification as one background unit of the lane:
@@ -15889,8 +15931,7 @@ mod tests {
         }
 
         // Once the folder reads again, the spelling beneath it is filed beside
-        // the other. The sweep leaves the folder's own unreadable mark
-        // standing, which NORN-478 tracks.
+        // the other, and the sweep ends the folder's own unreadable mark.
         fs::write(f.vault().join("bad\u{1}dir/lk\u{1}/a.md"), "edited").unwrap();
         watcher_leg(
             &ops,
@@ -15901,6 +15942,12 @@ mod tests {
             &["bad\u{1}dir"],
         );
         assert_eq!(spellings_filed_at(&mut attachment.store, place).len(), 2);
+        assert_eq!(
+            sorted_kinds(&mut attachment.store, "bad\u{fffd}dir/lk\u{fffd}"),
+            Vec::<String>::new(),
+            "the mark outlived its folder's denial"
+        );
+        assert_a_build_from_zero_agrees(&f, &mut attachment);
         ops.detach(&name, attachment);
     }
 
