@@ -2619,7 +2619,9 @@ wakes every waiting read, which takes the gate again and refuses with what the e
 publishes, unless the entry has reached `Ready` again before that retake; no teardown waits for
 it. While a maintenance leg holds the entry — for its units' background turn budget plus one
 unit, then the drain of the watcher batches observed meanwhile — the entry stays `Ready` without yet seeing an edit made moments before, so a read in
-that window can miss it. The store's verification opens no such window: it runs on the
+that window can miss it. A reload leg whose fold found nothing opens the same accepted gap
+while it reads and judges its candidate, until its end's drain, as the reload paragraphs below
+say. The store's verification opens no such window: it runs on the
 background lane through read-only connections to the store, and its full-text check runs on a copy.
 
 **A canonical read whose store finds its derived data damaged is answered by the entry.** After the
@@ -2978,8 +2980,9 @@ validates both files before it activates a candidate. Its fold, which runs first
 watcher facts the entry holds under the active declaration, and that derivation stands
 whatever the candidate turns out to be. A read or parse error refuses the reload, retains a
 typed file-and-stage error, and leaves the entry as the reload's fold and its leg's end left
-it, whatever state the reload was admitted at: `Ready` where nothing is left, and otherwise
-healing with the reconcile still owed handed on. An absent default
+it, whatever state the reload was admitted at: `Ready` where nothing is left, healing with
+the claim handed on where facts are, and untrusted where the end's drain met a watcher
+overflow or loss, which then answers the reload in the error's place. An absent default
 schema is no read error: it reads as the empty schema, so a reload after the default schema
 is deleted pins the empty declaration, while a missing explicit `schema_source` stays a read
 error. A schema whose
@@ -3048,12 +3051,16 @@ facts pending in the entry and drains the watcher once. Where any facts stand, i
 healing over a `Ready` entry, derives them under the active declaration as its own commit,
 and records that it has derived through the position it took them at, as a reconcile turn
 does. It then takes the gate again. A claim no longer standing at its epoch answers as a leg
-that no longer stands; damage a read met under the claim is published with its rebuild and
-answers the reload; a runtime failure the fold met is handled as a runtime failure the
-reload's own steps meet, and answers `vault/reload-failed` whose detail says the fold met it,
-so the candidate was not read. Only then does the reload run its own steps over the
-folded store: it reads and judges the candidate, and an activation takes it into service. A
-fold that finds no facts commits nothing, so over a quiet `Ready` entry it costs one drain.
+that no longer stands; a watcher overflow or loss the fold's drain met withdraws trust as a
+turn's end does — an overflow owes its rescan, and a loss gives its coverage up — and answers
+the reload, dry run included, with where the entry stands; damage a read met under the claim
+is published with its rebuild and answers the reload; a runtime failure the fold met is
+handled as a runtime failure the reload's own steps meet, and answers `vault/reload-failed`
+whose detail says the fold met it. On each of those the candidate was not read. Only then
+does the reload run its own steps over the folded store: it reads and judges the candidate,
+and an activation takes it into service. A fold that finds no facts commits nothing, so over
+a quiet `Ready` entry it costs one drain, and the entry stays `Ready` while the candidate is
+read, the observation gap the read contract below accepts.
 **A schema-changing reload derives the folded facts twice**, under the old declaration in its
 fold and again in its derivation of the vault under the new one. That is an accepted cost of
 one turn's facts: whether the schema changes is known only from the candidate, which the
@@ -3067,14 +3074,19 @@ config-only activation and a dry run, which derive nothing after their fold, sti
 their end. The leg that publishes — the reload's own, or for a schema-changing activation the
 leg or reconcile turn that completes its derivation under the new declaration — publishes
 `Ready` where no fact is pending, its end's drain was not saturated and no rung is owed, which
-is the rule every leg's end follows. Otherwise it leaves the entry healing, trust unbroken, and
-hands the claim on to the reconcile still owed, which is where facts the end's drain delivered
-go. A config-only activation and a dry run answer the asker as their leg ends, at either state.
-A schema-changing activation keeps its reply through its own reconcile turns and answers once
-`Ready` returns, as it does over a `Ready` entry. A candidate failure — a read or parse error,
+is the rule every leg's end follows. Where its end's drain meets a watcher overflow or loss,
+it withdraws trust as a turn's end does — an overflow owes its rescan, and a loss gives its
+coverage up — and the reload, dry run included, answers with where the entry stands, though
+it may have read and activated its candidate. Otherwise it leaves the entry healing, trust
+unbroken, and hands the claim on as a reconcile turn's end does: to the apply queue's head
+where one waits, and else to the reconcile owed, which is where facts the end's drain
+delivered go; a schema-changing activation's own turns run first. A config-only activation
+and a dry run answer the asker as their leg ends, `Ready` or healing. A schema-changing
+activation keeps its reply through its own reconcile turns and answers once `Ready` returns,
+as it does over a `Ready` entry. A candidate failure — a read or parse error,
 or any other refusal of the candidate before activation begins — leaves the entry as the fold
-and the leg's end left it, whatever state the reload was admitted at, and withdraws no trust:
-the fold's derivation stands, and the entry is `Ready` only where nothing is left. A
+and the leg's end left it, whatever state the reload was admitted at, and withdraws no trust
+of its own: the fold's derivation stands, and the entry is `Ready` only where nothing is left. A
 schema-changing activation that fails after it has begun replacing the derived state withdraws
 trust and owes the recovery. Whether it had begun is a fact the leg records, never one read
 back off the trust label, because a reload admitted over a settling entry publishes healing
@@ -3084,12 +3096,19 @@ before it begins.
 the derivation the reconcile it displaced would have committed, so the entry it hands back is
 the one that reconcile would have left, and nothing about the candidate is recorded.
 
-**The read contract holds across a reload.** A read that met the change the entry was settling
-recorded a position no later than the fold's take, so it answers once the fold commits, from
-the reader standing then, or once `Ready` returns. A schema-changing activation closes that
-reader after its fold, and a read still waiting answers from the pool installed with `Ready`.
-Because a reload publishes `Ready` only where nothing is left, no read establishes a snapshot
-without the change it met.
+**A reload keeps the read contract, with the one gap a maintenance leg also opens.** A read
+that met the change the entry was settling recorded a position no later than the fold's take,
+so it answers once the fold commits, from the reader standing then, or once `Ready` returns. A
+schema-changing activation closes that reader after its fold, and a read still waiting
+answers from the pool installed with `Ready`. Because a reload publishes `Ready` only where
+nothing is left, no read establishes a snapshot without a change it met. A read that meets
+`Ready` meets no change, though: where the fold finds nothing it commits nothing, and the entry
+stays `Ready` from the fold's drain until the leg's end drain while the candidate is read and
+judged, so a read in that window can miss an edit made moments before. That is the
+observation gap a maintenance leg opens, accepted on the same terms: it is bounded by the
+reload's own leg, and the end's drain takes the edit in before the leg ends. A fold that
+finds facts publishes healing, so its reload opens no such window, and a schema-changing
+activation closes the window when it publishes warming to re-derive.
 
 A reload of either mode that the entry is not in a state to run answers with where the entry
 stands: its published demand, rendered by the one mapping `vault status` and a demand lease answer
@@ -3099,15 +3118,27 @@ own code, not the label beneath it. That holds at admission, at a leg that no lo
 and for a reload the host drops without an answer, whether moved past before a worker ran it
 or lost with a leg that unwound; for an unwound leg with no park, the entry stands at the
 untrusted reading the unwind publishes. A turn that unwinds after handing the reload on
-leaves the answer to the turn it handed on to. On each of those paths the candidate was not
-read, though a reload whose claim was superseded after its fold committed leaves that fold's
-derivation standing. A not-ready state — unattached, or any warming phase a reload does not run
-over — answers `host/entry-not-ready` with the message "this vault is not ready to re-read its
-control files yet, so they were not read", which reads true of each of them, a settling entry
-met on one of the paths above included. A busy answer reads "this vault is already being worked
-over, so its control files were not read", which holds both at admission and for a `Ready`
-entry met on one of the paths above. A reload is answered with no code only by a host shutting
-down or whose job channel is gone.
+leaves the answer to the turn it handed on to.
+
+**What a fallback answer says of the control files follows where the reload stopped, never the
+label it reads.** A reload refused at admission, and one dropped before a leg read its
+candidate — moved past before a worker ran it, or ended at its leg's start or at its fold's
+retake of the gate — did not read the candidate; one superseded at that retake leaves its
+fold's derivation standing. On those paths a not-ready state — unattached, or any warming
+phase a reload does not run over — answers `host/entry-not-ready` with the message "this vault
+is not ready to re-read its control files yet, so they were not read", and a busy answer
+`vault/reload-busy` reads "this vault is already being worked over, so its control files were
+not read". A fold failure answers `vault/reload-failed`, whose detail says the fold met it. A
+reload may have read its candidate, and an activation taken it into service, before its claim
+is superseded or its leg unwinds: a leg reads and judges the candidate outside the gate and
+looks at the claim only afterwards, and a schema-changing activation's continuation legs run
+after it activated. There the same codes answer with messages neutral about the files: "this
+vault's reload could not report its completion, and the vault is not ready yet" for
+`host/entry-not-ready`, and "this vault's reload could not report its completion, and the
+vault is being worked over" for `vault/reload-busy`. Each case has that one spelling. A park,
+a hold, an unknown name and an untrusted entry answer in their own codes with their own
+messages, which say nothing of the control files and so read true on every path. A reload is
+answered with no code only by a host shutting down or whose job channel is gone.
 
 **An attach has no such declaration to fall back on, and does not refuse.** This concerns a
 declaration the build cannot read — a schema that is unreadable or does not parse as one.

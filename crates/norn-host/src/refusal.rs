@@ -380,10 +380,9 @@ impl ReloadRefusal {
 ///
 /// Two readings of that state, taken in the order that makes each of them
 /// true: an unattached or warming state is filed as not ready, with a message
-/// that reads true of every such state — a settling entry whose candidate a
-/// reload did not read among them, which is why it says "not ready" rather
-/// than "holds nothing" — and what is left is an entry that is ready and
-/// busy. A reload waits behind a watcher poll, a maintenance leg or a
+/// that reads true of every such state — a settling entry met after admission
+/// among them, which is why it says "not ready" rather than "holds nothing" —
+/// and what is left is an entry that is ready and busy. A reload waits behind a watcher poll, a maintenance leg or a
 /// reconcile turn instead. The busy answer at the ask, where explicit work
 /// holds the entry — another reload, an apply, or a scheduled detach — is a
 /// refusal of its own, decided at admission for a `Ready` and a settling
@@ -392,21 +391,31 @@ impl ReloadRefusal {
 /// state that refuses never reach here: [`Demand::answer`] renders them in
 /// their own codes.
 ///
-/// **`Ready` reaches here by the paths after admission, and on each the
-/// candidate was not read.** At a reload leg's epilogue, a claim superseded by
-/// newer work is a reload that lost its turn — after its fold may have
-/// committed, whose derivation stands — and the entry may stand `Ready` again
-/// by the time that epilogue reports. A reload the host moved past before any
-/// leg ran it — on its way to a worker, or waiting behind routine work — is
-/// answered with the demand the entry publishes once it is dropped, and where
-/// no park stands that too may be `Ready` again. A release does not reach it as `Ready`:
+/// **What the message says of the control files follows where the reload
+/// stopped, never the label read here.** A reload refused at admission, and
+/// one dropped before a leg read its candidate — moved past on its way to a
+/// worker or while it waited behind routine work, or ended at its leg's start
+/// or at its fold's retake of the gate — did not read the candidate, and its
+/// messages say so: "this vault is not ready to re-read its control files
+/// yet, so they were not read" and "this vault is already being worked over,
+/// so its control files were not read". A reload whose claim was superseded,
+/// or whose leg unwound, after it may have read the candidate — at a leg's
+/// epilogue, since the leg reads and judges the candidate outside the gate
+/// and looks at the claim only afterwards, or in a schema-changing
+/// activation's continuation legs, which run after it activated — answers in
+/// the same codes with messages neutral about the files: "this vault's
+/// reload could not report its completion, and the vault is not ready yet"
+/// and "this vault's reload could not report its completion, and the vault
+/// is being worked over". Each case has that one spelling, and
+/// `docs/architecture.md` states the rule. On a late path the entry may stand
+/// `Ready` again by the time the epilogue reports, which is the busy answer.
+/// A release does not reach here as `Ready`:
 /// `begin_release` sets `detach_in_flight` and sets the trust to
 /// `Warming(WarmingPhase::ReleasingCoverage)` in the same statement pair under
 /// one hold of the gate, so the epilogue that reads the flag reads that state
 /// beside it. `a_release_window_opened_over_reload_closes_at_the_job_epilogue`
-/// pins the value that arrives. Either way the answer is the same: the
-/// candidate was not read and nothing about it was recorded, and a retry is
-/// what asks again.
+/// pins the value that arrives. On every path nothing about the candidate is
+/// recorded by this answer, and a retry is what asks again.
 fn unavailable(state: TrustState) -> ErrorEnvelope {
     if let Some(not_ready) = state.not_ready() {
         return ErrorEnvelope::new(

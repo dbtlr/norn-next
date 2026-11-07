@@ -143,7 +143,11 @@ impl<O: EntryOps> Host<O> {
     /// watcher once more, and publishes `Ready` only where nothing is left at
     /// the end of the leg that publishes — for a schema-changing activation,
     /// the leg or turn that completes its derivation — and otherwise hands the
-    /// entry on to the reconcile still owed. A candidate failure leaves the
+    /// claim on as a reconcile turn's end does: to the apply queue's head
+    /// where one waits, and else to the reconcile owed, a schema-changing
+    /// activation's own turns first. A watcher overflow or loss that either
+    /// drain meets withdraws trust as a turn's end does and answers the
+    /// reload with where the entry stands. A candidate failure leaves the
     /// entry as the fold and the leg's end left it: the fold's derivation
     /// stands. A runtime failure either meets gets the same policy, and a
     /// reload the host drops without
