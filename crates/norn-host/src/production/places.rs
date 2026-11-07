@@ -186,6 +186,14 @@ impl PlaceReadings {
             };
             let path = at.as_path();
             if !is_markdown(path) {
+                // An unknown stat at a non-document name takes the walk's
+                // directory posture where this row-exclusive mark stands.
+                if folders
+                    && !unlistable
+                    && let norn_fs::WalkFact::Unreadable(fact) = vault.fact(path).map_err(effect)?
+                {
+                    unlistable = fact.kind() == norn_fs::UnreadKind::Unknown;
+                }
                 continue;
             }
             if let Err(quarantine) = document_path(path) {

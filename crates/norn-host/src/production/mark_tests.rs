@@ -477,3 +477,47 @@ fn a_place_reading_keeps_the_mark_its_job_just_filed() {
     );
     ops.detach(&name, attachment);
 }
+
+#[cfg(feature = "induced-failure")]
+#[test]
+fn a_place_reading_keeps_an_unknown_stat_names_directory_mark() {
+    let f = Fixture::new("mark-unknown-stat");
+    let Some((ops, name, progress, mut attachment)) = attach_over(&f, &["q\u{fffd}"], &[]) else {
+        return;
+    };
+    let root = f.vault();
+    let failing = norn_fs::fail_document_stats(&root.join("q\u{fffd}"));
+    watcher_leg(
+        &ops,
+        &name,
+        &mut attachment,
+        &progress,
+        &root,
+        &["q\u{fffd}"],
+    );
+    assert_eq!(
+        sorted_kinds(&mut attachment.store, "q\u{fffd}"),
+        ["directory/unreadable"]
+    );
+    // A report about a different spelling of the place reads the standing
+    // mark without walking (and re-filing) the stat-denied name itself.
+    watcher_leg(&ops, &name, &mut attachment, &progress, &root, &["q\\"]);
+    assert_eq!(
+        sorted_kinds(&mut attachment.store, "q\u{fffd}"),
+        ["directory/unreadable"]
+    );
+    // The hook covers reaches, not an enumerating build. Compare with that
+    // build once the stat reads again and the scoped leg ends the mark.
+    drop(failing);
+    watcher_leg(
+        &ops,
+        &name,
+        &mut attachment,
+        &progress,
+        &root,
+        &["q\u{fffd}"],
+    );
+    assert!(sorted_kinds(&mut attachment.store, "q\u{fffd}").is_empty());
+    assert_a_build_from_zero_agrees(&f, &mut attachment);
+    ops.detach(&name, attachment);
+}
