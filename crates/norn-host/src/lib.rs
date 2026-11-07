@@ -96,3 +96,8 @@ pub use semantic::{
 };
 pub use status::AttachmentAdvisory;
 pub use verification::VerificationReading;
+
+// Shared harness source; neither the helper nor its testkit dependency ships.
+#[cfg(all(test, feature = "induced-failure"))]
+#[path = "../tests/support/accepted_roots.rs"]
+mod accepted_roots;
