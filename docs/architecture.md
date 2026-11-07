@@ -712,18 +712,25 @@ never the rest and concludes nothing there. **A scoped leg told about a refused 
 its place instead**: a report names one spelling and the place is named by all of them, so the
 leg lists the folders along the place's path — the deepest one spelled as written, and one per
 candidate at each marked segment — and files every spelling it finds there, the first replacing
-what stood; where it finds none, the place's spelling findings end. A report does not say what the
-path was before, so every refused spelling it names has both its own place read and, where its
+what stood; where it finds none, the place's spelling findings end. **The same reading concludes
+the place's unreadable-directory mark**, which files at its folder's own place and so is named by
+every folder rendering there: where none of them is a folder the walk cannot list and no folder on
+the way hid any, the mark ends, unless the job filed it. A report does not say what the
+path was before, so every refused spelling it names has both its own place read — a name that is
+no refused Markdown file only where a mark stands there — and, where its
 spelling addresses no range of stored paths, the places beneath its rendering, found from the
-findings standing there. That covers a refused spelling that is edited, leaves, becomes a folder or
+spelling findings and marks standing there. An admitted name reported where a mark stands has its
+place read too, since the name is the one spelling of that place: a regular file there ends the
+mark, as a folder that lists again does. That covers a refused spelling that is edited, leaves, becomes a folder or
 stands refused, and a refused folder that leaves, loses a file, becomes a file or stands refused.
 A reading costs the folders along one path, each listed once per job and looked up by the segment
 its names render to, and never a subtree. A folder it cannot list or search is passed over as the
 vault heal passes over it — the spellings beneath it are stated nowhere, and a build from zero
 marks the folder instead — and a reading that reaches no spelling while a folder hid some concludes
 nothing, so the place keeps what it holds until the folder reads again. A walk rooted below an unrendered ancestor that a real
-folder's own marker-carrying name puts above it still concludes nothing at the places there, and the
-next heal converges them. **The content finding is the exception**: it is filed only at a spelling the
+folder's own marker-carrying name puts above it concludes nothing at the places there either, so the
+leg reads those places the same way: its own place where a mark stands, and the places beneath it
+found from the spelling findings and marks standing there. **The content finding is the exception**: it is filed only at a spelling the
 document grammar admits, which renders onto itself, so it is about the one file spelled as its place
 is. A walk whose scope reaches that spelling, withheld nothing over it and filed no content finding
 there, because it found the document gone, ends the content finding there and no other, so a deleted document whose own name or folder carries the marker converges at
