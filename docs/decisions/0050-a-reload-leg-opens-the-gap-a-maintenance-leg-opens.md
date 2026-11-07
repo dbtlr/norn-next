@@ -318,21 +318,22 @@ the same window. It reads and judges its candidate outside the entry gate while 
 the claim, so no poll runs, and an edit made after its fold's drain stays with the watcher
 until the leg's end drain. A read that begins meanwhile answers at once: under `Ready`
 where the fold found no facts and committed nothing, and under the healing the fold
-published where it found some, since the facts the fold took are derived. This accepted observation gap is limited to one maintenance leg
-or one reload leg. The maintenance leg ends when the background turn budget runs out, plus
-the one unit in flight at that moment, or earlier when its work is done. Watcher batches
-drain before another leg starts. The reload leg's window lasts from the leg's start, at its
-fold's drain, to its end drain, which takes in the edits that arrived meanwhile before the
-leg publishes, whether or not the fold found facts. It covers a config-only activation's or a dry run's candidate read and
-judgment. A schema-changing activation publishes warming once it has judged its candidate
-and settles from then on, so it opens no such window after activation. The candidate read is
-bounded by its own work, not by the background turn budget: reading and parsing the
-vault's two control files, comparing the schema's fingerprint with the active one, and,
-for a config-only activation, delivering the config to each engine receiver, which opens
-nothing and leaves an engine's setup to the background lane. Its cost follows those two
-files, never the vault's size or its edit rate. A semantic background turn and the
-store's verification hold no claim and open no such window. The bound is not a
-promise of wall-clock duration for an individual filesystem operation.
+published where it found some, since the facts the fold took are derived. This accepted
+observation gap is limited to one maintenance leg or one reload leg. The maintenance leg
+ends when the background turn budget runs out, plus the one unit in flight at that moment,
+or earlier when its work is done. Watcher batches drain before another leg starts. The
+reload leg's window lasts from the leg's start, at its fold's drain, to its end drain,
+which takes in the edits that arrived meanwhile before the leg publishes, whether or not
+the fold found facts. It covers a config-only activation's or a dry run's candidate read
+and judgment. A schema-changing activation publishes warming once it has judged its
+candidate and settles from then on, so it opens no such window after activation. The
+candidate read is bounded by its own work, not by the background turn budget: reading and
+parsing the vault's two control files, comparing the schema's fingerprint with the active
+one, and, for a config-only activation, delivering the config to each engine receiver,
+which opens nothing and leaves an engine's setup to the background lane. Its cost follows
+those two files, never the vault's size or its edit rate. A semantic background turn and
+the store's verification hold no claim and open no such window. The bound is not a promise
+of wall-clock duration for an individual filesystem operation.
 
 The reload leg's gap is accepted rather than closed because closing it would make reads
 wait behind every reload leg for a drain, for a window of one candidate read.
