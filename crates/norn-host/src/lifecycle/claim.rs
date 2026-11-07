@@ -90,11 +90,11 @@
 //!
 //! **A reload waits behind routine work without moving the entry on.**
 //! Carried by [`Claim::wait_reload`], which records the reload beside the gate
-//! the poll or maintenance leg holds and leaves the epoch where it stands:
-//! moving it would leave that leg answering for itself alone and handing its
-//! coverage up for give-back. [`Claim::held_by_routine`] is what admits it, and
-//! reads the kind of the work the entry stands at off `maintenance_stands`,
-//! because neither [`Leg`] nor [`Gate::Held`] names it. The leg's own end
+//! the poll, maintenance leg or reconcile turn holds and leaves the epoch where
+//! it stands: moving it would leave that work answering for itself alone and
+//! handing its coverage up for give-back. [`Claim::held_by_routine`] is what
+//! admits it, and reads the kind of the work the entry stands at off
+//! `routine_stands`, because neither [`Leg`] nor [`Gate::Held`] names it. The leg's own end
 //! takes the reload back out, through [`Claim::take_waiting_reload`], and
 //! gives it the claim or answers it. [`Claim::invalidate`] and [`Claim::open`]
 //! drop it with the work they end, so its asker reads where the entry then
@@ -799,12 +799,12 @@ pub(super) struct Claim {
     owes_maintenance: bool,
     /// Where the release of a marked entry sends its wake.
     wake: BackgroundWake,
-    /// Whether the job the entry stands at is a maintenance leg. Set where a
-    /// move schedules or hands on the entry's next job, and cleared by every
-    /// move past it.
-    maintenance_stands: bool,
-    /// A reload waiting for the poll or maintenance leg holding the gate to
-    /// end.
+    /// Whether the job the entry stands at is routine derivation: a
+    /// maintenance leg or a reconcile turn. Set where a move schedules or
+    /// hands on the entry's next job, and cleared by every move past it.
+    routine_stands: bool,
+    /// A reload waiting for the poll, maintenance leg or reconcile turn
+    /// holding the gate to end.
     waiting_reload: Option<WaitingReload>,
 }
 
@@ -821,7 +821,7 @@ impl Claim {
             slot: Slot::default(),
             owes_maintenance: false,
             wake,
-            maintenance_stands: false,
+            routine_stands: false,
             waiting_reload: None,
         }
     }
@@ -873,30 +873,34 @@ impl Claim {
     /// earlier epoch answers for itself alone from here.
     pub(super) fn supersede(&mut self) -> u64 {
         self.epoch += 1;
-        self.maintenance_stands = false;
+        self.routine_stands = false;
         self.epoch
     }
 
     /// Record the job the entry has moved on to as the work it stands at.
     fn stand_for(&mut self, job: &Job) {
-        self.maintenance_stands = matches!(job, Job::Maintenance(..));
+        self.routine_stands = matches!(job, Job::Maintenance(..) | Job::Reconcile(..));
     }
 
     /// Whether the vault's own routine work holds the gate: a watcher poll
-    /// running at the epoch the entry stands at, or the maintenance leg the
-    /// entry stands at, running or handed on and not yet begun. A scheduled
-    /// maintenance leg is a marker, not this.
+    /// running at the epoch the entry stands at, or the maintenance leg or
+    /// reconcile turn the entry stands at, running or handed on by a leg's
+    /// end and not yet begun. A scheduled maintenance leg or reconcile turn
+    /// is a marker, not this: a reload displaces it rather than waiting.
     pub(super) fn held_by_routine(&self) -> bool {
         matches!(self.gate, Gate::Held)
-            && (self.leg == Some(Leg::Poll(self.epoch)) || self.maintenance_stands)
+            && (self.leg == Some(Leg::Poll(self.epoch)) || self.routine_stands)
     }
 
-    /// Record a reload waiting for the routine work holding the gate to end.
-    /// The epoch stays where it stands, so that work runs to its own end.
+    /// Record a reload waiting for the routine work holding the gate to end:
+    /// a watcher poll, a maintenance leg or a reconcile turn. The epoch stays
+    /// where it stands, so that work runs to its own end, and that end gives
+    /// the reload the claim or answers it.
     pub(super) fn wait_reload(&mut self, reload: WaitingReload) {
         debug_assert!(
             self.held_by_routine() && self.waiting_reload.is_none(),
-            "a reload waits behind routine work alone, and one at a time"
+            "a reload waits behind a poll, a maintenance leg or a reconcile turn alone, and one \
+             at a time"
         );
         self.waiting_reload = Some(reload);
     }

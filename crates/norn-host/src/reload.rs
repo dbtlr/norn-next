@@ -196,9 +196,36 @@ pub enum ReloadRefusal {
     /// entry a registration change holds answer as every door answers them; an
     /// entry in service answers with the park it stands on first, and its
     /// trust state where nothing parks it.
+    ///
+    /// The reload did not read its candidate: it was refused at admission,
+    /// or dropped before a leg read it — moved past on its way to a worker or
+    /// while it waited, or ended at its leg's start or at its fold's retake
+    /// of the gate.
     Unavailable(Demand),
+    /// The entry serves or settles a change, and other work holds it: at
+    /// admission, explicit work — another reload, an apply, or a scheduled
+    /// detach. The reload did not read its candidate.
+    ///
+    /// It is decided off the entry's state rather than read off its label,
+    /// because a settling entry publishes warming; a `Ready` entry and a
+    /// settling one are refused through this one variant, so the two are
+    /// spelled alike.
+    Busy,
+    /// The reload may have read its candidate, and an activation taken it
+    /// into service, before its claim was superseded or its leg unwound, so
+    /// it could not report its completion: this is where the entry then
+    /// stands. A state the entry serves or settles in is
+    /// [`ReloadRefusal::UnreportedBusy`] instead.
+    Unreported(Demand),
+    /// The reload may have read its candidate before it could not report its
+    /// completion, and the entry serves or settles a change that other work
+    /// holds.
+    UnreportedBusy,
     Core(ReloadError),
     Runtime(JobFailure),
+    /// A runtime failure the reload's fold met while it derived the change
+    /// the entry held, before the reload read its candidate.
+    Fold(JobFailure),
     HostStopped,
 }
 

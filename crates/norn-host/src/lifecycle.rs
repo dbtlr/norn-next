@@ -930,11 +930,19 @@ impl<A: SnapshotSource> ProgressReporter<A> {
         true
     }
 
-    /// Enter Lane 1 warming after a reload candidate passes core validation.
+    /// Enter Lane 1 warming after a reload candidate passes core validation,
+    /// and record that this leg has begun replacing the derived state.
     ///
     /// This transition replaces the current trust label at the reporter's
-    /// epoch. Call it only from a reload leg that was admitted while the vault
-    /// was Ready. A call from another state would overwrite its trust reason.
+    /// epoch. Call it only from a reload leg admitted over an entry that
+    /// serves or settles a change — `Ready`, or healing with trust unbroken
+    /// since `Ready`, which is also what the leg's own fold publishes. A call
+    /// from another state would overwrite its trust reason.
+    ///
+    /// The record, not the label, is what a failure later in the leg reads
+    /// to decide whether it withdraws trust: the label is healing before this
+    /// call wherever the reload was admitted over a settling entry or its
+    /// fold took in facts.
     pub fn begin_schema_reload(&self) {
         let Some(entry) = self.entry.upgrade() else {
             return;
@@ -945,6 +953,7 @@ impl<A: SnapshotSource> ProgressReporter<A> {
         }
         state.close_reader();
         state.trust = TrustState::warming(WarmingPhase::Healing, 0, None);
+        state.reload_replacing_at = Some(self.epoch);
     }
 
     fn enter(&self, phase: WarmingPhase) {
@@ -1272,6 +1281,7 @@ impl<A: SnapshotSource> Entry<A> {
                 active_content_model: Arc::new(ContentModel::none()),
                 control_root: None,
                 last_reload_error: None,
+                reload_replacing_at: None,
                 advisories: Vec::new(),
                 rolling_heal: None,
                 store_reading: None,
@@ -1402,6 +1412,18 @@ struct EntryState<A: SnapshotSource> {
     /// The last typed core error from reading, parsing, or applying vault
     /// control files. A successful candidate clears it.
     last_reload_error: Option<ReloadError>,
+    /// The epoch of the reload leg that has begun replacing the entry's
+    /// derived state under a new declaration, as
+    /// [`ProgressReporter::begin_schema_reload`] records it.
+    ///
+    /// **Whether a failed reload withdraws trust is read here, never off the
+    /// trust label**: a reload admitted over a settling entry, or one whose
+    /// fold took in facts, publishes healing before it reads its candidate,
+    /// so the label cannot tell a candidate refused before activation from
+    /// an activation that failed after it began. An epoch the entry has
+    /// moved past names no leg that can read it again, so the record is
+    /// cleared only where a reload leg ends.
+    reload_replacing_at: Option<u64>,
     /// The advisories the entry's last attachment carried, as
     /// [`EntryOps::advisories`] read them at the last publication that
     /// recorded them.
@@ -2483,30 +2505,54 @@ impl<A: SnapshotSource> EntryState<A> {
             && self.read_stance() != ReadStance::Refuse
     }
 
-    /// Whether a reload may take the claim over this entry now: in service,
-    /// `Ready`, its coverage in hand, and no release in flight.
-    fn stands_ready_for_a_reload(&self) -> bool {
+    /// Whether a reload runs over this entry as it stands: in service,
+    /// unparked, no release in flight, and serving or settling a change —
+    /// `Ready`, or warming entered from `Ready` with trust unbroken and no
+    /// rung owed, the state a settling read waits on ([`ReadStance`]).
+    ///
+    /// It says nothing of what holds the claim. An entry a reload runs over
+    /// that other work holds answers [`ReloadRefusal::Busy`], whichever label
+    /// it publishes; every other entry answers with where it stands.
+    fn reload_runs_over(&self) -> bool {
         self.withdrawal_answer().is_none()
-            && self.trust == TrustState::Ready
-            && self.coverage.in_hand()
             && !self.detach_in_flight
+            && self.read_stance() != ReadStance::Refuse
+    }
+
+    /// Whether a reload may take the claim over this entry now: the entry is
+    /// one a reload runs over, with its coverage in hand.
+    fn stands_reloadable(&self) -> bool {
+        self.reload_runs_over() && self.coverage.in_hand()
+    }
+
+    /// What a reload that is not run is told of this entry: busy where a
+    /// reload runs over it, and where it stands otherwise, each spelled for
+    /// whether the reload may have read its candidate.
+    fn reload_stood_down(&self, candidate_read: bool) -> ReloadRefusal {
+        match (self.reload_runs_over(), candidate_read) {
+            (true, false) => ReloadRefusal::Busy,
+            (true, true) => ReloadRefusal::UnreportedBusy,
+            (false, false) => ReloadRefusal::Unavailable(self.published_demand()),
+            (false, true) => ReloadRefusal::Unreported(self.published_demand()),
+        }
     }
 
     /// What a reload asked over this entry now is admitted to.
     ///
-    /// Explicit work refuses it: a reload already waiting or running, a
-    /// queued or running apply, a detach scheduled or in flight. Routine work
-    /// does not: a poll or a maintenance leg holding the claim, whose coverage
-    /// is in the entry's hand or out with that work, admits it to wait, and a
-    /// maintenance leg scheduled and not yet begun gives the claim up to it.
+    /// An entry a reload does not run over refuses it with where it stands.
+    /// Over one it runs over, explicit work refuses it busy: a reload already
+    /// scheduled, waiting or running, a queued or running apply, a detach
+    /// scheduled. Routine work does not: a poll, a maintenance leg or a
+    /// reconcile turn holding the claim, whose coverage is in the entry's
+    /// hand or out with that work, admits it to wait, and a maintenance leg
+    /// or a reconcile turn scheduled and not yet begun gives the claim up to
+    /// it, as it does to an apply.
     fn reload_admission(&self) -> ReloadAdmission {
-        if self.withdrawal_answer().is_some()
-            || self.trust != TrustState::Ready
-            || self.detach_in_flight
-            || !self.applies.is_empty()
-            || self.claim.reload_waits()
-        {
+        if !self.reload_runs_over() {
             return ReloadAdmission::Refused;
+        }
+        if !self.applies.is_empty() || self.claim.reload_waits() {
+            return ReloadAdmission::Busy;
         }
         let epoch = self.claim.epoch();
         let in_hand = self.coverage.in_hand();
@@ -2519,16 +2565,18 @@ impl<A: SnapshotSource> EntryState<A> {
         }
         // A scheduled leg's supersession moves the epoch, which is safe only
         // where no leg at this epoch is out with the coverage.
-        if matches!(self.claim.marker(), Some(Job::Maintenance(..)))
-            && in_hand
+        if matches!(
+            self.claim.marker(),
+            Some(Job::Maintenance(..) | Job::Reconcile(..))
+        ) && in_hand
             && self.claim.leg().is_none_or(|leg| leg.epoch() != epoch)
         {
-            return ReloadAdmission::OverScheduledMaintenance;
+            return ReloadAdmission::OverScheduledRoutine;
         }
         if self.claim.held_by_routine() && (in_hand || self.coverage.out_with(epoch)) {
             return ReloadAdmission::Waits;
         }
-        ReloadAdmission::Refused
+        ReloadAdmission::Busy
     }
 
     /// Whether the head of the apply queue is owed the claim now: an apply
@@ -2621,13 +2669,65 @@ enum Job {
     Detach(VaultName, u64),
 }
 
-/// Where an explicit reload's asker waits for what the reload judged.
-type ReloadReply = mpsc::SyncSender<Result<ReloadJudgment, ReloadRefusal>>;
+/// One reload's answer.
+type ReloadAnswer = Result<ReloadJudgment, ReloadRefusal>;
 
-/// A reload asked while a watcher poll or a maintenance leg holds its entry,
-/// waiting in the entry's claim for that work to end. Dropped unanswered, its
-/// asker is told where the entry then stands, as a reload the host moved past
-/// is.
+/// Where an explicit reload's asker waits for what the reload judged, and
+/// whether a leg has begun reading its candidate.
+///
+/// **The record is what a fallback answer's spelling follows**: a reload
+/// answered with where its entry stands says its control files were not read
+/// only where no leg has begun reading them. Each clone shares the record, so
+/// the asker reads it once every sender is gone, and a leg that unwound or a
+/// job dropped after the candidate was read is spelled as one that may have
+/// read it.
+#[derive(Clone)]
+struct ReloadReply {
+    answer: mpsc::SyncSender<ReloadAnswer>,
+    candidate_read: Arc<AtomicBool>,
+}
+
+impl ReloadReply {
+    /// A reply the asker waits on through the receiver beside it, and the
+    /// record it reads once every sender is gone.
+    fn channel() -> (Self, mpsc::Receiver<ReloadAnswer>, Arc<AtomicBool>) {
+        let (answer, asked) = mpsc::sync_channel(1);
+        let candidate_read = Arc::new(AtomicBool::new(false));
+        (
+            Self {
+                answer,
+                candidate_read: Arc::clone(&candidate_read),
+            },
+            asked,
+            candidate_read,
+        )
+    }
+
+    fn send(&self, answer: ReloadAnswer) -> Result<(), mpsc::SendError<ReloadAnswer>> {
+        self.answer.send(answer)
+    }
+
+    /// Record that a leg is reading the candidate: from here a fallback
+    /// answer says nothing of the control files.
+    fn reading_the_candidate(&self) {
+        self.candidate_read.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether a leg has begun reading the candidate.
+    fn candidate_read(&self) -> bool {
+        self.candidate_read.load(Ordering::SeqCst)
+    }
+
+    /// Answer a reload not run to its end with what `state` says of it.
+    fn stand_down<A: SnapshotSource>(&self, state: &EntryState<A>) {
+        let _ = self.send(Err(state.reload_stood_down(self.candidate_read())));
+    }
+}
+
+/// A reload asked while a watcher poll, a maintenance leg or a reconcile turn
+/// holds its entry, waiting in the entry's claim for that work to end.
+/// Dropped unanswered, its asker is told where the entry then stands, as a
+/// reload the host moved past is.
 struct WaitingReload {
     job: fn(VaultName, u64, ReloadReply) -> Job,
     reply: ReloadReply,
@@ -2639,9 +2739,9 @@ impl WaitingReload {
         (self.job)(name.clone(), epoch, self.reply)
     }
 
-    /// Answer the asker with where the entry stands, the reload not run.
-    fn answer(self, stands: Demand) {
-        let _ = self.reply.send(Err(ReloadRefusal::Unavailable(stands)));
+    /// Answer the asker with what `state` says of a reload that did not run.
+    fn answer<A: SnapshotSource>(self, state: &EntryState<A>) {
+        self.reply.stand_down(state);
     }
 }
 
@@ -2649,14 +2749,18 @@ impl WaitingReload {
 enum ReloadAdmission {
     /// Nothing holds the entry: the reload takes the claim.
     Runs,
-    /// A maintenance leg is scheduled and has not begun: the reload takes the
-    /// claim in its place, and the pass stays due.
-    OverScheduledMaintenance,
-    /// A watcher poll or a maintenance leg holds the entry: the reload waits
-    /// for it to end.
+    /// A maintenance leg or a reconcile turn is scheduled and has not begun:
+    /// the reload takes the claim in its place. A maintenance pass stays
+    /// due, and the reload's fold derives the reconcile's facts.
+    OverScheduledRoutine,
+    /// A watcher poll, a maintenance leg or a reconcile turn holds the
+    /// entry: the reload waits for it to end.
     Waits,
-    /// The entry is not in a state to run a reload, or explicit work holds
-    /// it: the reload is answered with where the entry stands.
+    /// Explicit work holds an entry a reload runs over: the reload is
+    /// refused busy.
+    Busy,
+    /// The entry is not one a reload runs over: the reload is answered with
+    /// where the entry stands.
     Refused,
 }
 
@@ -2941,18 +3045,35 @@ fn schedule_queued_apply<A: SnapshotSource>(
 }
 
 /// Give the claim to the reload waiting behind routine work that has ended,
-/// where nothing was scheduled ahead of it and the entry still stands ready
-/// for it. A waiting reload this leaves is answered by
-/// [`answer_waiting_reload`] once the hold has published what it will.
+/// where nothing was scheduled ahead of it and the entry still serves or
+/// settles with its coverage in hand. A waiting reload this leaves is
+/// answered by [`answer_waiting_reload`] once the hold has published what it
+/// will.
 fn schedule_waiting_reload<A: SnapshotSource>(
     state: &mut EntryState<A>,
     name: &VaultName,
 ) -> Option<Job> {
-    if state.claim.is_held() || !state.stands_ready_for_a_reload() {
+    if state.claim.is_held() || !state.stands_reloadable() {
         return None;
     }
     let reload = state.claim.take_waiting_reload()?;
     Some(state.claim.schedule(|epoch| reload.job(name, epoch)))
+}
+
+/// Hand the claim a running leg holds to the reload waiting for that leg,
+/// where the entry still serves or settles with its coverage in hand: the
+/// job to send, or `None` where no reload waits or the entry is not one a
+/// reload runs over. A waiting reload this leaves is answered by
+/// [`answer_waiting_reload`].
+fn hand_on_to_the_waiting_reload<A: SnapshotSource>(
+    state: &mut EntryState<A>,
+    name: &VaultName,
+) -> Option<Job> {
+    if !state.claim.reload_waits() || !state.stands_reloadable() {
+        return None;
+    }
+    let reload = state.claim.take_waiting_reload()?;
+    Some(state.claim.hand_on(|epoch| reload.job(name, epoch)))
 }
 
 /// Answer a reload still waiting where the routine work it waited for ended
@@ -2961,7 +3082,7 @@ fn schedule_waiting_reload<A: SnapshotSource>(
 /// work published.
 fn answer_waiting_reload<A: SnapshotSource>(state: &mut EntryState<A>) {
     if let Some(reload) = state.claim.take_waiting_reload() {
-        reload.answer(state.published_demand());
+        reload.answer(state);
     }
 }
 
@@ -5681,15 +5802,18 @@ impl<O: EntryOps> Host<O> {
     /// Admit one reload-shaped job against `name`, send it, and wait for its
     /// answer.
     ///
-    /// The entry must be `Ready`, and no explicit work may hold it, as
-    /// [`EntryState::reload_admission`] reads it. Over a free claim with its
-    /// coverage in hand, or a maintenance leg scheduled and not yet begun,
-    /// the reload takes the claim at once. Over a watcher poll or a
-    /// maintenance leg holding the claim it waits in the claim, without
-    /// moving the entry on, and the end of that work judges it again: it
-    /// runs where the entry still stands `Ready` with its coverage in hand
-    /// and nothing was scheduled ahead of it, and is answered with where the
-    /// entry stands otherwise.
+    /// The entry must serve or settle a change — `Ready`, or warming entered
+    /// from `Ready` with trust unbroken — and no explicit work may hold it,
+    /// as [`EntryState::reload_admission`] reads it; explicit work refuses
+    /// it as [`ReloadRefusal::Busy`] over either. Over a free claim with its
+    /// coverage in hand, or a maintenance leg or a reconcile turn scheduled
+    /// and not yet begun, the reload takes the claim at once. Over a watcher
+    /// poll, a maintenance leg or a reconcile turn holding the claim it waits
+    /// in the claim, without moving the entry on, and the end of that work
+    /// judges it again: it takes the claim where the entry still serves or
+    /// settles with its coverage in hand and no rebuild was owed ahead of it,
+    /// and is answered with where the entry stands otherwise. Its leg then
+    /// folds the facts that work left before it reads its candidate.
     ///
     /// Where the entry stands is [`EntryState::published_demand`] on every
     /// path that tells the asker so — the refusal at admission, a leg that
@@ -5702,7 +5826,8 @@ impl<O: EntryOps> Host<O> {
     ///
     /// A leg that runs answers the asker itself. A reload that is dropped
     /// with no answer sent is one the host moved past, and the asker is told
-    /// where the entry stands, read once every sender of its reply is gone:
+    /// where the entry stands, read once every sender of its reply is gone,
+    /// in the spelling for whether a leg had begun reading its candidate:
     /// a job the entry was moved past on its marker, in the channel, or on
     /// its way back to its marker; a reload waiting behind routine work that
     /// a teardown or an invalidation ended; a job whose vault left the
@@ -5721,7 +5846,7 @@ impl<O: EntryOps> Host<O> {
         let Some(entry) = self.shared.entries.get(name) else {
             return Err(ReloadRefusal::Unavailable(Demand::UnknownVault));
         };
-        let (reply, answer) = mpsc::sync_channel(1);
+        let (reply, answer, candidate_read) = ReloadReply::channel();
         let scheduled = {
             let mut state = entry.gate.lock().expect("entry gate poisoned");
             match state.reload_admission() {
@@ -5730,14 +5855,18 @@ impl<O: EntryOps> Host<O> {
                 ReloadAdmission::Refused => {
                     return Err(ReloadRefusal::Unavailable(state.published_demand()));
                 }
+                ReloadAdmission::Busy => return Err(ReloadRefusal::Busy),
                 ReloadAdmission::Waits => {
                     state.claim.wait_reload(WaitingReload { job, reply });
                     false
                 }
                 admitted => {
-                    // The superseded pass stays due: the mark wakes the
-                    // scheduler at the reload's release.
-                    if matches!(admitted, ReloadAdmission::OverScheduledMaintenance) {
+                    // A superseded maintenance pass stays due: the mark wakes
+                    // the scheduler at the reload's release. A superseded
+                    // reconcile's facts are the reload's fold's to derive.
+                    if matches!(admitted, ReloadAdmission::OverScheduledRoutine)
+                        && matches!(state.claim.marker(), Some(Job::Maintenance(..)))
+                    {
                         state.claim.mark_owing_maintenance();
                     }
                     state
@@ -5750,27 +5879,28 @@ impl<O: EntryOps> Host<O> {
         if scheduled {
             dispatch_pending(&self.shared, &entry).map_err(|_| ReloadRefusal::HostStopped)?;
         }
-        answer
-            .recv()
-            .unwrap_or_else(|_| Err(self.unanswered_reload(name)))
+        answer.recv().unwrap_or_else(|_| {
+            Err(self.unanswered_reload(name, candidate_read.load(Ordering::SeqCst)))
+        })
     }
 
-    /// What the asker of a reload the host dropped unanswered is told: where
-    /// the entry stands now — its published demand, its withdrawal answer and
-    /// then its park first — a vault the serving set no longer holds, or a
-    /// host that is shutting down.
-    fn unanswered_reload(&self, name: &VaultName) -> ReloadRefusal {
+    /// What the asker of a reload the host dropped unanswered is told: busy
+    /// where the entry serves or settles, and where it stands now otherwise —
+    /// its published demand, its withdrawal answer and then its park first —
+    /// each spelled for whether a leg had begun reading the candidate; a
+    /// vault the serving set no longer holds; or a host that is shutting
+    /// down.
+    fn unanswered_reload(&self, name: &VaultName, candidate_read: bool) -> ReloadRefusal {
         if self.shared.shutting_down.load(Ordering::SeqCst) {
             return ReloadRefusal::HostStopped;
         }
         match self.shared.entries.get(name) {
-            Some(entry) => ReloadRefusal::Unavailable(
-                entry
-                    .gate
-                    .lock()
-                    .expect("entry gate poisoned")
-                    .published_demand(),
-            ),
+            Some(entry) => entry
+                .gate
+                .lock()
+                .expect("entry gate poisoned")
+                .reload_stood_down(candidate_read),
+            None if candidate_read => ReloadRefusal::Unreported(Demand::UnknownVault),
             None => ReloadRefusal::Unavailable(Demand::UnknownVault),
         }
     }
@@ -7178,6 +7308,10 @@ fn poll_claimed_entry<O: EntryOps>(
     let mut release = None;
     let mut root_moved_under_it = false;
     let mut lost_at = None;
+    // Whether the facts standing once this poll ends are owed their
+    // reconcile. A reload waiting behind the poll takes the claim in its
+    // place, and its fold derives them.
+    let mut owes_reconcile = false;
     {
         let mut state = entry.gate.lock().expect("entry gate poisoned");
         state.unpin_leg(Leg::Poll(epoch));
@@ -7196,11 +7330,7 @@ fn poll_claimed_entry<O: EntryOps>(
                     // background scheduler starts it at a wake or a deadline.
                     if !state.owes_a_rung() && !state.pending.is_empty() {
                         state.publish_pending_reconcile();
-                        schedule = Some(
-                            state
-                                .claim
-                                .schedule(|epoch| Job::Reconcile(name.clone(), epoch)),
-                        );
+                        owes_reconcile = true;
                     }
                 }
                 Ok(Some(batch)) => {
@@ -7215,19 +7345,13 @@ fn poll_claimed_entry<O: EntryOps>(
                         }
                     }
                     state.coverage.park_by(epoch, attachment);
-                    if !state.owes_a_rung() {
-                        // The facts this poll carried are owed their
-                        // reconcile. Maintenance that came due meanwhile is
-                        // not this poll's to schedule: the reconcile's end
-                        // asks the clocks and hands the claim on to it, ahead
-                        // of another reconcile turn, so its fairness under
-                        // sustained traffic is the reconcile leg's to keep.
-                        schedule = Some(
-                            state
-                                .claim
-                                .schedule(|epoch| Job::Reconcile(name.clone(), epoch)),
-                        );
-                    }
+                    // The facts this poll carried are owed their reconcile.
+                    // Maintenance that came due meanwhile is not this poll's
+                    // to schedule: the reconcile's end asks the clocks and
+                    // hands the claim on to it, ahead of another reconcile
+                    // turn, so its fairness under sustained traffic is the
+                    // reconcile leg's to keep.
+                    owes_reconcile = !state.owes_a_rung();
                 }
                 Err(JobFailure::LostMaintainership) => {
                     state.claim.supersede();
@@ -7312,14 +7436,33 @@ fn poll_claimed_entry<O: EntryOps>(
             // Damage a read met while this poll held the entry comes first,
             // because the rebuild it owes dominates what a lease is owed.
             if release.is_none() {
+                // With no reload waiting, the reconcile the facts are owed is
+                // scheduled ahead of damage a read met, which its own end
+                // publishes.
+                if owes_reconcile && !state.claim.reload_waits() {
+                    schedule = Some(
+                        state
+                            .claim
+                            .schedule(|epoch| Job::Reconcile(name.clone(), epoch)),
+                    );
+                }
                 if schedule.is_none() {
                     schedule = publish_damage_a_read_met(&mut state, name);
                 }
                 // A reload waiting behind this poll takes the claim ahead of
-                // the apply queue and a due detach; the reconcile or rebuild
-                // scheduled above answers it instead.
+                // the reconcile the facts are owed, the apply queue and a due
+                // detach: its fold derives the facts. The rebuild scheduled
+                // above, or an overflow the facts carried, answers it
+                // instead, and the reconcile then runs.
                 if schedule.is_none() {
                     schedule = schedule_waiting_reload(&mut state, name);
+                }
+                if schedule.is_none() && owes_reconcile {
+                    schedule = Some(
+                        state
+                            .claim
+                            .schedule(|epoch| Job::Reconcile(name.clone(), epoch)),
+                    );
                 }
                 answer_waiting_reload(&mut state);
                 if schedule.is_none() {
@@ -7560,8 +7703,9 @@ fn end_job_leg<O: EntryOps>(
                 schedule_demanded_work(&mut state, name);
             }
             // Defensive: every move past a leg drops a reload waiting for it,
-            // and a maintenance leg's own end answers one, so none is known to
-            // reach here. One that did would wait for nothing that will end,
+            // and the ends of a poll, a maintenance leg and a reconcile turn
+            // each give one the claim or answer it, so none is known to reach
+            // here. One that did would wait for nothing that will end,
             // so it is answered rather than left blocking its asker.
             if !state.claim.held_by_routine() {
                 answer_waiting_reload(&mut state);
@@ -8246,7 +8390,8 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
             {
                 let live = {
                     let state = entry.gate.lock().expect("entry gate poisoned");
-                    state.claim.stands_at(epoch) && !state.applies_waiting()
+                    state.claim.stands_at(epoch)
+                        && (state.claim.reload_waits() || !state.applies_waiting())
                 };
                 if live {
                     shared.ops.loading_reconcile_boundary();
@@ -8259,8 +8404,10 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                 }
                 // A queued apply takes the claim before the next turn would
                 // begin: its own intake derives the facts this turn would
-                // have taken, so the turn is not run at all.
-                if state.applies_waiting() {
+                // have taken, so the turn is not run at all. A reload waiting
+                // for this turn was asked before any apply queued, so the
+                // turn runs and gives the reload the claim at its end.
+                if state.applies_waiting() && !state.claim.reload_waits() {
                     let next = state.claim.hand_on(|epoch| Job::Apply(name.clone(), epoch));
                     drop(state);
                     dispatch_handoff(shared, entry, epoch, next);
@@ -8324,10 +8471,26 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                         state.publish_pending_reconcile();
                     }
                     if let Some(next) = hand_on_carried_damage(&mut state, &name) {
+                        answer_waiting_reload(&mut state);
                         drop(state);
                         dispatch_handoff(shared, entry, epoch, next);
                         break None;
-                    } else if state.applies_waiting() {
+                    } else if let Some(next) = hand_on_to_the_waiting_reload(&mut state, &name) {
+                        // A reload waiting for this turn takes the claim ahead
+                        // of the apply queue, a due detach, maintenance and
+                        // another turn, and its fold derives the facts this
+                        // turn left, as an apply's intake would. The entry is
+                        // healing still: the reload's end publishes `Ready`
+                        // where nothing is left.
+                        drop(state);
+                        dispatch_handoff(shared, entry, epoch, next);
+                        break None;
+                    }
+                    // A reload still waiting met an entry it no longer runs
+                    // over — the facts this turn observed carried an
+                    // overflow — and is answered with where it stands.
+                    answer_waiting_reload(&mut state);
+                    if state.applies_waiting() {
                         // A queued apply takes the claim ahead of the next
                         // turn and of due maintenance: its intake derives the
                         // facts this turn left. Due maintenance is still due
@@ -8397,7 +8560,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
             run_reload_job(shared, entry, name, epoch, reply, ReloadStep::Activate)
         }
         Job::JudgeReload(name, epoch, reply) => {
-            run_reload_judgment_job(shared, entry, name, epoch, reply)
+            run_reload_job(shared, entry, name, epoch, reply, ReloadStep::Judge)
         }
         Job::ReloadReconcile(name, epoch, judgment, reply) => run_reload_job(
             shared,
@@ -8484,22 +8647,22 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     // too, because a demand can withdraw it before it runs.
                     state.publish_ready_where_nothing_is_left(handoff_saturated);
                     let facts_left = handoff_saturated || !state.pending.is_empty();
+                    if state.claim.reload_waits() && facts_left && !state.owes_a_rung() {
+                        // The facts left go to the waiting reload's fold, and
+                        // the entry publishes what they leave it at
+                        // meanwhile: healing, or an overflow that withdraws
+                        // trust and answers the reload below.
+                        state.publish_pending_reconcile();
+                    }
                     if let Some(job) = hand_on_carried_damage(&mut state, &name) {
                         next = Some(job);
-                    } else if state.claim.reload_waits() && facts_left {
-                        // The facts left go to their reconcile ahead of the
-                        // waiting reload, which is answered below with the
-                        // warming it publishes.
-                        state.publish_pending_reconcile();
-                        next = Some(
-                            state
-                                .claim
-                                .hand_on(|epoch| Job::Reconcile(name.clone(), epoch)),
-                        );
                     } else if let Some(job) = schedule_waiting_reload(&mut state, &name) {
                         // A reload waiting for this leg takes the claim ahead
-                        // of the apply queue, a due detach and another
-                        // maintenance leg.
+                        // of the reconcile the facts it left are owed, the
+                        // apply queue, a due detach and another maintenance
+                        // leg: its fold derives those facts, and so those a
+                        // saturated drain left with the watcher, since the
+                        // fold drains again.
                         next = Some(job);
                     } else if state.applies_waiting() {
                         next = Some(state.claim.hand_on(|epoch| Job::Apply(name.clone(), epoch)));
@@ -8649,7 +8812,9 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
 ///
 /// A reconcile turn and an apply's intake — which derives the facts delivered
 /// before it as a reconcile turn does — both end here, so the facts either
-/// meets are answered by one policy.
+/// meets are answered by one policy. A reload waiting for the turn is
+/// answered with where the policy left the entry: by the release where one
+/// begins, and here otherwise.
 fn end_turn_on_failure<O: EntryOps>(
     shared: &Arc<Shared<O>>,
     entry: &Arc<Entry<O::Attachment>>,
@@ -8692,6 +8857,7 @@ fn end_turn_on_failure<O: EntryOps>(
             state.pending.merge(Batch::rescan(RescanScope::Vault));
             let moved = root_moved(&error);
             state.withdraw_trust(watcher_lost(error));
+            answer_waiting_reload(&mut state);
             let next = schedule_due_detach(&mut state, name);
             let lost_at = moved.then(|| state.claim.epoch());
             drop(state);
@@ -8712,6 +8878,7 @@ fn end_turn_on_failure<O: EntryOps>(
             state.require_recovery();
             state.pending.merge(Batch::rescan(RescanScope::Vault));
             state.withdraw_trust(UntrustedReason::environmental_refusal(detail));
+            answer_waiting_reload(&mut state);
             let next = schedule_due_detach(&mut state, name);
             drop(state);
             if let Some(job) = next {
@@ -8725,6 +8892,7 @@ fn end_turn_on_failure<O: EntryOps>(
             state.pending.merge(Batch::rescan(RescanScope::Vault));
             let detail = state.record_reload_error(error);
             state.withdraw_trust(UntrustedReason::environmental_refusal(detail));
+            answer_waiting_reload(&mut state);
             let next = schedule_due_detach(&mut state, name);
             drop(state);
             if let Some(job) = next {
@@ -8741,6 +8909,7 @@ fn end_turn_on_failure<O: EntryOps>(
             let next = state
                 .claim
                 .hand_on(|epoch| Job::Rebuild(name.clone(), epoch));
+            answer_waiting_reload(&mut state);
             drop(state);
             dispatch_handoff(shared, entry, epoch, next);
         }
@@ -9061,7 +9230,11 @@ fn end_apply_on_failure<O: EntryOps>(
 
 #[derive(Clone, Copy)]
 enum ReloadStep {
+    /// Activate the candidate: its leg folds, reads, judges and puts it into
+    /// service.
     Activate,
+    /// A dry run: fold, read and judge the candidate, and activate nothing.
+    Judge,
     /// A later turn of a schema reload, carrying what its first turn judged.
     Reconcile(ReloadJudgment),
 }
@@ -9071,8 +9244,10 @@ enum ReloadStep {
 /// else the leg starts from under the same hold.
 ///
 /// A claim no longer standing at `epoch`, or coverage already out, is a leg
-/// that does not run: the asker is told where the entry stands — its
-/// published demand, park first — and `None` comes back. A reload and its dry run both begin here.
+/// that does not run: the asker is told what the entry then says of a reload
+/// not run — busy where a reload runs over it, and where it stands otherwise,
+/// park first — and `None` comes back. A reload, its dry run and a schema
+/// reload's later turns all begin here.
 fn begin_reload_leg<'entry, A: SnapshotSource>(
     entry: &'entry Entry<A>,
     epoch: u64,
@@ -9080,12 +9255,12 @@ fn begin_reload_leg<'entry, A: SnapshotSource>(
 ) -> Option<(GateHold<'entry, EntryState<A>>, A)> {
     let mut state = entry.gate.lock().expect("entry gate poisoned");
     if !state.claim.stands_at(epoch) {
-        let _ = reply.send(Err(ReloadRefusal::Unavailable(state.published_demand())));
+        reply.stand_down(&state);
         return None;
     }
     let Some(attachment) = state.coverage.take(epoch) else {
         state.claim.release();
-        let _ = reply.send(Err(ReloadRefusal::Unavailable(state.published_demand())));
+        reply.stand_down(&state);
         return None;
     };
     state.pin_for_leg(Leg::Job(epoch));
@@ -9108,11 +9283,11 @@ enum ReloadLegEnd<'entry, A: SnapshotSource> {
 ///
 /// The claim this leg ran under may have been taken away while it ran, so the
 /// work it did is not what stands over the entry any more; or a release may
-/// have opened over it. Either way the asker is told where the entry stands
-/// now — its published demand, park first — read off the gate under the same
-/// hold, which is the value
-/// [`begin_reload_leg`] reports for the same condition. A reload and its dry
-/// run both end here.
+/// have opened over it. Either way the asker is told what the entry then says
+/// of a reload that could not report its completion, read off the gate under
+/// the same hold: the leg read its candidate outside the gate, so the answer
+/// says nothing of the control files. A reload, its dry run and a schema
+/// reload's later turns all end here.
 fn end_reload_leg<'entry, A: SnapshotSource>(
     entry: &'entry Entry<A>,
     epoch: u64,
@@ -9122,61 +9297,150 @@ fn end_reload_leg<'entry, A: SnapshotSource>(
     let mut state = entry.gate.lock().expect("entry gate poisoned");
     state.unpin_leg(Leg::Job(epoch));
     if !state.claim.stands_at(epoch) || state.detach_in_flight {
-        let stands = state.published_demand();
+        reply.stand_down(&state);
         drop(state);
-        let _ = reply.send(Err(ReloadRefusal::Unavailable(stands)));
         return ReloadLegEnd::Superseded(attachment);
     }
     ReloadLegEnd::Standing(state, attachment)
 }
 
-/// Run one dry run of a reload: judge the candidate over the entry's coverage
-/// and hand the coverage back as it was.
+/// A reload's first step, as an apply's first step is its intake: derive the
+/// watcher facts the entry holds under the active declaration before the
+/// candidate is read.
 ///
-/// It begins and ends as a reload's leg does, so a dry run is refused when a
-/// reload asked at the same moment would be. What it judges of the candidate
-/// is the answer and nothing else: the handle stays as it stood, and no
-/// fingerprint, diagnostic or trust state is recorded for the candidate.
-/// Every failure it meets goes to [`apply_reload_runtime_failure`], which
-/// answers a candidate's own failure and records nothing, and applies to a
-/// fact about the entry the policy an activation's meets.
-fn run_reload_judgment_job<O: EntryOps>(
+/// It drains the watcher once and takes every fact pending in the entry
+/// under one hold of the gate. A watcher overflow among them withdraws trust
+/// as a turn's end does and hands the claim on to the reconcile that rereads
+/// the rescan; any other facts are derived as the reload's own commit, under
+/// the healing it publishes over a `Ready` entry, and the entry records that
+/// it has derived through the position it took them at, as a reconcile turn
+/// does. A fold that finds nothing commits nothing.
+///
+/// `Ok` is the coverage for the reload's own steps, the leg still pinned.
+/// `Err` carries what the job returns where the fold ended the reload, its
+/// asker answered: a claim no longer standing where the fold retakes the
+/// gate, an overflow, damage a read met under the claim, or a runtime
+/// failure, which answers `vault/reload-failed` saying the fold met it — a
+/// watcher loss the drain met answers with where the entry stands instead.
+/// The candidate was not read on any of those.
+fn fold_for_reload<O: EntryOps>(
     shared: &Arc<Shared<O>>,
     entry: &Arc<Entry<O::Attachment>>,
-    name: VaultName,
+    name: &VaultName,
     epoch: u64,
-    reply: ReloadReply,
-) -> Option<O::Attachment> {
-    let (state, attachment) = begin_reload_leg(entry, epoch, &reply)?;
-    drop(state);
-
-    let judged = shared.ops.judge_reload(&name, &attachment);
-
-    let (mut state, attachment) = match end_reload_leg(entry, epoch, attachment, &reply) {
-        ReloadLegEnd::Standing(state, attachment) => (state, attachment),
-        ReloadLegEnd::Superseded(attachment) => return Some(attachment),
-    };
-    let response = match judged {
-        Ok(judgment) => Ok(judgment),
-        Err(EntryReloadFailure::Unsupported) => Err(ReloadRefusal::Unsupported),
-        Err(EntryReloadFailure::Runtime(failure)) => {
-            return apply_reload_runtime_failure(
-                shared, entry, state, name, epoch, attachment, failure, reply,
-            );
+    mut attachment: O::Attachment,
+    reply: &ReloadReply,
+) -> Result<O::Attachment, Option<O::Attachment>> {
+    let drained = drain_observed(&shared.ops, name, &mut attachment);
+    let mut state = entry.gate.lock().expect("entry gate poisoned");
+    if !state.claim.stands_at(epoch) || state.detach_in_flight {
+        state.unpin_leg(Leg::Job(epoch));
+        reply.stand_down(&state);
+        return Err(Some(attachment));
+    }
+    // A saturated drain leaves facts with the watcher; the leg's end drains
+    // again before it publishes, so they are taken in there.
+    let observed = match drained {
+        Ok((observed, _)) => observed,
+        Err(failure) => {
+            state.unpin_leg(Leg::Job(epoch));
+            let answered = if matches!(failure, JobFailure::WatcherTerminal(_)) {
+                FailureAnswer::WhereItStands
+            } else {
+                FailureAnswer::Fold
+            };
+            return Err(apply_reload_runtime_failure(
+                shared,
+                entry,
+                state,
+                name.clone(),
+                epoch,
+                attachment,
+                failure,
+                reply.clone(),
+                answered,
+            ));
         }
     };
-    state.coverage.park_by(epoch, attachment);
-    state.claim.release();
+    state.pending.merge(observed);
+    if state.pending.has_rescans() {
+        state.unpin_leg(Leg::Job(epoch));
+        state.coverage.park_by(epoch, attachment);
+        state.publish_pending_reconcile();
+        let next = state
+            .claim
+            .hand_on(|epoch| Job::Reconcile(name.clone(), epoch));
+        reply.stand_down(&state);
+        drop(state);
+        dispatch_handoff(shared, entry, epoch, next);
+        return Err(None);
+    }
+    let (work, through) = state.pending.take();
+    if work.is_empty() {
+        return Ok(attachment);
+    }
+    if state.trust == TrustState::Ready {
+        state.trust = TrustState::warming(WarmingPhase::Healing, 0, None);
+    }
     drop(state);
-    let _ = reply.send(response);
-    None
+    // A schema-changing reload derives these facts twice — here under the
+    // active declaration, and again under the new one — an accepted cost of
+    // one turn's facts: whether the schema changes is known only from the
+    // candidate, which is read after this fold.
+    let folded = shared.ops.reconcile(
+        name,
+        &mut attachment,
+        ReconcileWork { batch: work },
+        &reporter(entry, epoch),
+    );
+    let mut state = entry.gate.lock().expect("entry gate poisoned");
+    if !state.claim.stands_at(epoch) || state.detach_in_flight {
+        state.unpin_leg(Leg::Job(epoch));
+        reply.stand_down(&state);
+        return Err(Some(attachment));
+    }
+    if let Err(failure) = folded {
+        state.unpin_leg(Leg::Job(epoch));
+        return Err(apply_reload_runtime_failure(
+            shared,
+            entry,
+            state,
+            name.clone(),
+            epoch,
+            attachment,
+            failure,
+            reply.clone(),
+            FailureAnswer::Fold,
+        ));
+    }
+    // The fold committed every fact it took, so a read that met the entry's
+    // change at or before `through` may answer from here on.
+    state.pending.derive_through(through);
+    record_advisories(&mut state, &*shared.ops, &attachment);
+    if state.damage_met_under_a_claim.is_some() {
+        state.unpin_leg(Leg::Job(epoch));
+        state.coverage.park_by(epoch, attachment);
+        let rebuild = hand_on_carried_damage(&mut state, name).expect("the damage is carried");
+        reply.stand_down(&state);
+        drop(state);
+        dispatch_handoff(shared, entry, epoch, rebuild);
+        return Err(None);
+    }
+    Ok(attachment)
 }
 
-/// Run one bounded turn of an explicit reload.
+/// Run one leg of an explicit reload: an activation, a dry run, or a schema
+/// reload's later turn.
 ///
-/// A schema reload keeps its reply while watcher facts remain. Each saturated
-/// drain hands the claim to a new turn, so unrelated vault work can run before
-/// this vault continues. The reply succeeds only after this vault is Ready.
+/// An activation and a dry run fold first ([`fold_for_reload`]) and read
+/// their candidate over the folded store; a later turn derives the facts
+/// pending under the new declaration. Every leg then ends as an apply's
+/// does, draining the watcher once more before it publishes, and
+/// [`end_reload_leg_over_its_drain`] publishes `Ready` only where nothing is
+/// left. A schema reload keeps its reply while watcher facts remain: each
+/// drain that leaves facts hands the claim to a new turn, so unrelated vault
+/// work can run before this vault continues, and the reply succeeds only
+/// once this vault is `Ready`.
 fn run_reload_job<O: EntryOps>(
     shared: &Arc<Shared<O>>,
     entry: &Arc<Entry<O::Attachment>>,
@@ -9185,15 +9449,25 @@ fn run_reload_job<O: EntryOps>(
     reply: ReloadReply,
     step: ReloadStep,
 ) -> Option<O::Attachment> {
-    let (mut state, mut attachment) = begin_reload_leg(entry, epoch, &reply)?;
-    let work = match step {
-        ReloadStep::Activate => Batch::default(),
-        ReloadStep::Reconcile(_) => state.pending.take().0,
+    let (mut state, attachment) = begin_reload_leg(entry, epoch, &reply)?;
+    let (mut attachment, work) = match step {
+        ReloadStep::Reconcile(_) => {
+            let work = state.pending.take().0;
+            drop(state);
+            (attachment, work)
+        }
+        ReloadStep::Activate | ReloadStep::Judge => {
+            drop(state);
+            match fold_for_reload(shared, entry, &name, epoch, attachment, &reply) {
+                Ok(attachment) => (attachment, Batch::default()),
+                Err(held) => return held,
+            }
+        }
     };
-    drop(state);
+    reply.reading_the_candidate();
 
     // `None` is an attachment that holds no reload at all.
-    let mut result = match step {
+    let result = match step {
         ReloadStep::Activate => {
             match shared
                 .ops
@@ -9204,6 +9478,11 @@ fn run_reload_job<O: EntryOps>(
                 Err(EntryReloadFailure::Runtime(failure)) => Some(Err(failure)),
             }
         }
+        ReloadStep::Judge => match shared.ops.judge_reload(&name, &attachment) {
+            Ok(judgment) => Some(Ok(judgment)),
+            Err(EntryReloadFailure::Unsupported) => None,
+            Err(EntryReloadFailure::Runtime(failure)) => Some(Err(failure)),
+        },
         ReloadStep::Reconcile(judgment) if work.is_empty() => Some(Ok(judgment)),
         ReloadStep::Reconcile(judgment) => Some(
             shared
@@ -9217,36 +9496,117 @@ fn run_reload_job<O: EntryOps>(
                 .map(|()| judgment),
         ),
     };
-    let mut observed = Batch::default();
-    let mut handoff_saturated = false;
-    if let Some(Ok(judgment)) = &result
-        && judgment.outcome == ReloadOutcome::SchemaChanged
-    {
-        match drain_observed(&shared.ops, &name, &mut attachment) {
-            Ok((batch, saturated)) => {
-                observed = batch;
-                handoff_saturated = saturated;
-            }
-            Err(error) => result = Some(Err(error)),
-        }
-    }
+    // A runtime failure other than the candidate's own goes to its policy
+    // with nothing drained; every other leg drains once more before it
+    // publishes, so facts that arrived while it read or derived are taken in.
+    let drained = match &result {
+        Some(Err(failure)) if !matches!(failure, JobFailure::Reload(_)) => None,
+        _ => Some(drain_observed(&shared.ops, &name, &mut attachment)),
+    };
 
     let (mut state, attachment) = match end_reload_leg(entry, epoch, attachment, &reply) {
         ReloadLegEnd::Standing(state, attachment) => (state, attachment),
         ReloadLegEnd::Superseded(attachment) => return Some(attachment),
     };
-    let Some(result) = result else {
-        state.coverage.park_by(epoch, attachment);
-        state.claim.release();
-        drop(state);
-        let _ = reply.send(Err(ReloadRefusal::Unsupported));
-        return None;
+    // A later turn runs only after its activation began replacing the
+    // derived state; a first leg had begun only where it recorded so.
+    let replacing =
+        state.reload_replacing_at.take() == Some(epoch) || matches!(step, ReloadStep::Reconcile(_));
+    let activates = !matches!(step, ReloadStep::Judge);
+
+    let result = match result {
+        None => Err(ReloadRefusal::Unsupported),
+        Some(Err(JobFailure::Reload(error))) if replacing => {
+            // An activation that failed after it began replacing the derived
+            // state withdraws trust and owes the recovery.
+            record_active_declaration(&mut state, &*shared.ops, &name, &attachment);
+            state.park_coverage(&*shared.ops, epoch, attachment);
+            if let Some(Ok((observed, _))) = drained {
+                state.pending.merge(observed);
+            }
+            let detail = state.record_reload_error(error.clone());
+            state.require_recovery();
+            state.pending.merge(Batch::rescan(RescanScope::Vault));
+            state.withdraw_trust(UntrustedReason::environmental_refusal(detail));
+            state.claim.release();
+            drop(state);
+            let _ = reply.send(Err(ReloadRefusal::Core(error)));
+            return None;
+        }
+        // A candidate refused before activation began: retained by an
+        // activation, recorded nowhere by a dry run, and no trust withdrawn
+        // of its own — the fold's derivation stands.
+        Some(Err(JobFailure::Reload(error))) => {
+            if activates {
+                record_active_declaration(&mut state, &*shared.ops, &name, &attachment);
+                state.record_reload_error(error.clone());
+            }
+            Err(ReloadRefusal::Core(error))
+        }
+        Some(Err(failure)) => {
+            return apply_reload_runtime_failure(
+                shared,
+                entry,
+                state,
+                name,
+                epoch,
+                attachment,
+                failure,
+                reply,
+                FailureAnswer::Runtime,
+            );
+        }
+        Some(Ok(judgment)) => Ok(judgment),
     };
-    if let Ok(judgment) = &result
-        && judgment.outcome == ReloadOutcome::SchemaChanged
-        && (handoff_saturated || !observed.is_empty())
+    let (observed, saturated) = match drained.expect("every leg reaching here drained") {
+        Ok(drained) => drained,
+        Err(failure) => {
+            if let Ok(judgment) = &result
+                && activates
+            {
+                // The activation took its candidate into service before the
+                // drain met the failure.
+                record_active_declaration(&mut state, &*shared.ops, &name, &attachment);
+                let _ = judgment;
+                state.last_reload_error = None;
+            }
+            let answered = if matches!(failure, JobFailure::WatcherTerminal(_)) {
+                FailureAnswer::WhereItStands
+            } else {
+                FailureAnswer::Runtime
+            };
+            return apply_reload_runtime_failure(
+                shared, entry, state, name, epoch, attachment, failure, reply, answered,
+            );
+        }
+    };
+
+    let Ok(judgment) = result else {
+        state.park_coverage(&*shared.ops, epoch, attachment);
+        return end_reload_leg_over_its_drain(
+            shared, entry, state, &name, epoch, observed, saturated, &reply, result,
+        );
+    };
+    if !activates {
+        state.park_coverage(&*shared.ops, epoch, attachment);
+        return end_reload_leg_over_its_drain(
+            shared,
+            entry,
+            state,
+            &name,
+            epoch,
+            observed,
+            saturated,
+            &reply,
+            Ok(judgment),
+        );
+    }
+    if judgment.outcome == ReloadOutcome::SchemaChanged
+        && observed.rescans().is_empty()
+        && (saturated || !observed.is_empty())
     {
-        let judgment = *judgment;
+        // The schema reload's own turns derive what its drain delivered
+        // under the new declaration, keeping its reply.
         state.pending.merge(observed);
         state.coverage.park_by(epoch, attachment);
         let next = state
@@ -9264,69 +9624,122 @@ fn run_reload_job<O: EntryOps>(
         return None;
     }
 
-    let response = match result {
-        Ok(judgment) => {
-            record_active_declaration(&mut state, &*shared.ops, &name, &attachment);
-            state.last_reload_error = None;
-            // A reload keeps the store it ran over, so damage a read met under
-            // its claim — an early read on a build it ran over an empty store,
-            // or a read on the standing handle — names the store it goes on
-            // holding.
-            let damage_a_read_met = state.damage_met_under_a_claim.take();
-            state.clear_rung_requirements();
-            match judgment.outcome {
-                ReloadOutcome::ConfigOnly => {
-                    // A config-only reload closed no handle, so the slot is
-                    // full and this mints nothing. It is spelled as the
-                    // parking that answers for the slot all the same: a leg
-                    // that parks coverage answers for the handle over it, and
-                    // an arm that did not would be the one place the
-                    // invariant is unenforced.
-                    state.park_coverage(&*shared.ops, epoch, attachment);
-                }
-                ReloadOutcome::SchemaChanged => {
-                    state.remint_coverage(&*shared.ops, epoch, attachment);
-                }
-            }
-            if let Some(detail) = damage_a_read_met {
-                // The damage is published in place of `Ready` and the claim
-                // goes on to the rebuild it owes, as for damage the reload
-                // met itself; the caller is answered with it.
-                state.damage_met_under_a_claim = Some(detail.clone());
-                let rebuild =
-                    hand_on_carried_damage(&mut state, &name).expect("the damage is carried");
-                drop(state);
-                let _ = reply.send(Err(ReloadRefusal::Runtime(JobFailure::StoreDamaged(
-                    detail,
-                ))));
-                dispatch_handoff(shared, entry, epoch, rebuild);
-                return None;
-            }
-            state.trust = TrustState::Ready;
-            Ok(judgment)
-        }
-        Err(JobFailure::Reload(error)) => {
-            record_active_declaration(&mut state, &*shared.ops, &name, &attachment);
+    record_active_declaration(&mut state, &*shared.ops, &name, &attachment);
+    state.last_reload_error = None;
+    // A reload keeps the store it ran over, so damage a read met under its
+    // claim — an early read on a build it ran over an empty store, or a read
+    // on the standing handle — names the store it goes on holding.
+    let damage_a_read_met = state.damage_met_under_a_claim.take();
+    state.clear_rung_requirements();
+    match judgment.outcome {
+        ReloadOutcome::ConfigOnly => {
+            // A config-only reload closed no handle, so the slot is full and
+            // this mints nothing. It is spelled as the parking that answers
+            // for the slot all the same: a leg that parks coverage answers for
+            // the handle over it, and an arm that did not would be the one
+            // place the invariant is unenforced.
             state.park_coverage(&*shared.ops, epoch, attachment);
-            let ready = state.trust == TrustState::Ready;
-            let detail = state.record_reload_error(error.clone());
-            if !ready {
-                state.require_recovery();
-                state.pending.merge(Batch::rescan(RescanScope::Vault));
-                state.withdraw_trust(UntrustedReason::environmental_refusal(detail));
-            }
-            Err(ReloadRefusal::Core(error))
         }
-        Err(failure) => {
-            return apply_reload_runtime_failure(
-                shared, entry, state, name, epoch, attachment, failure, reply,
-            );
+        ReloadOutcome::SchemaChanged => {
+            state.remint_coverage(&*shared.ops, epoch, attachment);
         }
-    };
+    }
+    if let Some(detail) = damage_a_read_met {
+        // The damage is published in place of `Ready` and the claim goes on
+        // to the rebuild it owes, as for damage the reload met itself; the
+        // caller is answered with it. The rebuild reads the vault whole, so
+        // nothing the drain delivered is kept for it.
+        state.damage_met_under_a_claim = Some(detail.clone());
+        let rebuild = hand_on_carried_damage(&mut state, &name).expect("the damage is carried");
+        drop(state);
+        let _ = reply.send(Err(ReloadRefusal::Runtime(JobFailure::StoreDamaged(
+            detail,
+        ))));
+        dispatch_handoff(shared, entry, epoch, rebuild);
+        return None;
+    }
+    end_reload_leg_over_its_drain(
+        shared,
+        entry,
+        state,
+        &name,
+        epoch,
+        observed,
+        saturated,
+        &reply,
+        Ok(judgment),
+    )
+}
+
+/// End a reload leg over what its last drain delivered, the coverage parked:
+/// the rule every leg's end follows.
+///
+/// A watcher overflow withdraws trust as a turn's end does and hands the claim
+/// on to the reconcile that rereads the rescan, and the asker is answered
+/// with where the entry stands, though the leg may have read and activated
+/// its candidate. Facts left — delivered, or left with the watcher by a
+/// saturated drain — leave the entry healing with trust unbroken, and the
+/// claim goes on as a reconcile turn's end hands it: to the apply queue's
+/// head where one waits, and else to the reconcile those facts are owed.
+/// Where nothing is left, the entry publishes `Ready`. The asker is answered
+/// `answer` on both of those, as the leg ends.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the leg's whole standing: its gate hold, its epoch, its drain and its asker"
+)]
+fn end_reload_leg_over_its_drain<O: EntryOps>(
+    shared: &Arc<Shared<O>>,
+    entry: &Arc<Entry<O::Attachment>>,
+    mut state: GateHold<'_, EntryState<O::Attachment>>,
+    name: &VaultName,
+    epoch: u64,
+    observed: Batch,
+    saturated: bool,
+    reply: &ReloadReply,
+    answer: ReloadAnswer,
+) -> Option<O::Attachment> {
+    state.pending.merge(observed);
+    if state.pending.has_rescans() {
+        state.publish_pending_reconcile();
+        let next = state
+            .claim
+            .hand_on(|epoch| Job::Reconcile(name.clone(), epoch));
+        reply.stand_down(&state);
+        drop(state);
+        dispatch_handoff(shared, entry, epoch, next);
+        return None;
+    }
+    if saturated || !state.pending.is_empty() {
+        state.publish_pending_reconcile();
+        let next = if state.applies_waiting() {
+            state.claim.hand_on(|epoch| Job::Apply(name.clone(), epoch))
+        } else {
+            state
+                .claim
+                .hand_on(|epoch| Job::Reconcile(name.clone(), epoch))
+        };
+        drop(state);
+        let _ = reply.send(answer);
+        dispatch_handoff(shared, entry, epoch, next);
+        return None;
+    }
+    state.publish_ready_where_nothing_is_left(false);
     state.claim.release();
     drop(state);
-    let _ = reply.send(response);
+    let _ = reply.send(answer);
     None
+}
+
+/// What the asker of a reload whose leg met a runtime failure is answered.
+#[derive(Clone, Copy)]
+enum FailureAnswer {
+    /// `vault/reload-failed`, with what the leg met.
+    Runtime,
+    /// `vault/reload-failed`, saying the reload's fold met it.
+    Fold,
+    /// Where the entry stands once the failure's policy has published: a
+    /// watcher loss either drain met.
+    WhereItStands,
 }
 
 /// Answer a runtime failure a reload-shaped leg met, and apply the policy the
@@ -9338,9 +9751,11 @@ fn run_reload_job<O: EntryOps>(
 ///
 /// Each of these is a fact about the entry rather than about the candidate
 /// the leg read, so an activation and a dry run that meet one both answer it
-/// here. A candidate's own failure is not such a fact: it is answered and
-/// nothing is recorded for it, and an activation, which retains it, handles
-/// it before reaching this.
+/// here, and so does a reload's fold. `answered` says how the asker is told:
+/// `vault/reload-failed` with what the leg met, or saying the fold met it, or
+/// where the entry then stands for a watcher loss a drain met. A candidate's
+/// own failure is not such a fact: [`run_reload_job`] answers it before
+/// reaching this.
 #[expect(
     clippy::too_many_arguments,
     reason = "the leg's whole standing: its gate hold, its coverage, its epoch and its asker"
@@ -9354,14 +9769,24 @@ fn apply_reload_runtime_failure<O: EntryOps>(
     attachment: O::Attachment,
     failure: JobFailure,
     reply: ReloadReply,
+    answered: FailureAnswer,
 ) -> Option<O::Attachment> {
+    let refusal = |state: &EntryState<O::Attachment>, failure: JobFailure| match answered {
+        FailureAnswer::Runtime => ReloadRefusal::Runtime(failure),
+        FailureAnswer::Fold => ReloadRefusal::Fold(failure),
+        FailureAnswer::WhereItStands => state.reload_stood_down(reply.candidate_read()),
+    };
     let response = match failure {
         JobFailure::Reload(error) => {
             state.coverage.park_by(epoch, attachment);
-            Err(ReloadRefusal::Core(error))
+            match answered {
+                FailureAnswer::Fold => ReloadRefusal::Fold(JobFailure::Reload(error)),
+                FailureAnswer::Runtime | FailureAnswer::WhereItStands => ReloadRefusal::Core(error),
+            }
         }
         error @ JobFailure::LostMaintainership => {
             begin_release(&mut state);
+            let refused = refusal(&state, error);
             drop(state);
             finish_release(
                 shared,
@@ -9371,13 +9796,14 @@ fn apply_reload_runtime_failure<O: EntryOps>(
                 Some(attachment),
                 ReleaseTail::HonorDemand,
             );
-            let _ = reply.send(Err(ReloadRefusal::Runtime(error)));
+            let _ = reply.send(Err(refused));
             return None;
         }
         JobFailure::MaintainerContended(incumbent) => {
             let error = JobFailure::MaintainerContended(incumbent.clone());
             state.maintainer_contended = Some(incumbent);
             begin_release(&mut state);
+            let refused = refusal(&state, error);
             drop(state);
             finish_release(
                 shared,
@@ -9387,7 +9813,7 @@ fn apply_reload_runtime_failure<O: EntryOps>(
                 Some(attachment),
                 ReleaseTail::HonorDemand,
             );
-            let _ = reply.send(Err(ReloadRefusal::Runtime(error)));
+            let _ = reply.send(Err(refused));
             return None;
         }
         JobFailure::WatcherTerminal(error) => {
@@ -9399,12 +9825,13 @@ fn apply_reload_runtime_failure<O: EntryOps>(
             state.pending.merge(Batch::rescan(RescanScope::Vault));
             state.withdraw_trust(watcher_lost(error));
             state.claim.release();
+            let refused = refusal(&state, failure);
             let lost_at = moved.then(|| state.claim.epoch());
             drop(state);
             if let Some(lost_at) = lost_at {
                 give_back_lost_coverage(shared, &name, lost_at);
             }
-            let _ = reply.send(Err(ReloadRefusal::Runtime(failure)));
+            let _ = reply.send(Err(refused));
             return None;
         }
         JobFailure::Environmental(detail) => {
@@ -9414,7 +9841,7 @@ fn apply_reload_runtime_failure<O: EntryOps>(
             state.require_recovery();
             state.pending.merge(Batch::rescan(RescanScope::Vault));
             state.withdraw_trust(UntrustedReason::environmental_refusal(detail));
-            Err(ReloadRefusal::Runtime(failure))
+            refusal(&state, failure)
         }
         JobFailure::StoreDamaged(detail) => {
             let failure = JobFailure::StoreDamaged(detail.clone());
@@ -9430,15 +9857,16 @@ fn apply_reload_runtime_failure<O: EntryOps>(
             let next = state
                 .claim
                 .hand_on(|epoch| Job::Rebuild(name.clone(), epoch));
+            let refused = refusal(&state, failure);
             drop(state);
-            let _ = reply.send(Err(ReloadRefusal::Runtime(failure)));
+            let _ = reply.send(Err(refused));
             dispatch_handoff(shared, entry, epoch, next);
             return None;
         }
     };
     state.claim.release();
     drop(state);
-    let _ = reply.send(response);
+    let _ = reply.send(Err(response));
     None
 }
 
@@ -10439,6 +10867,11 @@ mod tests {
         /// How many reconciles the fake had run when each reload or dry run
         /// read its candidate, in call order.
         reconciles_at_reload: Mutex<Vec<usize>>,
+        /// An arming run once, where the next reload or dry run reads its
+        /// candidate: past the reload's fold, so what it arms meets the
+        /// drain at the leg's end.
+        #[allow(clippy::type_complexity)]
+        once_the_candidate_is_read: Mutex<Option<Box<dyn FnOnce(&FakeOps) + Send>>>,
     }
 
     /// What had run against the fake when one of its applies ran.
@@ -10554,6 +10987,16 @@ mod tests {
         fn record_a_candidate_read(&self) {
             let reconciles = self.reconciles.load(Ordering::SeqCst);
             self.reconciles_at_reload.lock().unwrap().push(reconciles);
+            let arming = self.once_the_candidate_is_read.lock().unwrap().take();
+            if let Some(arming) = arming {
+                arming(self);
+            }
+        }
+
+        /// Arm `arming` for the drain at the end of the next reload's leg:
+        /// it runs once that reload reads its candidate, past its fold.
+        fn once_the_candidate_is_read(&self, arming: impl FnOnce(&FakeOps) + Send + 'static) {
+            *self.once_the_candidate_is_read.lock().unwrap() = Some(Box::new(arming));
         }
 
         /// Start the fake's maintenance clock again, a period from now, where
@@ -10818,7 +11261,10 @@ mod tests {
                 self.reload_started.store(true, Ordering::SeqCst);
                 wait_for_release("reload_release", &self.reload_release);
             }
-            if self.reload_candidate_unparsable.swap(false, Ordering::SeqCst) {
+            if self
+                .reload_candidate_unparsable
+                .swap(false, Ordering::SeqCst)
+            {
                 return Err(an_unparsable_candidate());
             }
             if self.panic_in_reload.load(Ordering::SeqCst) {
@@ -10868,7 +11314,10 @@ mod tests {
                 self.reload_started.store(true, Ordering::SeqCst);
                 wait_for_release("reload_release", &self.reload_release);
             }
-            if self.reload_candidate_unparsable.swap(false, Ordering::SeqCst) {
+            if self
+                .reload_candidate_unparsable
+                .swap(false, Ordering::SeqCst)
+            {
                 return Err(an_unparsable_candidate());
             }
             if self.panic_in_judge_reload.load(Ordering::SeqCst) {
@@ -12061,7 +12510,7 @@ mod tests {
         let entry = host.shared.entries.get(&name).unwrap();
         wait_for_the_attach_leg_to_end(&entry);
 
-        let (reply, answer) = mpsc::sync_channel(1);
+        let (reply, answer, _) = ReloadReply::channel();
         let epoch = {
             let mut state = entry.gate.lock().unwrap();
             // A leg that has released the gate and sent its reply, and has
@@ -12186,9 +12635,20 @@ mod tests {
         begin_release(&mut entry.gate.lock().unwrap());
         ops.reload_release.store(true, Ordering::SeqCst);
 
+        // The leg read its candidate before it met the release, so its answer
+        // says nothing of the control files.
+        let refused = reload.join().unwrap();
         assert_eq!(
-            reload.join().unwrap(),
-            Err(ReloadRefusal::Unavailable(Demand::State(releasing())))
+            refused,
+            Err(ReloadRefusal::Unreported(Demand::State(releasing())))
+        );
+        assert_eq!(
+            refused
+                .unwrap_err()
+                .answer(&name)
+                .expect("a live host answers with a code")
+                .message(),
+            "this vault's reload could not report its completion, and the vault is not ready yet"
         );
         wait_for_state(&host, &name, TrustState::Ready);
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
@@ -12240,9 +12700,10 @@ mod tests {
         begin_release(&mut entry.gate.lock().unwrap());
         ops.reload_release.store(true, Ordering::SeqCst);
 
+        // The dry run read its candidate before it met the release.
         assert_eq!(
             judgment.join().unwrap(),
-            Err(ReloadRefusal::Unavailable(Demand::State(releasing())))
+            Err(ReloadRefusal::Unreported(Demand::State(releasing())))
         );
         wait_for_state(&host, &name, TrustState::Ready);
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
@@ -12264,7 +12725,8 @@ mod tests {
         wait_for_state(&host, &name, TrustState::Ready);
         let reconciled = ops.reconciles.load(Ordering::SeqCst);
 
-        ops.handoff_rescan_poll_batches.store(1, Ordering::SeqCst);
+        // The fact arrives past the reload's fold, for its end's drain.
+        ops.once_the_candidate_is_read(|ops| ops.facts_on_next_polls.store(1, Ordering::SeqCst));
         assert_eq!(
             host.reload(&name),
             Ok(fake_judgment(ReloadOutcome::SchemaChanged))
@@ -13657,13 +14119,14 @@ mod tests {
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let _lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
-        ops.handoff_rescan_poll_batches.store(1, Ordering::SeqCst);
+        // The fact arrives past the reload's fold, for its end's drain.
+        ops.once_the_candidate_is_read(|ops| ops.facts_on_next_polls.store(1, Ordering::SeqCst));
         host.shared
             .panic_after_reload_handoff
             .store(true, Ordering::SeqCst);
 
         let entry = host.shared.entries.get(&name).unwrap();
-        let (reply, answer) = mpsc::sync_channel(1);
+        let (reply, answer, _) = ReloadReply::channel();
         entry
             .gate
             .lock()
@@ -14696,7 +15159,7 @@ mod tests {
         name: &VaultName,
     ) -> mpsc::Receiver<Result<ReloadJudgment, ReloadRefusal>> {
         let entry = host.shared.entries.get(name).expect("the vault is served");
-        let (reply, answer) = mpsc::sync_channel(1);
+        let (reply, answer, _) = ReloadReply::channel();
         entry
             .gate
             .lock()
@@ -16425,16 +16888,23 @@ mod tests {
         a_job_legs_coverage_loss_gives_the_coverage_back("reload", |host, ops, name, lease| {
             ops.reload_supported.store(true, Ordering::SeqCst);
             ops.reload_schema_changed.store(true, Ordering::SeqCst);
-            report_coverage_lost(ops, name);
+            // The loss meets the drain at the leg's end, past the fold, and
+            // the reload answers with where the entry then stands.
+            let lost = name.clone();
+            ops.once_the_candidate_is_read(move |ops| report_coverage_lost(ops, &lost));
             let refusal = host
                 .reload(name)
                 .expect_err("a reload whose drain met a coverage loss succeeded");
             assert!(
                 matches!(
                     refusal,
-                    ReloadRefusal::Runtime(JobFailure::WatcherTerminal(WatchError::CoverageLost(
-                        _
-                    )))
+                    ReloadRefusal::Unreported(Demand::State(TrustState::Untrusted {
+                        reason: UntrustedReason::WatcherLost {
+                            cause: WatcherLossCause::CoverageLost,
+                            ..
+                        },
+                        ..
+                    }))
                 ),
                 "the reload answered {refusal:?}"
             );
@@ -22641,21 +23111,35 @@ mod tests {
                 },
                 answered: |refusal| matches!(refusal, ReloadRefusal::Core(_)),
             },
+            // The drain's failures are armed past the reload's fold, for the
+            // drain at its leg's end.
             Row {
                 failure: "a terminal watcher",
                 arm: |ops, _| {
-                    *ops.terminal_poll.lock().unwrap() = Some(WatchError::Backend("lost".into()));
+                    ops.once_the_candidate_is_read(|ops| {
+                        *ops.terminal_poll.lock().unwrap() =
+                            Some(WatchError::Backend("lost".into()));
+                    });
                 },
+                // A loss the end's drain meets answers with where the entry
+                // stands.
                 answered: |refusal| {
                     matches!(
                         refusal,
-                        ReloadRefusal::Runtime(JobFailure::WatcherTerminal(_))
+                        ReloadRefusal::Unreported(Demand::State(TrustState::Untrusted {
+                            reason: UntrustedReason::WatcherLost { .. },
+                            ..
+                        }))
                     )
                 },
             },
             Row {
                 failure: "a refusing environment",
-                arm: |ops, _| ops.environmental_poll.store(true, Ordering::SeqCst),
+                arm: |ops, _| {
+                    ops.once_the_candidate_is_read(|ops| {
+                        ops.environmental_poll.store(true, Ordering::SeqCst);
+                    });
+                },
                 answered: |refusal| {
                     matches!(
                         refusal,
@@ -22668,7 +23152,10 @@ mod tests {
                 // The rung the damage hands on to mints a handle of its own,
                 // so it is held until the count is read.
                 arm: |ops, name| {
-                    arrange_for(&ops.damaged_poll_at, name);
+                    let damaged = name.clone();
+                    ops.once_the_candidate_is_read(move |ops| {
+                        arrange_for(&ops.damaged_poll_at, &damaged);
+                    });
                     ops.block_rebuild.store(true, Ordering::SeqCst);
                 },
                 answered: |refusal| {

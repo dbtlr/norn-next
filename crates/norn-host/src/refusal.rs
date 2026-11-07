@@ -362,12 +362,23 @@ impl ReloadRefusal {
         Ok(match self {
             ReloadRefusal::Unavailable(demand) => match demand.answer(name) {
                 Err(envelope) => envelope,
-                Ok(state) => unavailable(state),
+                Ok(state) => unavailable(state, Stopped::BeforeTheCandidate),
             },
+            ReloadRefusal::Busy => busy(Stopped::BeforeTheCandidate),
+            ReloadRefusal::Unreported(demand) => match demand.answer(name) {
+                Err(envelope) => envelope,
+                Ok(state) => unavailable(state, Stopped::AfterItMayHaveRead),
+            },
+            ReloadRefusal::UnreportedBusy => busy(Stopped::AfterItMayHaveRead),
             ReloadRefusal::Core(error) => {
                 reload_failed(ReloadFailure::control_file(control_file_failure(&error)))
             }
             ReloadRefusal::Runtime(failure) => reload_failed(runtime_failure(failure)),
+            ReloadRefusal::Fold(failure) => ErrorEnvelope::new(
+                "this vault's reload met a failure while it took in the change the vault held, \
+                 so its control files were not read",
+                ErrorDetail::reload_failed(runtime_failure(failure)),
+            ),
             ReloadRefusal::Unsupported => reload_failed(ReloadFailure::unsupported()),
             ReloadRefusal::HostStopped => return Err(HostError::WorkerStopped),
         })
@@ -416,17 +427,50 @@ impl ReloadRefusal {
 /// beside it. `a_release_window_opened_over_reload_closes_at_the_job_epilogue`
 /// pins the value that arrives. On every path nothing about the candidate is
 /// recorded by this answer, and a retry is what asks again.
-fn unavailable(state: TrustState) -> ErrorEnvelope {
-    if let Some(not_ready) = state.not_ready() {
-        return ErrorEnvelope::new(
-            "this vault holds nothing to re-read its control files over yet",
-            ErrorDetail::entry_not_ready(not_ready),
-        );
-    }
+fn unavailable(state: TrustState, stopped: Stopped) -> ErrorEnvelope {
+    let Some(not_ready) = state.not_ready() else {
+        return busy(stopped);
+    };
     ErrorEnvelope::new(
-        "this vault is already being worked over, so the reload was not started",
+        match stopped {
+            Stopped::BeforeTheCandidate => {
+                "this vault is not ready to re-read its control files yet, so they were not read"
+            }
+            Stopped::AfterItMayHaveRead => {
+                "this vault's reload could not report its completion, and the vault is not ready \
+                 yet"
+            }
+        },
+        ErrorDetail::entry_not_ready(not_ready),
+    )
+}
+
+/// The `vault/reload-busy` envelope, in the one spelling each place a reload
+/// stopped has.
+fn busy(stopped: Stopped) -> ErrorEnvelope {
+    ErrorEnvelope::new(
+        match stopped {
+            Stopped::BeforeTheCandidate => {
+                "this vault is already being worked over, so its control files were not read"
+            }
+            Stopped::AfterItMayHaveRead => {
+                "this vault's reload could not report its completion, and the vault is being \
+                 worked over"
+            }
+        },
         ErrorDetail::reload_busy(),
     )
+}
+
+/// Where a reload answered with where its entry stands had stopped, which is
+/// what its message may say of the control files.
+#[derive(Clone, Copy)]
+enum Stopped {
+    /// Before any leg read the candidate: the files were not read.
+    BeforeTheCandidate,
+    /// After a leg may have read the candidate: the message says nothing of
+    /// the files.
+    AfterItMayHaveRead,
 }
 
 /// The envelope a reload that ran and did not finish its work is filed under.
@@ -1253,8 +1297,12 @@ mod reload_tests {
     enum Shape {
         Unsupported,
         Unavailable,
+        Busy,
+        Unreported,
+        UnreportedBusy,
         Core,
         Runtime,
+        Fold,
         HostStopped,
     }
 
@@ -1262,9 +1310,13 @@ mod reload_tests {
         const fn after(self) -> Option<Shape> {
             match self {
                 Shape::Unsupported => Some(Shape::Unavailable),
-                Shape::Unavailable => Some(Shape::Core),
+                Shape::Unavailable => Some(Shape::Busy),
+                Shape::Busy => Some(Shape::Unreported),
+                Shape::Unreported => Some(Shape::UnreportedBusy),
+                Shape::UnreportedBusy => Some(Shape::Core),
                 Shape::Core => Some(Shape::Runtime),
-                Shape::Runtime => Some(Shape::HostStopped),
+                Shape::Runtime => Some(Shape::Fold),
+                Shape::Fold => Some(Shape::HostStopped),
                 Shape::HostStopped => None,
             }
         }
@@ -1285,8 +1337,12 @@ mod reload_tests {
         match refusal {
             ReloadRefusal::Unsupported => Shape::Unsupported,
             ReloadRefusal::Unavailable(_) => Shape::Unavailable,
+            ReloadRefusal::Busy => Shape::Busy,
+            ReloadRefusal::Unreported(_) => Shape::Unreported,
+            ReloadRefusal::UnreportedBusy => Shape::UnreportedBusy,
             ReloadRefusal::Core(_) => Shape::Core,
             ReloadRefusal::Runtime(_) => Shape::Runtime,
+            ReloadRefusal::Fold(_) => Shape::Fold,
             ReloadRefusal::HostStopped => Shape::HostStopped,
         }
     }
@@ -1418,8 +1474,93 @@ mod reload_tests {
                     ReloadFailure::maintainer_contended(MaintainerIdentity::unknown()),
                 )),
             ),
+            (ReloadRefusal::Busy, Some(ErrorDetail::reload_busy())),
+            (
+                ReloadRefusal::Unreported(Demand::State(TrustState::warming(
+                    WarmingPhase::ReleasingCoverage,
+                    0,
+                    None,
+                ))),
+                Some(ErrorDetail::entry_not_ready(NotReady::warming(
+                    WarmingPhase::ReleasingCoverage,
+                    0,
+                    None,
+                ))),
+            ),
+            (
+                ReloadRefusal::Unreported(Demand::State(TrustState::untrusted(
+                    UntrustedReason::WatcherOverflow,
+                ))),
+                Some(ErrorDetail::entry_untrusted(
+                    UntrustedReason::WatcherOverflow,
+                )),
+            ),
+            (
+                ReloadRefusal::UnreportedBusy,
+                Some(ErrorDetail::reload_busy()),
+            ),
+            (
+                ReloadRefusal::Fold(JobFailure::LostMaintainership),
+                Some(ErrorDetail::reload_failed(
+                    ReloadFailure::lost_maintainership(),
+                )),
+            ),
             (ReloadRefusal::HostStopped, None),
         ]
+    }
+
+    /// **What a reload answered with where its entry stands says of the
+    /// control files follows where it stopped.** One that stopped before a
+    /// leg read its candidate says they were not read; one that may have
+    /// read them says only that it could not report its completion; a fold
+    /// failure says the fold met it. Each case has one spelling, and a state
+    /// that serves renders busy whichever variant carries it.
+    #[test]
+    fn a_reload_answer_says_of_the_control_files_what_its_stopping_place_makes_true() {
+        let not_read_busy = "this vault is already being worked over, so its control files were not \
+                             read";
+        let not_read_not_ready =
+            "this vault is not ready to re-read its control files yet, so they were not read";
+        let late_busy = "this vault's reload could not report its completion, and the vault is being worked \
+             over";
+        let late_not_ready =
+            "this vault's reload could not report its completion, and the vault is not ready yet";
+        let building = || {
+            Demand::State(TrustState::warming(
+                WarmingPhase::InstallingCoverage,
+                0,
+                None,
+            ))
+        };
+        for (refusal, message) in [
+            (ReloadRefusal::Busy, not_read_busy),
+            (
+                ReloadRefusal::Unavailable(Demand::State(TrustState::Ready)),
+                not_read_busy,
+            ),
+            (ReloadRefusal::Unavailable(building()), not_read_not_ready),
+            (
+                ReloadRefusal::Unavailable(Demand::State(TrustState::Unattached)),
+                not_read_not_ready,
+            ),
+            (ReloadRefusal::UnreportedBusy, late_busy),
+            (
+                ReloadRefusal::Unreported(Demand::State(TrustState::Ready)),
+                late_busy,
+            ),
+            (ReloadRefusal::Unreported(building()), late_not_ready),
+            (
+                ReloadRefusal::Fold(JobFailure::Environmental("refused".to_string())),
+                "this vault's reload met a failure while it took in the change the vault held, so \
+                 its control files were not read",
+            ),
+        ] {
+            let envelope = refusal
+                .clone()
+                .answer(&name("notes"))
+                .expect("a live host answers with a code");
+            assert_eq!(envelope.message(), message, "{refusal:?}");
+        }
     }
 
     /// Every reload refusal reaches exactly one detail, payload and all — or

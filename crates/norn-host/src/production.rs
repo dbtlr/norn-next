@@ -8968,12 +8968,26 @@ mod tests {
             host.authored_drift(&name),
             Ok(crate::AuthoredDrift::Current)
         );
-        host.reload(&name)
-            .expect("config-only reload from covered root");
-        assert_eq!(
-            host.authored_drift(&name),
-            Ok(crate::AuthoredDrift::Current)
-        );
+        // The watcher may report the root's move before the reload's fold
+        // drains it, and a loss the fold or the end's drain meets answers
+        // with where the entry stands rather than reading a candidate. Where
+        // it has not yet, the reload reads the covered root, as the drift
+        // did.
+        match host.reload(&name) {
+            Ok(_) => assert_eq!(
+                host.authored_drift(&name),
+                Ok(crate::AuthoredDrift::Current)
+            ),
+            Err(
+                crate::ReloadRefusal::Unavailable(crate::Demand::State(
+                    norn_wire::TrustState::Untrusted { reason, .. },
+                ))
+                | crate::ReloadRefusal::Unreported(crate::Demand::State(
+                    norn_wire::TrustState::Untrusted { reason, .. },
+                )),
+            ) if matches!(reason, norn_wire::UntrustedReason::WatcherLost { .. }) => {}
+            Err(refusal) => panic!("config-only reload from covered root: {refusal:?}"),
+        }
     }
 
     #[test]

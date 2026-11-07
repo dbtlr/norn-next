@@ -15,10 +15,10 @@ use super::*;
 /// What a reload's asker is answered.
 type Answer = Result<ReloadJudgment, ReloadRefusal>;
 
-/// The answer `vault/reload-busy` renders from: the entry still publishes
-/// `Ready` and explicit work holds it.
+/// The answer `vault/reload-busy` renders from: the entry serves or settles
+/// a change, and explicit work holds it.
 fn busy() -> Answer {
-    Err(ReloadRefusal::Unavailable(Demand::State(TrustState::Ready)))
+    Err(ReloadRefusal::Busy)
 }
 
 /// The answer a reload that ran over the fake's attachment gets.
@@ -735,7 +735,11 @@ fn a_reload_over_a_vault_settling_an_edit_waits_for_the_turn_and_folds_what_it_l
             "dry run: {dry_run}: the fold derived nothing"
         );
         wait_for_state(&host, &name, TrustState::Ready);
-        assert_eq!(ops.reconciles.load(Ordering::SeqCst), 2, "dry run: {dry_run}");
+        assert_eq!(
+            ops.reconciles.load(Ordering::SeqCst),
+            2,
+            "dry run: {dry_run}"
+        );
         drop((lease, host));
     }
 }
@@ -758,7 +762,11 @@ fn a_reload_over_a_quiet_ready_vault_commits_nothing_and_drains_twice() {
         };
 
         assert_eq!(reloaded, judged(), "dry run: {dry_run}");
-        assert_eq!(ops.reconciles.load(Ordering::SeqCst), 0, "dry run: {dry_run}");
+        assert_eq!(
+            ops.reconciles.load(Ordering::SeqCst),
+            0,
+            "dry run: {dry_run}"
+        );
         assert_eq!(
             polls_of(&ops, &name) - polled,
             2,
@@ -903,7 +911,15 @@ fn an_overflow_at_the_end_drain_answers_the_reload_untrusted_and_owes_the_rescan
         ops.handoff_rescan_poll_batches.store(1, Ordering::SeqCst);
         ops.reload_release.store(true, Ordering::SeqCst);
 
-        assert_eq!(answer_of(&answer), overflowed(), "dry run: {dry_run}");
+        // The leg read its candidate, so its answer is spelled as one that
+        // may have; an untrusted entry renders alike either way.
+        assert_eq!(
+            answer_of(&answer),
+            Err(ReloadRefusal::Unreported(Demand::State(
+                TrustState::untrusted(UntrustedReason::WatcherOverflow)
+            ))),
+            "dry run: {dry_run}"
+        );
         wait_for_state(&host, &name, TrustState::Ready);
         drop((lease, host));
     }
@@ -945,7 +961,8 @@ fn a_candidate_failure_over_a_settling_vault_keeps_the_folds_derivation_and_its_
         hold_a_settling_turn(&host, &ops, &name);
         let answer = a_waiting_reload(&host, &name, dry_run);
 
-        ops.reload_candidate_unparsable.store(true, Ordering::SeqCst);
+        ops.reload_candidate_unparsable
+            .store(true, Ordering::SeqCst);
         end_the_turn_leaving_a_fact(&ops);
 
         let refused = answer_of(&answer);
@@ -963,7 +980,11 @@ fn a_candidate_failure_over_a_settling_vault_keeps_the_folds_derivation_and_its_
             "dry run: {dry_run}: the candidate's failure withdrew trust"
         );
         assert_eq!(ops.recovers.load(Ordering::SeqCst), 0, "dry run: {dry_run}");
-        assert_eq!(ops.reconciles.load(Ordering::SeqCst), 2, "dry run: {dry_run}");
+        assert_eq!(
+            ops.reconciles.load(Ordering::SeqCst),
+            2,
+            "dry run: {dry_run}"
+        );
         drop((lease, host));
     }
 }
@@ -986,7 +1007,9 @@ fn a_failure_the_fold_meets_answers_reload_failed_saying_the_fold_met_it() {
 
     let refusal = answer_of(&answer).expect_err("the fold's failure was answered as success");
     assert!(ops.reconciles_at_reload.lock().unwrap().is_empty());
-    let envelope = refusal.answer(&name).expect("a live host answers with a code");
+    let envelope = refusal
+        .answer(&name)
+        .expect("a live host answers with a code");
     assert_eq!(
         envelope.detail(),
         &ErrorDetail::reload_failed(norn_wire::ReloadFailure::environmental("refused"))
