@@ -25,8 +25,11 @@
 //! another reload, an apply, or a scheduled detach; a reload waits behind the
 //! vault's own polls, maintenance and reconcile turns, and derives the change
 //! they left before its own work — and `vault/reload-failed`, carrying what
-//! the reload met, for every outcome of a reload that ran, its `unsupported`
-//! kind among them for an attachment that holds no reload at all. A reload
+//! the reload met, for a reload that ran and failed in its fold, its
+//! candidate or its activation, its `unsupported` kind among them for an
+//! attachment that holds no reload at all. A reload whose fold or end drain
+//! meets a watcher overflow or a loss answers with where the entry stands,
+//! `host/entry-untrusted`, whether or not it activated its candidate. A reload
 //! that lost its claim or its leg after it may have read the control files
 //! answers in the same codes; as `host/entry-not-ready` or
 //! `vault/reload-busy`, its message says only that it could not report its

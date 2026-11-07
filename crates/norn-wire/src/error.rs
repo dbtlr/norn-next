@@ -438,9 +438,10 @@ pub enum ReasonCode {
     /// `vault/reload-busy` — the vault is serving or settling a change, and
     /// other work holds it. At the ask that is explicit work — another
     /// reload, an apply, or a scheduled detach — and the control files were
-    /// not read. A reload that lost its claim to newer work may have read
-    /// them before it could report its completion, and its message says only
-    /// that. A reload never meets this for the vault's own routine work, a
+    /// not read. A reload that lost its claim to newer work before a leg read
+    /// its candidate says the same; one that lost it after its leg may have
+    /// read them says only that it could not report its completion. A reload
+    /// never meets this for the vault's own routine work, a
     /// watcher poll, a maintenance leg or a reconcile turn: it waits for that
     /// work instead. The detail carries nothing: the ask is repeated rather
     /// than resolved.
