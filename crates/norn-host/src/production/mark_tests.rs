@@ -521,3 +521,55 @@ fn a_place_reading_keeps_an_unknown_stat_names_directory_mark() {
     assert_a_build_from_zero_agrees(&f, &mut attachment);
     ops.detach(&name, attachment);
 }
+
+/// A refused directory renders onto a readable document's subject, but its
+/// place-scoped mark is withheld there even though the directory cannot list.
+#[test]
+fn a_document_row_withholds_a_colliding_refused_directorys_mark() {
+    let f = Fixture::new("mark-row-exclusive");
+    let Some((ops, name, progress, mut attachment)) =
+        attach_over(&f, &["n\u{1}.md"], &["n\u{1}.md/a.md", "n\u{fffd}.md"])
+    else {
+        return;
+    };
+    let root = f.vault();
+    let folder = root.join("n\u{1}.md");
+    let Some(denial) = Denied::search(&folder, &folder.join("a.md")) else {
+        ops.detach(&name, attachment);
+        return;
+    };
+    let vault = norn_fs::Vault::open(&root, &[]).unwrap();
+    let norn_fs::WalkFact::Unreadable(fact) = vault.fact(Path::new("n\u{1}.md")).unwrap() else {
+        panic!("the walk must see the unlistable directory");
+    };
+    assert_eq!(fact.kind(), norn_fs::UnreadKind::Directory);
+    assert!(
+        attachment
+            .store
+            .begin_request()
+            .stored_document(&DocumentPath::new("n\u{fffd}.md").unwrap())
+            .unwrap()
+            .is_some(),
+        "the colliding document must stand before the mark is attempted"
+    );
+    let mut account = Account::default();
+    {
+        let mut pending = Pending::new(&mut attachment.store, 2, &root, &[], &mut account).unwrap();
+        assert!(pending.unreadable_fact(&fact, None).unwrap());
+        pending.flush().unwrap();
+    }
+    assert!(sorted_kinds(&mut attachment.store, "n\u{fffd}.md").is_empty());
+    denial.restore();
+    fs::remove_dir_all(&folder).unwrap();
+    watcher_leg(
+        &ops,
+        &name,
+        &mut attachment,
+        &progress,
+        &root,
+        &["n\u{1}.md"],
+    );
+    assert!(sorted_kinds(&mut attachment.store, "n\u{fffd}.md").is_empty());
+    assert_a_build_from_zero_agrees(&f, &mut attachment);
+    ops.detach(&name, attachment);
+}
