@@ -32,6 +32,28 @@ pub(super) struct Spelling {
     pub(super) quarantine: Quarantine,
 }
 
+/// What one reading of a place found at every spelling rendering onto it.
+pub(super) struct PlaceReading {
+    /// The Markdown files the vault walk would quarantine there.
+    pub(super) spellings: Vec<Spelling>,
+    /// Whether a folder on the way hid some spellings, as it hides them from
+    /// the vault walk.
+    pub(super) hidden: bool,
+    /// Whether some spelling there is a folder the vault walk cannot list,
+    /// which a build from zero marks at the place.
+    pub(super) unlistable: bool,
+}
+
+/// The place the paths beneath a folder render under: each of its segments
+/// rendered as a folder, which is how every path under it renders them.
+pub(super) fn rendered_folder(folder: &Path) -> String {
+    folder
+        .components()
+        .map(|segment| rendered_folder_name(segment.as_os_str()))
+        .collect::<Vec<String>>()
+        .join("/")
+}
+
 /// The places one job has read and the folders those readings listed.
 ///
 /// **A place is read once per job.** Every spelling of it is filed by the
@@ -87,6 +109,25 @@ impl PlaceReadings {
         vault: &norn_fs::Vault,
         place: &DocumentPath,
     ) -> Result<Option<Vec<Spelling>>, JobFailure> {
+        let reading = self.read(vault, place, false)?;
+        Ok((!reading.spellings.is_empty() || !reading.hidden).then_some(reading.spellings))
+    }
+
+    /// Every spelling in the vault that renders onto `place`, read as
+    /// [`PlaceReadings::spellings`] reads them, and — where `folders` asks —
+    /// whether any of them is a folder the vault walk cannot list.
+    ///
+    /// **A folder's mark is filed at its own place**, which is a rendering
+    /// wherever the document grammar refuses its name, so the folders rendering
+    /// onto a place are its spellings on the content side exactly as the files
+    /// are on the spelling side. Asking costs one listing per folder found
+    /// there, which only a reading that concludes a mark asks for.
+    pub(super) fn read(
+        &mut self,
+        vault: &norn_fs::Vault,
+        place: &DocumentPath,
+        folders: bool,
+    ) -> Result<PlaceReading, JobFailure> {
         let segments: Vec<&str> = place.as_str().split('/').collect();
         let ancestor = place.unrendered_ancestor();
         let spelled = if ancestor.is_empty() {
@@ -121,6 +162,7 @@ impl PlaceReadings {
             candidates = next;
         }
         let mut spellings = Vec::new();
+        let mut unlistable = false;
         for candidate in candidates {
             let at = match reach_spelling(vault, &candidate)? {
                 Reached::Stands(at) => at,
@@ -128,10 +170,30 @@ impl PlaceReadings {
                     hidden = true;
                     continue;
                 }
+                Reached::Folder(at) => {
+                    // The vault walk's own answer about the folder, which is
+                    // what a build from zero marks it by.
+                    if folders
+                        && !unlistable
+                        && let norn_fs::WalkFact::Unreadable(fact) =
+                            vault.fact(at.as_path()).map_err(effect)?
+                    {
+                        unlistable = fact.kind() == norn_fs::UnreadKind::Directory;
+                    }
+                    continue;
+                }
                 Reached::Absent => continue,
             };
             let path = at.as_path();
             if !is_markdown(path) {
+                // An unknown stat at a non-document name takes the walk's
+                // directory posture where this row-exclusive mark stands.
+                if folders
+                    && !unlistable
+                    && let norn_fs::WalkFact::Unreadable(fact) = vault.fact(path).map_err(effect)?
+                {
+                    unlistable = fact.kind() == norn_fs::UnreadKind::Unknown;
+                }
                 continue;
             }
             if let Err(quarantine) = document_path(path) {
@@ -141,7 +203,11 @@ impl PlaceReadings {
                 });
             }
         }
-        Ok((!spellings.is_empty() || !hidden).then_some(spellings))
+        Ok(PlaceReading {
+            spellings,
+            hidden,
+            unlistable,
+        })
     }
 
     /// The names in `folder` whose rendering carries the marker, listed once
@@ -194,6 +260,8 @@ pub(super) struct DeferredReadings {
 pub(super) enum Reached {
     /// A regular file stands there, at the spelling its folder lists.
     Stands(norn_fs::NormalizedPath),
+    /// A folder stands there, which names no document and can carry a mark.
+    Folder(norn_fs::NormalizedPath),
     /// A folder on the way hides it, as it hides it from the vault walk.
     Hidden,
     /// No file the vault walk would yield stands there.
@@ -213,6 +281,10 @@ pub(super) fn reach_spelling(
             kind: norn_fs::PathKind::RegularFile,
             at,
         }) => Reached::Stands(at),
+        Ok(norn_fs::Reach::Stands {
+            kind: norn_fs::PathKind::Directory,
+            at,
+        }) => Reached::Folder(at),
         Ok(_) => Reached::Absent,
         // A folder on the way that cannot be listed hides what is under it, as
         // it does from the vault walk.
@@ -257,48 +329,57 @@ pub(super) fn place_candidates() -> usize {
     PLACE_CANDIDATES.with(std::cell::Cell::get)
 }
 
-/// Re-derive the spelling findings a refused spelling's places hold: its own
-/// place, where the name could be or have been a document, and the places
-/// beneath it, where it could be or have been a folder no stored path sits
-/// under.
+/// Re-derive the place-scoped findings at the rendered places a reported
+/// spelling stands at or holds: its own place, where the name could be or have
+/// been a refused document or a marked folder, and the places beneath it, where
+/// it could be or have been a folder.
 ///
-/// **Every arm of a scoped leg that meets a refused spelling ends here**,
-/// whatever it found at the path. A report does not say what the path was
-/// before — a file that became a folder leaves its own place behind, and a
-/// folder that became a file, or lost what it held, leaves the places
-/// beneath — so both are read, and each costs nothing where the spelling could
-/// not have been that.
-pub(super) fn read_places_of_a_refused_spelling(
+/// **A place is read wherever no scope the caller registered can conclude
+/// it**, which is wherever it carries the marker: a place is named by every
+/// spelling rendering onto it, so only the vault walk reaches its unrendered
+/// ancestor. A refused spelling's places always do, and so do the places of an
+/// admitted name that carries the marker as written.
+///
+/// **Every arm of a scoped leg ends here**, whatever it found at the path. A
+/// report does not say what the path was before — a file that became a folder
+/// leaves its own place behind, and a folder that became a file, or lost what
+/// it held, leaves the places beneath — so both are read, and each costs
+/// nothing where the spelling could not have been that. A name that is no
+/// refused Markdown file has no spelling finding at its place, so its own
+/// place is read only where a mark stands there — one keyed probe — and an
+/// admitted name is the one spelling of a place without the marker, so the
+/// reading finds whether a folder the walk cannot list still stands there.
+pub(super) fn read_rendered_places(
     pending: &mut Pending<'_>,
     vault: &norn_fs::Vault,
     path: &Path,
     page_size: usize,
     order: StoredPathOrder,
 ) -> Result<(), JobFailure> {
-    let addressed = path
-        .to_str()
-        .is_some_and(|spelling| DirectoryPrefix::new(spelling).is_ok());
-    // A folder whose spelling a prefix admits addresses the stored paths
-    // beneath it, and the scope the caller pruned and registered is what
-    // concludes the places there.
-    if !addressed {
+    // A folder whose rendering is its own spelling holds places the scope the
+    // caller pruned and registered concludes.
+    if rendered_folder(path).contains(RENDERED_MARKER) {
         read_places_beneath(pending, vault, path, page_size, order)?;
     }
-    if is_markdown(path) && document_path(path).is_err() {
-        pending.read_place(vault, &DocumentPath::rendered(path))?;
+    let place = DocumentPath::rendered(path);
+    let refused_document = is_markdown(path) && document_path(path).is_err();
+    if refused_document || pending.marked(&place)? {
+        pending.read_place(vault, &place)?;
     }
     Ok(())
 }
 
-/// Re-derive the spelling findings at every place the documents under a
-/// refused folder rendered onto.
+/// Re-derive the place-scoped findings at every place the documents and
+/// folders under a folder whose rendering carries the marker rendered onto.
 ///
-/// The folder's own spelling addresses no range of stored paths, since no
-/// path carrying it is storable, so the places are found from the findings
-/// the store holds under the folder's rendering: one ordered pass over that
+/// The places are found from the findings the store holds under the folder's
+/// rendering — a refused folder's spelling addresses no range of stored paths
+/// at all, and an admitted one's range holds rows rather than the places other
+/// spellings render onto: one ordered pass over that
 /// range, which costs the findings standing there rather than the vault. Each
 /// place is read for the spellings still rendering onto it, so a colliding
-/// sibling folder's documents keep their findings.
+/// sibling folder's documents keep their findings and a folder beneath that
+/// still cannot be listed keeps its mark.
 fn read_places_beneath(
     pending: &mut Pending<'_>,
     vault: &norn_fs::Vault,
@@ -306,13 +387,15 @@ fn read_places_beneath(
     page_size: usize,
     order: StoredPathOrder,
 ) -> Result<(), JobFailure> {
-    let rendered: Vec<String> = folder
-        .components()
-        .map(|segment| rendered_folder_name(segment.as_os_str()))
-        .collect();
-    let Ok(prefix) = DirectoryPrefix::new(&rendered.join("/")) else {
+    let Ok(prefix) = DirectoryPrefix::new(&rendered_folder(folder)) else {
         return Ok(());
     };
+    let kinds: Vec<FindingKind> = Decided::BySpelling
+        .kinds()
+        .iter()
+        .copied()
+        .chain([FindingKind::UnreadableDirectory])
+        .collect();
     let mut after: Option<DocumentPath> = None;
     loop {
         let page = pending
@@ -320,7 +403,7 @@ fn read_places_beneath(
             .begin_request()
             .finding_subjects_without_rows_after(
                 SubjectScope::Under(&prefix),
-                Decided::BySpelling.kinds(),
+                &kinds,
                 after.as_ref(),
                 page_size,
                 order,
