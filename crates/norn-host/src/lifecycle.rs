@@ -10432,6 +10432,13 @@ mod tests {
         /// Facts the watcher delivers to the next polls, whichever thread
         /// polls: a case sets them where only the leg it drives can poll.
         facts_on_next_polls: AtomicUsize,
+        /// Refuse the next reload's candidate as a schema that does not
+        /// parse, before anything is activated: a candidate failure. One-shot,
+        /// and spent by a reload or its dry run alike.
+        reload_candidate_unparsable: AtomicBool,
+        /// How many reconciles the fake had run when each reload or dry run
+        /// read its candidate, in call order.
+        reconciles_at_reload: Mutex<Vec<usize>>,
     }
 
     /// What had run against the fake when one of its applies ran.
@@ -10533,7 +10540,22 @@ mod tests {
             .is_ok()
     }
 
+    /// The candidate failure `reload_candidate_unparsable` arms: a schema
+    /// that does not parse, met before anything is activated.
+    fn an_unparsable_candidate() -> EntryReloadFailure {
+        EntryReloadFailure::Runtime(JobFailure::Reload(ReloadError::SchemaParse(
+            "the candidate schema does not parse".into(),
+        )))
+    }
+
     impl FakeOps {
+        /// Record that a reload or a dry run is reading its candidate, with
+        /// the reconciles run by then.
+        fn record_a_candidate_read(&self) {
+            let reconciles = self.reconciles.load(Ordering::SeqCst);
+            self.reconciles_at_reload.lock().unwrap().push(reconciles);
+        }
+
         /// Start the fake's maintenance clock again, a period from now, where
         /// the case gave it one.
         fn restart_maintenance_clock(&self) {
@@ -10791,9 +10813,13 @@ mod tests {
             if !self.reload_supported.load(Ordering::SeqCst) {
                 return Err(EntryReloadFailure::Unsupported);
             }
+            self.record_a_candidate_read();
             if self.block_reload.load(Ordering::SeqCst) {
                 self.reload_started.store(true, Ordering::SeqCst);
                 wait_for_release("reload_release", &self.reload_release);
+            }
+            if self.reload_candidate_unparsable.swap(false, Ordering::SeqCst) {
+                return Err(an_unparsable_candidate());
             }
             if self.panic_in_reload.load(Ordering::SeqCst) {
                 panic!("{RELOAD_PANIC}");
@@ -10837,9 +10863,13 @@ mod tests {
             if !self.reload_supported.load(Ordering::SeqCst) {
                 return Err(EntryReloadFailure::Unsupported);
             }
+            self.record_a_candidate_read();
             if self.block_reload.load(Ordering::SeqCst) {
                 self.reload_started.store(true, Ordering::SeqCst);
                 wait_for_release("reload_release", &self.reload_release);
+            }
+            if self.reload_candidate_unparsable.swap(false, Ordering::SeqCst) {
+                return Err(an_unparsable_candidate());
             }
             if self.panic_in_judge_reload.load(Ordering::SeqCst) {
                 panic!("{JUDGE_RELOAD_PANIC}");

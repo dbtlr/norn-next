@@ -1,6 +1,9 @@
-//! The reload admission's lifecycle cases: a reload of either mode waits
-//! behind the vault's own routine work — a watcher poll or a maintenance leg —
-//! and refuses at once on explicit work.
+//! The reload admission's lifecycle cases: a reload of either mode runs over
+//! a vault that serves or settles a change, waits behind the vault's own
+//! routine work — a watcher poll, a maintenance leg or a reconcile turn —
+//! folds the facts that work left before it reads its candidate, publishes
+//! `Ready` only where its end leaves nothing, and refuses at once on explicit
+//! work.
 //!
 //! The hosts here run no ambient dispatcher tick inside a case, so the poll or
 //! the leg a case holds open is the one the case drove, and a waiting reload
@@ -217,11 +220,11 @@ fn while_a_reload_waits_a_maintenance_leg_hands_on_to_no_other_maintenance_leg()
     drop((lease, host));
 }
 
-/// **A maintenance leg that ends with watcher facts left hands on to their
-/// reconcile, and the waiting reload is answered with the warming that
-/// reconcile publishes**, not as busy.
+/// **A maintenance leg that ends with watcher facts left gives the waiting
+/// reload the claim, and the reload's fold derives them** before it reads
+/// its candidate, rather than a reconcile ahead of it answering it warming.
 #[test]
-fn a_maintenance_leg_leaving_facts_answers_the_waiting_reload_with_the_reconciles_warming() {
+fn a_maintenance_leg_leaving_facts_gives_the_waiting_reload_the_claim_and_its_fold_derives_them() {
     let ops = Arc::new(FakeOps::default());
     let (host, name, lease) = a_ready_vault(&ops);
     hold_a_maintenance_leg(&host, &ops, &name);
@@ -231,25 +234,18 @@ fn a_maintenance_leg_leaving_facts_answers_the_waiting_reload_with_the_reconcile
     ops.facts_on_next_polls.store(1, Ordering::SeqCst);
     ops.maintenance_release.store(true, Ordering::SeqCst);
 
-    let answered = answer_of(&answer);
-    assert!(
-        matches!(
-            answered,
-            Err(ReloadRefusal::Unavailable(Demand::State(
-                TrustState::Warming { .. }
-            )))
-        ),
-        "the waiting reload was answered {answered:?}"
-    );
-    wait_for_reconciles(&ops, 1, "the reconcile the facts are owed to run");
+    assert_eq!(answer_of(&answer), judged());
+    assert_eq!(*ops.reconciles_at_reload.lock().unwrap(), vec![1]);
     wait_for_state(&host, &name, TrustState::Ready);
+    assert_eq!(ops.reconciles.load(Ordering::SeqCst), 1);
     drop((lease, host));
 }
 
-/// **A watcher poll that reports facts schedules their reconcile, and the
-/// reload waiting behind the poll is answered with the warming it publishes.**
+/// **A watcher poll that reports facts gives the reload waiting behind it the
+/// claim, and the reload's fold derives them** in place of the reconcile the
+/// poll would have scheduled.
 #[test]
-fn a_poll_reporting_facts_answers_the_waiting_reload_with_the_reconciles_warming() {
+fn a_poll_reporting_facts_gives_the_waiting_reload_the_claim_and_its_fold_derives_them() {
     let ops = Arc::new(FakeOps::default());
     let (host, name, lease) = a_ready_vault(&ops);
     let poll = hold_a_poll(&host, &ops);
@@ -258,15 +254,11 @@ fn a_poll_reporting_facts_answers_the_waiting_reload_with_the_reconciles_warming
     ops.facts_on_next_polls.store(1, Ordering::SeqCst);
     ops.poll_release.store(true, Ordering::SeqCst);
 
-    assert_eq!(
-        answer_of(&answer),
-        Err(ReloadRefusal::Unavailable(Demand::State(
-            TrustState::warming(WarmingPhase::Healing, 0, None)
-        )))
-    );
+    assert_eq!(answer_of(&answer), judged());
+    assert_eq!(*ops.reconciles_at_reload.lock().unwrap(), vec![1]);
     poll.join().unwrap();
-    wait_for_reconciles(&ops, 1, "the reconcile the facts are owed to run");
     wait_for_state(&host, &name, TrustState::Ready);
+    assert_eq!(ops.reconciles.load(Ordering::SeqCst), 1);
     drop((lease, host));
 }
 
@@ -664,5 +656,411 @@ fn a_reload_waiting_behind_a_poll_a_root_refusal_moves_past_answers_the_park() {
     assert_eq!(answer_of(&answer), Err(ReloadRefusal::Unavailable(parked)));
     ops.poll_release.store(true, Ordering::SeqCst);
     poll.join().unwrap();
+    drop((lease, host));
+}
+
+/// The healing a `Ready` vault settles a change under.
+fn healing() -> TrustState {
+    TrustState::warming(WarmingPhase::Healing, 0, None)
+}
+
+/// The answer a reload whose drain met a watcher overflow gets: where the
+/// entry then stands, its trust withdrawn until the rescan is reread.
+fn overflowed() -> Answer {
+    Err(ReloadRefusal::Unavailable(Demand::State(
+        TrustState::untrusted(UntrustedReason::WatcherOverflow),
+    )))
+}
+
+/// Hold a `Ready` vault settling an edit: a driven poll reports a fact, and
+/// the reconcile turn it schedules is held open inside the fake. Only that
+/// turn is held; the turns after it run.
+fn hold_a_settling_turn(host: &SharedHost, ops: &Arc<FakeOps>, name: &VaultName) {
+    let turn = ops.reconciles.load(Ordering::SeqCst) + 1;
+    ops.block_reconcile_at.store(turn, Ordering::SeqCst);
+    report_through_a_driven_poll(ops, host, name, &ops.off_thread_fact_poll_batches);
+    wait_for_flag("reconcile_started", &ops.reconcile_started);
+    assert_eq!(
+        host.state(name),
+        answered(healing()),
+        "the edit did not leave the vault settling"
+    );
+}
+
+/// Let the held turn end, its own drain meeting one more fact: the turn
+/// leaves that fact pending, for whatever takes the claim at its end.
+fn end_the_turn_leaving_a_fact(ops: &FakeOps) {
+    ops.facts_on_next_polls.store(1, Ordering::SeqCst);
+    ops.reconcile_release.store(true, Ordering::SeqCst);
+}
+
+/// Ask a reload of `name` — a dry run where `dry_run` — on a thread of its
+/// own, answering its receiver at once.
+fn ask_a_reload(host: &SharedHost, name: &VaultName, dry_run: bool) -> mpsc::Receiver<Answer> {
+    let (sent, answer) = mpsc::channel();
+    let asking = Arc::clone(host);
+    let asked = name.clone();
+    thread::spawn(move || {
+        let _ = sent.send(if dry_run {
+            asking.judge_reload(&asked)
+        } else {
+            asking.reload(&asked)
+        });
+    });
+    answer
+}
+
+/// **A reload asked while a `Ready` vault settles an edit waits for the
+/// reconcile turn and folds what that turn left**, in either mode: it reads
+/// its candidate only once its fold has derived the fact, and the vault ends
+/// `Ready` with nothing derived twice.
+#[test]
+fn a_reload_over_a_vault_settling_an_edit_waits_for_the_turn_and_folds_what_it_left() {
+    for dry_run in [false, true] {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name, lease) = a_ready_vault(&ops);
+        hold_a_settling_turn(&host, &ops, &name);
+
+        let answer = a_waiting_reload(&host, &name, dry_run);
+        end_the_turn_leaving_a_fact(&ops);
+
+        assert_eq!(answer_of(&answer), judged(), "dry run: {dry_run}");
+        assert_eq!(
+            *ops.reconciles_at_reload.lock().unwrap(),
+            vec![2],
+            "dry run: {dry_run}: the candidate was not read over the turn and the fold's commit"
+        );
+        assert!(
+            !ops.reconciled_batches.lock().unwrap()[1].is_empty(),
+            "dry run: {dry_run}: the fold derived nothing"
+        );
+        wait_for_state(&host, &name, TrustState::Ready);
+        assert_eq!(ops.reconciles.load(Ordering::SeqCst), 2, "dry run: {dry_run}");
+        drop((lease, host));
+    }
+}
+
+/// **A reload over a quiet `Ready` vault commits nothing and drains the
+/// watcher twice**: its fold finds no fact, and its end drains once more
+/// before it publishes. That is the whole of what the fold adds to a reload
+/// over a quiet vault.
+#[test]
+fn a_reload_over_a_quiet_ready_vault_commits_nothing_and_drains_twice() {
+    for dry_run in [false, true] {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name, lease) = a_ready_vault(&ops);
+        let polled = polls_of(&ops, &name);
+
+        let reloaded = if dry_run {
+            host.judge_reload(&name)
+        } else {
+            host.reload(&name)
+        };
+
+        assert_eq!(reloaded, judged(), "dry run: {dry_run}");
+        assert_eq!(ops.reconciles.load(Ordering::SeqCst), 0, "dry run: {dry_run}");
+        assert_eq!(
+            polls_of(&ops, &name) - polled,
+            2,
+            "dry run: {dry_run}: the fold's drain and the end's drain"
+        );
+        assert_eq!(host.state(&name), answered(TrustState::Ready));
+        drop((lease, host));
+    }
+}
+
+/// **A reload publishes `Ready` only where its end's drain leaves nothing**,
+/// in either mode: the fold leaves the vault healing while the candidate is
+/// read, and a fact arriving meanwhile is taken in by the end's drain and
+/// handed on to its reconcile rather than left behind a `Ready` publication.
+#[test]
+fn a_reload_over_a_settling_vault_publishes_ready_only_where_its_end_drain_leaves_nothing() {
+    for dry_run in [false, true] {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name, lease) = a_ready_vault(&ops);
+        hold_a_settling_turn(&host, &ops, &name);
+        let answer = a_waiting_reload(&host, &name, dry_run);
+
+        ops.block_reload.store(true, Ordering::SeqCst);
+        end_the_turn_leaving_a_fact(&ops);
+        wait_for_flag("reload_started", &ops.reload_started);
+        assert_eq!(
+            host.state(&name),
+            answered(healing()),
+            "dry run: {dry_run}: the fold published Ready over the candidate's reading"
+        );
+
+        ops.facts_on_next_polls.store(1, Ordering::SeqCst);
+        ops.reload_release.store(true, Ordering::SeqCst);
+
+        assert_eq!(answer_of(&answer), judged(), "dry run: {dry_run}");
+        assert_eq!(
+            ops.facts_on_next_polls.load(Ordering::SeqCst),
+            0,
+            "dry run: {dry_run}: the end's drain left the fact with the watcher"
+        );
+        wait_for_reconciles(&ops, 3, "the reconcile the end's drain handed on to");
+        wait_for_state(&host, &name, TrustState::Ready);
+        drop((lease, host));
+    }
+}
+
+/// **A read that met the change a reload folds answers once the fold commits
+/// it**, from the reader standing then and under the healing that still
+/// stands, never from a snapshot without the change.
+#[test]
+fn a_read_that_met_the_change_a_reload_folds_answers_once_the_fold_commits() {
+    let ops = Arc::new(FakeOps::default());
+    let (host, name, lease) = a_ready_vault(&ops);
+    hold_a_settling_turn(&host, &ops, &name);
+    let answer = a_waiting_reload(&host, &name, false);
+
+    // The fold's commit is held, and so is the reload's own step after it.
+    ops.hold_reconciles_from.store(2, Ordering::SeqCst);
+    ops.block_reload.store(true, Ordering::SeqCst);
+    end_the_turn_leaving_a_fact(&ops);
+    wait_for_reconciles(&ops, 2, "the fold's commit to begin");
+
+    let before = host.read_evidence();
+    thread::scope(|scope| {
+        let reading = scope.spawn(|| host.begin_read(&name));
+        wait_for_settle_waits(&host, before, 1);
+        assert!(
+            !reading.is_finished(),
+            "the read answered before the fold committed the change it met"
+        );
+        ops.later_reconcile_release.store(true, Ordering::SeqCst);
+        let hold = reading
+            .join()
+            .expect("the read finished")
+            .expect("a read that met the folded change was refused");
+        assert_eq!(hold.reading().published(), &Demand::State(healing()));
+    });
+
+    ops.reload_release.store(true, Ordering::SeqCst);
+    assert_eq!(answer_of(&answer), judged());
+    drop((lease, host));
+}
+
+/// **A watcher overflow the turn a reload waits for meets withdraws trust,
+/// and the reload answers with it**, its candidate not read; the rescan
+/// then runs.
+#[test]
+fn an_overflow_during_the_wait_answers_the_reload_untrusted_and_owes_the_rescan() {
+    let ops = Arc::new(FakeOps::default());
+    let (host, name, lease) = a_ready_vault(&ops);
+    hold_a_settling_turn(&host, &ops, &name);
+    let answer = a_waiting_reload(&host, &name, false);
+
+    ops.handoff_rescan_poll_batches.store(1, Ordering::SeqCst);
+    ops.reconcile_release.store(true, Ordering::SeqCst);
+
+    assert_eq!(answer_of(&answer), overflowed());
+    assert!(ops.reconciles_at_reload.lock().unwrap().is_empty());
+    wait_for_state(&host, &name, TrustState::Ready);
+    drop((lease, host));
+}
+
+/// **A watcher overflow the fold's drain meets withdraws trust, and the
+/// reload answers with it**, in either mode, its candidate not read; the
+/// rescan then runs.
+#[test]
+fn an_overflow_at_the_folds_drain_answers_the_reload_untrusted_and_owes_the_rescan() {
+    for dry_run in [false, true] {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name, lease) = a_ready_vault(&ops);
+        let poll = hold_a_poll(&host, &ops);
+        let answer = a_waiting_reload(&host, &name, dry_run);
+
+        // The poll reports an edit, and the fold's drain meets an overflow.
+        ops.facts_on_next_polls.store(1, Ordering::SeqCst);
+        ops.handoff_rescan_poll_batches.store(1, Ordering::SeqCst);
+        ops.poll_release.store(true, Ordering::SeqCst);
+
+        assert_eq!(answer_of(&answer), overflowed(), "dry run: {dry_run}");
+        assert!(
+            ops.reconciles_at_reload.lock().unwrap().is_empty(),
+            "dry run: {dry_run}: the candidate was read over an overflow"
+        );
+        poll.join().unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        drop((lease, host));
+    }
+}
+
+/// **A watcher overflow the end's drain meets withdraws trust, and the reload
+/// answers with it**, in either mode, though it read its candidate; the
+/// rescan then runs.
+#[test]
+fn an_overflow_at_the_end_drain_answers_the_reload_untrusted_and_owes_the_rescan() {
+    for dry_run in [false, true] {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name, lease) = a_ready_vault(&ops);
+        ops.block_reload.store(true, Ordering::SeqCst);
+        let answer = ask_a_reload(&host, &name, dry_run);
+        wait_for_flag("reload_started", &ops.reload_started);
+
+        ops.handoff_rescan_poll_batches.store(1, Ordering::SeqCst);
+        ops.reload_release.store(true, Ordering::SeqCst);
+
+        assert_eq!(answer_of(&answer), overflowed(), "dry run: {dry_run}");
+        wait_for_state(&host, &name, TrustState::Ready);
+        drop((lease, host));
+    }
+}
+
+/// **An apply asked while a reload waits behind a reconcile turn queues
+/// behind the reload**: the turn's end gives the reload the claim, and the
+/// apply runs at the reload's end.
+#[test]
+fn an_apply_asked_while_a_reload_waits_behind_a_turn_runs_after_the_reload() {
+    let ops = Arc::new(FakeOps::default());
+    let (host, name, lease) = a_ready_vault(&ops);
+    hold_a_settling_turn(&host, &ops, &name);
+    let answer = a_waiting_reload(&host, &name, false);
+    let pending = host.admit_apply(&name, a_plan(&name)).expect("admitted");
+
+    ops.block_reload.store(true, Ordering::SeqCst);
+    end_the_turn_leaving_a_fact(&ops);
+    wait_for_flag("reload_started", &ops.reload_started);
+    assert!(
+        ops.applies_ran.lock().unwrap().is_empty(),
+        "the apply ran ahead of the reload waiting before it"
+    );
+
+    ops.reload_release.store(true, Ordering::SeqCst);
+    assert_eq!(answer_of(&answer), judged());
+    pending.wait().expect("the apply applied");
+    drop((lease, host));
+}
+
+/// **A candidate failure over a settling vault keeps what the fold derived
+/// and withdraws no trust**, in either mode: the vault is `Ready` once
+/// nothing is left, and no recovery is owed.
+#[test]
+fn a_candidate_failure_over_a_settling_vault_keeps_the_folds_derivation_and_its_trust() {
+    for dry_run in [false, true] {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name, lease) = a_ready_vault(&ops);
+        hold_a_settling_turn(&host, &ops, &name);
+        let answer = a_waiting_reload(&host, &name, dry_run);
+
+        ops.reload_candidate_unparsable.store(true, Ordering::SeqCst);
+        end_the_turn_leaving_a_fact(&ops);
+
+        let refused = answer_of(&answer);
+        assert!(
+            matches!(
+                refused,
+                Err(ReloadRefusal::Core(ReloadError::SchemaParse(_)))
+            ),
+            "dry run: {dry_run}: the reload answered {refused:?}"
+        );
+        assert_eq!(*ops.reconciles_at_reload.lock().unwrap(), vec![2]);
+        assert_eq!(
+            host.state(&name),
+            answered(TrustState::Ready),
+            "dry run: {dry_run}: the candidate's failure withdrew trust"
+        );
+        assert_eq!(ops.recovers.load(Ordering::SeqCst), 0, "dry run: {dry_run}");
+        assert_eq!(ops.reconciles.load(Ordering::SeqCst), 2, "dry run: {dry_run}");
+        drop((lease, host));
+    }
+}
+
+/// **A runtime failure the fold meets answers `vault/reload-failed` saying
+/// the fold met it**, its candidate not read, and the entry takes the policy
+/// that failure owes.
+#[test]
+fn a_failure_the_fold_meets_answers_reload_failed_saying_the_fold_met_it() {
+    let ops = Arc::new(FakeOps::default());
+    let (host, name, lease) = a_ready_vault(&ops);
+    hold_a_settling_turn(&host, &ops, &name);
+    let answer = a_waiting_reload(&host, &name, false);
+
+    ops.hold_reconciles_from.store(2, Ordering::SeqCst);
+    end_the_turn_leaving_a_fact(&ops);
+    wait_for_reconciles(&ops, 2, "the fold's commit to begin");
+    ops.environmental_reconcile.store(true, Ordering::SeqCst);
+    ops.later_reconcile_release.store(true, Ordering::SeqCst);
+
+    let refusal = answer_of(&answer).expect_err("the fold's failure was answered as success");
+    assert!(ops.reconciles_at_reload.lock().unwrap().is_empty());
+    let envelope = refusal.answer(&name).expect("a live host answers with a code");
+    assert_eq!(
+        envelope.detail(),
+        &ErrorDetail::reload_failed(norn_wire::ReloadFailure::environmental("refused"))
+    );
+    assert_eq!(
+        envelope.message(),
+        "this vault's reload met a failure while it took in the change the vault held, so its \
+         control files were not read"
+    );
+    drop((lease, host));
+}
+
+/// **A schema-changing reload over a settling vault completes, and answers
+/// once `Ready` returns.**
+#[test]
+fn a_schema_changing_reload_over_a_settling_vault_answers_at_ready() {
+    let ops = Arc::new(FakeOps::default());
+    let (host, name, lease) = a_ready_vault(&ops);
+    ops.reload_schema_changed.store(true, Ordering::SeqCst);
+    hold_a_settling_turn(&host, &ops, &name);
+    let answer = a_waiting_reload(&host, &name, false);
+
+    end_the_turn_leaving_a_fact(&ops);
+
+    assert_eq!(
+        answer_of(&answer),
+        Ok(fake_judgment(ReloadOutcome::SchemaChanged))
+    );
+    assert_eq!(host.state(&name), answered(TrustState::Ready));
+    drop((lease, host));
+}
+
+/// **Explicit work refuses a reload busy at once over a `Ready` and a
+/// settling vault alike**, in one spelling that says the control files were
+/// not read.
+#[test]
+fn explicit_work_refuses_a_reload_busy_alike_over_a_ready_and_a_settling_vault() {
+    let ops = Arc::new(FakeOps::default());
+    let (host, name, lease) = a_ready_vault(&ops);
+    ops.block_apply.store(true, Ordering::SeqCst);
+    let pending = host.admit_apply(&name, a_plan(&name)).expect("admitted");
+    wait_for_flag("apply_started", &ops.apply_started);
+    let over_ready = host
+        .reload(&name)
+        .expect_err("a reload ran beside an apply")
+        .answer(&name)
+        .expect("a live host answers with a code");
+    ops.apply_release.store(true, Ordering::SeqCst);
+    pending.wait().expect("the apply applied");
+    wait_for_state(&host, &name, TrustState::Ready);
+    wait_for_a_quiet_entry(&host, &name);
+
+    hold_a_settling_turn(&host, &ops, &name);
+    let answer = a_waiting_reload(&host, &name, true);
+    let over_settling = host
+        .reload(&name)
+        .expect_err("a second reload was admitted")
+        .answer(&name)
+        .expect("a live host answers with a code");
+    let dry_over_settling = host
+        .judge_reload(&name)
+        .expect_err("a second dry run was admitted")
+        .answer(&name)
+        .expect("a live host answers with a code");
+
+    assert_eq!(over_ready.detail(), &ErrorDetail::reload_busy());
+    assert_eq!(
+        over_ready.message(),
+        "this vault is already being worked over, so its control files were not read"
+    );
+    assert_eq!(over_settling, over_ready);
+    assert_eq!(dry_over_settling, over_ready);
+
+    ops.reconcile_release.store(true, Ordering::SeqCst);
+    assert_eq!(answer_of(&answer), judged());
     drop((lease, host));
 }
