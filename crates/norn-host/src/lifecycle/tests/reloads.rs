@@ -192,6 +192,53 @@ fn a_reload_over_a_scheduled_maintenance_leg_takes_the_claim_and_the_pass_runs_a
     drop((entry, lease, host));
 }
 
+/// **A reload over a reconcile turn scheduled and not yet begun takes the
+/// claim from it, and its fold derives the facts the turn was scheduled
+/// for**, in either mode: the reload reads its candidate over the fold's
+/// commit, and the displaced turn does not run after it.
+#[test]
+fn a_reload_over_a_scheduled_reconcile_turn_takes_the_claim_and_its_fold_derives_the_facts() {
+    for dry_run in [false, true] {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name, lease) = a_ready_vault(&ops);
+        let entry = host.shared.entries.get(&name).unwrap();
+        {
+            // A poll's end, its marker held undispatched: the fact it took
+            // in is pending, the vault settles it, and the turn is scheduled.
+            let mut state = entry.gate.lock().unwrap();
+            state.pending.merge(a_fact());
+            state.publish_pending_reconcile();
+            state
+                .claim
+                .schedule(|epoch| Job::Reconcile(name.clone(), epoch));
+        }
+
+        let reloaded = if dry_run {
+            host.judge_reload(&name)
+        } else {
+            host.reload(&name)
+        };
+
+        assert_eq!(reloaded, judged(), "dry run: {dry_run}");
+        assert_eq!(
+            *ops.reconciles_at_reload.lock().unwrap(),
+            vec![1],
+            "dry run: {dry_run}: the candidate was not read over the fold's commit"
+        );
+        assert!(
+            !ops.reconciled_batches.lock().unwrap()[0].is_empty(),
+            "dry run: {dry_run}: the fold derived nothing"
+        );
+        assert_eq!(host.state(&name), answered(TrustState::Ready));
+        assert_eq!(
+            ops.reconciles.load(Ordering::SeqCst),
+            1,
+            "dry run: {dry_run}: the displaced turn ran after the reload"
+        );
+        drop((entry, lease, host));
+    }
+}
+
 /// **While a reload waits, a maintenance leg that ends with maintenance still
 /// due hands the claim to the reload rather than to another maintenance
 /// leg**; the pass it owes runs after the reload.
