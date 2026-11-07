@@ -3090,7 +3090,9 @@ or any other refusal of the candidate before activation begins — leaves the en
 and the leg's end left it, whatever state the reload was admitted at, and withdraws no trust
 of its own: the fold's derivation stands, and the entry is `Ready` only where nothing is left. A
 schema-changing activation that fails after it has begun replacing the derived state withdraws
-trust and owes the recovery. Whether it had begun is a fact the leg records, never one read
+trust and owes the recovery. If its end drain also meets a runtime failure other than a
+candidate error, that failure decides the entry's policy while the reload retains and replies
+with the candidate's own error. Whether it had begun is a fact the leg records, never one read
 back off the trust label, because a reload admitted over a settling entry publishes healing
 before it begins.
 

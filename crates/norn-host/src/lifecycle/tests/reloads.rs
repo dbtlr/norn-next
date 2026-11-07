@@ -1460,6 +1460,44 @@ fn a_schema_activation_failing_after_it_began_over_a_settling_vault_withdraws_tr
     drop((entry, lease, host));
 }
 
+/// Damage the end drain meets after a failed activation owes a rebuild,
+/// while the reload still answers with the candidate's own error.
+#[test]
+fn a_failed_schema_activation_whose_end_drain_meets_damage_owes_a_rebuild() {
+    let ops = Arc::new(FakeOps::default());
+    let (host, name, lease) = a_ready_vault(&ops);
+    ops.reload_schema_changed.store(true, Ordering::SeqCst);
+    ops.reload_schema_apply_failure
+        .store(true, Ordering::SeqCst);
+    ops.block_rebuild.store(true, Ordering::SeqCst);
+    let damaged = name.clone();
+    ops.once_the_candidate_is_read(move |ops| {
+        arrange_for(&ops.damaged_poll_at, &damaged);
+    });
+
+    let answer = host.reload(&name);
+    let state = host.state(&name);
+    // Let any dispatched rebuild finish even if an assertion fails.
+    ops.rebuild_release.store(true, Ordering::SeqCst);
+    assert_eq!(
+        answer,
+        Err(ReloadRefusal::Core(ReloadError::SchemaApply(
+            "the candidate could not be pinned".into()
+        )))
+    );
+    assert_eq!(
+        state,
+        answered(TrustState::untrusted(
+            UntrustedReason::store_damaged_rebuilding(
+                "the watcher cursor points into a truncated page"
+            )
+        ))
+    );
+    wait_for_one_rebuild_to_ready(&host, &name, &ops);
+    assert_eq!(ops.recovers.load(Ordering::SeqCst), 0);
+    drop((lease, host));
+}
+
 /// **A fold over a quiet `Ready` vault whose drain meets an edit publishes
 /// healing while it derives it**, so a read meanwhile waits for the edit
 /// rather than answering `Ready` without it.

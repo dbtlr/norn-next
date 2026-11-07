@@ -9580,14 +9580,28 @@ fn run_reload_job<O: EntryOps>(
     let result = match result {
         None => Err(ReloadRefusal::Unsupported),
         Some(Err(JobFailure::Reload(error))) if replacing => {
-            // An activation that failed after it began replacing the derived
-            // state withdraws trust and owes the recovery.
+            // A failed activation owes recovery unless its end drain met a
+            // runtime failure whose policy must decide what the entry owes.
             record_active_declaration(&mut state, &*shared.ops, &name, &attachment);
-            state.park_coverage(&*shared.ops, epoch, attachment);
-            if let Some(Ok((observed, _))) = drained {
-                state.pending.merge(observed);
-            }
             let detail = state.record_reload_error(error.clone());
+            match drained {
+                Some(Err(failure)) if !matches!(failure, JobFailure::Reload(_)) => {
+                    return apply_reload_runtime_failure(
+                        shared,
+                        entry,
+                        state,
+                        name,
+                        epoch,
+                        attachment,
+                        failure,
+                        reply,
+                        FailureAnswer::Core(error),
+                    );
+                }
+                Some(Ok((observed, _))) => state.pending.merge(observed),
+                _ => {}
+            }
+            state.park_coverage(&*shared.ops, epoch, attachment);
             state.require_recovery();
             state.pending.merge(Batch::rescan(RescanScope::Vault));
             state.withdraw_trust(UntrustedReason::environmental_refusal(detail));
@@ -9794,8 +9808,11 @@ fn end_reload_leg_over_its_drain<O: EntryOps>(
 }
 
 /// What the asker of a reload whose leg met a runtime failure is answered.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum FailureAnswer {
+    /// The candidate failed after activation began; the drain's failure
+    /// decides the entry's policy while the candidate's error stays the reply.
+    Core(ReloadError),
     /// `vault/reload-failed`, with what the leg met.
     Runtime,
     /// Where the entry stands once the failure's policy has published: a
@@ -9814,9 +9831,9 @@ enum FailureAnswer {
 /// the leg read, so an activation and a dry run that meet one both answer it
 /// here. `answered` says how the asker is told: `vault/reload-failed` with
 /// what the leg met, or where the entry then stands for a watcher loss the
-/// end's drain met. A candidate's own failure is not such a fact:
-/// [`run_reload_job`] answers it before reaching this, and a failure the
-/// reload's fold met is ended as an apply's intake ends it, by
+/// end's drain met, or the candidate's own error where its failed activation
+/// also met a drain failure. A failure the reload's fold met is ended as an
+/// apply's intake ends it, by
 /// [`end_fold_on_failure`].
 #[expect(
     clippy::too_many_arguments,
@@ -9833,7 +9850,8 @@ fn apply_reload_runtime_failure<O: EntryOps>(
     reply: ReloadReply,
     answered: FailureAnswer,
 ) -> Option<O::Attachment> {
-    let refusal = |state: &EntryState<O::Attachment>, failure: JobFailure| match answered {
+    let refusal = |state: &EntryState<O::Attachment>, failure: JobFailure| match &answered {
+        FailureAnswer::Core(error) => ReloadRefusal::Core(error.clone()),
         FailureAnswer::Runtime => ReloadRefusal::Runtime(failure),
         FailureAnswer::WhereItStands => state.reload_stood_down(reply.candidate_read()),
     };
