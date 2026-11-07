@@ -1,5 +1,6 @@
 ---
-status: accepted
+status: superseded
+superseded-by: 0050-a-reload-leg-opens-the-gap-a-maintenance-leg-opens.md
 date: 2026-11-02
 ---
 

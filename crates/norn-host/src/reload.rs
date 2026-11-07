@@ -134,11 +134,23 @@ impl<O: EntryOps> Host<O> {
     /// nothing.
     ///
     /// Both are admitted and run as one reload is, so a dry run waits behind
-    /// a watcher poll or a maintenance leg and is refused whenever an
+    /// a watcher poll, a maintenance leg or a reconcile turn, folds the facts
+    /// that work left as an activation does, and is refused whenever an
     /// activation asked at the same moment would be — among them
-    /// `vault/reload-busy` while explicit work holds the vault — and answers
-    /// the outcome and fingerprints that activation would. A runtime failure
-    /// either meets gets the same policy, and a reload the host drops without
+    /// `vault/reload-busy` while explicit work holds a vault that serves or
+    /// settles — and answers the outcome and fingerprints that activation
+    /// would. Either one's leg ends as an apply's does, draining the
+    /// watcher once more, and publishes `Ready` only where nothing is left at
+    /// the end of the leg that publishes — for a schema-changing activation,
+    /// the leg or turn that completes its derivation — and otherwise hands the
+    /// claim on as a reconcile turn's end does: to the apply queue's head
+    /// where one waits, and else to the reconcile owed, a schema-changing
+    /// activation's own turns first. A watcher overflow or loss that either
+    /// drain meets withdraws trust as a turn's end does and answers the
+    /// reload with where the entry stands. A candidate failure leaves the
+    /// entry as the fold and the leg's end left it: the fold's derivation
+    /// stands. A runtime failure either meets gets the same policy, and a
+    /// reload the host drops without
     /// an answer — moved past before it ran, or lost with a leg that unwound —
     /// answers where the entry stands once it is dropped. Where the entry
     /// stands is its published demand, so an entry a registration change holds is
@@ -184,9 +196,36 @@ pub enum ReloadRefusal {
     /// entry a registration change holds answer as every door answers them; an
     /// entry in service answers with the park it stands on first, and its
     /// trust state where nothing parks it.
+    ///
+    /// The reload did not read its candidate: it was refused at admission,
+    /// or dropped before a leg read it — moved past on its way to a worker or
+    /// while it waited, or ended at its leg's start or at its fold's retake
+    /// of the gate.
     Unavailable(Demand),
+    /// The entry serves or settles a change, and other work holds it: at
+    /// admission, explicit work — another reload, an apply, or a scheduled
+    /// detach. The reload did not read its candidate.
+    ///
+    /// It is decided off the entry's state rather than read off its label,
+    /// because a settling entry publishes warming; a `Ready` entry and a
+    /// settling one are refused through this one variant, so the two are
+    /// spelled alike.
+    Busy,
+    /// The reload may have read its candidate, and an activation taken it
+    /// into service, before its claim was superseded or its leg unwound, so
+    /// it could not report its completion: this is where the entry then
+    /// stands. A state the entry serves or settles in is
+    /// [`ReloadRefusal::UnreportedBusy`] instead.
+    Unreported(Demand),
+    /// The reload may have read its candidate before it could not report its
+    /// completion, and the entry serves or settles a change that other work
+    /// holds.
+    UnreportedBusy,
     Core(ReloadError),
     Runtime(JobFailure),
+    /// A runtime failure the reload's fold met while it derived the change
+    /// the entry held, before the reload read its candidate.
+    Fold(JobFailure),
     HostStopped,
 }
 

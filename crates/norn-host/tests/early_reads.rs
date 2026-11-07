@@ -4207,7 +4207,7 @@ fn quiet_requeue_calls(fixture: &Fixture) -> u64 {
     calls
 }
 
-/// ADR 0048: each requeue takes once. A build's requeue calls are bounded by
+/// ADR 0050: each requeue takes once. A build's requeue calls are bounded by
 /// the vault's shape, so a writer that keeps a fact pending at every call
 /// adds no call, and each call makes exactly the one take; and no fact is
 /// lost, whether it lands before a take's read, after it, or after Relations'
@@ -4273,7 +4273,7 @@ fn a_writer_inside_every_take_never_outnumbers_the_requeue_calls() {
     );
 }
 
-/// ADR 0048: a take publishes only what it read. A path renamed and recreated
+/// ADR 0050: a take publishes only what it read. A path renamed and recreated
 /// after Relations' closing take read it, before that take publishes, stays
 /// outstanding: Gets of both names and a Find wait for `Ready` instead of
 /// answering with the bytes the take read, while a Get the facts do not touch

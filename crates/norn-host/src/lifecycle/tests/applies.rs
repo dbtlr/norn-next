@@ -1154,7 +1154,7 @@ fn registration_changes_refuse_as_held_while_an_apply_is_queued_or_running() {
 
     registration_changes_refuse_as_held(&host, &name);
     assert!(
-        matches!(host.reload(&name), Err(ReloadRefusal::Unavailable(_))),
+        matches!(host.reload(&name), Err(ReloadRefusal::Busy)),
         "an explicit reload was not refused while an apply was queued"
     );
 
