@@ -103,7 +103,8 @@ fn measure(label: &str, profile_name: &str) -> Reading {
     // walker alone, not to fixture construction.
     let manifest = norn_fixtures::generate(&profile, SEED, &root)
         .unwrap_or_else(|error| panic!("generating `{profile_name}`: {error}"));
-    let expected_facts = manifest.files + manifest.symlinks.total();
+    let expected_facts =
+        manifest.files + manifest.symlinks.total() + manifest.dot_led_directory_roots;
 
     let child = installed_child(&sandbox);
     let outcome = Run::new(&sandbox, child)
@@ -191,4 +192,33 @@ fn mebibytes(bytes: u64) -> f64 {
 fn the_child_report_parser_requires_an_exact_count() {
     assert_eq!(reported_facts("norn-fs walk facts: 2361\n"), Some(2_361));
     assert_eq!(reported_facts("norn-fs walk facts: none\n"), None);
+}
+
+#[test]
+fn generated_dot_led_directories_are_stated_once_without_their_descendants() {
+    let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), "walk-dot-roots")
+        .expect("a fixture sandbox");
+    let root = sandbox.work_dir().join("vault");
+    let manifest = norn_fixtures::generate(&Profile::by_name("realistic").unwrap(), SEED, &root)
+        .expect("generating realistic");
+    let mut dot_roots = Vec::new();
+    let mut facts = 0;
+    for fact in walk(&root, &[]).expect("starting the walk") {
+        let fact = fact.expect("a generated fact");
+        if let WalkFact::Skipped(skip) = &fact
+            && skip.reason() == norn_fs::SkipReason::DotLed
+        {
+            dot_roots.push(skip.path().as_path().to_path_buf());
+        }
+        facts += 1;
+    }
+    dot_roots.sort();
+    assert_eq!(
+        dot_roots,
+        [".norn-fixture-vault", ".obsidian", ".trash"].map(PathBuf::from)
+    );
+    assert_eq!(
+        facts,
+        manifest.files + manifest.symlinks.total() + manifest.dot_led_directory_roots
+    );
 }
