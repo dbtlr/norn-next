@@ -7717,10 +7717,17 @@ fn end_job_leg<O: EntryOps>(
             }
         } else if publish_damage_a_read_met(&mut state, name).is_some()
             || schedule_queued_apply(&mut state, name).is_some()
+            || schedule_due_detach(&mut state, name).is_some()
         {
             // A leg that ended free — an attach, a recovery, a rebuild or a
             // reload publishing `Ready`, a turn leaving nothing to derive —
-            // hands the claim to the apply queued behind it here.
+            // hands the claim on here, in the order a reconcile turn's end
+            // hands it: the rebuild owed for damage a read met, then the apply
+            // queued behind the leg, then the teardown the entry is due. A leg
+            // that scheduled its own teardown left the claim held, so nothing
+            // here schedules a second; this is where a reload's release, which
+            // schedules none of its own, has its due teardown scheduled rather
+            // than left to the idle reap a dispatcher tick later.
             drop(state);
             let _ = dispatch_pending(shared, entry);
         }
@@ -25793,6 +25800,118 @@ mod tests {
             "the rescan a recovery left owed was not reconciled once"
         );
         drop(holding_lease);
+    }
+
+    /// Run the reload-shaped `leg` (an activation or a dry run) on this thread
+    /// over a `Ready` entry with a teardown due, with the fake armed by `arm`,
+    /// and answer what its asker was told. The
+    /// dispatcher does not tick inside the case, so no idle reap schedules the
+    /// teardown: [`a_leg_scheduled_due_a_teardown`] finds it scheduled only
+    /// where the reload's own release scheduled it.
+    fn a_reload_released_due_a_teardown(
+        leg: fn(VaultName, u64, ReloadReply) -> Job,
+        arm: fn(&FakeOps),
+    ) -> Result<ReloadJudgment, ReloadRefusal> {
+        let ops = Arc::new(FakeOps::default());
+        ops.reload_supported.store(true, Ordering::SeqCst);
+        arm(&ops);
+        let (reply, answer, _) = ReloadReply::channel();
+        let (_host, _subject, holding_lease) = a_leg_scheduled_due_a_teardown(
+            &ops,
+            Duration::from_secs(2),
+            Duration::from_secs(60),
+            |state, subject| {
+                state
+                    .claim
+                    .schedule(|epoch| leg(subject.clone(), epoch, reply))
+            },
+        );
+        let response = wait_until(
+            "the reload to answer its asker",
+            lifecycle_wait_budget(),
+            || match answer.try_recv() {
+                Ok(response) => Observed::Met(response),
+                Err(_) => Observed::pending("the reload has not answered"),
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+        ops.attach_release.store(true, Ordering::SeqCst);
+        drop(holding_lease);
+        response
+    }
+
+    /// **A reload that activates its candidate schedules the teardown due at
+    /// its release**, as a reconcile turn's end does, rather than leaving it
+    /// to the idle reap a dispatcher tick later.
+    #[test]
+    fn a_reload_that_activates_schedules_a_due_teardown_at_its_release() {
+        let response = a_reload_released_due_a_teardown(Job::Reload, |_| {});
+        assert_eq!(response, Ok(fake_judgment(ReloadOutcome::ConfigOnly)));
+    }
+
+    /// **A reload whose candidate is refused before activation schedules the
+    /// teardown due at its release**: the refusal is the asker's answer, not
+    /// a reason to leave the entry holding coverage it is due to give back.
+    #[test]
+    fn a_reload_whose_candidate_is_refused_schedules_a_due_teardown_at_its_release() {
+        let response = a_reload_released_due_a_teardown(Job::Reload, |ops| {
+            ops.reload_candidate_unparsable
+                .store(true, Ordering::SeqCst);
+        });
+        assert!(
+            matches!(
+                response,
+                Err(ReloadRefusal::Core(ReloadError::SchemaParse(_)))
+            ),
+            "the refused candidate answered {response:?}"
+        );
+    }
+
+    /// **A dry run schedules the teardown due at its release**, as an
+    /// activation does: it reads its candidate under the same claim and ends
+    /// the same way.
+    #[test]
+    fn a_dry_run_schedules_a_due_teardown_at_its_release() {
+        let response = a_reload_released_due_a_teardown(Job::JudgeReload, |_| {});
+        assert_eq!(response, Ok(fake_judgment(ReloadOutcome::ConfigOnly)));
+    }
+
+    /// **A reload whose end drain meets a refusing environment schedules the
+    /// teardown due at its release**: the recovery the failure leaves owed
+    /// waits for a demand, and the failure is the asker's answer.
+    #[test]
+    fn a_reload_meeting_a_runtime_failure_schedules_a_due_teardown_at_its_release() {
+        let response = a_reload_released_due_a_teardown(Job::Reload, |ops| {
+            ops.once_the_candidate_is_read(|ops| {
+                ops.environmental_poll.store(true, Ordering::SeqCst);
+            });
+        });
+        assert!(
+            matches!(
+                response,
+                Err(ReloadRefusal::Runtime(JobFailure::Environmental(_)))
+            ),
+            "the refusing environment answered {response:?}"
+        );
+    }
+
+    /// **A schema activation that fails schedules the teardown due at its
+    /// release**: the recovery it leaves owed waits for a demand, and a
+    /// teardown is what an entry with no demand is due.
+    #[test]
+    fn a_failed_schema_activation_schedules_a_due_teardown_at_its_release() {
+        let response = a_reload_released_due_a_teardown(Job::Reload, |ops| {
+            ops.reload_schema_changed.store(true, Ordering::SeqCst);
+            ops.reload_schema_apply_failure
+                .store(true, Ordering::SeqCst);
+        });
+        assert!(
+            matches!(
+                response,
+                Err(ReloadRefusal::Core(ReloadError::SchemaApply(_)))
+            ),
+            "the failed activation answered {response:?}"
+        );
     }
 
     /// **A batch carrying no fact leaves the entry's position where it
