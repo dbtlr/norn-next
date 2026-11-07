@@ -437,14 +437,16 @@ pub enum ReasonCode {
     VaultUnknownRule,
     /// `vault/reload-busy` — the vault is serving or settling a change, and
     /// explicit work holds it: another reload, an apply, or a scheduled
-    /// detach. The reload was not started. A reload never meets this for the
-    /// vault's own routine work, a watcher poll, a maintenance leg or a
-    /// reconcile turn: it waits for that work instead. The detail carries
+    /// detach. Its control files were not read. A reload never meets this
+    /// for the vault's own routine work, a watcher poll, a maintenance leg or
+    /// a reconcile turn: it waits for that work instead. The detail carries
     /// nothing: the ask is repeated rather than resolved.
     #[serde(rename = "vault/reload-busy")]
     VaultReloadBusy,
     /// `vault/reload-failed` — the reload ran and did not leave the vault
-    /// serving what its control files state. The detail is what it met.
+    /// serving what its control files state. The detail is what it met; a
+    /// failure met while the reload folded in the change the vault was
+    /// settling says so, since the candidate was then not read.
     #[serde(rename = "vault/reload-failed")]
     VaultReloadFailed,
     /// `vault/cursor-order-changed` — the cursor names no position in the

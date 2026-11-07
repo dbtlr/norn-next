@@ -17,7 +17,8 @@
 //! park — `host/duplicate-root`, `host/maintainer-contended`, or
 //! `host/entry-untrusted` for a root the registry cannot read — exactly as
 //! `vault status` answers it, `host/entry-not-ready` for an entry not ready
-//! to re-read its control files yet — unattached, building, recovering or
+//! to re-read its control files yet — unattached, building, recovering,
+//! healing with its trust withdrawn, as after a watcher overflow, or
 //! releasing — `host/entry-untrusted` for an entry whose derived state cannot
 //! be trusted, a watcher overflow among them, `vault/reload-busy` for a vault
 //! that is serving or settling a change and that explicit work holds —
