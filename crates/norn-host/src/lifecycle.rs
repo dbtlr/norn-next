@@ -25802,12 +25802,14 @@ mod tests {
         drop(holding_lease);
     }
 
-    /// Run a reload on this thread over a `Ready` entry with a teardown due,
-    /// with the fake armed by `arm`, and answer what its asker was told. The
+    /// Run the reload-shaped `leg` (an activation or a dry run) on this thread
+    /// over a `Ready` entry with a teardown due, with the fake armed by `arm`,
+    /// and answer what its asker was told. The
     /// dispatcher does not tick inside the case, so no idle reap schedules the
     /// teardown: [`a_leg_scheduled_due_a_teardown`] finds it scheduled only
     /// where the reload's own release scheduled it.
     fn a_reload_released_due_a_teardown(
+        leg: fn(VaultName, u64, ReloadReply) -> Job,
         arm: fn(&FakeOps),
     ) -> Result<ReloadJudgment, ReloadRefusal> {
         let ops = Arc::new(FakeOps::default());
@@ -25821,7 +25823,7 @@ mod tests {
             |state, subject| {
                 state
                     .claim
-                    .schedule(|epoch| Job::Reload(subject.clone(), epoch, reply))
+                    .schedule(|epoch| leg(subject.clone(), epoch, reply))
             },
         );
         let response = wait_until(
@@ -25843,7 +25845,7 @@ mod tests {
     /// to the idle reap a dispatcher tick later.
     #[test]
     fn a_reload_that_activates_schedules_a_due_teardown_at_its_release() {
-        let response = a_reload_released_due_a_teardown(|_| {});
+        let response = a_reload_released_due_a_teardown(Job::Reload, |_| {});
         assert_eq!(response, Ok(fake_judgment(ReloadOutcome::ConfigOnly)));
     }
 
@@ -25852,7 +25854,7 @@ mod tests {
     /// a reason to leave the entry holding coverage it is due to give back.
     #[test]
     fn a_reload_whose_candidate_is_refused_schedules_a_due_teardown_at_its_release() {
-        let response = a_reload_released_due_a_teardown(|ops| {
+        let response = a_reload_released_due_a_teardown(Job::Reload, |ops| {
             ops.reload_candidate_unparsable
                 .store(true, Ordering::SeqCst);
         });
@@ -25865,12 +25867,40 @@ mod tests {
         );
     }
 
+    /// **A dry run schedules the teardown due at its release**, as an
+    /// activation does: it reads its candidate under the same claim and ends
+    /// the same way.
+    #[test]
+    fn a_dry_run_schedules_a_due_teardown_at_its_release() {
+        let response = a_reload_released_due_a_teardown(Job::JudgeReload, |_| {});
+        assert_eq!(response, Ok(fake_judgment(ReloadOutcome::ConfigOnly)));
+    }
+
+    /// **A reload whose end drain meets a refusing environment schedules the
+    /// teardown due at its release**: the recovery the failure leaves owed
+    /// waits for a demand, and the failure is the asker's answer.
+    #[test]
+    fn a_reload_meeting_a_runtime_failure_schedules_a_due_teardown_at_its_release() {
+        let response = a_reload_released_due_a_teardown(Job::Reload, |ops| {
+            ops.once_the_candidate_is_read(|ops| {
+                ops.environmental_poll.store(true, Ordering::SeqCst);
+            });
+        });
+        assert!(
+            matches!(
+                response,
+                Err(ReloadRefusal::Runtime(JobFailure::Environmental(_)))
+            ),
+            "the refusing environment answered {response:?}"
+        );
+    }
+
     /// **A schema activation that fails schedules the teardown due at its
     /// release**: the recovery it leaves owed waits for a demand, and a
     /// teardown is what an entry with no demand is due.
     #[test]
     fn a_failed_schema_activation_schedules_a_due_teardown_at_its_release() {
-        let response = a_reload_released_due_a_teardown(|ops| {
+        let response = a_reload_released_due_a_teardown(Job::Reload, |ops| {
             ops.reload_schema_changed.store(true, Ordering::SeqCst);
             ops.reload_schema_apply_failure
                 .store(true, Ordering::SeqCst);
