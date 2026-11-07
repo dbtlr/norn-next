@@ -315,16 +315,17 @@ no gap, and a settling read may wait behind one maintenance leg.
 While a maintenance leg holds the entry, the entry can stay `Ready` and not yet see an
 edit made moments before, so a read in that window can miss that edit. A reload leg opens
 the same window. It reads and judges its candidate outside the entry gate while it holds
-the claim, so no poll runs, and where its fold found no facts, the fold committed nothing
-and left the entry `Ready`. This accepted observation gap is limited to one maintenance leg
+the claim, so no poll runs, and an edit made after its fold's drain stays with the watcher
+until the leg's end drain. A read that begins meanwhile answers at once: under `Ready`
+where the fold found no facts and committed nothing, and under the healing the fold
+published where it found some, since the facts the fold took are derived. This accepted observation gap is limited to one maintenance leg
 or one reload leg. The maintenance leg ends when the background turn budget runs out, plus
 the one unit in flight at that moment, or earlier when its work is done. Watcher batches
 drain before another leg starts. The reload leg's window lasts from the leg's start, at its
 fold's drain, to its end drain, which takes in the edits that arrived meanwhile before the
-leg publishes. It covers a config-only activation's or a dry run's candidate read and
+leg publishes, whether or not the fold found facts. It covers a config-only activation's or a dry run's candidate read and
 judgment. A schema-changing activation publishes warming once it has judged its candidate
-and settles from then on, so it opens no such window after activation. A fold that found
-facts publishes healing, so its reload opens no such window. The candidate read is
+and settles from then on, so it opens no such window after activation. The candidate read is
 bounded by its own work, not by the background turn budget: reading and parsing the
 vault's two control files, comparing the schema's fingerprint with the active one, and,
 for a config-only activation, delivering the config to each engine receiver, which opens

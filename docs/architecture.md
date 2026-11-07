@@ -2619,9 +2619,9 @@ wakes every waiting read, which takes the gate again and refuses with what the e
 publishes, unless the entry has reached `Ready` again before that retake; no teardown waits for
 it. While a maintenance leg holds the entry — for its units' background turn budget plus one
 unit, then the drain of the watcher batches observed meanwhile — the entry stays `Ready` without yet seeing an edit made moments before, so a read in
-that window can miss it. A reload leg whose fold found nothing opens the same accepted gap
-while it reads and judges its candidate, until its end's drain, as the reload paragraphs below
-say. The store's verification opens no such window: it runs on the
+that window can miss it. A reload leg opens the same accepted gap from its fold's drain until
+its end's drain, while it reads and judges its candidate, whether or not its fold found facts,
+as the reload paragraphs below say. The store's verification opens no such window: it runs on the
 background lane through read-only connections to the store, and its full-text check runs on a copy.
 
 **A canonical read whose store finds its derived data damaged is answered by the entry.** After the
@@ -3060,8 +3060,9 @@ whose message says the fold met it, with what it met as the detail. On each of t
 candidate was not read. Only then
 does the reload run its own steps over the folded store: it reads and judges the candidate,
 and an activation takes it into service. A fold that finds no facts commits nothing, so over
-a quiet `Ready` entry it costs one drain, and the entry stays `Ready` while the candidate is
-read, the observation gap the read contract below accepts.
+a quiet `Ready` entry it costs one drain. Whatever the fold found, an edit made after its
+drain stays with the watcher while the candidate is read, the observation gap the read
+contract below accepts.
 **A schema-changing reload derives the folded facts twice**, under the old declaration in its
 fold and again in its derivation of the vault under the new one. That is an accepted cost of
 one turn's facts: whether the schema changes is known only from the candidate, which the
@@ -3102,14 +3103,16 @@ that met the change the entry was settling recorded a position no later than the
 so it answers once the fold commits, from the reader standing then, or once `Ready` returns. A
 schema-changing activation closes that reader after its fold, and a read still waiting
 answers from the pool installed with `Ready`. Because a reload publishes `Ready` only where
-nothing is left, no read establishes a snapshot without a change it met. A read that meets
-`Ready` meets no change, though: where the fold finds nothing it commits nothing, and the entry
-stays `Ready` from the fold's drain until the leg's end drain while the candidate is read and
-judged, so a read in that window can miss an edit made moments before. That is the
-observation gap a maintenance leg opens, accepted on the same terms: it is bounded by the
-reload's own leg, and the end's drain takes the edit in before the leg ends. A fold that
-finds facts publishes healing, so its reload opens no such window, and a schema-changing
-activation closes the window when it publishes warming to re-derive.
+nothing is left, no read establishes a snapshot without a change it met. A change still with
+the watcher is not one a read met, though: no poll runs while the reload holds the claim, so
+an edit made after the fold's drain stays with the watcher until the leg's end drain, and a
+read that begins while the candidate is read and judged answers at once — under `Ready`
+where the fold found nothing and committed nothing, and under the healing the fold published
+where it found facts, since the facts it took are derived. So a read in that window can miss
+an edit made moments before, whether or not the fold found facts. That is the observation
+gap a maintenance leg opens, accepted on the same terms: it is bounded by the reload's own
+leg, and the end's drain takes the edit in before the leg ends. A schema-changing activation
+closes the window when it publishes warming to re-derive.
 
 A reload of either mode that the entry is not in a state to run answers with where the entry
 stands: its published demand, rendered by the one mapping `vault status` and a demand lease answer
