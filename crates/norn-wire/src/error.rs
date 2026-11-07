@@ -450,7 +450,7 @@ pub enum ReasonCode {
     /// `vault/reload-failed` — the reload ran and did not leave the vault
     /// serving what its control files state. The detail is what it met; a
     /// failure met while the reload folded in the change the vault held says
-    /// so, since the candidate was then not read.
+    /// so in its message, since the candidate was then not read.
     #[serde(rename = "vault/reload-failed")]
     VaultReloadFailed,
     /// `vault/cursor-order-changed` — the cursor names no position in the

@@ -3056,7 +3056,8 @@ turn's end does — an overflow owes its rescan, and a loss gives its coverage u
 the reload, dry run included, with where the entry stands; damage a read met under the claim
 is published with its rebuild and answers the reload; a runtime failure the fold met is
 handled as a runtime failure the reload's own steps meet, and answers `vault/reload-failed`
-whose detail says the fold met it. On each of those the candidate was not read. Only then
+whose message says the fold met it, with what it met as the detail. On each of those the
+candidate was not read. Only then
 does the reload run its own steps over the folded store: it reads and judges the candidate,
 and an activation takes it into service. A fold that finds no facts commits nothing, so over
 a quiet `Ready` entry it costs one drain, and the entry stays `Ready` while the candidate is
@@ -3128,7 +3129,10 @@ fold's derivation standing. On those paths a not-ready state — unattached, or 
 phase a reload does not run over — answers `host/entry-not-ready` with the message "this vault
 is not ready to re-read its control files yet, so they were not read", and a busy answer
 `vault/reload-busy` reads "this vault is already being worked over, so its control files were
-not read". A fold failure answers `vault/reload-failed`, whose detail says the fold met it. A
+not read". A fold failure answers `vault/reload-failed` with the message "this vault's reload
+met a failure while it took in the change the vault held, so its control files were not read",
+and what it met as the detail: the failure kinds carry no common text a fold could be named
+in, and some carry no text at all. A
 reload may have read its candidate, and an activation taken it into service, before its claim
 is superseded or its leg unwinds: a leg reads and judges the candidate outside the gate and
 looks at the claim only afterwards, and a schema-changing activation's continuation legs run
