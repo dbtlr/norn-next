@@ -8810,9 +8810,9 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
 /// back as well, through [`give_back_lost_coverage`] — and damaged derived
 /// state withdraws trust and hands the claim on to rung 3.
 ///
-/// A reconcile turn and an apply's intake — which derives the facts delivered
-/// before it as a reconcile turn does — both end here, so the facts either
-/// meets are answered by one policy. A reload waiting for the turn is
+/// A reconcile turn, an apply's intake and a reload's fold — which derive the
+/// facts delivered before their leg as a reconcile turn does — all end here,
+/// so the facts any of them meets are answered by one policy. A reload waiting for the turn is
 /// answered with where the policy left the entry: by the release where one
 /// begins, and here otherwise.
 fn end_turn_on_failure<O: EntryOps>(
@@ -8916,6 +8916,119 @@ fn end_turn_on_failure<O: EntryOps>(
     }
 }
 
+/// What a leg does with a watcher overflow its intake's drain delivers.
+#[derive(Clone, Copy)]
+enum IntakeOverflow {
+    /// Derive the rescan inside the intake, as any other fact: an apply plans
+    /// only against a store that has taken the whole vault in.
+    Derive,
+    /// Withdraw trust as a turn's end does and hand the claim on to the
+    /// reconcile that rereads the rescan, deriving nothing: a reload's fold,
+    /// whose reload then answers with where the entry stands.
+    HandOn,
+}
+
+/// Where a leg's intake left the entry, the gate held.
+enum IntakeEnd<'entry, A: SnapshotSource> {
+    /// The intake derived every fact it took, or found none: the claim still
+    /// stands at the leg's epoch, the leg is still pinned, and the entry is
+    /// healing where it derived facts over `Ready`. The caller publishes what
+    /// its leg publishes at the intake's end.
+    Derived(GateHold<'entry, EntryState<A>>, A),
+    /// The entry moved past the leg — a teardown or a park moved the claim
+    /// on, or a detach is under way — so nothing the intake did stands over
+    /// it. The leg is still pinned, and the attachment is the release's.
+    MovedOn(GateHold<'entry, EntryState<A>>, A),
+    /// The intake's drain or derivation met a runtime failure, the leg still
+    /// pinned: the caller ends the turn on [`end_turn_on_failure`].
+    Failed(GateHold<'entry, EntryState<A>>, A, JobFailure),
+    /// The intake handed the claim on, the coverage parked and the leg
+    /// unpinned: to the rebuild the damage a read carried to the claim owes,
+    /// published under this hold, or, under [`IntakeOverflow::HandOn`], to the
+    /// reconcile that rereads an overflow. The caller answers its asker and
+    /// dispatches the job.
+    HandedOn(GateHold<'entry, EntryState<A>>, Job),
+}
+
+/// A leg's intake: derive the watcher facts delivered before the leg's own
+/// work, as a commit of their own, the way a reconcile turn does. An apply's
+/// intake and a reload's fold both run here, so the facts either takes are
+/// derived, recorded and failed by one path.
+///
+/// It drains the watcher once and, under one hold of the gate, merges what the
+/// drain delivered into the entry's pending facts and takes them all beside
+/// `work`, the facts the leg took when it began. Where any stand it publishes
+/// healing over a `Ready` entry and derives them under the active declaration;
+/// the entry then records that it has derived through the position it took
+/// them at, and the advisories the derivation left. A saturated drain leaves
+/// facts with the watcher, which the leg's end drains. `overflow` says what a
+/// watcher overflow among the facts does. Damage a read met while the intake
+/// held the claim is published with the rebuild it owes, in the hold that
+/// ends the intake.
+fn take_in_delivered_facts<'entry, O: EntryOps>(
+    shared: &Arc<Shared<O>>,
+    entry: &'entry Arc<Entry<O::Attachment>>,
+    name: &VaultName,
+    epoch: u64,
+    mut attachment: O::Attachment,
+    mut work: Batch,
+    overflow: IntakeOverflow,
+) -> IntakeEnd<'entry, O::Attachment> {
+    let drained = drain_observed(&shared.ops, name, &mut attachment);
+    let mut state = entry.gate.lock().expect("entry gate poisoned");
+    if moved_on_before_planning(&state, epoch) {
+        return IntakeEnd::MovedOn(state, attachment);
+    }
+    let observed = match drained {
+        Ok((observed, _)) => observed,
+        Err(failure) => return IntakeEnd::Failed(state, attachment, failure),
+    };
+    state.pending.merge(observed);
+    if matches!(overflow, IntakeOverflow::HandOn) && state.pending.has_rescans() {
+        state.unpin_leg(Leg::Job(epoch));
+        state.coverage.park_by(epoch, attachment);
+        state.publish_pending_reconcile();
+        let next = state
+            .claim
+            .hand_on(|epoch| Job::Reconcile(name.clone(), epoch));
+        return IntakeEnd::HandedOn(state, next);
+    }
+    let (delivered, through) = state.pending.take();
+    work.merge(delivered);
+    if !work.is_empty() && state.trust == TrustState::Ready {
+        state.trust = TrustState::warming(WarmingPhase::Healing, 0, None);
+    }
+    drop(state);
+    let derived = if work.is_empty() {
+        Ok(())
+    } else {
+        shared.ops.reconcile(
+            name,
+            &mut attachment,
+            ReconcileWork { batch: work },
+            &reporter(entry, epoch),
+        )
+    };
+    let mut state = entry.gate.lock().expect("entry gate poisoned");
+    if moved_on_before_planning(&state, epoch) {
+        return IntakeEnd::MovedOn(state, attachment);
+    }
+    if let Err(failure) = derived {
+        return IntakeEnd::Failed(state, attachment, failure);
+    }
+    // The intake committed every fact it took, so a read that met the
+    // entry's change at or before `through` may answer from here on.
+    state.pending.derive_through(through);
+    record_advisories(&mut state, &*shared.ops, &attachment);
+    if state.damage_met_under_a_claim.is_some() {
+        state.unpin_leg(Leg::Job(epoch));
+        state.coverage.park_by(epoch, attachment);
+        let rebuild = hand_on_carried_damage(&mut state, name).expect("the damage is carried");
+        return IntakeEnd::HandedOn(state, rebuild);
+    }
+    IntakeEnd::Derived(state, attachment)
+}
+
 /// Run the apply at the head of the entry's queue, holding the entry's claim.
 ///
 /// **The claim is held from the intake to the changeset**, so the apply's
@@ -8949,7 +9062,7 @@ fn run_apply_job<O: EntryOps>(
     name: VaultName,
     epoch: u64,
 ) -> Option<O::Attachment> {
-    let (mut attachment, apply, mut work) = {
+    let (attachment, apply, work) = {
         let mut state = entry.gate.lock().expect("entry gate poisoned");
         if !state.claim.stands_at(epoch) {
             return None;
@@ -8989,72 +9102,46 @@ fn run_apply_job<O: EntryOps>(
     let reporter = reporter(entry, epoch);
 
     // The intake.
-    let intake = match drain_observed(&shared.ops, &name, &mut attachment) {
-        Ok((observed, _)) => {
-            let through = {
-                let mut state = entry.gate.lock().expect("entry gate poisoned");
-                state.pending.merge(observed);
-                let (delivered, through) = state.pending.take();
-                work.merge(delivered);
-                if !work.is_empty() && state.trust == TrustState::Ready {
-                    state.trust = TrustState::warming(WarmingPhase::Healing, 0, None);
-                }
-                through
-            };
-            if work.is_empty() {
-                Ok(through)
-            } else {
-                shared
-                    .ops
-                    .reconcile(
-                        &name,
-                        &mut attachment,
-                        ReconcileWork { batch: work },
-                        &reporter,
-                    )
-                    .map(|()| through)
-            }
-        }
-        Err(failure) => Err(failure),
-    };
-    let mut state = entry.gate.lock().expect("entry gate poisoned");
-    if moved_on_before_planning(&state, epoch) {
-        answer_unplanned_apply(state, &name, epoch, &reply);
-        return Some(attachment);
-    }
-    match intake {
-        Ok(through) => {
-            state.pending.derive_through(through);
-            record_advisories(&mut state, &*shared.ops, &attachment);
-            // Damage a read met while the intake held the claim makes the
-            // store unfit to plan against: it is published here, with the
-            // rebuild it owes, and the apply is answered with it unrun. Every
-            // other unfitness is raised by a teardown or a park, which moves
-            // the claim past this leg and is read above.
-            if state.damage_met_under_a_claim.is_some() {
-                state.unpin_leg(Leg::Job(epoch));
-                state.running_apply = None;
-                state.coverage.park_by(epoch, attachment);
-                let rebuild =
-                    hand_on_carried_damage(&mut state, &name).expect("the damage is carried");
-                let cause = state.apply_cause(&name);
-                drop(state);
-                let _ = reply.send(Err(not_run(cause, None)));
-                dispatch_handoff(shared, entry, epoch, rebuild);
-                return None;
-            }
+    let mut attachment = match take_in_delivered_facts(
+        shared,
+        entry,
+        &name,
+        epoch,
+        attachment,
+        work,
+        IntakeOverflow::Derive,
+    ) {
+        IntakeEnd::Derived(mut state, attachment) => {
             if !state.owes_a_rung() {
                 state.trust = TrustState::Ready;
             }
+            drop(state);
+            attachment
         }
-        Err(failure) => {
+        IntakeEnd::MovedOn(state, attachment) => {
+            answer_unplanned_apply(state, &name, epoch, &reply);
+            return Some(attachment);
+        }
+        IntakeEnd::Failed(state, attachment, failure) => {
             end_apply_on_failure(
                 shared, entry, state, &name, epoch, attachment, failure, &reply,
             );
             return None;
         }
-    }
-    drop(state);
+        // Damage a read met while the intake held the claim makes the store
+        // unfit to plan against: the intake published it with the rebuild it
+        // owes, and the apply is answered with it unrun. Every other
+        // unfitness is raised by a teardown or a park, which moves the claim
+        // past this leg and is answered above.
+        IntakeEnd::HandedOn(mut state, rebuild) => {
+            state.running_apply = None;
+            let cause = state.apply_cause(&name);
+            drop(state);
+            let _ = reply.send(Err(not_run(cause, None)));
+            dispatch_handoff(shared, entry, epoch, rebuild);
+            return None;
+        }
+    };
 
     let ApplyEnd { answer, heal } =
         match shared
@@ -9306,127 +9393,100 @@ fn end_reload_leg<'entry, A: SnapshotSource>(
 
 /// A reload's first step, as an apply's first step is its intake: derive the
 /// watcher facts the entry holds under the active declaration before the
-/// candidate is read.
-///
-/// It drains the watcher once and takes every fact pending in the entry
-/// under one hold of the gate. A watcher overflow among them withdraws trust
-/// as a turn's end does and hands the claim on to the reconcile that rereads
-/// the rescan; any other facts are derived as the reload's own commit, under
-/// the healing it publishes over a `Ready` entry, and the entry records that
-/// it has derived through the position it took them at, as a reconcile turn
-/// does. A fold that finds nothing commits nothing.
+/// candidate is read, through the intake an apply runs
+/// ([`take_in_delivered_facts`]). It differs from an apply's intake in two
+/// things only: a watcher overflow among the facts withdraws trust as a
+/// turn's end does and hands the claim on to the reconcile that rereads the
+/// rescan, and the healing a fold publishes over a `Ready` entry stands until
+/// the reload's end drain, which publishes `Ready` only where nothing is left.
+/// A fold that finds nothing commits nothing.
 ///
 /// `Ok` is the coverage for the reload's own steps, the leg still pinned.
 /// `Err` carries what the job returns where the fold ended the reload, its
 /// asker answered: a claim no longer standing where the fold retakes the
 /// gate, an overflow, damage a read met under the claim, or a runtime
-/// failure, which answers `vault/reload-failed` saying the fold met it — a
-/// watcher loss the drain met answers with where the entry stands instead.
-/// The candidate was not read on any of those.
+/// failure, ended as [`end_fold_on_failure`] ends it. The candidate was not
+/// read on any of those.
 fn fold_for_reload<O: EntryOps>(
     shared: &Arc<Shared<O>>,
     entry: &Arc<Entry<O::Attachment>>,
     name: &VaultName,
     epoch: u64,
-    mut attachment: O::Attachment,
+    attachment: O::Attachment,
     reply: &ReloadReply,
 ) -> Result<O::Attachment, Option<O::Attachment>> {
-    let drained = drain_observed(&shared.ops, name, &mut attachment);
-    let mut state = entry.gate.lock().expect("entry gate poisoned");
-    if !state.claim.stands_at(epoch) || state.detach_in_flight {
-        state.unpin_leg(Leg::Job(epoch));
-        reply.stand_down(&state);
-        return Err(Some(attachment));
-    }
-    // A saturated drain leaves facts with the watcher; the leg's end drains
-    // again before it publishes, so they are taken in there.
-    let observed = match drained {
-        Ok((observed, _)) => observed,
-        Err(failure) => {
-            state.unpin_leg(Leg::Job(epoch));
-            let answered = if matches!(failure, JobFailure::WatcherTerminal(_)) {
-                FailureAnswer::WhereItStands
-            } else {
-                FailureAnswer::Fold
-            };
-            return Err(apply_reload_runtime_failure(
-                shared,
-                entry,
-                state,
-                name.clone(),
-                epoch,
-                attachment,
-                failure,
-                reply.clone(),
-                answered,
-            ));
-        }
-    };
-    state.pending.merge(observed);
-    if state.pending.has_rescans() {
-        state.unpin_leg(Leg::Job(epoch));
-        state.coverage.park_by(epoch, attachment);
-        state.publish_pending_reconcile();
-        let next = state
-            .claim
-            .hand_on(|epoch| Job::Reconcile(name.clone(), epoch));
-        reply.stand_down(&state);
-        drop(state);
-        dispatch_handoff(shared, entry, epoch, next);
-        return Err(None);
-    }
-    let (work, through) = state.pending.take();
-    if work.is_empty() {
-        return Ok(attachment);
-    }
-    if state.trust == TrustState::Ready {
-        state.trust = TrustState::warming(WarmingPhase::Healing, 0, None);
-    }
-    drop(state);
     // A schema-changing reload derives these facts twice — here under the
     // active declaration, and again under the new one — an accepted cost of
     // one turn's facts: whether the schema changes is known only from the
     // candidate, which is read after this fold.
-    let folded = shared.ops.reconcile(
+    match take_in_delivered_facts(
+        shared,
+        entry,
         name,
-        &mut attachment,
-        ReconcileWork { batch: work },
-        &reporter(entry, epoch),
+        epoch,
+        attachment,
+        Batch::default(),
+        IntakeOverflow::HandOn,
+    ) {
+        IntakeEnd::Derived(state, attachment) => {
+            drop(state);
+            Ok(attachment)
+        }
+        IntakeEnd::MovedOn(mut state, attachment) => {
+            state.unpin_leg(Leg::Job(epoch));
+            reply.stand_down(&state);
+            Err(Some(attachment))
+        }
+        IntakeEnd::Failed(state, attachment, failure) => {
+            end_fold_on_failure(shared, entry, state, name, epoch, attachment, failure, reply);
+            Err(None)
+        }
+        IntakeEnd::HandedOn(state, next) => {
+            reply.stand_down(&state);
+            drop(state);
+            dispatch_handoff(shared, entry, epoch, next);
+            Err(None)
+        }
+    }
+}
+
+/// End a reload's job on a runtime failure its fold met, before the candidate
+/// was read: the entry answers the failure by [`end_turn_on_failure`], the
+/// policy an apply's failed intake takes, so trust is withdrawn and the
+/// recovery or rung the failure owes is owed, and the reload is answered once
+/// that policy has published — `vault/reload-failed` saying the fold met it,
+/// or, for a watcher loss the fold's drain met, with where the entry then
+/// stands.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the turn's policy takes seven; the reload adds only its reply"
+)]
+fn end_fold_on_failure<O: EntryOps>(
+    shared: &Arc<Shared<O>>,
+    entry: &Arc<Entry<O::Attachment>>,
+    mut state: GateHold<'_, EntryState<O::Attachment>>,
+    name: &VaultName,
+    epoch: u64,
+    attachment: O::Attachment,
+    failure: JobFailure,
+    reply: &ReloadReply,
+) {
+    state.unpin_leg(Leg::Job(epoch));
+    let where_it_stands = matches!(failure, JobFailure::WatcherTerminal(_));
+    end_turn_on_failure(
+        shared,
+        entry,
+        state,
+        name,
+        epoch,
+        attachment,
+        failure.clone(),
     );
-    let mut state = entry.gate.lock().expect("entry gate poisoned");
-    if !state.claim.stands_at(epoch) || state.detach_in_flight {
-        state.unpin_leg(Leg::Job(epoch));
-        reply.stand_down(&state);
-        return Err(Some(attachment));
+    if where_it_stands {
+        reply.stand_down(&entry.gate.lock().expect("entry gate poisoned"));
+    } else {
+        let _ = reply.send(Err(ReloadRefusal::Fold(failure)));
     }
-    if let Err(failure) = folded {
-        state.unpin_leg(Leg::Job(epoch));
-        return Err(apply_reload_runtime_failure(
-            shared,
-            entry,
-            state,
-            name.clone(),
-            epoch,
-            attachment,
-            failure,
-            reply.clone(),
-            FailureAnswer::Fold,
-        ));
-    }
-    // The fold committed every fact it took, so a read that met the entry's
-    // change at or before `through` may answer from here on.
-    state.pending.derive_through(through);
-    record_advisories(&mut state, &*shared.ops, &attachment);
-    if state.damage_met_under_a_claim.is_some() {
-        state.unpin_leg(Leg::Job(epoch));
-        state.coverage.park_by(epoch, attachment);
-        let rebuild = hand_on_carried_damage(&mut state, name).expect("the damage is carried");
-        reply.stand_down(&state);
-        drop(state);
-        dispatch_handoff(shared, entry, epoch, rebuild);
-        return Err(None);
-    }
-    Ok(attachment)
 }
 
 /// Run one leg of an explicit reload: an activation, a dry run, or a schema
@@ -9735,10 +9795,8 @@ fn end_reload_leg_over_its_drain<O: EntryOps>(
 enum FailureAnswer {
     /// `vault/reload-failed`, with what the leg met.
     Runtime,
-    /// `vault/reload-failed`, saying the reload's fold met it.
-    Fold,
     /// Where the entry stands once the failure's policy has published: a
-    /// watcher loss either drain met.
+    /// watcher loss the end's drain met.
     WhereItStands,
 }
 
@@ -9751,11 +9809,12 @@ enum FailureAnswer {
 ///
 /// Each of these is a fact about the entry rather than about the candidate
 /// the leg read, so an activation and a dry run that meet one both answer it
-/// here, and so does a reload's fold. `answered` says how the asker is told:
-/// `vault/reload-failed` with what the leg met, or saying the fold met it, or
-/// where the entry then stands for a watcher loss a drain met. A candidate's
-/// own failure is not such a fact: [`run_reload_job`] answers it before
-/// reaching this.
+/// here. `answered` says how the asker is told: `vault/reload-failed` with
+/// what the leg met, or where the entry then stands for a watcher loss the
+/// end's drain met. A candidate's own failure is not such a fact:
+/// [`run_reload_job`] answers it before reaching this, and a failure the
+/// reload's fold met is ended as an apply's intake ends it, by
+/// [`end_fold_on_failure`].
 #[expect(
     clippy::too_many_arguments,
     reason = "the leg's whole standing: its gate hold, its coverage, its epoch and its asker"
@@ -9773,16 +9832,12 @@ fn apply_reload_runtime_failure<O: EntryOps>(
 ) -> Option<O::Attachment> {
     let refusal = |state: &EntryState<O::Attachment>, failure: JobFailure| match answered {
         FailureAnswer::Runtime => ReloadRefusal::Runtime(failure),
-        FailureAnswer::Fold => ReloadRefusal::Fold(failure),
         FailureAnswer::WhereItStands => state.reload_stood_down(reply.candidate_read()),
     };
     let response = match failure {
         JobFailure::Reload(error) => {
             state.coverage.park_by(epoch, attachment);
-            match answered {
-                FailureAnswer::Fold => ReloadRefusal::Fold(JobFailure::Reload(error)),
-                FailureAnswer::Runtime | FailureAnswer::WhereItStands => ReloadRefusal::Core(error),
-            }
+            ReloadRefusal::Core(error)
         }
         error @ JobFailure::LostMaintainership => {
             begin_release(&mut state);
@@ -10590,6 +10645,10 @@ mod tests {
         terminal_reconcile: std::sync::atomic::AtomicBool,
         environmental_recover: std::sync::atomic::AtomicBool,
         environmental_reconcile: std::sync::atomic::AtomicBool,
+        /// Fail the next reconcile on a vault control file it read: a typed
+        /// reload error a turn meets, rather than a refusing environment.
+        /// One-shot.
+        control_file_reconcile: std::sync::atomic::AtomicBool,
         /// The vault whose next reconcile reports damaged derived state, and
         /// the vault whose next maintenance does. Each names one vault and is
         /// taken by the leg that reports it, so a case reads what one entry
@@ -11155,6 +11214,11 @@ mod tests {
             }
             if self.environmental_reconcile.swap(false, Ordering::SeqCst) {
                 return Err(JobFailure::Environmental("refused".into()));
+            }
+            if self.control_file_reconcile.swap(false, Ordering::SeqCst) {
+                return Err(JobFailure::Reload(ReloadError::SchemaParse(
+                    "the schema does not parse".into(),
+                )));
             }
             if takes_the_vault(&self.damaged_reconcile_at, name) {
                 return Err(JobFailure::StoreDamaged(

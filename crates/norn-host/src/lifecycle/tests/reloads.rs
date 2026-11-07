@@ -990,36 +990,78 @@ fn a_candidate_failure_over_a_settling_vault_keeps_the_folds_derivation_and_its_
 }
 
 /// **A runtime failure the fold meets answers `vault/reload-failed` saying
-/// the fold met it**, its candidate not read, and the entry takes the policy
-/// that failure owes.
+/// the fold met it**, its candidate not read, and is handled as a runtime
+/// failure the reload's own steps meet: trust is withdrawn, the recovery is
+/// owed, and no fact the fold took is lost, since the recovery rereads the
+/// whole vault. That holds for a refusing environment and for a control file
+/// the fold's derivation could not read alike.
 #[test]
 fn a_failure_the_fold_meets_answers_reload_failed_saying_the_fold_met_it() {
-    let ops = Arc::new(FakeOps::default());
-    let (host, name, lease) = a_ready_vault(&ops);
-    hold_a_settling_turn(&host, &ops, &name);
-    let answer = a_waiting_reload(&host, &name, false);
+    for control_file in [false, true] {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name, lease) = a_ready_vault(&ops);
+        hold_a_settling_turn(&host, &ops, &name);
+        let answer = a_waiting_reload(&host, &name, false);
 
-    ops.hold_reconciles_from.store(2, Ordering::SeqCst);
-    end_the_turn_leaving_a_fact(&ops);
-    wait_for_reconciles(&ops, 2, "the fold's commit to begin");
-    ops.environmental_reconcile.store(true, Ordering::SeqCst);
-    ops.later_reconcile_release.store(true, Ordering::SeqCst);
+        ops.hold_reconciles_from.store(2, Ordering::SeqCst);
+        end_the_turn_leaving_a_fact(&ops);
+        wait_for_reconciles(&ops, 2, "the fold's commit to begin");
+        if control_file {
+            ops.control_file_reconcile.store(true, Ordering::SeqCst);
+        } else {
+            ops.environmental_reconcile.store(true, Ordering::SeqCst);
+        }
+        ops.later_reconcile_release.store(true, Ordering::SeqCst);
 
-    let refusal = answer_of(&answer).expect_err("the fold's failure was answered as success");
-    assert!(ops.reconciles_at_reload.lock().unwrap().is_empty());
-    let envelope = refusal
-        .answer(&name)
-        .expect("a live host answers with a code");
-    assert_eq!(
-        envelope.detail(),
-        &ErrorDetail::reload_failed(norn_wire::ReloadFailure::environmental("refused"))
-    );
-    assert_eq!(
-        envelope.message(),
-        "this vault's reload met a failure while it took in the change the vault held, so its \
-         control files were not read"
-    );
-    drop((lease, host));
+        let refusal = answer_of(&answer).expect_err("the fold's failure was answered as success");
+        assert!(
+            ops.reconciles_at_reload.lock().unwrap().is_empty(),
+            "control file: {control_file}: the candidate was read over the fold's failure"
+        );
+        let envelope = refusal
+            .answer(&name)
+            .expect("a live host answers with a code");
+        if !control_file {
+            assert_eq!(
+                envelope.detail(),
+                &ErrorDetail::reload_failed(norn_wire::ReloadFailure::environmental("refused"))
+            );
+        }
+        assert_eq!(
+            envelope.message(),
+            "this vault's reload met a failure while it took in the change the vault held, so \
+             its control files were not read",
+            "control file: {control_file}"
+        );
+
+        // No ambient tick runs here, so the entry stands as the failure's
+        // policy left it until a demand asks for the recovery it owes.
+        {
+            let entry = host.shared.entries.get(&name).unwrap();
+            let state = entry.gate.lock().unwrap();
+            assert!(
+                matches!(state.trust, TrustState::Untrusted { .. }),
+                "control file: {control_file}: the fold's failure left the trust at {:?}",
+                state.trust
+            );
+            assert!(
+                state.recovery_required,
+                "control file: {control_file}: the fold's failure owes no recovery"
+            );
+            assert!(
+                state.pending.has_rescans(),
+                "control file: {control_file}: nothing rereads the facts the fold took"
+            );
+        }
+        drop(host.demand(&name).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        assert_eq!(
+            ops.recovers.load(Ordering::SeqCst),
+            1,
+            "control file: {control_file}"
+        );
+        drop((lease, host));
+    }
 }
 
 /// **A schema-changing reload over a settling vault completes, and answers
