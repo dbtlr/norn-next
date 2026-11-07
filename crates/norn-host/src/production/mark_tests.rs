@@ -385,3 +385,95 @@ fn a_marked_folder_that_becomes_a_markdown_file_ends_its_mark() {
         Leaves::BecameAFile,
     );
 }
+
+#[test]
+fn a_hidden_rendering_keeps_a_relisted_folders_mark() {
+    let f = Fixture::new("mark-hidden-rendering");
+    let Some((ops, name, progress, mut attachment)) = attach_over(
+        &f,
+        &["q\u{fffd}", "q\u{fffd}/lk", "q\\"],
+        &["q\u{fffd}/lk/a.md", "q\\/probe.md"],
+    ) else {
+        return;
+    };
+    let root = f.vault();
+    let folder = root.join("q\u{fffd}/lk");
+    let Some(denial) = Denied::search(&folder, &folder.join("a.md")) else {
+        ops.detach(&name, attachment);
+        return;
+    };
+    watcher_leg(
+        &ops,
+        &name,
+        &mut attachment,
+        &progress,
+        &root,
+        &["q\u{fffd}"],
+    );
+    assert_eq!(
+        sorted_kinds(&mut attachment.store, "q\u{fffd}/lk"),
+        ["directory/unreadable"]
+    );
+    denial.restore();
+    let hidden = root.join("q\\");
+    let Some(_hidden) = Denied::search(&hidden, &hidden.join("probe.md")) else {
+        ops.detach(&name, attachment);
+        return;
+    };
+    watcher_leg(
+        &ops,
+        &name,
+        &mut attachment,
+        &progress,
+        &root,
+        &["q\\", "q\u{fffd}"],
+    );
+    // The visible folder lists again, but the refused, unlistable sibling
+    // hides another rendering. ADR 0046 withholds this job's conclusion.
+    // A build from zero sees readable lk and has no earlier mark to hold.
+    assert_eq!(
+        sorted_kinds(&mut attachment.store, "q\u{fffd}/lk"),
+        ["directory/unreadable"]
+    );
+    ops.detach(&name, attachment);
+}
+
+#[test]
+fn a_place_reading_keeps_the_mark_its_job_just_filed() {
+    let f = Fixture::new("mark-filed-this-job");
+    let Some((ops, name, _progress, mut attachment)) =
+        attach_over(&f, &["q\u{fffd}"], &["q\u{fffd}/a.md"])
+    else {
+        return;
+    };
+    let root = f.vault();
+    let folder = root.join("q\u{fffd}");
+    let Some(denial) = Denied::search(&folder, &folder.join("a.md")) else {
+        ops.detach(&name, attachment);
+        return;
+    };
+    let vault = norn_fs::Vault::open(&root, &[]).unwrap();
+    let norn_fs::WalkFact::Unreadable(fact) = vault.fact(Path::new("q\u{fffd}")).unwrap() else {
+        panic!("the walk must see the unlistable folder");
+    };
+    let mut account = Account::default();
+    {
+        let mut pending = Pending::new(&mut attachment.store, 2, &root, &[], &mut account).unwrap();
+        pending.unreadable_fact(&fact, None).unwrap();
+        pending.flush().unwrap();
+        // Deterministically stage the window between the walk's mark and its
+        // place reading: permissions return, but this job's reading stands.
+        denial.restore();
+        pending
+            .read_place(&vault, &DocumentPath::new("q\u{fffd}").unwrap())
+            .unwrap();
+        pending.flush().unwrap();
+    }
+    // A fresh build sees restored permissions, so it cannot reproduce the
+    // mark this job earned before the restoration.
+    assert_eq!(
+        sorted_kinds(&mut attachment.store, "q\u{fffd}"),
+        ["directory/unreadable"]
+    );
+    ops.detach(&name, attachment);
+}
