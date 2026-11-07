@@ -323,8 +323,9 @@ pub trait EntryOps: Send + Sync + 'static {
     #[cfg(feature = "induced-failure")]
     fn loading_read_boundary(&self, _completed: bool) {}
 
-    /// Harness timing before a reconcile takes coverage.
-    #[cfg(feature = "induced-failure")]
+    /// Harness timing before a reconcile takes coverage. The lifecycle's own
+    /// cases hold a turn here, at the top of its iteration, as well.
+    #[cfg(any(test, feature = "induced-failure"))]
     fn loading_reconcile_boundary(&self) {}
 
     /// Background release of idle read resources, outside every entry gate.
@@ -8386,7 +8387,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
         Job::Reconcile(name, epoch) => loop {
             // The probe reports a reconcile turn only when one will run: a stale
             // claim or a queued apply ends the job before it takes coverage.
-            #[cfg(feature = "induced-failure")]
+            #[cfg(any(test, feature = "induced-failure"))]
             {
                 let live = {
                     let state = entry.gate.lock().expect("entry gate poisoned");
@@ -9438,7 +9439,9 @@ fn fold_for_reload<O: EntryOps>(
             Err(Some(attachment))
         }
         IntakeEnd::Failed(state, attachment, failure) => {
-            end_fold_on_failure(shared, entry, state, name, epoch, attachment, failure, reply);
+            end_fold_on_failure(
+                shared, entry, state, name, epoch, attachment, failure, reply,
+            );
             Err(None)
         }
         IntakeEnd::HandedOn(state, next) => {
@@ -10724,6 +10727,18 @@ mod tests {
         block_reconcile_at: AtomicUsize,
         reconcile_started: std::sync::atomic::AtomicBool,
         reconcile_release: std::sync::atomic::AtomicBool,
+        /// The reconcile turn boundary — the top of a turn's iteration,
+        /// before it takes the gate — whose count the fake holds on
+        /// `reconcile_boundary_started` and `reconcile_boundary_release`, and
+        /// zero for none. The count runs across the fake's vaults.
+        block_reconcile_boundary_at: AtomicUsize,
+        reconcile_boundaries: AtomicUsize,
+        reconcile_boundary_started: std::sync::atomic::AtomicBool,
+        reconcile_boundary_release: std::sync::atomic::AtomicBool,
+        /// The poll of a vault, by that vault's own poll count, that the fake
+        /// holds on `poll_started` and `poll_release`, and zero for none: a
+        /// case holds one drain of a leg whose earlier polls it counted.
+        block_poll_at: AtomicUsize,
         /// The reconcile turn from which every later turn is held on its own
         /// release, and zero for none: a case that lets one held turn go
         /// through `reconcile_release` still holds the turns after it.
@@ -11098,6 +11113,18 @@ mod tests {
     impl EntryOps for Arc<FakeOps> {
         type Attachment = FakeCoverage;
 
+        fn loading_reconcile_boundary(&self) {
+            let boundary = self.reconcile_boundaries.fetch_add(1, Ordering::SeqCst) + 1;
+            if self.block_reconcile_boundary_at.load(Ordering::SeqCst) == boundary {
+                self.reconcile_boundary_started
+                    .store(true, Ordering::SeqCst);
+                wait_for_release(
+                    "reconcile_boundary_release",
+                    &self.reconcile_boundary_release,
+                );
+            }
+        }
+
         fn active_content_model(&self, attachment: &FakeCoverage) -> Arc<ContentModel> {
             Arc::clone(&attachment.content_model)
         }
@@ -11409,18 +11436,19 @@ mod tests {
             name: &VaultName,
             _: &mut FakeCoverage,
         ) -> Result<Option<Batch>, JobFailure> {
-            *self
-                .polls
-                .lock()
-                .expect("poll counts poisoned")
-                .entry(name.clone())
-                .or_default() += 1;
-            let gated = self
-                .poll_gate
-                .lock()
-                .expect("poll gate poisoned")
-                .as_ref()
-                .is_some_and(|gated| gated == name);
+            let polled = {
+                let mut polls = self.polls.lock().expect("poll counts poisoned");
+                let polled = polls.entry(name.clone()).or_default();
+                *polled += 1;
+                *polled
+            };
+            let gated = self.block_poll_at.load(Ordering::SeqCst) == polled
+                || self
+                    .poll_gate
+                    .lock()
+                    .expect("poll gate poisoned")
+                    .as_ref()
+                    .is_some_and(|gated| gated == name);
             if self.block_poll.load(Ordering::SeqCst) || gated {
                 self.poll_started.store(true, Ordering::SeqCst);
                 wait_for_release("poll_release", &self.poll_release);

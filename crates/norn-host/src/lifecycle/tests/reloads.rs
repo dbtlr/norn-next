@@ -1375,7 +1375,11 @@ fn a_reload_over_the_reconcile_an_earlier_reloads_end_handed_on_to_waits_and_run
     ops.block_reload.store(true, Ordering::SeqCst);
     let first = ask_a_reload(&host, &name, false);
     wait_for_flag("reload_started", &ops.reload_started);
-    assert_eq!(host.reload(&name), busy(), "a second reload while the first runs");
+    assert_eq!(
+        host.reload(&name),
+        busy(),
+        "a second reload while the first runs"
+    );
 
     let turn = ops.reconciles.load(Ordering::SeqCst) + 1;
     ops.block_reconcile_at.store(turn, Ordering::SeqCst);
@@ -1537,4 +1541,70 @@ fn damage_a_read_met_while_the_fold_derives_answers_the_reload_before_its_candid
         assert_eq!(ops.rebuilds.load(Ordering::SeqCst), 1, "dry run: {dry_run}");
         drop((lease, host));
     }
+}
+
+/// **A maintenance leg that ends with facts left for the waiting reload
+/// publishes healing at its end**, so between the leg's end and the reload's
+/// fold the vault does not stand `Ready` with an edit it has not derived.
+#[test]
+fn a_maintenance_leg_leaving_facts_for_the_waiting_reload_publishes_healing_at_its_end() {
+    let ops = Arc::new(FakeOps::default());
+    let (host, name, lease) = a_ready_vault(&ops);
+    hold_a_maintenance_leg(&host, &ops, &name);
+    let answer = a_waiting_reload(&host, &name, false);
+
+    // The leg's own drain meets the fact and then an empty poll; the fold's
+    // drain, the poll after those, is held.
+    let fold_drain = polls_of(&ops, &name) + 3;
+    ops.block_poll_at.store(fold_drain, Ordering::SeqCst);
+    ops.facts_on_next_polls.store(1, Ordering::SeqCst);
+    ops.maintenance_release.store(true, Ordering::SeqCst);
+    wait_for_flag("poll_started", &ops.poll_started);
+    assert_eq!(
+        host.state(&name),
+        answered(healing()),
+        "the leg's end left the vault Ready with a fact pending"
+    );
+
+    ops.poll_release.store(true, Ordering::SeqCst);
+    assert_eq!(answer_of(&answer), judged());
+    wait_for_state(&host, &name, TrustState::Ready);
+    drop((lease, host));
+}
+
+/// **An apply admitted while a reload waits for a reconcile turn a leg's end
+/// handed on runs after the reload**, though it was queued before the turn
+/// began: the turn runs and hands the claim to the reload, never to the
+/// apply ahead of it.
+#[test]
+fn an_apply_queued_behind_a_reload_waiting_for_a_handed_on_turn_runs_after_the_reload() {
+    let ops = Arc::new(FakeOps::default());
+    let (host, name, lease) = a_ready_vault(&ops);
+    hold_a_settling_turn(&host, &ops, &name);
+
+    // The held turn ends leaving a fact, and the turn it hands on to is held
+    // at its top, before it takes the gate.
+    let next_turn = ops.reconcile_boundaries.load(Ordering::SeqCst) + 1;
+    ops.block_reconcile_boundary_at
+        .store(next_turn, Ordering::SeqCst);
+    end_the_turn_leaving_a_fact(&ops);
+    wait_for_flag(
+        "reconcile_boundary_started",
+        &ops.reconcile_boundary_started,
+    );
+
+    let answer = a_waiting_reload(&host, &name, false);
+    let pending = host.admit_apply(&name, a_plan(&name)).expect("admitted");
+    ops.block_reload.store(true, Ordering::SeqCst);
+    ops.reconcile_boundary_release.store(true, Ordering::SeqCst);
+
+    wait_for_flag("reload_started", &ops.reload_started);
+    assert!(
+        ops.applies_ran.lock().unwrap().is_empty(),
+        "the apply ran ahead of the reload waiting before it"
+    );
+    ops.reload_release.store(true, Ordering::SeqCst);
+    assert_eq!(answer_of(&answer), judged());
+    pending.wait().expect("the apply applied");
+    drop((lease, host));
 }
