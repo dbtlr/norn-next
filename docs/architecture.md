@@ -165,7 +165,7 @@ may not be added.
   During the first three steps, accepted roots run ahead through the same routines.
   Link health is judged fourth and stored bodies are full-text indexed fifth. The capabilities
   each step completes publish to early reads as it ends, as [ADR
-  0048](decisions/0048-a-build-step-ends-at-its-closing-take.md) rules.
+  0050](decisions/0050-a-reload-leg-opens-the-gap-a-maintenance-leg-opens.md) rules.
 - **Corruption, or any state the lower rungs cannot resolve** — at any time, before or after
   release.
 
@@ -1636,7 +1636,7 @@ in which the derived database answers from a stale world. High-fidelity change d
 therefore what buys the right to read SQLite and answer. Canonical warm requests perform
 no filesystem check. An early read of a store under construction additionally checks its
 build's root identity outside entry and watcher locks, as [ADR
-0048](decisions/0048-a-build-step-ends-at-its-closing-take.md) permits. The heal ladder is why imperfect detection cannot corrupt derived state;
+0050](decisions/0050-a-reload-leg-opens-the-gap-a-maintenance-leg-opens.md) permits. The heal ladder is why imperfect detection cannot corrupt derived state;
 detection fidelity is why that state is worth reading at all.
 
 Two mechanisms carry trust, and both are contract:
@@ -2448,7 +2448,7 @@ A park keeps its own code. Where the demand is serving, the refusal is reader-un
 which is an entry serving every surface but this one.
 
 **A from-zero build answers each read whose data it has completed, under [ADR
-0048](decisions/0048-a-build-step-ends-at-its-closing-take.md).** Early reads run on
+0050](decisions/0050-a-reload-leg-opens-the-gap-a-maintenance-leg-opens.md).** Early reads run on
 the canonical store under construction; a build creates no store beside it. Every
 from-zero route — an attach after a create or an open-time rebuild, inline rung 3, the
 `rebuild` leg, and the recovery or reload over the empty store an undeclarable attach
@@ -2570,7 +2570,7 @@ mutation. An early answer carries the warming trust, store epoch and committed g
 of its hold, and a Find cursor continues across `Ready` under ordinary cursor judgment.
 
 **A canonical read that meets a change waits for it, as [ADR
-0048](decisions/0048-a-build-step-ends-at-its-closing-take.md) rules.** Warming splits
+0050](decisions/0050-a-reload-leg-opens-the-gap-a-maintenance-leg-opens.md) rules.** Warming splits
 by stance, read under the entry gate beside the published demand: an entry that entered
 warming from `Ready` with no withdrawal of trust in between — a polled batch, a reconcile
 turn, a schema reload — settles. Every other state refuses canonical acquisition at once
@@ -2939,7 +2939,7 @@ Full-text search and the stem trigram index are maintained transactionally insid
 The full-text triggers are the index's only writer on a finished store; a from-zero build
 holds no triggers while it runs and fills the index in committed batches from the stored
 bodies in step 5, installing the triggers in the closing transaction that clears its mark ([ADR
-0048](decisions/0048-a-build-step-ends-at-its-closing-take.md)).
+0050](decisions/0050-a-reload-leg-opens-the-gap-a-maintenance-leg-opens.md)).
 The trigram index is a lane-1 projection of the document path alone, invalidated by the
 derivation version. Embeddings are
 lane-2 engine state: eventually consistent, held in the engine's sidecar database rather
@@ -3413,7 +3413,7 @@ rows are discarded and the whole vault is walked again. Unlike the other write v
 `Host::init` answers synchronously rather than with a `PendingApply`, and a vault whose
 standing schema cannot be read answers the entry's untrusted refusal. **Initializing a vault
 runs its first build in the foreground** ([ADR
-0048](decisions/0048-a-build-step-ends-at-its-closing-take.md)): past the `schema_elsewhere`
+0050](decisions/0050-a-reload-leg-opens-the-gap-a-maintenance-leg-opens.md)): past the `schema_elsewhere`
 answer, `init` demands the vault and waits, with no bound, until it is `Ready`, holding that
 demand until it answers, so a vault nothing has attached runs its from-zero build inside the
 call rather than refusing as still indexing. A build that ends short of `Ready` — a failure of
