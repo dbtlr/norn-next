@@ -1208,13 +1208,16 @@ fn while_a_reload_waits_a_reconcile_turn_ending_with_maintenance_due_hands_on_to
     drop((lease, host));
 }
 
+/// Arm the fake so the held turn over the named vault fails one way.
+type ArmAFailure = fn(&FakeOps, &VaultName);
+
 /// **Every runtime failure of the turn a reload waits for answers the
 /// reload**, never busy, its candidate not read: a refusing environment, a
 /// terminal watch, a lost or contended maintainership, and damaged derived
 /// state.
 #[test]
 fn every_failure_of_the_turn_a_reload_waits_for_answers_the_reload_with_its_candidate_unread() {
-    let failures: [(&str, fn(&FakeOps, &VaultName)); 5] = [
+    let failures: [(&str, ArmAFailure); 5] = [
         ("environmental", |ops, _| {
             ops.environmental_reconcile.store(true, Ordering::SeqCst);
         }),
