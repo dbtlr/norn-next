@@ -3043,7 +3043,8 @@ apply queue's head, a due detach, maintenance and another reconcile turn. Facts 
 work left to derive go to the reload's fold rather than to a reconcile ahead of it, and so do
 those a saturated last drain left with the watcher, since the fold drains again. The order among the others, and between the queue's head and a
 pending reconcile, is unchanged. An apply asked while a reload waits queues behind it, a due
-detach waits behind it, and a second reload refuses as busy. A teardown, an invalidation or a
+detach waits behind it and is scheduled where the reload releases the claim, whatever the
+reload answered, and a second reload refuses as busy. A teardown, an invalidation or a
 park that ends the wait answers the reload with where the entry then stands.
 
 **A reload's first step is its fold, as an apply's first step is its intake.** It takes the
