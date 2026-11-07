@@ -903,8 +903,10 @@ pub const REQUIRED_CASES: &[Case] = &[
                  the lane, run on a copy of the store, carries the verdict out rather than \
                  swallowing it, and rung 3 run as the \
                  lifecycle runs it — over coverage that stands — derives the vault again to what a \
-                 build from zero holds, findings included. The trust the verdict withdraws is \
-                 `induced-host-damage-withdraws-trust-at-the-maintenance-leg`'s claim",
+                 build from zero holds, findings included. The trust the verdict withdraws is stated over the lifecycle by \
+                 `lifecycle::tests::lane::damage_a_unit_meets_is_judged_by_the_ops_lifetime_where_the_entry_records_none` \
+                 and over a host by \
+                 `verification::damage_the_verification_meets_schedules_the_rebuild_once`",
         carrier: "crates/norn-host/src/production.rs::\
                   the_scheduled_verification_reports_a_full_text_index_that_stopped_agreeing_as_damage",
         feature: None,
