@@ -16,14 +16,16 @@
 //! registration change holds, the park's own code for an entry standing on a
 //! park — `host/duplicate-root`, `host/maintainer-contended`, or
 //! `host/entry-untrusted` for a root the registry cannot read — exactly as
-//! `vault status` answers it, `host/entry-not-ready` for an entry holding
-//! nothing to reload yet, `host/entry-untrusted` for an entry whose derived
-//! state cannot be trusted, `vault/reload-busy` for a vault that is serving
-//! and that explicit work holds — another reload, an apply, or a scheduled
-//! detach; a reload waits behind the vault's own polls and maintenance — and
-//! `vault/reload-failed`, carrying what the reload met, for every outcome of a
-//! reload that ran, its `unsupported` kind among them for an attachment that
-//! holds no reload at all.
+//! `vault status` answers it, `host/entry-not-ready` for an entry not ready
+//! to re-read its control files yet — unattached, building, recovering or
+//! releasing — `host/entry-untrusted` for an entry whose derived state cannot
+//! be trusted, a watcher overflow among them, `vault/reload-busy` for a vault
+//! that is serving or settling a change and that explicit work holds —
+//! another reload, an apply, or a scheduled detach; a reload waits behind the
+//! vault's own polls, maintenance and reconcile turns, and derives the change
+//! they left before its own work — and `vault/reload-failed`, carrying what
+//! the reload met, for every outcome of a reload that ran, its `unsupported`
+//! kind among them for an attachment that holds no reload at all.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

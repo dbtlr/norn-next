@@ -345,10 +345,10 @@ impl ReloadRefusal {
     /// `host/entry-held`, a park in its own code (`host/duplicate-root`,
     /// `host/maintainer-contended`, or `host/entry-untrusted` for a root the
     /// registry cannot read), an entry whose derived state cannot be trusted
-    /// in `host/entry-untrusted`, an entry that holds nothing to reload yet in
-    /// `host/entry-not-ready`, and a `Ready` entry that explicit work holds
-    /// (another reload, an apply, or a scheduled detach) in
-    /// `vault/reload-busy`.
+    /// in `host/entry-untrusted`, an entry not ready to re-read its control
+    /// files yet in `host/entry-not-ready`, and an entry serving or settling a
+    /// change that explicit work holds (another reload, an apply, or a
+    /// scheduled detach) in `vault/reload-busy`, whichever label it publishes.
     ///
     /// `Err(HostError)` is the host being gone rather than the vault refusing.
     /// It carries no code and no detail: no reload outcome was learned, so
@@ -379,11 +379,16 @@ impl ReloadRefusal {
 /// refuses.
 ///
 /// Two readings of that state, taken in the order that makes each of them
-/// true: a state that holds nothing yet is filed as not ready, and what is left
-/// is an entry that is ready and busy — explicit work holds it, which is what a
-/// reload is refused behind. A reload waits behind a watcher poll or a
-/// maintenance leg instead. A park and a state that refuses never reach here:
-/// [`Demand::answer`] renders them in their own codes.
+/// true: an unattached or warming state is filed as not ready, with a message
+/// that reads true of every such state — a settling entry a reload was not
+/// run over among them, which is why it says "not ready" rather than "holds
+/// nothing" — and what is left is an entry that is ready and busy: explicit
+/// work holds it, which is what a reload is refused behind. A reload waits
+/// behind a watcher poll, a maintenance leg or a reconcile turn instead. A
+/// settling entry that explicit work holds publishes warming, so its busy
+/// answer is named at admission rather than read off the label here. A park
+/// and a state that refuses never reach here: [`Demand::answer`] renders them
+/// in their own codes.
 ///
 /// **`Ready` reaches here by three paths, and on each the reload did not
 /// run.** At the ask, explicit work holds the entry: another reload, an apply,
