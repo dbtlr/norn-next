@@ -186,8 +186,8 @@ pub use profile::{
     Ambiguity, BodyShape, Clutter, DirShape, LengthBucket, LinkDensity, PROFILES, Profile, Symlinks,
 };
 
-/// File marking a directory as generator-owned. Dot-prefixed, so a walk that
-/// skips hidden entries never sees it.
+/// File marking a directory as generator-owned. Dot-prefixed, so a vault walk
+/// reports it as a skipped root rather than reading its contents.
 pub const SENTINEL_FILE: &str = ".norn-fixture-vault";
 
 /// Exact sentinel contents. A caller clearing a directory verifies these
@@ -210,6 +210,11 @@ pub struct Manifest {
     /// Every file written, documents and clutter and the sentinel alike.
     pub files: usize,
     pub directories: usize,
+    /// Outermost dot-led directories emitted. A vault walk reports each as
+    /// one skipped root, without entering it. Generated files and symlinks
+    /// never sit beneath these directories; the dot-led sentinel is already
+    /// included in `files`.
+    pub dot_led_directory_roots: usize,
     pub markdown_bytes: usize,
     pub links: usize,
     pub dangling_links: usize,
@@ -540,6 +545,15 @@ fn generate_where(
         documents: plan.len(),
         files: writer.file_digests.len(),
         directories: writer.dirs.len(),
+        dot_led_directory_roots: writer
+            .dirs
+            .iter()
+            .filter(|dir| {
+                let mut parts = dir.rsplit('/');
+                parts.next().is_some_and(|name| name.starts_with('.'))
+                    && !parts.any(|name| name.starts_with('.'))
+            })
+            .count(),
         markdown_bytes,
         links: total_links,
         dangling_links,

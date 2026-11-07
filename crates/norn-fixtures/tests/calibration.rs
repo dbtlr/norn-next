@@ -144,6 +144,46 @@ fn the_probe_and_the_manifest_agree_on_the_tree() {
 }
 
 #[test]
+fn the_manifest_counts_only_outermost_dot_led_directory_roots() {
+    for (empty_dirs, expected) in [(0, 0), (5, 0), (6, 1), (7, 2), (8, 2)] {
+        let mut profile = profile("tiny");
+        profile.clutter.empty_dirs = empty_dirs;
+        with_tree(
+            &format!("cal-dot-roots-{empty_dirs}"),
+            &profile,
+            7,
+            |dir, manifest| {
+                assert_eq!(manifest.dot_led_directory_roots, expected);
+                let roots: std::collections::BTreeSet<_> = scratch::walk(dir)
+                    .into_iter()
+                    .filter(|entry| entry.kind == scratch::Kind::Dir)
+                    .filter_map(|entry| {
+                        let mut prefix = String::new();
+                        for part in entry.rel.split('/') {
+                            if !prefix.is_empty() {
+                                prefix.push('/');
+                            }
+                            prefix.push_str(part);
+                            if part.starts_with('.') {
+                                return Some(prefix);
+                            }
+                        }
+                        None
+                    })
+                    .collect();
+                assert_eq!(manifest.dot_led_directory_roots, roots.len());
+                assert!(scratch::walk(dir).iter().all(|entry| {
+                    entry.kind == scratch::Kind::Dir
+                        || entry.rel.rsplit_once('/').is_none_or(|(parent, _)| {
+                            parent.split('/').all(|part| !part.starts_with('.'))
+                        })
+                }));
+            },
+        );
+    }
+}
+
+#[test]
 #[ignore = "soak-lane case: the >=5k profile is nightly work, not per-PR"]
 fn the_probe_and_the_manifest_agree_on_the_soak_tree() {
     let (stats, manifest) = generate_and_measure("cal-agree-soak", &profile("soak"), 3);
