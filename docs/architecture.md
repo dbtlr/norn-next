@@ -43,10 +43,15 @@ Nothing streams a whole vault through RAM — not a walk, not a query, not a mut
 The invariant is *measured*, not asserted:
 
 - Full nightly/manual regression asserts peak memory at a realistic ~2k-document profile, alongside
-  size-independence pairs expressed as counts rather than clocks. Its attach, read and plan
-  ceilings bound a child's peak minus the peak of a null child: the same binary attaching a
-  vault with no documents. The subtraction cancels the binary's own code and runtime, which
-  grow with the codebase rather than the vault.
+  size-independence pairs expressed as counts rather than clocks. Every child of the memory
+  lane first makes its whole executable segment resident. Its attach, read and plan ceilings
+  then bound a child's peak minus the peak of a null child: the same binary attaching a vault
+  with no documents. Both children hold the same code and runtime, which grow with the
+  codebase rather than the vault, so the difference leaves them out; the lane records each
+  child's segment residency as the evidence. A separate bar holds the null child's peak above
+  its code, the fixed cost of a host and an empty attach, and the attach and read pairs carry
+  a byte bar on the larger profile's peak above the smaller's. The soak lane's ceilings are
+  still whole-process peaks.
 - The scheduled soak lane records three peak-memory readings each run, and they
   are separate gates with separate ceilings. One is what generating the ≥5k
   profile's tree costs, and its ceiling is authored. The second is the host's
@@ -1556,7 +1561,8 @@ read verbs: a find under a predicate, sorted and paged; a count by field; a get 
 resolve; links-to and backlinks; a validate narrowed by a path part, which is
 findings-for-path; lexical search; and describe. Two bars hold the ~2k-document profile's
 process to a ceiling on its peak above the null child's and to a ratio over the peak of the
-same attach without the reads. The kernel reports one
+same attach without the reads, and a byte bar holds the reading process at the ~2k-document
+profile to its peak at the 300-document profile. The kernel reports one
 peak per process, so they hold the highest peak any shape reached rather than each shape's
 own. The third reads the most the shapes raised the live heap above the attached host,
 counted by the process's own allocator, at the 300-document and ~2k-document profiles, and

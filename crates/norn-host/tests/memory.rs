@@ -11,11 +11,11 @@
 //!
 //! Two instruments, both counts and neither a clock. A **ceiling** holds how
 //! far the ~2k-document `realistic` profile's attach raises its child's peak
-//! above the null child's under a checked-in number. A
-//! **flatness pair** holds the ratio between the 300-document `ambiguous`
-//! profile and `realistic`, which is the sharper of the two: a ceiling passes
-//! anything that fits under it, and a ratio fails the moment two scales stop
-//! moving together. Both profiles are under 5k documents, so both are this
+//! above the null child's under a checked-in number. A **flatness pair** holds
+//! the 300-document `ambiguous` profile's peak and `realistic`'s two ways: in
+//! bytes, by how far the larger may exceed the smaller, and as a ratio. The
+//! pair is the sharper instrument: a ceiling passes anything that fits under
+//! it, and a pair fails the moment two scales stop moving together. Both profiles are under 5k documents, so both are this
 //! lane's work under ADR 0004's by-kind split.
 //!
 //! **A read is held three ways, over one read mix.** A child attaches a
@@ -75,7 +75,7 @@
 //! allocator's discretion: they would set the planning child's peak, and that
 //! ceiling would then be sized on the allocator rather than on the plans. The
 //! size child carries no ceiling of its own for the same reason, which
-//! [`PLAN_PEAK_RSS_CEILING_BYTES`](baselines::PLAN_PEAK_RSS_CEILING_BYTES)
+//! [`PLAN_PEAK_RSS_OVER_NULL_CEILING_BYTES`](baselines::PLAN_PEAK_RSS_OVER_NULL_CEILING_BYTES)
 //! records with the readings that show it.
 //!
 //! - The large byte-identical move's preview may raise the heap above its
@@ -112,22 +112,31 @@
 //! attachment's and not the generator's, and a peak read off the test process
 //! itself would include cargo's runner and every case running beside it.
 //!
-//! **The three ceilings subtract a null child.** The null child is this binary
-//! re-executed in a harness mode of its own. It builds a production host,
-//! registers and attaches a vault with no documents, waits for ready, detaches,
-//! and reports zero documents derived. Its peak is the fixed addend every child
-//! of this binary carries: the binary's code pages, the runtime, the host's
-//! threads and the allocator's floor. The attach, read and plan ceilings bound
-//! a measured child's peak minus the minimum of three null peaks taken in the
-//! same test process. The flatness ratios still divide whole-process peaks, and
-//! the heap bars still count bytes. The rule, with why it takes the minimum and
-//! what the difference stops seeing, is in `baselines`, under *The null child
-//! and the differential ceilings*.
+//! **Every child prefaults its code, and the three ceilings subtract a null
+//! child.** At harness entry, before anything it is measured for, every child
+//! makes its executable segment wholly resident and, on Linux, reports that
+//! segment's residency, so every child carries the whole segment rather than
+//! whatever fault-around reached. The null child is this binary re-executed
+//! in a harness mode of its own, through the same `child_run`. It builds a
+//! production host, registers and attaches a vault with no documents, waits
+//! for ready, detaches, and reports zero documents derived. Its peak is the
+//! fixed addend every child of this binary carries: the code, the runtime,
+//! the host's threads and the allocator's floor. The attach, read and plan
+//! ceilings bound a measured child's peak minus the minimum of three null
+//! peaks taken in the same test process. The null child's own case bars the
+//! fixed cost beyond the code: the null baseline minus its executable
+//! residency. The two pairs' byte bars subtract `ambiguous` from `realistic`.
+//! A difference below zero fails as a broken instrument, naming every reading
+//! it subtracted. The ratios still divide whole-process peaks, and the heap
+//! bars still count bytes. The rule is in `baselines`, under *The null child
+//! and the differential ceilings*: why it takes the minimum, what each bar
+//! catches, and what the differences stop seeing.
 //!
-//! [`the_gate_profile_attaches_inside_its_memory_bar`] and
-//! [`the_gate_profile_reads_inside_its_memory_bar`] are each both a bar and a
+//! [`the_gate_profile_attaches_inside_its_memory_bar`],
+//! [`the_gate_profile_reads_inside_its_memory_bar`] and the null child's case,
+//! `an_empty_vault_attaches_inside_its_fixed_cost_bar`, are each both a bar and a
 //! harness entry point — the child re-executes one of them by name, the name
-//! is what says whether it attaches or reads, and the environment variable is
+//! is what says whether it attaches, reads or attaches an empty vault, and the environment variable is
 //! what tells it to do that instead of to measure. One case doing both is what
 //! keeps this suite from carrying a case that passes trivially in the lane
 //! whenever nothing spawned it. **The variable alone does
@@ -273,7 +282,7 @@ fn the_gate_profile_attaches_inside_its_memory_bar() {
             ("peak resident set (MiB)", baselines::mebibytes(peak)),
             (
                 "peak resident set ceiling (MiB)",
-                baselines::mebibytes(baselines::ATTACH_PEAK_RSS_CEILING_BYTES),
+                baselines::mebibytes(baselines::ATTACH_PEAK_RSS_OVER_NULL_CEILING_BYTES),
             ),
         ],
     );
@@ -282,10 +291,10 @@ fn the_gate_profile_attaches_inside_its_memory_bar() {
         "the attaching child reported no peak resident set, so the ceiling holds no reading"
     );
     assert!(
-        baselines::fits(peak, baselines::ATTACH_PEAK_RSS_CEILING_BYTES),
+        baselines::fits(peak, baselines::ATTACH_PEAK_RSS_OVER_NULL_CEILING_BYTES),
         "attaching `realistic` peaked at {} MiB against a {} MiB bar",
         baselines::mebibytes(peak),
-        baselines::mebibytes(baselines::ATTACH_PEAK_RSS_CEILING_BYTES)
+        baselines::mebibytes(baselines::ATTACH_PEAK_RSS_OVER_NULL_CEILING_BYTES)
     );
 }
 
@@ -557,7 +566,7 @@ fn the_gate_profile_reads_inside_its_memory_bar() {
             ("peak resident set (MiB)", baselines::mebibytes(peak)),
             (
                 "peak resident set ceiling (MiB)",
-                baselines::mebibytes(baselines::READ_PEAK_RSS_CEILING_BYTES),
+                baselines::mebibytes(baselines::READ_PEAK_RSS_OVER_NULL_CEILING_BYTES),
             ),
         ],
     );
@@ -566,10 +575,10 @@ fn the_gate_profile_reads_inside_its_memory_bar() {
         "the reading child reported no peak resident set, so the ceiling holds no reading"
     );
     assert!(
-        baselines::fits(peak, baselines::READ_PEAK_RSS_CEILING_BYTES),
+        baselines::fits(peak, baselines::READ_PEAK_RSS_OVER_NULL_CEILING_BYTES),
         "attaching and reading `realistic` peaked at {} MiB against a {} MiB bar",
         baselines::mebibytes(peak),
-        baselines::mebibytes(baselines::READ_PEAK_RSS_CEILING_BYTES)
+        baselines::mebibytes(baselines::READ_PEAK_RSS_OVER_NULL_CEILING_BYTES)
     );
 }
 
@@ -1058,7 +1067,7 @@ fn the_gate_profile_plans_inside_its_memory_bar() {
             ("peak resident set (MiB)", baselines::mebibytes(peak)),
             (
                 "peak resident set ceiling (MiB)",
-                baselines::mebibytes(baselines::PLAN_PEAK_RSS_CEILING_BYTES),
+                baselines::mebibytes(baselines::PLAN_PEAK_RSS_OVER_NULL_CEILING_BYTES),
             ),
         ],
     );
@@ -1067,10 +1076,10 @@ fn the_gate_profile_plans_inside_its_memory_bar() {
         "the planning child reported no peak resident set, so the ceiling holds no reading"
     );
     assert!(
-        baselines::fits(peak, baselines::PLAN_PEAK_RSS_CEILING_BYTES),
+        baselines::fits(peak, baselines::PLAN_PEAK_RSS_OVER_NULL_CEILING_BYTES),
         "attaching `realistic` and planning over it peaked at {} MiB against a {} MiB bar",
         baselines::mebibytes(peak),
-        baselines::mebibytes(baselines::PLAN_PEAK_RSS_CEILING_BYTES)
+        baselines::mebibytes(baselines::PLAN_PEAK_RSS_OVER_NULL_CEILING_BYTES)
     );
 }
 

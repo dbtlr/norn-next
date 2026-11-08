@@ -453,8 +453,8 @@ pub struct ExitBar {
 /// document text.
 pub const NAMED_EXIT_BARS: &[ExitBar] = &[
     ExitBar {
-        name: "attach-peak-rss-ceiling",
-        authored_at: "crates/norn-host/tests/baselines/mod.rs::ATTACH_PEAK_RSS_CEILING_BYTES",
+        name: "attach-peak-rss-over-null-ceiling",
+        authored_at: "crates/norn-host/tests/baselines/mod.rs::ATTACH_PEAK_RSS_OVER_NULL_CEILING_BYTES",
         armed: true,
     },
     ExitBar {
@@ -468,8 +468,8 @@ pub const NAMED_EXIT_BARS: &[ExitBar] = &[
         armed: true,
     },
     ExitBar {
-        name: "read-peak-rss-ceiling",
-        authored_at: "crates/norn-host/tests/baselines/mod.rs::READ_PEAK_RSS_CEILING_BYTES",
+        name: "read-peak-rss-over-null-ceiling",
+        authored_at: "crates/norn-host/tests/baselines/mod.rs::READ_PEAK_RSS_OVER_NULL_CEILING_BYTES",
         armed: true,
     },
     ExitBar {
@@ -553,8 +553,8 @@ pub const NAMED_EXIT_BARS: &[ExitBar] = &[
         armed: true,
     },
     ExitBar {
-        name: "plan-peak-rss-ceiling",
-        authored_at: "crates/norn-host/tests/baselines/mod.rs::PLAN_PEAK_RSS_CEILING_BYTES",
+        name: "plan-peak-rss-over-null-ceiling",
+        authored_at: "crates/norn-host/tests/baselines/mod.rs::PLAN_PEAK_RSS_OVER_NULL_CEILING_BYTES",
         armed: true,
     },
     ExitBar {
