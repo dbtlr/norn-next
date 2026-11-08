@@ -11,7 +11,7 @@ use norn_db::rusqlite::types::Value;
 
 use crate::error::StoreError;
 use crate::facts::StoredPathOrder;
-use crate::json::{FrontmatterValue, canonical_json};
+use crate::json::{FrontmatterValue, canonical_json, write_string};
 use crate::path::SuffixKey;
 use crate::read::{
     AnswerSeek, Binder, Driver, FINDING_ROW_COLUMNS, FieldOrder, Filter, Reach, Term,
@@ -1008,7 +1008,7 @@ pub(crate) struct SpellingRange<'a> {
     pub(crate) lower: &'a str,
     pub(crate) upper: &'a str,
     pub(crate) segments: usize,
-    pub(crate) exact_keys: Vec<&'a str>,
+    pub(crate) exact_keys: &'a [&'a str],
 }
 
 /// [`FindStatement::CandidateSuffixes`]: for each of `ranges`, at most two
@@ -1026,30 +1026,7 @@ pub(crate) struct SpellingRange<'a> {
 /// document stands at one of the spelling's exact paths
 /// ([`resolve::exact_first`]), an equality seek per exact key. Exact members
 /// lead each run, so the cut at two keeps them.
-pub(crate) fn compose_candidate_suffixes(
-    ranges: &[SpellingRange<'_>],
-) -> Result<(String, Vec<Value>), StoreError> {
-    let listed = canonical_json(&FrontmatterValue::Sequence(
-        ranges
-            .iter()
-            .map(|range| {
-                FrontmatterValue::Sequence(vec![
-                    FrontmatterValue::String(range.lower.to_string()),
-                    FrontmatterValue::String(range.upper.to_string()),
-                    FrontmatterValue::Int(
-                        i64::try_from(range.segments).expect("a segment count fits i64"),
-                    ),
-                    FrontmatterValue::Sequence(
-                        range
-                            .exact_keys
-                            .iter()
-                            .map(|key| FrontmatterValue::String((*key).to_string()))
-                            .collect(),
-                    ),
-                ])
-            })
-            .collect(),
-    ))?;
+pub(crate) fn compose_candidate_suffixes(ranges: ListedRanges) -> (String, Vec<Value>) {
     let class = resolve::range_rows(
         SuffixKey::Comparison,
         (
@@ -1067,14 +1044,65 @@ pub(crate) fn compose_candidate_suffixes(
         "json_extract(j.value, '$[2]')",
         "json_array_length(json_extract(j.value, '$[3]')) = 1",
     );
-    Ok((
+    (
         format!(
             "SELECT j.key, m.value FROM json_each(?1) AS j CROSS JOIN json_each((
                  SELECT json_group_array(dr.id) FROM ({class}) AS dr WHERE {exact_first}
              )) AS m"
         ),
-        vec![Value::Text(listed)],
-    ))
+        vec![Value::Text(ranges.into_text())],
+    )
+}
+
+/// The ranges [`compose_candidate_suffixes`] reads, as the JSON list it binds:
+/// each range `[lower, upper, segments, [exact keys]]`, in the text
+/// [`canonical_json`] writes for the same list.
+///
+/// Written one range at a time rather than built as a [`FrontmatterValue`]
+/// tree. The ranges are every spelling of every candidate a find page's links
+/// name, so a tree of them, or the classes they are read from held all at
+/// once beside it, would be the largest thing a page of rows that carry
+/// links holds. The text is all that is kept.
+pub(crate) struct ListedRanges {
+    listed: String,
+}
+
+impl ListedRanges {
+    /// A list holding no range.
+    pub(crate) fn new() -> Self {
+        ListedRanges {
+            listed: String::from("["),
+        }
+    }
+
+    /// `range` written at the end of the list, its index in the list the
+    /// one the statement answers it by.
+    pub(crate) fn push(&mut self, range: &SpellingRange<'_>) {
+        let listed = &mut self.listed;
+        if listed.len() > 1 {
+            listed.push(',');
+        }
+        listed.push('[');
+        write_string(range.lower, listed);
+        listed.push(',');
+        write_string(range.upper, listed);
+        listed.push(',');
+        listed.push_str(&range.segments.to_string());
+        listed.push_str(",[");
+        for (at, key) in range.exact_keys.iter().enumerate() {
+            if at > 0 {
+                listed.push(',');
+            }
+            write_string(key, listed);
+        }
+        listed.push_str("]]");
+    }
+
+    /// The list's text.
+    fn into_text(mut self) -> String {
+        self.listed.push(']');
+        self.listed
+    }
 }
 
 /// [`FindStatement::LinkTargets`]: for each link `links` names that names a
@@ -1179,4 +1207,65 @@ pub(crate) fn compose_link_targets(links: &[i64], head: usize) -> (String, Vec<V
             Value::Integer(i64::try_from(head).expect("a head fits i64")),
         ],
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ListedRanges, SpellingRange};
+    use crate::json::{FrontmatterValue, canonical_json};
+
+    /// **The ranges are listed in the text the canonical writer writes.** The
+    /// list is written one range at a time, and what it binds is the text a
+    /// tree of the same ranges writes, escapes included.
+    #[test]
+    fn listed_ranges_are_the_canonical_json_of_the_same_list() {
+        let ranges = [
+            SpellingRange {
+                lower: "hub/",
+                upper: "hub0",
+                segments: 1,
+                exact_keys: &["hub/", "hub.md/"],
+            },
+            SpellingRange {
+                lower: "a \"quoted\" \\ name\t/",
+                upper: "a \"quoted\" \\ name\t0",
+                segments: 2,
+                exact_keys: &["\u{1}/"],
+            },
+            SpellingRange {
+                lower: "été/",
+                upper: "été0",
+                segments: 12,
+                exact_keys: &[],
+            },
+        ];
+        let mut listed = ListedRanges::new();
+        for range in &ranges {
+            listed.push(range);
+        }
+        let tree = FrontmatterValue::Sequence(
+            ranges
+                .iter()
+                .map(|range| {
+                    FrontmatterValue::Sequence(vec![
+                        FrontmatterValue::String(range.lower.to_string()),
+                        FrontmatterValue::String(range.upper.to_string()),
+                        FrontmatterValue::Int(range.segments as i64),
+                        FrontmatterValue::Sequence(
+                            range
+                                .exact_keys
+                                .iter()
+                                .map(|key| FrontmatterValue::String((*key).to_string()))
+                                .collect(),
+                        ),
+                    ])
+                })
+                .collect(),
+        );
+        assert_eq!(
+            listed.into_text(),
+            canonical_json(&tree).expect("a shallow list")
+        );
+        assert_eq!(ListedRanges::new().into_text(), "[]");
+    }
 }

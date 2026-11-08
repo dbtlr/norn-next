@@ -14,12 +14,15 @@
 //! The full-regression memory job runs this case alone through `lane-suite.sh`, which
 //! rejects an empty run. The workspace suite leaves the measurement to that lane.
 
+use std::sync::Arc;
+
 use norn_store::{
     Change, ContentModel, DerivationVersion, DocumentFacts, DocumentPath, IncrementProvenance,
-    LinkFact, LinkFamily, Span, Store, StoredPathOrder,
+    LinkFact, LinkFamily, NESTED_ROW_CEILING, Span, Store, StoredPathOrder,
 };
 use norn_testkit::heap;
 use norn_testkit::scratch::Scratch;
+use norn_wire::{Column, Content, FindParams, Predicate, VaultAddress, VaultName};
 
 /// Every allocation this binary makes goes through the counting allocator.
 #[global_allocator]
@@ -389,4 +392,136 @@ fn construction_peak(documents: usize) -> (usize, usize) {
     }
     store.finish_step(Step::Structure).unwrap();
     (content_peak, mark.peak_above())
+}
+
+/// How many more bytes naming a find row's candidates may hold for each
+/// distinct suffix spelling more that they spell.
+///
+/// A spelling's share is its ranges' text in the list the suffix statement
+/// binds (about seventy bytes for each of its one or two ranges), its own
+/// text and index entry, and a word or two of bookkeeping: under 300 bytes,
+/// and under 450 with the list's doubling slack. Holding each spelling's
+/// compiled class while its statement runs, or building the list as a tree,
+/// costs about as much again per spelling, and both are past this bound.
+const PER_SPELLING: usize = 512;
+
+/// The heap peak of a find of one row carrying [`NESTED_ROW_CEILING`] links,
+/// the `n`th to `c{n:04}/{leaf(n)}`, each naming the one document there, and
+/// the suffix each link's candidate is named by.
+fn naming_peak(label: &str, leaf: fn(usize) -> String) -> (usize, Vec<String>) {
+    let scratch = Scratch::new(&format!("norn-store-heap-naming-{label}"));
+    let mut store = Store::open_throwaway(
+        scratch.join("store.sqlite3"),
+        StoredPathOrder::Sensitive,
+        DerivationVersion::new(1),
+    )
+    .expect("opening a store");
+    let declared = ContentModel::none();
+    let target = |n: usize| format!("c{n:04}/{}", leaf(n));
+    let mut changes = vec![Change::Upsert(holder(
+        "holder.md",
+        NESTED_ROW_CEILING,
+        None,
+        &target,
+    ))];
+    changes.extend((0..NESTED_ROW_CEILING).map(|n| {
+        let at = format!("{}.md", target(n));
+        Change::Upsert(DocumentFacts::new(
+            DocumentPath::new(&at).expect("a path"),
+            format!("hash-{at}"),
+            "candidate\n",
+            10,
+        ))
+    }));
+    store
+        .begin_request()
+        .apply_increment(IncrementProvenance::Derived, changes, &[], &declared)
+        .expect("writing the holder and its candidates");
+    let reader = Arc::new(store.open_reader().reader.expect("a reader"));
+    let snapshot = reader
+        .try_take()
+        .expect("a handle nothing is reading holds its connection")
+        .establish()
+        .expect("a snapshot");
+    let params = FindParams::new(VaultAddress::name(
+        VaultName::new("notes").expect("a vault name"),
+    ))
+    .with_predicates([Predicate::path("holder.md")])
+    .with_columns([Column::links()]);
+
+    let mark = heap::Mark::set();
+    let found = snapshot
+        .find(&params, &declared)
+        .unwrap_or_else(|refusal| panic!("a find of the holder: {refusal}"));
+    let peak = mark.peak_above();
+
+    let [row] = &found.rows[..] else {
+        panic!("{label}: the holder is not one row: {:?}", found.rows);
+    };
+    let Some(Content::Known { value: links, .. }) = &row.links else {
+        panic!("{label}: the holder's links are not known: {:?}", row.links);
+    };
+    let suffixes = links
+        .items
+        .iter()
+        .map(|link| {
+            let candidates = link
+                .targets
+                .as_ref()
+                .unwrap_or_else(|| panic!("{label}: `{}` was not resolved", link.target))
+                .candidates();
+            let [candidate] = candidates else {
+                panic!("{label}: `{}` names {candidates:?}", link.target);
+            };
+            candidate.suffix.clone()
+        })
+        .collect();
+    (peak, suffixes)
+}
+
+/// **Naming a row's candidates holds their spellings' text, never their
+/// classes.** A find's links column names every candidate its links name by
+/// its shortest unique suffix, and reads each distinct suffix spelling once.
+/// A row of 256 links, each naming a document of its own two segments deep,
+/// spells 1,024 spellings either way. Where the documents share their leaf
+/// (`c0001/hub00.md`) the leaf's two spellings are shared and 514 are
+/// distinct; where they share nothing (`c0001/h0001.md`, the same lengths)
+/// all 1,024 are.
+///
+/// The second find may peak above the first by [`PER_SPELLING`] for each of
+/// the 510 spellings more, so what naming holds for a spelling is its text
+/// and a few words. Naming the candidates of a page that links to more
+/// distinct documents, as a page does in a larger vault, then grows the read
+/// by that and no more.
+#[test]
+#[ignore = "memory-lane case: isolated candidate-naming heap measurement"]
+fn naming_candidates_holds_their_spellings_text_not_their_classes() {
+    let (shared, shared_suffixes) = naming_peak("shared-leaf", |_| "hub00".to_string());
+    let (distinct, distinct_suffixes) = naming_peak("distinct-leaves", |n| format!("h{n:04}"));
+    // Both rows were named: a shared leaf names each candidate by its folder
+    // too, and a leaf of its own names it alone.
+    assert!(
+        shared_suffixes
+            .iter()
+            .enumerate()
+            .all(|(n, suffix)| *suffix == format!("c{n:04}/hub00")),
+        "{shared_suffixes:?}"
+    );
+    assert!(
+        distinct_suffixes
+            .iter()
+            .enumerate()
+            .all(|(n, suffix)| *suffix == format!("h{n:04}")),
+        "{distinct_suffixes:?}"
+    );
+    let more = 4 * NESTED_ROW_CEILING - (2 * NESTED_ROW_CEILING + 2);
+    eprintln!(
+        "candidate naming heap peaks: shared leaf {shared} bytes, distinct leaves {distinct} \
+         bytes, {more} spellings more"
+    );
+    assert!(
+        distinct <= shared + more * PER_SPELLING,
+        "naming {more} more distinct spellings peaked {distinct} bytes above the mark, against \
+         {shared}: more than {PER_SPELLING} bytes a spelling"
+    );
 }

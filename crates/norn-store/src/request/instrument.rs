@@ -1028,7 +1028,9 @@ fn explained_after(text: &str) -> health::After {
 /// through the same [`SuffixSpellings`].
 fn explained_suffixes() -> Result<(String, Vec<norn_db::rusqlite::types::Value>), StoreError> {
     let named = BTreeMap::from([(EXPLAINED_DOCUMENT_ROW, EXPLAINED_PAGE_CURSOR_LEAF)]);
-    SuffixSpellings::new(&named, &AmbiguityIgnore::none())?.statement()
+    Ok(SuffixSpellings::new(&named, &AmbiguityIgnore::none())?
+        .into_statement()
+        .0)
 }
 
 /// The cursor [`Request::emitted_plan`] explains a paged statement with.

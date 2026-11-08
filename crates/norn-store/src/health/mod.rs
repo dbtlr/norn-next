@@ -32,7 +32,7 @@
 //! A finding's keys are its link's keys, under the comparison key — a
 //! suffix key as a class key, and a path key as a path key — and the naming
 //! classes of every candidate it carries: the classes the candidate's minimal
-//! disambiguating suffix is read from ([`SuffixSpellings::naming_classes`]).
+//! disambiguating suffix is read from ([`SuffixSpellings::with_naming_classes`]).
 //! What a finding says moves with the documents its link's keys name, and with
 //! the documents those names are read against, so a change to either reaches
 //! it: the changeset's discard on either axis ranges over exactly these keys.
@@ -316,7 +316,7 @@ impl KeySummaries {
 }
 
 /// How a finding names one candidate: its minimal disambiguating suffix, and
-/// the classes that suffix is read from ([`SuffixSpellings::naming_classes`]),
+/// the classes that suffix is read from ([`SuffixSpellings::with_naming_classes`]),
 /// which the finding is keyed by beside its link's own keys.
 #[derive(Debug)]
 struct CandidateName {
@@ -1597,9 +1597,8 @@ fn candidate_names(
     if named.is_empty() {
         return Ok(HashMap::new());
     }
-    let spellings = SuffixSpellings::new(named, ignore)?;
-    let mut classes = spellings.naming_classes();
-    let (sql, values) = spellings.statement()?;
+    let (spellings, mut classes) = SuffixSpellings::with_naming_classes(named, ignore)?;
+    let ((sql, values), spelled) = spellings.into_statement();
     let rows = Request::read_all_on(
         connection,
         work,
@@ -1608,7 +1607,7 @@ fn candidate_names(
         |row| Ok(Ok((row.get::<_, usize>(0)?, row.get::<_, i64>(1)?))),
         "naming a judgment's candidates by their suffixes",
     )?;
-    let mut suffixes = spellings.suffixes(rows)?;
+    let mut suffixes = spelled.suffixes(rows)?;
     Ok(named
         .iter()
         .map(|(id, path)| {

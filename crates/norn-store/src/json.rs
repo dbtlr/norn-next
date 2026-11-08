@@ -248,7 +248,8 @@ pub(crate) fn float_text(number: f64) -> Option<String> {
         .map(FiniteFloat::canonical_text)
 }
 
-fn write_string(text: &str, out: &mut String) {
+/// `text` as a JSON string, as [`canonical_json`] writes every string.
+pub(crate) fn write_string(text: &str, out: &mut String) {
     out.push('"');
     for ch in text.chars() {
         match ch {
