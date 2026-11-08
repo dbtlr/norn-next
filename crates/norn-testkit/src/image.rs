@@ -149,6 +149,12 @@ impl ResidencyReport {
 }
 
 /// Make every executable-file mapping of this process wholly resident.
+///
+/// Call it only while no other thread of the process writes to the
+/// executable's data segment, as at a measured child's harness entry: where
+/// the advice is unavailable (macOS, or Linux before 5.14) it reads one byte
+/// of every page, writable ones included, and a concurrent write there would
+/// race that read.
 pub fn prefault() -> io::Result<()> {
     platform::prefault()
 }
@@ -241,11 +247,15 @@ impl<'a> Mapping<'a> {
 ///
 /// # Safety
 ///
-/// Every page of the range must be mapped readable for as long as this runs.
+/// Every page of the range must be mapped readable for as long as this runs,
+/// and no other thread may write to the range while it runs: a volatile read
+/// is a non-atomic access, so a concurrent write to a writable page of the
+/// image (its data segment) would be a data race.
 unsafe fn touch(start: usize, end: usize, page: usize) {
     let mut address = start;
     while address < end {
-        // SAFETY: the caller guarantees the page is mapped readable.
+        // SAFETY: the caller guarantees the page is mapped readable and that
+        // no other thread writes to it while this runs.
         unsafe { std::ptr::read_volatile(address as *const u8) };
         address += page;
     }
@@ -299,7 +309,10 @@ mod platform {
                 // A kernel before 5.14 does not know the advice: read the
                 // range one page at a time instead.
                 // SAFETY: the range is a readable mapping of the executable,
-                // which stays mapped for the life of the process.
+                // which stays mapped for the life of the process. `prefault`
+                // runs at harness entry, before the child starts any thread
+                // of its own, while the test harness's other thread only waits
+                // for this one, so nothing writes to the image meanwhile.
                 unsafe { touch(start, end, page) };
             }
         }
@@ -345,7 +358,10 @@ mod platform {
     pub(super) fn prefault() -> io::Result<()> {
         // SAFETY: image 0 is the main executable, which dyld keeps loaded for
         // the life of the process; its header and load commands are mapped
-        // readable, and `sizeofcmds` bounds the walk.
+        // readable, and `sizeofcmds` bounds the walk. `touch`'s no-writer
+        // condition holds because `prefault` runs at harness entry, before
+        // the child starts any thread of its own, while the test harness's
+        // other thread only waits for this one.
         unsafe {
             let header = _dyld_get_image_header(0);
             if header.is_null() || (*header).magic != MH_MAGIC_64 {
