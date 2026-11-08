@@ -153,6 +153,20 @@ use std::time::Duration;
 /// Whether the rise is a cost to cut or the bar should be re-authored is
 /// Mimir task NORN-501.
 ///
+/// **The rise is the child binary's code, not the attachment.** A probe of
+/// `/proc/self/smaps` in the attach children of `full memory invariant` run
+/// 42515170305 (main at 4b55ca48 plus the probe) read, at the attachment's
+/// ready point, **25.1 MiB resident in the debug `memory` binary's 27.4 MiB
+/// executable segment** and 7.3 MiB anonymous, of a 38.4–39.4 MiB peak:
+/// fault-around maps nearly every code page of a binary the harness has just
+/// copied, so the fixed addend is about the segment's size. Rust's heap peaked
+/// 2 MiB above the child's start. On Linux arm64 the segment grew from 11.1
+/// MiB at 3832ba88 (2026-09-22) to 23.0, 27.6, 29.4 and 29.7 MiB at
+/// 503f3f3e, d8e9c7cf, 03d9a92d and 966c4276, while the hosted `ambiguous`
+/// attach read 16.65, 30.24, 35.14, 36.73 and 37.70 MiB at the same commits:
+/// the reading tracks the segment almost one to one, spread across the
+/// product's own code and its monomorphizations rather than one commit or crate.
+///
 /// **Platform scope: the Linux measurement lane.** The full-regression `memory
 /// invariant` job on `ubuntu-latest` x86_64-glibc is where this gates; the
 /// macos-arm64 band above is what a developer running the same case sees, and
