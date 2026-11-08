@@ -2613,7 +2613,8 @@ wait never runs until the vault falls quiet, and no read answers from the state 
 change it met. A schema reload retires the pool from its activation until the leg that
 activates ends, so a read it settles answers once that leg installs another, `Ready` or
 healing, and from that pool; the read refuses only where the entry is no longer settling or
-serving. A read that first meets the entry while no reader stands records, in place of the
+serving. A read that first meets the entry while the reader the activation closed is not yet
+replaced records, in place of the
 position at that instant, the position once that leg has taken in its end drain, as the
 reload paragraphs below say. Past a bound, a lifecycle policy value whose
 production value is the 5-second settle ceiling, it refuses as `host/entry-not-ready` with the
@@ -3109,14 +3110,16 @@ the one that reconcile would have left, and nothing about the candidate is recor
 
 **A reload keeps the read contract, with the one gap a maintenance leg also opens.** A read
 that met the change the entry was settling recorded a position no later than the fold's take,
-so it answers once the fold commits, from the reader standing then, or once `Ready` returns. A
-schema-changing activation closes that reader after its fold, and a read still waiting
+so it answers once the fold commits, from the reader standing then. A schema-changing
+activation closes that reader after its fold, and a read still waiting
 answers from the pool its leg installs as it ends, since the activation has derived every
 fact that read met. No poll runs while the activation derives the vault, so an edit made then
-stays with the watcher until the leg's end drain: a read that first meets the entry while no
-reader stands therefore records its position once the leg has taken in that drain, and
-answers once the ordinary reconcile turn that derives the drain's facts commits, never
-waiting for `Ready`. Because a reload publishes `Ready` only where
+stays with the watcher until the leg's end drain: a read that first meets the entry while the
+reader the activation closed is not yet replaced therefore records its position once the leg
+has taken in that drain, and answers once the next intake, an ordinary reconcile turn or the
+apply queue's head, has derived the drain's facts, never waiting for `Ready`. Where that drain
+is saturated, the intake drains first, so the position still lies past every edit the read
+met. Because a reload publishes `Ready` only where
 nothing is left, no read establishes a snapshot without a change it met. A change still with
 the watcher is not one a read met, though: no poll runs while the reload holds the claim, so
 an edit made after the fold's drain stays with the watcher until the leg's end drain, and a
@@ -3333,7 +3336,7 @@ refills them. That is safe because a schema reload publishes `Warming` in its `H
 at its activation and retires the entry's pool until its leg ends, and that walk is the activation's own heal of the
 whole vault, which converges inside the leg before it installs another pool, so no read
 observes a column the walk has half refilled. An activation that fails after its re-pin
-withdraws trust and owes the recovery before any pool it leaves stands, so no read is served
+withdraws trust and owes the recovery or the rebuild before any pool it leaves stands, so no read is served
 from that column either.
 The fold, the tag a value row names under a tag key — the `tags` carrier, declared or not,
 or a key declared `tags` — its `#` marker dropped and the tag fold applied, or the link a
