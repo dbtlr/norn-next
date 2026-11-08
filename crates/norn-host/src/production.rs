@@ -1153,8 +1153,11 @@ impl ProductionEntryOps {
 
         progress.begin_schema_reload();
         // A pin the store refused leaves the store pinning the schema the
-        // entry serves under, so the refusal is the schema's to report and
-        // the entry keeps serving.
+        // entry served under, so the refusal is the schema's to report. The
+        // activation has already closed the entry's reader, so the lifecycle
+        // takes it as an activation that failed after it began: trust is
+        // withdrawn, and the recovery owed pins and reads the active schema
+        // again before the entry serves.
         Self::pin_candidate(&mut attachment.store, &candidate).map_err(
             |failure| match failure {
                 JobFailure::Environmental(detail) => {

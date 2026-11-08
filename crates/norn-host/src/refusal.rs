@@ -412,8 +412,8 @@ impl ReloadRefusal {
 /// so its control files were not read". A reload whose claim was superseded,
 /// or whose leg unwound, after it may have read the candidate — at a leg's
 /// epilogue, since the leg reads and judges the candidate outside the gate
-/// and looks at the claim only afterwards, or in a schema-changing
-/// activation's continuation legs, which run after it activated — answers in
+/// and looks at the claim only afterwards, and a schema-changing activation
+/// derives the vault after it activated — answers in
 /// the same codes with messages neutral about the files: "this vault's
 /// reload could not report its completion, and the vault is not ready yet"
 /// and "this vault's reload could not report its completion, and the vault

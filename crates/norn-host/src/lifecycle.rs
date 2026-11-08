@@ -27,7 +27,7 @@ use crate::semantic::DeliveredEngine;
 use crate::status::EngineReport;
 use crate::{
     ActiveFingerprints, AttachmentAdvisory, AuthoredDrift, ReloadError, ReloadJudgment,
-    ReloadOutcome, ReloadRefusal, VaultInspection,
+    ReloadRefusal, VaultInspection,
 };
 
 mod apply;
@@ -1424,6 +1424,11 @@ struct EntryState<A: SnapshotSource> {
     /// an activation that failed after it began. An epoch the entry has
     /// moved past names no leg that can read it again, so the record is
     /// cleared only where a reload leg ends.
+    ///
+    /// A read reads it too, through
+    /// [`EntryState::activation_replaces_the_reader`]: one that meets the
+    /// entry while the record names the leg the entry stands at waits for the
+    /// facts that leg's end drain takes in.
     reload_replacing_at: Option<u64>,
     /// The advisories the entry's last attachment carried, as
     /// [`EntryOps::advisories`] read them at the last publication that
@@ -1749,13 +1754,18 @@ enum ReadStance {
 }
 
 /// What a read waiting outside the entry gate is woken by a change of: the
-/// entry's read stance, and how far its reconciles have derived the facts it
-/// has taken in. A committed turn moves the second while the first stands at
-/// settle, and a waiting read whose facts that turn derived answers from it.
+/// entry's read stance, how far its reconciles have derived the facts it has
+/// taken in, and whether a reader stands. A committed turn moves the second
+/// while the first stands at settle, and a waiting read whose facts that turn
+/// derived answers from it. A schema-changing activation's leg moves the
+/// third as it installs the new pool over a settling entry, so a read whose
+/// facts the activation derived answers from that pool as the leg ends, not
+/// at the next commit.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ReadStanding {
     stance: ReadStance,
     derived_through: u64,
+    reader_stands: bool,
     construction_revision: u64,
 }
 
@@ -1774,6 +1784,7 @@ impl<A: SnapshotSource> Stanced for EntryState<A> {
         ReadStanding {
             stance: self.read_stance(),
             derived_through: self.pending.derived_through,
+            reader_stands: self.reader.is_some(),
             construction_revision: self.construction_revision,
         }
     }
@@ -2462,8 +2473,31 @@ impl<A: SnapshotSource> EntryState<A> {
     /// Where in the entry's fact stream a read meets the change it is
     /// taking in: every fact taken in so far, the one a turn has taken
     /// included.
-    fn change_met_at(&self) -> u64 {
-        self.pending.taken_in
+    ///
+    /// `None` while a schema-changing activation has closed the reader and
+    /// not yet replaced it ([`EntryState::activation_replaces_the_reader`]).
+    /// No poll runs while that activation derives the vault, so an edit made
+    /// meanwhile stays with the watcher until the leg's end drain, and the
+    /// position now lies short of it. A read meeting the entry then records
+    /// its position at its first hold after the leg ends instead: the leg
+    /// installs the new pool and merges its end drain in one hold, so that
+    /// position lies past every edit the watcher held when the read arrived.
+    fn change_met_at(&self) -> Option<u64> {
+        (!self.activation_replaces_the_reader()).then_some(self.pending.taken_in)
+    }
+
+    /// Whether the reader a schema-changing activation closed is not yet
+    /// replaced: the leg that recorded its replacement still stands at the
+    /// entry's epoch, and has not yet ended.
+    ///
+    /// It is the activation's closed slot, not any empty slot: a settling
+    /// entry whose mint failed has no end drain to wait for, and its reads
+    /// keep the ordinary rule. The epoch is read with the record because a leg
+    /// that unwinds leaves its record behind, and the invalidation that
+    /// answers the unwind moves the entry past it.
+    fn activation_replaces_the_reader(&self) -> bool {
+        self.reload_replacing_at
+            .is_some_and(|leg| self.claim.stands_at(leg))
     }
 
     /// Whether a read answers from this entry now, having met its change at
@@ -2474,8 +2508,9 @@ impl<A: SnapshotSource> EntryState<A> {
     /// through, where it holds a reader: every fact the entry knew of when
     /// the read met it is committed, so the snapshot established now is not
     /// the state before the change, whatever arrived after it. An entry
-    /// holding no reader — a schema reload closed it — answers nothing until
-    /// it mints one with `Ready`. Every other entry answers nothing.
+    /// holding no reader — a schema-changing activation closed it — answers
+    /// nothing until the activation's leg installs the new pool as it ends,
+    /// `Ready` or healing. Every other entry answers nothing.
     fn answers_a_read(&self, met_at: Option<u64>) -> bool {
         match self.read_stance() {
             ReadStance::Serve => true,
@@ -2494,9 +2529,11 @@ impl<A: SnapshotSource> EntryState<A> {
     /// releasing it.
     ///
     /// **This is the store an apply is fit to plan against.** An entry
-    /// attaching, recovering, rebuilding or reloading its schema owes work an
-    /// apply's intake does not do, and publishes neither `Ready` nor a reader
-    /// until that work is done, so a queued apply waits behind it here.
+    /// attaching, recovering or rebuilding owes work an apply's intake does
+    /// not do, and publishes neither `Ready` nor a reader until that work is
+    /// done. A schema-changing activation holds no reader until its leg
+    /// installs the new pool as it ends, and what that leg leaves pending is
+    /// what an apply's intake derives. A queued apply waits behind each here.
     fn fit_to_apply(&self) -> bool {
         self.coverage.in_hand()
             && self.reader.is_some()
@@ -2663,8 +2700,6 @@ enum Job {
     Reload(VaultName, u64, ReloadReply),
     /// A dry run of a reload: judge the candidate and activate nothing.
     JudgeReload(VaultName, u64, ReloadReply),
-    /// A schema reload's next turn, carrying what its first turn judged.
-    ReloadReconcile(VaultName, u64, ReloadJudgment, ReloadReply),
     /// Run the apply at the head of the entry's queue, holding its claim.
     Apply(VaultName, u64),
     Detach(VaultName, u64),
@@ -2775,7 +2810,6 @@ impl Job {
             | Self::Maintenance(_, epoch)
             | Self::Reload(_, epoch, _)
             | Self::JudgeReload(_, epoch, _)
-            | Self::ReloadReconcile(_, epoch, _, _)
             | Self::Apply(_, epoch)
             | Self::Detach(_, epoch) => *epoch,
         }
@@ -2790,7 +2824,6 @@ impl Job {
             | Self::Maintenance(name, _)
             | Self::Reload(name, _, _)
             | Self::JudgeReload(name, _, _)
-            | Self::ReloadReconcile(name, _, _, _)
             | Self::Apply(name, _)
             | Self::Detach(name, _) => name,
         }
@@ -2800,9 +2833,7 @@ impl Job {
     /// job is one.
     fn reload_reply(&self) -> Option<ReloadReply> {
         match self {
-            Self::Reload(_, _, reply)
-            | Self::JudgeReload(_, _, reply)
-            | Self::ReloadReconcile(_, _, _, reply) => Some(reply.clone()),
+            Self::Reload(_, _, reply) | Self::JudgeReload(_, _, reply) => Some(reply.clone()),
             Self::Attach(..)
             | Self::Recover(..)
             | Self::Rebuild(..)
@@ -4623,11 +4654,6 @@ struct Shared<O: EntryOps> {
     /// Root identities claimed by coverage acquisitions while their
     /// filesystem work runs outside this gate.
     attach_gate: Mutex<BTreeMap<Identity, VaultName>>,
-    /// Unwind the next reload turn that hands its reload on, straight after
-    /// the hand-on. That turn no longer holds the entry, so its unwind is the
-    /// one whose asker the turn it handed on to answers.
-    #[cfg(test)]
-    panic_after_reload_handoff: AtomicBool,
     /// Unwind the next reap between scheduling the due detaches it found and
     /// sending them, so each stands as its entry's marker.
     #[cfg(test)]
@@ -5582,8 +5608,6 @@ impl<O: EntryOps> Host<O> {
             maintenance: Mutex::new(MaintenanceReading::default()),
             attach_gate: Mutex::new(BTreeMap::new()),
             #[cfg(test)]
-            panic_after_reload_handoff: AtomicBool::new(false),
-            #[cfg(test)]
             panic_in_reap_dispatch: AtomicBool::new(false),
             #[cfg(test)]
             panic_in_dispatch_retry: AtomicBool::new(false),
@@ -5834,11 +5858,12 @@ impl<O: EntryOps> Host<O> {
     /// a teardown or an invalidation ended; a job whose vault left the
     /// serving set;
     /// and a leg that unwound, whose worker holds the asker until the
-    /// unwind has published over the entry. A turn that handed the reload on
-    /// before it unwound leaves a sender with the turn it handed on to, and
-    /// that turn is what answers. `HostStopped` is what is left: a job
-    /// channel that refused the send, or a job dropped undelivered because
-    /// the host is shutting down.
+    /// unwind has published over the entry. A reload is one leg and hands its
+    /// reply to no other job, so its asker is answered as that leg ends, a
+    /// schema-changing activation's included: `Ready` where nothing is left,
+    /// and otherwise healing, with the facts left to ordinary reconcile turns.
+    /// `HostStopped` is what is left: a job channel that refused the send, or
+    /// a job dropped undelivered because the host is shutting down.
     fn request_reload(
         &self,
         name: &VaultName,
@@ -6318,7 +6343,10 @@ impl<O: EntryOps> Host<O> {
     /// waits until the entry's reconciles have derived through that position
     /// with a reader standing, or until the entry publishes `Ready`; it
     /// answers from the first of the two it observes, under what the entry
-    /// then publishes. A vault whose facts keep arriving is answered once
+    /// then publishes. A read whose first such hold finds a schema-changing
+    /// activation's closed reader not yet replaced records the position under
+    /// its first hold after that activation's leg ends instead, past every
+    /// edit the leg's end drain took in. A vault whose facts keep arriving is answered once
     /// the facts the read met are committed, without waiting for it to fall
     /// quiet, and no read answers from the state before the change it met.
     /// Every other entry refuses at once with what it publishes: an entry
@@ -6518,7 +6546,9 @@ impl<O: EntryOps> Host<O> {
         let mut mint_statements = 0;
         // Where in the entry's fact stream this read met the change the entry
         // is taking in: recorded under the first hold that finds the entry
-        // settling, before any wait, and never moved after.
+        // settling, before any wait, and never moved after — or, where that
+        // hold finds a schema activation replacing the reader, under the
+        // first hold after the activation's leg has ended.
         let mut met_at = None;
         let mut build_met = None;
         // Whether this read was counted past its build's pull-ahead bound.
@@ -6578,7 +6608,7 @@ impl<O: EntryOps> Host<O> {
                 ReadStance::Settle | ReadStance::Serve => (None, false),
             };
             if stance == ReadStance::Settle && met_at.is_none() {
-                met_at = Some(state.change_met_at());
+                met_at = state.change_met_at();
             }
             match stance {
                 ReadStance::Refuse if selected.is_none() && !early_wait => {
@@ -7750,7 +7780,6 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
         | Job::Maintenance(name, _)
         | Job::Reload(name, _, _)
         | Job::JudgeReload(name, _, _)
-        | Job::ReloadReconcile(name, _, _, _)
         | Job::Apply(name, _)
         | Job::Detach(name, _) => name,
     };
@@ -8570,14 +8599,6 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
         Job::JudgeReload(name, epoch, reply) => {
             run_reload_job(shared, entry, name, epoch, reply, ReloadStep::Judge)
         }
-        Job::ReloadReconcile(name, epoch, judgment, reply) => run_reload_job(
-            shared,
-            entry,
-            name,
-            epoch,
-            reply,
-            ReloadStep::Reconcile(judgment),
-        ),
         Job::Apply(name, epoch) => run_apply_job(shared, entry, name, epoch),
         Job::Maintenance(name, epoch) => {
             let (mut attachment, quiet) = {
@@ -9330,24 +9351,21 @@ enum ReloadStep {
     Activate,
     /// A dry run: fold, read and judge the candidate, and activate nothing.
     Judge,
-    /// A later turn of a schema reload, carrying what its first turn judged.
-    Reconcile(ReloadJudgment),
 }
 
-/// Take the entry's coverage for one reload-shaped leg at `epoch` and pin the
-/// entry for it, returning the gate still held so the caller can take what
-/// else the leg starts from under the same hold.
+/// Take the entry's coverage for one reload leg at `epoch` and pin the entry
+/// for it.
 ///
 /// A claim no longer standing at `epoch`, or coverage already out, is a leg
 /// that does not run: the asker is told what the entry then says of a reload
 /// not run — busy where a reload runs over it, and where it stands otherwise,
-/// park first — and `None` comes back. A reload, its dry run and a schema
-/// reload's later turns all begin here.
-fn begin_reload_leg<'entry, A: SnapshotSource>(
-    entry: &'entry Entry<A>,
+/// park first — and `None` comes back. A reload and its dry run both begin
+/// here.
+fn begin_reload_leg<A: SnapshotSource>(
+    entry: &Entry<A>,
     epoch: u64,
     reply: &ReloadReply,
-) -> Option<(GateHold<'entry, EntryState<A>>, A)> {
+) -> Option<A> {
     let mut state = entry.gate.lock().expect("entry gate poisoned");
     if !state.claim.stands_at(epoch) {
         reply.stand_down(&state);
@@ -9359,14 +9377,16 @@ fn begin_reload_leg<'entry, A: SnapshotSource>(
         return None;
     };
     state.pin_for_leg(Leg::Job(epoch));
-    Some((state, attachment))
+    Some(attachment)
 }
 
 /// Where a reload-shaped leg stands once its work is back under the gate.
 enum ReloadLegEnd<'entry, A: SnapshotSource> {
     /// The claim still stands at the leg's epoch and no release opened over
-    /// it: the leg publishes what its work met, under this hold.
-    Standing(GateHold<'entry, EntryState<A>>, A),
+    /// it: the leg publishes what its work met, under this hold. The flag says
+    /// whether the leg had begun replacing the entry's derived state under a
+    /// new declaration, as [`ProgressReporter::begin_schema_reload`] recorded.
+    Standing(GateHold<'entry, EntryState<A>>, A, bool),
     /// The claim was taken away or a release opened while the leg ran. The
     /// asker has been told where the entry stands, and the job returns this
     /// attachment for the release to take.
@@ -9374,15 +9394,15 @@ enum ReloadLegEnd<'entry, A: SnapshotSource> {
 }
 
 /// Bring a reload-shaped leg's work back under the gate: give back its pin,
-/// and end the leg where it no longer stands over the entry.
+/// clear the record of a replacement it began, and end the leg where it no
+/// longer stands over the entry.
 ///
 /// The claim this leg ran under may have been taken away while it ran, so the
 /// work it did is not what stands over the entry any more; or a release may
 /// have opened over it. Either way the asker is told what the entry then says
 /// of a reload that could not report its completion, read off the gate under
 /// the same hold: the leg read its candidate outside the gate, so the answer
-/// says nothing of the control files. A reload, its dry run and a schema
-/// reload's later turns all end here.
+/// says nothing of the control files. A reload and its dry run both end here.
 fn end_reload_leg<'entry, A: SnapshotSource>(
     entry: &'entry Entry<A>,
     epoch: u64,
@@ -9391,12 +9411,13 @@ fn end_reload_leg<'entry, A: SnapshotSource>(
 ) -> ReloadLegEnd<'entry, A> {
     let mut state = entry.gate.lock().expect("entry gate poisoned");
     state.unpin_leg(Leg::Job(epoch));
+    let replacing = state.reload_replacing_at.take() == Some(epoch);
     if !state.claim.stands_at(epoch) || state.detach_in_flight {
         reply.stand_down(&state);
         drop(state);
         return ReloadLegEnd::Superseded(attachment);
     }
-    ReloadLegEnd::Standing(state, attachment)
+    ReloadLegEnd::Standing(state, attachment, replacing)
 }
 
 /// A reload's first step, as an apply's first step is its intake: derive the
@@ -9499,18 +9520,17 @@ fn end_fold_on_failure<O: EntryOps>(
     }
 }
 
-/// Run one leg of an explicit reload: an activation, a dry run, or a schema
-/// reload's later turn.
+/// Run the one leg of an explicit reload: an activation or a dry run.
 ///
-/// An activation and a dry run fold first ([`fold_for_reload`]) and read
-/// their candidate over the folded store; a later turn derives the facts
-/// pending under the new declaration. Every leg then ends as an apply's
-/// does, draining the watcher once more before it publishes, and
-/// [`end_reload_leg_over_its_drain`] publishes `Ready` only where nothing is
-/// left. A schema reload keeps its reply while watcher facts remain: each
-/// drain that leaves facts hands the claim to a new turn, so unrelated vault
-/// work can run before this vault continues, and the reply succeeds only
-/// once this vault is `Ready`.
+/// The leg folds first ([`fold_for_reload`]) and reads its candidate over the
+/// folded store. It then ends as an apply's does, draining the watcher once
+/// more before it publishes, and [`end_reload_leg_over_its_drain`] publishes
+/// `Ready` only where nothing is left and answers the asker as the leg ends.
+/// A schema-changing activation derives the whole vault under the new
+/// declaration inside this leg and installs the new pool as it ends, so the
+/// facts its end drain delivered are ordinary pending facts: the claim goes
+/// on to the apply queue's head or to an ordinary reconcile turn, and a
+/// schema reload has no turns of its own.
 fn run_reload_job<O: EntryOps>(
     shared: &Arc<Shared<O>>,
     entry: &Arc<Entry<O::Attachment>>,
@@ -9519,20 +9539,10 @@ fn run_reload_job<O: EntryOps>(
     reply: ReloadReply,
     step: ReloadStep,
 ) -> Option<O::Attachment> {
-    let (mut state, attachment) = begin_reload_leg(entry, epoch, &reply)?;
-    let (mut attachment, work) = match step {
-        ReloadStep::Reconcile(_) => {
-            let work = state.pending.take().0;
-            drop(state);
-            (attachment, work)
-        }
-        ReloadStep::Activate | ReloadStep::Judge => {
-            drop(state);
-            match fold_for_reload(shared, entry, &name, epoch, attachment, &reply) {
-                Ok(attachment) => (attachment, Batch::default()),
-                Err(held) => return held,
-            }
-        }
+    let attachment = begin_reload_leg(entry, epoch, &reply)?;
+    let mut attachment = match fold_for_reload(shared, entry, &name, epoch, attachment, &reply) {
+        Ok(attachment) => attachment,
+        Err(held) => return held,
     };
     reply.reading_the_candidate();
 
@@ -9553,18 +9563,6 @@ fn run_reload_job<O: EntryOps>(
             Err(EntryReloadFailure::Unsupported) => None,
             Err(EntryReloadFailure::Runtime(failure)) => Some(Err(failure)),
         },
-        ReloadStep::Reconcile(judgment) if work.is_empty() => Some(Ok(judgment)),
-        ReloadStep::Reconcile(judgment) => Some(
-            shared
-                .ops
-                .reconcile(
-                    &name,
-                    &mut attachment,
-                    ReconcileWork { batch: work },
-                    &reporter(entry, epoch),
-                )
-                .map(|()| judgment),
-        ),
     };
     // A runtime failure other than the candidate's own goes to its policy
     // with nothing drained; every other leg drains once more before it
@@ -9574,15 +9572,12 @@ fn run_reload_job<O: EntryOps>(
         _ => Some(drain_observed(&shared.ops, &name, &mut attachment)),
     };
 
-    let (mut state, attachment) = match end_reload_leg(entry, epoch, attachment, &reply) {
-        ReloadLegEnd::Standing(state, attachment) => (state, attachment),
+    let (mut state, attachment, replacing) = match end_reload_leg(entry, epoch, attachment, &reply)
+    {
+        ReloadLegEnd::Standing(state, attachment, replacing) => (state, attachment, replacing),
         ReloadLegEnd::Superseded(attachment) => return Some(attachment),
     };
-    // A later turn runs only after its activation began replacing the
-    // derived state; a first leg had begun only where it recorded so.
-    let replacing =
-        state.reload_replacing_at.take() == Some(epoch) || matches!(step, ReloadStep::Reconcile(_));
-    let activates = !matches!(step, ReloadStep::Judge);
+    let activates = matches!(step, ReloadStep::Activate);
 
     let result = match result {
         None => Err(ReloadRefusal::Unsupported),
@@ -9685,29 +9680,6 @@ fn run_reload_job<O: EntryOps>(
             Ok(judgment),
         );
     }
-    if judgment.outcome == ReloadOutcome::SchemaChanged
-        && observed.rescans().is_empty()
-        && (saturated || !observed.is_empty())
-    {
-        // The schema reload's own turns derive what its drain delivered
-        // under the new declaration, keeping its reply.
-        state.pending.merge(observed);
-        state.coverage.park_by(epoch, attachment);
-        let next = state
-            .claim
-            .hand_on(|epoch| Job::ReloadReconcile(name.clone(), epoch, judgment, reply));
-        drop(state);
-        dispatch_handoff(shared, entry, epoch, next);
-        #[cfg(test)]
-        if shared
-            .panic_after_reload_handoff
-            .swap(false, Ordering::SeqCst)
-        {
-            panic!("the reload turn unwound after its hand-on");
-        }
-        return None;
-    }
-
     record_active_declaration(&mut state, &*shared.ops, &name, &attachment);
     state.last_reload_error = None;
     // A reload keeps the store it ran over, so damage a read met under its
@@ -9715,19 +9687,16 @@ fn run_reload_job<O: EntryOps>(
     // on the standing handle — names the store it goes on holding.
     let damage_a_read_met = state.damage_met_under_a_claim.take();
     state.clear_rung_requirements();
-    match judgment.outcome {
-        ReloadOutcome::ConfigOnly => {
-            // A config-only reload closed no handle, so the slot is full and
-            // this mints nothing. It is spelled as the parking that answers
-            // for the slot all the same: a leg that parks coverage answers for
-            // the handle over it, and an arm that did not would be the one
-            // place the invariant is unenforced.
-            state.park_coverage(&*shared.ops, epoch, attachment);
-        }
-        ReloadOutcome::SchemaChanged => {
-            state.remint_coverage(&*shared.ops, epoch, attachment);
-        }
-    }
+    // A config-only reload closed no handle, so the slot is full and this
+    // mints nothing; it is spelled as the parking that answers for the slot
+    // all the same. A schema-changing activation closed the handle as it
+    // began, so this installs the new pool, in the same hold that merges the
+    // end drain's facts below. That pool reads the store the entry kept,
+    // derived under the active declaration through every fact taken in, so
+    // installing it breaks no trust: the entry settles across what the drain
+    // left, where a pool over a store that replaced the one before
+    // ([`EntryState::remint_coverage`]) starts trust again.
+    state.park_coverage(&*shared.ops, epoch, attachment);
     if let Some(detail) = damage_a_read_met {
         // The damage is published in place of `Ready` and the claim goes on
         // to the rebuild it owes, as for damage the reload met itself; the
@@ -10167,6 +10136,7 @@ impl<O: EntryOps> Host<O> {
 #[allow(clippy::disallowed_methods)] // fixtures impersonate external filesystem retargets.
 mod tests {
     use super::*;
+    use crate::ReloadOutcome;
     use norn_config::registry::{Entry as RegistryEntry, VaultRoot};
     use norn_testkit::scratch::Scratch;
     use norn_testkit::wait::{Budget, Observed, wait_until};
@@ -12829,35 +12799,9 @@ mod tests {
         assert!(state.coverage.in_hand());
     }
 
-    /// A schema reload whose drain observed watcher facts reconciles them on
-    /// its next turn, and that turn answers what the first turn judged.
-    #[test]
-    fn a_reload_turn_that_reconciles_observed_facts_answers_the_first_turns_judgment() {
-        let ops = Arc::new(FakeOps::default());
-        ops.reload_supported.store(true, Ordering::SeqCst);
-        ops.reload_schema_changed.store(true, Ordering::SeqCst);
-        let name = VaultName::new("notes").unwrap();
-        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        let _lease = host.demand(&name).unwrap();
-        wait_for_state(&host, &name, TrustState::Ready);
-        let reconciled = ops.reconciles.load(Ordering::SeqCst);
-
-        // The fact arrives past the reload's fold, for its end's drain.
-        ops.once_the_candidate_is_read(|ops| ops.facts_on_next_polls.store(1, Ordering::SeqCst));
-        assert_eq!(
-            host.reload(&name),
-            Ok(fake_judgment(ReloadOutcome::SchemaChanged))
-        );
-        assert_eq!(
-            ops.reconciles.load(Ordering::SeqCst),
-            reconciled + 1,
-            "the facts the first turn observed were not reconciled"
-        );
-        assert_eq!(host.state(&name), answered(TrustState::Ready));
-    }
-
-    /// A reload turn whose drain stays saturated hands its claim on, and the
-    /// sibling attach queued behind it runs before the turn it handed on to.
+    /// A schema reload whose end drain stays saturated answers as its leg
+    /// ends and hands its claim on to an ordinary reconcile turn, and the
+    /// sibling attach queued behind it runs before that turn.
     ///
     /// The host runs no ambient poll: a watcher poll holds the entry's claim
     /// and coverage while it runs, and a reload asked inside that span is
@@ -12894,6 +12838,11 @@ mod tests {
         *ops.continuous_handoff_poll_for.lock().unwrap() = Some(reloaded.clone());
         let _sibling_lease = host.demand(&sibling).unwrap();
         ops.reload_release.store(true, Ordering::SeqCst);
+        assert_eq!(
+            reload.join().unwrap(),
+            Ok(fake_judgment(ReloadOutcome::SchemaChanged)),
+            "the reload was not answered as its leg ended"
+        );
 
         let sibling_ready = wait_until(
             "the sibling to attach between bounded reload turns",
@@ -12909,18 +12858,8 @@ mod tests {
         ));
         *ops.continuous_handoff_poll_for.lock().unwrap() = None;
         retry_pending_dispatches(&host.shared);
-        // The turn that finishes answers what the first turn judged.
-        assert_eq!(
-            reload.join().unwrap(),
-            Ok(fake_judgment(ReloadOutcome::SchemaChanged))
-        );
         sibling_ready.unwrap_or_else(|failure| panic!("{failure}"));
-        assert_eq!(host.state(&reloaded), answered(TrustState::Ready));
-        assert_eq!(
-            ops.reconciles.load(Ordering::SeqCst),
-            0,
-            "an empty saturated drain ran an empty reconcile"
-        );
+        wait_for_state(&host, &reloaded, TrustState::Ready);
 
         drop(host);
     }
@@ -14220,55 +14159,6 @@ mod tests {
                     .expect("a reload the entry stood at");
             }
         }
-    }
-
-    /// **A reload turn that unwinds after handing the reload on is answered
-    /// once, by the turn it handed on to.** The unwinding turn no longer holds
-    /// the entry, so its unwind publishes nothing and the asker waits for the
-    /// next turn's activation rather than being told a reading the reload is
-    /// about to leave.
-    #[test]
-    fn a_reload_turn_unwinding_after_its_hand_on_leaves_the_answer_to_the_next_turn() {
-        let ops = Arc::new(FakeOps::default());
-        ops.reload_supported.store(true, Ordering::SeqCst);
-        ops.reload_schema_changed.store(true, Ordering::SeqCst);
-        let name = VaultName::new("notes").unwrap();
-        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        let _lease = host.demand(&name).unwrap();
-        wait_for_state(&host, &name, TrustState::Ready);
-        // The fact arrives past the reload's fold, for its end's drain.
-        ops.once_the_candidate_is_read(|ops| ops.facts_on_next_polls.store(1, Ordering::SeqCst));
-        host.shared
-            .panic_after_reload_handoff
-            .store(true, Ordering::SeqCst);
-
-        let entry = host.shared.entries.get(&name).unwrap();
-        let (reply, answer, _) = ReloadReply::channel();
-        entry
-            .gate
-            .lock()
-            .unwrap()
-            .claim
-            .schedule(|epoch| Job::Reload(name.clone(), epoch, reply));
-        dispatch_pending(&host.shared, &entry).unwrap();
-
-        assert_eq!(
-            answer.recv(),
-            Ok(Ok(fake_judgment(ReloadOutcome::SchemaChanged))),
-            "the asker was answered before the turn it was handed on to"
-        );
-        assert!(
-            answer.recv().is_err(),
-            "the reload was answered a second time"
-        );
-        assert!(
-            !host
-                .shared
-                .panic_after_reload_handoff
-                .load(Ordering::SeqCst),
-            "the turn never reached its hand-on"
-        );
-        assert_eq!(host.state(&name), answered(TrustState::Ready));
     }
 
     /// **A host whose job channel is gone answers no reload at all**: no code,
@@ -25849,6 +25739,17 @@ mod tests {
         assert_eq!(response, Ok(fake_judgment(ReloadOutcome::ConfigOnly)));
     }
 
+    /// **A schema-changing reload schedules the teardown due at its release**,
+    /// as a config-only activation does: the leg that activates installs the
+    /// new pool and ends the way every reload leg ends.
+    #[test]
+    fn a_schema_changing_reload_schedules_a_due_teardown_at_its_release() {
+        let response = a_reload_released_due_a_teardown(Job::Reload, |ops| {
+            ops.reload_schema_changed.store(true, Ordering::SeqCst);
+        });
+        assert_eq!(response, Ok(fake_judgment(ReloadOutcome::SchemaChanged)));
+    }
+
     /// **A reload whose candidate is refused before activation schedules the
     /// teardown due at its release**: the refusal is the asker's answer, not
     /// a reason to leave the entry holding coverage it is due to give back.
@@ -28127,7 +28028,6 @@ mod tests {
             Job::Maintenance(..)
             | Job::Reload(..)
             | Job::JudgeReload(..)
-            | Job::ReloadReconcile(..)
             | Job::Apply(..)
             | Job::Detach(..) => None,
         }

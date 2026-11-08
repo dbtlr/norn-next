@@ -126,11 +126,12 @@ pub fn read_budget(limit: Duration) -> Budget {
 
 /// How long one look that asks the host for a reload may take.
 ///
-/// A reload admitted over a `Ready` entry answers only once its job has run: a
-/// schema reload heals the vault under the new declaration and drains the
-/// watcher facts behind it before it replies. So a look at a reload is a job
-/// of an attachment's size, bounded as an attachment converging is, and only
-/// a reload that outlasts [`READY_LIMIT`] is a machine that stopped answering.
+/// A reload admitted over a `Ready` entry answers only once its leg has run: a
+/// schema reload heals the whole vault under the new declaration inside that
+/// leg and replies as the leg ends, leaving the watcher facts that arrived
+/// meanwhile to ordinary reconcile turns. So a look at a reload is a job of an
+/// attachment's size, bounded as an attachment converging is, and only a
+/// reload that outlasts [`READY_LIMIT`] is a machine that stopped answering.
 /// A reload refused at admission answers at once.
 pub const RELOAD_PROBE: Duration = READY_LIMIT;
 
