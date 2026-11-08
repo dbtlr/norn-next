@@ -165,7 +165,7 @@ may not be added.
   During the first three steps, accepted roots run ahead through the same routines.
   Link health is judged fourth and stored bodies are full-text indexed fifth. The capabilities
   each step completes publish to early reads as it ends, as [ADR
-  0050](decisions/0050-a-reload-leg-opens-the-gap-a-maintenance-leg-opens.md) rules.
+  0051](decisions/0051-a-schema-reload-serves-reads-again-when-its-activation-ends.md) rules.
 - **Corruption, or any state the lower rungs cannot resolve** — at any time, before or after
   release.
 
@@ -1636,7 +1636,7 @@ in which the derived database answers from a stale world. High-fidelity change d
 therefore what buys the right to read SQLite and answer. Canonical warm requests perform
 no filesystem check. An early read of a store under construction additionally checks its
 build's root identity outside entry and watcher locks, as [ADR
-0050](decisions/0050-a-reload-leg-opens-the-gap-a-maintenance-leg-opens.md) permits. The heal ladder is why imperfect detection cannot corrupt derived state;
+0051](decisions/0051-a-schema-reload-serves-reads-again-when-its-activation-ends.md) permits. The heal ladder is why imperfect detection cannot corrupt derived state;
 detection fidelity is why that state is worth reading at all.
 
 Two mechanisms carry trust, and both are contract:
@@ -2448,7 +2448,7 @@ A park keeps its own code. Where the demand is serving, the refusal is reader-un
 which is an entry serving every surface but this one.
 
 **A from-zero build answers each read whose data it has completed, under [ADR
-0050](decisions/0050-a-reload-leg-opens-the-gap-a-maintenance-leg-opens.md).** Early reads run on
+0051](decisions/0051-a-schema-reload-serves-reads-again-when-its-activation-ends.md).** Early reads run on
 the canonical store under construction; a build creates no store beside it. Every
 from-zero route — an attach after a create or an open-time rebuild, inline rung 3, the
 `rebuild` leg, and the recovery or reload over the empty store an undeclarable attach
@@ -2570,7 +2570,7 @@ mutation. An early answer carries the warming trust, store epoch and committed g
 of its hold, and a Find cursor continues across `Ready` under ordinary cursor judgment.
 
 **A canonical read that meets a change waits for it, as [ADR
-0050](decisions/0050-a-reload-leg-opens-the-gap-a-maintenance-leg-opens.md) rules.** Warming splits
+0051](decisions/0051-a-schema-reload-serves-reads-again-when-its-activation-ends.md) rules.** Warming splits
 by stance, read under the entry gate beside the published demand: an entry that entered
 warming from `Ready` with no withdrawal of trust in between — a polled batch, a reconcile
 turn, a schema reload — settles. Every other state refuses canonical acquisition at once
@@ -2580,7 +2580,7 @@ above. The trust
 label does not say how warming was entered, so the entry's own state holds that fact: every
 hold of the entry gate ends by recording whether trust has stood unbroken since `Ready`, and
 moves the gate's stance signal where the hold changed the stance or how far the entry has
-derived the facts it took in. The bound runs from the read's first take of the entry gate and
+derived the facts it took in, or installed a reader over a settling entry. The bound runs from the read's first take of the entry gate and
 covers the waits the read takes to establish its snapshot or to refuse: that first take, the
 wait for the connection and the wait for the change together, and the retake of the gate after
 each. **After those, a read never waits for the entry gate**, so a gate another holder keeps —
@@ -2610,9 +2610,13 @@ answer carries what the entry then publishes, so a read answered while later fac
 being derived says so: its trust is the healing that stands, and its generation is the store's
 committed write generation. So a vault edited faster than one reconcile turn still answers, the
 wait never runs until the vault falls quiet, and no read answers from the state before the
-change it met. A schema reload retires the pool for its length, so a read it settles answers
-once it installs another with `Ready`, and from that pool; the read refuses only where the
-entry is no longer settling or serving. Past a bound, a lifecycle policy value whose
+change it met. A schema reload retires the pool from its activation until the leg that
+activates ends, so a read it settles answers once that leg installs another, `Ready` or
+healing, and from that pool; the read refuses only where the entry is no longer settling or
+serving. A read that first meets the entry while the reader the activation closed is not yet
+replaced records, in place of the
+position at that instant, the position once that leg has taken in its end drain, as the
+reload paragraphs below say. Past a bound, a lifecycle policy value whose
 production value is the 5-second settle ceiling, it refuses as `host/entry-not-ready` with the
 message "this vault is still indexing a change". A teardown's publication moves the stance and
 wakes every waiting read, which takes the gate again and refuses with what the entry then
@@ -2939,7 +2943,7 @@ Full-text search and the stem trigram index are maintained transactionally insid
 The full-text triggers are the index's only writer on a finished store; a from-zero build
 holds no triggers while it runs and fills the index in committed batches from the stored
 bodies in step 5, installing the triggers in the closing transaction that clears its mark ([ADR
-0050](decisions/0050-a-reload-leg-opens-the-gap-a-maintenance-leg-opens.md)).
+0051](decisions/0051-a-schema-reload-serves-reads-again-when-its-activation-ends.md)).
 The trigram index is a lane-1 projection of the document path alone, invalidated by the
 derivation version. Embeddings are
 lane-2 engine state: eventually consistent, held in the engine's sidecar database rather
@@ -3069,24 +3073,27 @@ fold and again in its derivation of the vault under the new one. That is an acce
 one turn's facts: whether the schema changes is known only from the candidate, which the
 reload reads after its fold.
 
-**A reload publishes `Ready` only where nothing is left at the end of the leg that
-publishes.** A reload leg ends as an apply's does: it drains the watcher once more before it
-publishes, so the facts that arrived while it read the candidate or derived are taken in
-rather than left behind a `Ready` publication. The fold's drain is never that last drain, so a
-config-only activation and a dry run, which derive nothing after their fold, still drain at
-their end. The leg that publishes — the reload's own, or for a schema-changing activation the
-leg or reconcile turn that completes its derivation under the new declaration — publishes
-`Ready` where no fact is pending, its end's drain was not saturated and no rung is owed, which
-is the rule every leg's end follows. Where its end's drain meets a watcher overflow or loss,
+**A reload publishes `Ready` only where nothing is left at the end of its leg.** A reload leg
+ends as an apply's does: it drains the watcher once more before it publishes, so the facts
+that arrived while it read the candidate or derived are taken in rather than left behind a
+`Ready` publication. The fold's drain is never that last drain, so a config-only activation
+and a dry run, which derive nothing after their fold, still drain at their end. The leg
+publishes `Ready` where no fact is pending, its end's drain was not saturated and no rung is
+owed, which is the rule every leg's end follows. Where its end's drain meets a watcher overflow or loss,
 it withdraws trust as a turn's end does — an overflow owes its rescan, and a loss gives its
 coverage up — and the reload, dry run included, answers with where the entry stands, though
 it may have read and activated its candidate. Otherwise it leaves the entry healing, trust
 unbroken, and hands the claim on as a reconcile turn's end does: to the apply queue's head
 where one waits, and else to the reconcile owed, which is where facts the end's drain
-delivered go; a schema-changing activation's own turns run first. A config-only activation
-and a dry run answer the asker as their leg ends, `Ready` or healing. A schema-changing
-activation keeps its reply through its own reconcile turns and answers once `Ready` returns,
-as it does over a `Ready` entry. A candidate failure — a read or parse error,
+delivered go. **Every reload answers its asker as its leg ends, `Ready` or healing.** A
+schema-changing activation derives the whole vault under the new declaration inside its leg
+and installs the new pool as that leg ends, so the facts its end's drain delivered are
+ordinary pending facts, derived by ordinary reconcile turns under the new declaration, as
+[ADR 0051](decisions/0051-a-schema-reload-serves-reads-again-when-its-activation-ends.md)
+rules. Installing that pool over the store the entry kept breaks no trust, so the entry
+settles across those turns as it does across any change; only a pool installed over a store
+that replaced the one before starts trust again. A schema reload has no reconcile turns of its own, and its answer implies `Ready` only
+where nothing was left; `vault status` reports where the entry stands. A candidate failure — a read or parse error,
 or any other refusal of the candidate before activation begins — leaves the entry as the fold
 and the leg's end left it, whatever state the reload was admitted at, and withdraws no trust
 of its own: the fold's derivation stands, and the entry is `Ready` only where nothing is left. A
@@ -3103,9 +3110,16 @@ the one that reconcile would have left, and nothing about the candidate is recor
 
 **A reload keeps the read contract, with the one gap a maintenance leg also opens.** A read
 that met the change the entry was settling recorded a position no later than the fold's take,
-so it answers once the fold commits, from the reader standing then, or once `Ready` returns. A
-schema-changing activation closes that reader after its fold, and a read still waiting
-answers from the pool installed with `Ready`. Because a reload publishes `Ready` only where
+so it answers once the fold commits, from the reader standing then. A schema-changing
+activation closes that reader after its fold, and a read still waiting
+answers from the pool its leg installs as it ends, since the activation has derived every
+fact that read met. No poll runs while the activation derives the vault, so an edit made then
+stays with the watcher until the leg's end drain: a read that first meets the entry while the
+reader the activation closed is not yet replaced therefore records its position once the leg
+has taken in that drain, and answers once the next intake, an ordinary reconcile turn or the
+apply queue's head, has derived the drain's facts, never waiting for `Ready`. Where that drain
+is saturated, the intake drains first, so the position still lies past every edit the read
+met. Because a reload publishes `Ready` only where
 nothing is left, no read establishes a snapshot without a change it met. A change still with
 the watcher is not one a read met, though: no poll runs while the reload holds the claim, so
 an edit made after the fold's drain stays with the watcher until the leg's end drain, and a
@@ -3124,8 +3138,7 @@ as held, a vault unregistered answers as unknown, and a parked entry answers in 
 own code, not the label beneath it. That holds at admission, at a leg that no longer stands,
 and for a reload the host drops without an answer, whether moved past before a worker ran it
 or lost with a leg that unwound; for an unwound leg with no park, the entry stands at the
-untrusted reading the unwind publishes. A turn that unwinds after handing the reload on
-leaves the answer to the turn it handed on to.
+untrusted reading the unwind publishes.
 
 **What a fallback answer says of the control files follows where the reload stopped, never the
 label it reads.** A reload refused at admission, and one dropped before a leg read its
@@ -3141,8 +3154,8 @@ and what it met as the detail: the failure kinds carry no common text a fold cou
 in, and some carry no text at all. A
 reload may have read its candidate, and an activation taken it into service, before its claim
 is superseded or its leg unwinds: a leg reads and judges the candidate outside the gate and
-looks at the claim only afterwards, and a schema-changing activation's continuation legs run
-after it activated. There the same codes answer with messages neutral about the files: "this
+looks at the claim only afterwards, and a schema-changing activation derives the vault after
+it activated. There the same codes answer with messages neutral about the files: "this
 vault's reload could not report its completion, and the vault is not ready yet" for
 `host/entry-not-ready`, and "this vault's reload could not report its completion, and the
 vault is being worked over" for `vault/reload-busy`. Each case has that one spelling. A park,
@@ -3319,8 +3332,12 @@ maintained inside the document's changeset beside the value they type; and their
 invalidation key is the standing schema pin held in `meta`. **The typed column joins what a
 re-pin discards**: the pin's own transaction clears every typed value, its least-value
 marker and its offset spelling beside the findings it discards, and the walk that follows
-refills them. That is safe because a schema reload retires the entry's pool and publishes `Warming` in its `Healing`
-phase until the heal converges, so no read observes a column the walk has half refilled.
+refills them. That is safe because a schema reload publishes `Warming` in its `Healing` phase
+at its activation and retires the entry's pool until its leg ends, and that walk is the activation's own heal of the
+whole vault, which converges inside the leg before it installs another pool, so no read
+observes a column the walk has half refilled. An activation that fails after its re-pin
+withdraws trust and owes the recovery or the rebuild before any pool it leaves stands, so no read is served
+from that column either.
 The fold, the tag a value row names under a tag key — the `tags` carrier, declared or not,
 or a key declared `tags` — its `#` marker dropped and the tag fold applied, or the link a
 value row is under a key declared `link`, its alias dropped, read by the schema's link
@@ -3347,7 +3364,8 @@ and its invalidation key is the standing schema pin. **A re-pin does not discard
 pin's transaction leaves the column standing, and the heal that follows converges it by
 deriving every row below the pin again, so until that heal reaches a row, the row holds the
 count the old ignore set gave it. No read observes that window, because a schema reload
-retires the entry's pool until the heal converges. A re-decision inside the heal's own
+retires the entry's pool until its leg ends, and the heal converges inside that leg; an
+activation that fails before it converges withdraws trust, which refuses every read. A re-decision inside the heal's own
 changesets may read an old count, but a row whose admitting count the new set moves is not
 an in-place rewrite, so the changeset that writes it re-decides every link its class and
 path reach; the last such changeset in a class runs after every member is derived under the
@@ -3423,7 +3441,7 @@ rows are discarded and the whole vault is walked again. Unlike the other write v
 `Host::init` answers synchronously rather than with a `PendingApply`, and a vault whose
 standing schema cannot be read answers the entry's untrusted refusal. **Initializing a vault
 runs its first build in the foreground** ([ADR
-0050](decisions/0050-a-reload-leg-opens-the-gap-a-maintenance-leg-opens.md)): past the `schema_elsewhere`
+0051](decisions/0051-a-schema-reload-serves-reads-again-when-its-activation-ends.md)): past the `schema_elsewhere`
 answer, `init` demands the vault and waits, with no bound, until it is `Ready`, holding that
 demand until it answers, so a vault nothing has attached runs its from-zero build inside the
 call rather than refusing as still indexing. A build that ends short of `Ready` — a failure of
@@ -4444,7 +4462,7 @@ bound by the applier's lifecycle tests.
   hand every writer a retry. The
   queue's head takes the claim before the next reconcile
   turn or maintenance leg would begin, and never ahead of an attach, a recovery, a rebuild,
-  a detach, or a schema reload before it publishes `Ready`, because each of those owes work
+  a detach, or a reload's leg, because each of those owes work
   an apply's intake does not do. Nor does it take the claim ahead of a reload that was waiting
   before the apply was asked. Applies run in the order they were admitted, so operations
   planned inside the registration's serialization plan against a determined predecessor. The

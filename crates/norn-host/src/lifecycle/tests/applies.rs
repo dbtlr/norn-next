@@ -918,14 +918,15 @@ fn an_apply_queued_during_an_attach_recovery_or_rebuild_runs_once_trust_is_held(
     drop((lease, host));
 }
 
-/// **Case 4: an apply queued during a schema reload runs only after the
-/// reload publishes `Ready`.** The reload closed the entry's reader when it
-/// began, and its drain delivers a fact, so it hands the claim on to its own
-/// next turn before it mints a reader again. The apply queued meanwhile does
-/// not take the claim at that hand-on: the reload's turn runs first, and the
-/// apply runs over the reader the reload minted.
+/// **Case 4: an apply queued during a schema reload takes the claim as the
+/// reload's leg ends.** The activation closed the entry's reader when it
+/// began, and a second reload asked meanwhile refuses busy. Its end drain
+/// delivers a fact, and the leg installs the new pool and hands the claim to
+/// the apply queue's head, as a reconcile turn's end does: the reload is
+/// answered as its leg ends, and the apply's own intake derives the fact
+/// before the apply runs over the pool the leg installed.
 #[test]
-fn an_apply_queued_during_a_schema_reload_runs_only_after_it_publishes_ready() {
+fn an_apply_queued_during_a_schema_reload_takes_the_claim_as_its_leg_ends() {
     let ops = Arc::new(FakeOps::default());
     ops.reload_supported.store(true, Ordering::SeqCst);
     ops.reload_schema_changed.store(true, Ordering::SeqCst);
@@ -934,23 +935,36 @@ fn an_apply_queued_during_a_schema_reload_runs_only_after_it_publishes_ready() {
     ops.block_schema_reload.store(true, Ordering::SeqCst);
     let reload = reload_on_a_thread(&host, &name, false);
     wait_for_flag("reload_started", &ops.reload_started);
+    assert_eq!(
+        host.reload(&name),
+        Err(ReloadRefusal::Busy),
+        "a second reload during the activation"
+    );
     let pending = host
         .admit_apply(&name, a_plan(&name))
         .expect("an apply over a reloading entry is admitted");
+    let intake = ops.reconciles.load(Ordering::SeqCst) + 1;
+    ops.hold_reconciles_from.store(intake, Ordering::SeqCst);
     ops.facts_on_next_polls.store(1, Ordering::SeqCst);
 
     ops.reload_release.store(true, Ordering::SeqCst);
-    applied(answer_of(pending));
     reload
         .join()
         .unwrap()
         .expect("the host is running")
         .expect("the reload applied");
+    wait_for_reconciles(&ops, intake, "the apply's intake to begin");
+    assert!(
+        ops.applies_ran.lock().unwrap().is_empty(),
+        "the apply ran ahead of its own intake"
+    );
+    ops.later_reconcile_release.store(true, Ordering::SeqCst);
+    applied(answer_of(pending));
     let when = ops.applies_ran.lock().unwrap()[0];
     assert!(when.reader_stood, "the apply ran with no reader standing");
     assert_eq!(
-        when.reconciles, 1,
-        "the reload's own turn did not run ahead of the apply"
+        when.reconciles, intake,
+        "the apply's intake did not derive the end drain's fact ahead of it"
     );
     drop(lease);
 }

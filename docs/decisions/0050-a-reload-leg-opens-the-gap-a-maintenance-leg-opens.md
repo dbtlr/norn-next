@@ -1,5 +1,6 @@
 ---
-status: accepted
+status: superseded
+superseded-by: 0051-a-schema-reload-serves-reads-again-when-its-activation-ends.md
 date: 2026-11-07
 ---
 

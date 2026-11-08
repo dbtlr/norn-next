@@ -141,13 +141,16 @@ impl<O: EntryOps> Host<O> {
     /// settles — and answers the outcome and fingerprints that activation
     /// would. Either one's leg ends as an apply's does, draining the
     /// watcher once more, and publishes `Ready` only where nothing is left at
-    /// the end of the leg that publishes — for a schema-changing activation,
-    /// the leg or turn that completes its derivation — and otherwise hands the
-    /// claim on as a reconcile turn's end does: to the apply queue's head
-    /// where one waits, and else to the reconcile owed, a schema-changing
-    /// activation's own turns first. A watcher overflow or loss that either
-    /// drain meets withdraws trust as a turn's end does and answers the
-    /// reload with where the entry stands. A candidate failure leaves the
+    /// the end of its leg, and otherwise hands the claim on as a reconcile
+    /// turn's end does: to the apply queue's head where one waits, and else to
+    /// the reconcile owed. Either answers its asker as that leg ends, `Ready`
+    /// or healing. A schema-changing activation derives the whole vault under
+    /// the new declaration inside its leg and installs the new pool as the leg
+    /// ends, so the facts its end drain delivered are left to ordinary
+    /// reconcile turns, and an answered schema reload implies `Ready` only
+    /// where nothing was left. A watcher overflow or loss that either drain
+    /// meets withdraws trust as a turn's end does and answers the reload with
+    /// where the entry stands. A candidate failure leaves the
     /// entry as the fold and the leg's end left it: the fold's derivation
     /// stands. A runtime failure either meets gets the same policy, and a
     /// reload the host drops without

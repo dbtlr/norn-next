@@ -32,13 +32,19 @@ type SharedHost = Arc<Host<Arc<FakeOps>>>;
 /// A host over one vault with no ambient tick, holding the vault `Ready` and
 /// quiet over an attachment that holds a reload.
 fn a_ready_vault(ops: &Arc<FakeOps>) -> (SharedHost, VaultName, DemandLease<Arc<FakeOps>>) {
+    a_ready_vault_settling_within(ops, crate::READ_SETTLE_BOUND)
+}
+
+/// [`a_ready_vault`], whose reads settle within `read_settle_bound`: a case
+/// whose read must answer before its bound names one past the case's own
+/// wait budget, so a read that answers only at its bound fails the case.
+fn a_ready_vault_settling_within(
+    ops: &Arc<FakeOps>,
+    read_settle_bound: Duration,
+) -> (SharedHost, VaultName, DemandLease<Arc<FakeOps>>) {
     ops.reload_supported.store(true, Ordering::SeqCst);
-    let name = VaultName::new("notes").unwrap();
-    let host = Arc::new(host_without_ambient_polling(
-        Arc::clone(ops),
-        Roots::Absent(&[&name]),
-        1,
-    ));
+    let (host, name) = fixture_settling_within(Arc::clone(ops), read_settle_bound);
+    let host = Arc::new(host);
     let lease = host.demand(&name).unwrap();
     wait_for_state(&host, &name, TrustState::Ready);
     wait_for_a_quiet_entry(&host, &name);
@@ -1111,8 +1117,9 @@ fn a_failure_the_fold_meets_answers_reload_failed_saying_the_fold_met_it() {
     }
 }
 
-/// **A schema-changing reload over a settling vault completes, and answers
-/// once `Ready` returns.**
+/// **A schema-changing reload over a settling vault whose end drain finds
+/// nothing answers with `Ready`**: its fold derived what the turn it waited
+/// for left, and nothing arrived while it activated.
 #[test]
 fn a_schema_changing_reload_over_a_settling_vault_answers_at_ready() {
     let ops = Arc::new(FakeOps::default());
@@ -1399,28 +1406,283 @@ fn a_reload_over_the_reconcile_an_earlier_reloads_end_handed_on_to_waits_and_run
     drop((lease, host));
 }
 
-/// **A schema-changing reload over a settling vault whose own end drain and
-/// later turns keep meeting facts keeps its reply through its own turns** and
-/// answers once `Ready` returns.
+/// The reader `name`'s entry holds now, where one stands.
+fn standing_reader(host: &SharedHost, name: &VaultName) -> Option<Arc<FakeReader>> {
+    let entry = host.shared.entries.get(name).expect("the vault is served");
+    let state = entry.gate.lock().unwrap();
+    state.reader.as_ref().map(Arc::clone)
+}
+
+/// Hold a schema-changing activation of `name` open once it has closed the
+/// reader, asked on a thread of its own; the reload's receiver comes back.
+fn a_held_schema_activation(
+    host: &SharedHost,
+    ops: &FakeOps,
+    name: &VaultName,
+) -> mpsc::Receiver<Answer> {
+    ops.reload_schema_changed.store(true, Ordering::SeqCst);
+    ops.block_schema_reload.store(true, Ordering::SeqCst);
+    let answer = ask_a_reload(host, name, false);
+    wait_for_flag("reload_started", &ops.reload_started);
+    assert!(
+        standing_reader(host, name).is_none(),
+        "the activation left the reader it closed standing"
+    );
+    answer
+}
+
+/// End a held schema activation with one fact for its end's drain, the
+/// reconcile turn that follows held at its own release: answers that turn's
+/// number once it has begun.
+fn end_the_activation_leaving_a_fact(ops: &FakeOps) -> usize {
+    let next_turn = ops.reconciles.load(Ordering::SeqCst) + 1;
+    ops.hold_reconciles_from.store(next_turn, Ordering::SeqCst);
+    ops.facts_on_next_polls.store(1, Ordering::SeqCst);
+    ops.reload_release.store(true, Ordering::SeqCst);
+    next_turn
+}
+
+/// **A schema-changing reload whose end drain leaves facts answers its asker
+/// as its leg ends**, with the new declaration's fingerprints, and installs
+/// the new pool there with trust unbroken: the entry settles under healing,
+/// not `Ready`, and an ordinary reconcile turn derives what the drain left.
 #[test]
-fn a_schema_changing_reload_over_a_settling_vault_keeps_its_reply_through_its_own_turns() {
+fn a_schema_reload_leaving_facts_answers_as_its_leg_ends_and_an_ordinary_reconcile_follows() {
     let ops = Arc::new(FakeOps::default());
     let (host, name, lease) = a_ready_vault(&ops);
-    ops.reload_schema_changed.store(true, Ordering::SeqCst);
-    hold_a_settling_turn(&host, &ops, &name);
-    let answer = a_waiting_reload(&host, &name, false);
+    let answer = a_held_schema_activation(&host, &ops, &name);
 
-    ops.block_schema_reload.store(true, Ordering::SeqCst);
-    end_the_turn_leaving_a_fact(&ops);
-    wait_for_flag("reload_started", &ops.reload_started);
-    ops.facts_on_next_polls.store(2, Ordering::SeqCst);
-    ops.reload_release.store(true, Ordering::SeqCst);
+    let next_turn = end_the_activation_leaving_a_fact(&ops);
 
     assert_eq!(
         answer_of(&answer),
+        Ok(fake_judgment(ReloadOutcome::SchemaChanged)),
+        "the reload was not answered as its leg ended"
+    );
+    wait_for_reconciles(&ops, next_turn, "the reconcile the leg's end handed on to");
+    assert_eq!(host.state(&name), answered(healing()));
+    assert!(
+        standing_reader(&host, &name).is_some(),
+        "the leg ended with no pool installed"
+    );
+    {
+        let entry = host.shared.entries.get(&name).unwrap();
+        let state = entry.gate.lock().unwrap();
+        assert_eq!(
+            state.read_stance(),
+            ReadStance::Settle,
+            "installing the pool over the store the entry kept broke trust"
+        );
+    }
+    ops.later_reconcile_release.store(true, Ordering::SeqCst);
+    wait_for_state(&host, &name, TrustState::Ready);
+    drop((lease, host));
+}
+
+/// **A read that met a schema reload's change before its activation closed
+/// the reader answers from the pool the leg installs as it ends**, under the
+/// healing that stands where the end drain left facts. The activation
+/// derived every fact the read met, and the install is what wakes it: it
+/// answers while the next reconcile turn is still held, not at that turn's
+/// commit or at its bound.
+#[test]
+fn a_read_that_met_the_change_before_the_activation_answers_from_the_pool_its_leg_installs() {
+    let ops = Arc::new(FakeOps::default());
+    let (host, name, lease) = a_ready_vault_settling_within(&ops, LONG_SETTLE);
+    ops.reload_schema_changed.store(true, Ordering::SeqCst);
+    hold_a_settling_turn(&host, &ops, &name);
+    let entry = host.shared.entries.get(&name).unwrap();
+    let (paused, pause) = mpsc::channel();
+    let (resume, resumed) = mpsc::channel::<()>();
+    entry.gate.when_a_read_lets_go(move || {
+        paused.send(()).expect("the case waits for the pause");
+        resumed.recv().expect("the case resumes the read");
+    });
+
+    let before = host.read_evidence();
+    thread::scope(|scope| {
+        let reading = scope.spawn(|| host.begin_read(&name));
+        pause
+            .recv()
+            .expect("the read paused after letting the gate go");
+        let answer = a_waiting_reload(&host, &name, false);
+        ops.block_schema_reload.store(true, Ordering::SeqCst);
+        ops.reconcile_release.store(true, Ordering::SeqCst);
+        wait_for_flag("reload_started", &ops.reload_started);
+        resume.send(()).expect("the read is paused");
+        assert!(
+            !settle_waits_or_an_answer(&host, before, 2, &reading),
+            "a read answered while the activation held the entry with no reader"
+        );
+
+        let next_turn = end_the_activation_leaving_a_fact(&ops);
+        assert_eq!(
+            answer_of(&answer),
+            Ok(fake_judgment(ReloadOutcome::SchemaChanged))
+        );
+        wait_until(
+            "the read to answer as the leg installs the pool",
+            lifecycle_wait_budget(),
+            || {
+                if reading.is_finished() {
+                    Observed::Met(())
+                } else {
+                    Observed::pending("the read is still waiting")
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+        let hold = reading
+            .join()
+            .expect("the read finished")
+            .expect("a read the activation derived was refused");
+        assert_eq!(hold.reading().published(), &Demand::State(healing()));
+        let installed = standing_reader(&host, &name).expect("the leg installed a pool");
+        assert!(
+            Arc::ptr_eq(&hold.reader, &installed),
+            "the read answered from a handle other than the one the leg installed"
+        );
+        // The turn the leg's end handed on to is still held, so nothing but
+        // the install could have woken the read.
+        wait_for_reconciles(&ops, next_turn, "the reconcile the leg's end handed on to");
+        drop(hold);
+        ops.later_reconcile_release.store(true, Ordering::SeqCst);
+    });
+    wait_for_state(&host, &name, TrustState::Ready);
+    drop((entry, lease, host));
+}
+
+/// **A read that first meets the entry while the reader the activation
+/// closed is not yet replaced waits for the facts the leg's end drain takes
+/// in**: it does not answer as the leg installs the pool, and answers once
+/// the reconcile turn that follows derives the drain's facts, never waiting
+/// for `Ready`.
+#[test]
+fn a_read_that_met_the_activation_answers_once_the_next_intake_derives_the_end_drain() {
+    let ops = Arc::new(FakeOps::default());
+    let (host, name, lease) = a_ready_vault(&ops);
+    let answer = a_held_schema_activation(&host, &ops, &name);
+
+    let before = host.read_evidence();
+    thread::scope(|scope| {
+        let reading = scope.spawn(|| host.begin_read(&name));
+        wait_for_settle_waits(&host, before, 1);
+
+        let next_turn = end_the_activation_leaving_a_fact(&ops);
+        assert_eq!(
+            answer_of(&answer),
+            Ok(fake_judgment(ReloadOutcome::SchemaChanged))
+        );
+        wait_for_reconciles(&ops, next_turn, "the reconcile the leg's end handed on to");
+        assert!(
+            !settle_waits_or_an_answer(&host, before, 2, &reading),
+            "a read that met the activation answered without the end drain's facts"
+        );
+
+        // Facts keep arriving at every drain from here, and the turn after
+        // this one is held, so the entry is still healing when this turn
+        // commits what the leg's drain left.
+        arrange_for(&ops.continuous_fact_handoff_for, &name);
+        ops.block_reconcile_at
+            .store(next_turn + 1, Ordering::SeqCst);
+        ops.later_reconcile_release.store(true, Ordering::SeqCst);
+        let hold = reading
+            .join()
+            .expect("the read finished")
+            .expect("a read whose facts were derived was refused");
+        assert_eq!(
+            hold.reading().published(),
+            &Demand::State(healing()),
+            "the read waited past the intake that derived its facts"
+        );
+        drop(hold);
+        *ops.continuous_fact_handoff_for.lock().unwrap() = None;
+        ops.reconcile_release.store(true, Ordering::SeqCst);
+    });
+    wait_for_state(&host, &name, TrustState::Ready);
+    drop((lease, host));
+}
+
+/// **A schema activation that unwound after closing the reader leaves no wait
+/// behind it**: once the vault is attached again, a read meeting it while it
+/// settles an edit answers at the turn that derives that edit, under the
+/// healing that still stands, not at `Ready` or its bound.
+#[test]
+fn a_read_after_a_schema_activation_unwound_answers_at_the_turn_that_derives_its_edit() {
+    let ops = Arc::new(FakeOps::default());
+    let (host, name, lease) = a_ready_vault(&ops);
+    ops.reload_schema_changed.store(true, Ordering::SeqCst);
+    ops.panic_in_schema_reload.store(true, Ordering::SeqCst);
+    assert_eq!(
+        host.reload(&name),
+        Err(ReloadRefusal::Unreported(Demand::State(unwound(
+            SCHEMA_RELOAD_PANIC
+        ))))
+    );
+    ops.panic_in_schema_reload.store(false, Ordering::SeqCst);
+    drop(host.demand(&name).unwrap());
+    wait_for_state(&host, &name, TrustState::Ready);
+    wait_for_a_quiet_entry(&host, &name);
+    {
+        let entry = host.shared.entries.get(&name).unwrap();
+        let state = entry.gate.lock().unwrap();
+        assert!(
+            state.reload_replacing_at.is_some(),
+            "the unwound activation left no record, so this case no longer reaches \
+             the state it guards"
+        );
+    }
+
+    hold_a_settling_turn(&host, &ops, &name);
+    let held_turn = ops.reconciles.load(Ordering::SeqCst);
+    let before = host.read_evidence();
+    thread::scope(|scope| {
+        let reading = scope.spawn(|| host.begin_read(&name));
+        wait_for_settle_waits(&host, before, 1);
+
+        // Facts keep arriving at every drain, and every turn after the held
+        // one is held too, so the entry is still healing when the held turn
+        // commits the edit the read met.
+        arrange_for(&ops.continuous_fact_handoff_for, &name);
+        ops.hold_reconciles_from
+            .store(held_turn + 1, Ordering::SeqCst);
+        ops.reconcile_release.store(true, Ordering::SeqCst);
+        let hold = reading
+            .join()
+            .expect("the read finished")
+            .expect("a read whose edit was derived was refused");
+        assert_eq!(
+            hold.reading().published(),
+            &Demand::State(healing()),
+            "the read waited past the turn that derived its edit"
+        );
+        drop(hold);
+        *ops.continuous_fact_handoff_for.lock().unwrap() = None;
+        ops.later_reconcile_release.store(true, Ordering::SeqCst);
+    });
+    wait_for_state(&host, &name, TrustState::Ready);
+    drop((lease, host));
+}
+
+/// **A schema-changing reload over a quiet vault answers with `Ready`**, from
+/// a pool installed in place of the one its activation closed.
+#[test]
+fn a_schema_reload_over_a_quiet_vault_answers_with_ready_over_a_new_pool() {
+    let ops = Arc::new(FakeOps::default());
+    let (host, name, lease) = a_ready_vault(&ops);
+    ops.reload_schema_changed.store(true, Ordering::SeqCst);
+    let closed = standing_reader(&host, &name).expect("a ready entry holds a reader");
+
+    assert_eq!(
+        host.reload(&name),
         Ok(fake_judgment(ReloadOutcome::SchemaChanged))
     );
     assert_eq!(host.state(&name), answered(TrustState::Ready));
+    let installed = standing_reader(&host, &name).expect("the reload installed a pool");
+    assert!(
+        !Arc::ptr_eq(&installed, &closed),
+        "the reload left the reader its activation closed standing"
+    );
     drop((lease, host));
 }
 
