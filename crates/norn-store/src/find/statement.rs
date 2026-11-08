@@ -1020,9 +1020,10 @@ pub(crate) struct SpellingRange<'a> {
 /// and the at most two ids it keeps are gathered into one array the range's
 /// row expands. Each admitting count opens one seek of the suffix comparison
 /// key, cut at two documents in ladder order. The bounded heads are merged
-/// and cut at two before their documents are emitted. A range costs at most two members per admitting count, however large the
-/// class. Every class range uses [`resolve::range_rows`], less the deeper
-/// members where a document stands at one of the spelling's exact paths
+/// and cut at two before their documents are emitted. A range costs at most
+/// two members per admitting count, however large the class. Every class
+/// range uses [`resolve::range_rows`], less the deeper members where a
+/// document stands at one of the spelling's exact paths
 /// ([`resolve::exact_first`]), an equality seek per exact key. Exact members
 /// lead each run, so the cut at two keeps them.
 pub(crate) fn compose_candidate_suffixes(
