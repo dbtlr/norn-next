@@ -6346,9 +6346,10 @@ impl<O: EntryOps> Host<O> {
     /// then publishes. A read whose first such hold finds a schema-changing
     /// activation's closed reader not yet replaced records the position under
     /// its first hold after that activation's leg ends instead, past every
-    /// edit the leg's end drain took in. A vault whose facts keep arriving is answered once
-    /// the facts the read met are committed, without waiting for it to fall
-    /// quiet, and no read answers from the state before the change it met.
+    /// edit the leg's end drain took in. A vault whose facts keep arriving
+    /// is answered once the facts the read met are committed, without waiting
+    /// for it to fall quiet, and no read answers from the state before the
+    /// change it met.
     /// Every other entry refuses at once with what it publishes: an entry
     /// that has never served, one whose trust was withdrawn, one warming from
     /// untrusted, a teardown, and every park.
