@@ -399,11 +399,13 @@ fn construction_peak(documents: usize) -> (usize, usize) {
 ///
 /// A spelling's share is its ranges' text in the list the suffix statement
 /// binds (about seventy bytes for each of its one or two ranges), its own
-/// text and index entry, and a word or two of bookkeeping: under 300 bytes,
-/// and under 450 with the list's doubling slack. Holding each spelling's
-/// compiled class while its statement runs, or building the list as a tree,
-/// costs about as much again per spelling, and both are past this bound.
-const PER_SPELLING: usize = 512;
+/// text and index entry, and a word or two of bookkeeping. On this fixture,
+/// whose sizes fix the list's doubling slack, it reads about 274 bytes. The
+/// counting allocator makes the reading the same on every run, so the bound
+/// sits between that and the two shapes it refuses: holding each spelling's
+/// compiled class while its statement runs reads about 382 bytes, and
+/// building the list as a tree beside the classes, about 899.
+const PER_SPELLING: usize = 320;
 
 /// The heap peak of a find of one row carrying [`NESTED_ROW_CEILING`] links,
 /// the `n`th to `c{n:04}/{leaf(n)}`, each naming the one document there, and
