@@ -9,8 +9,9 @@
 //! bounded changesets, so what stays resident is one changeset rather than the
 //! vault's facts.
 //!
-//! Two instruments, both counts and neither a clock. A **ceiling** holds the
-//! ~2k-document `realistic` profile's attach peak under a checked-in number. A
+//! Two instruments, both counts and neither a clock. A **ceiling** holds how
+//! far the ~2k-document `realistic` profile's attach raises its child's peak
+//! above the null child's under a checked-in number. A
 //! **flatness pair** holds the ratio between the 300-document `ambiguous`
 //! profile and `realistic`, which is the sharper of the two: a ceiling passes
 //! anything that fits under it, and a ratio fails the moment two scales stop
@@ -29,8 +30,9 @@
 //! what a read adds to a process that attached is a page's rows rather than
 //! the vault's.
 //!
-//! Two of the three are whole-process peaks at `realistic`: a ceiling on the
-//! reading child's, and a ratio of it to the peak of an attach-only child of
+//! Two of the three are read off whole-process peaks at `realistic`: a ceiling
+//! on how far the reading child's peak stands above the null child's, and a
+//! ratio of the reading child's peak to the peak of an attach-only child of
 //! the same tree. The kernel reports one peak per child, so the mix is one
 //! child, and what those bars bound is the highest any shape reached, over
 //! the attach under all of them. **The third is the heap.** This binary's
@@ -50,8 +52,8 @@
 //!
 //! **A plan is held three ways, over one planning child.** The child
 //! previews a `set --where`, a hub move with its cascade and a delete, and
-//! applies each as previewed. A ceiling holds its whole-process peak at
-//! `realistic`, and two heap pairs hold, across the two profiles, what the
+//! applies each as previewed. A ceiling holds how far its peak at `realistic`
+//! stands above the null child's, and two heap pairs hold, across the two profiles, what the
 //! previews alone raised the heap by and what the whole mix with its applies
 //! did, because a plan's memory is its operations and a fixed record per
 //! target, never the vault. The previews' pair is held at the read pair's
@@ -109,6 +111,18 @@
 //! **Generation happens in the parent**, so the child's peak is the
 //! attachment's and not the generator's, and a peak read off the test process
 //! itself would include cargo's runner and every case running beside it.
+//!
+//! **The three ceilings subtract a null child.** The null child is this binary
+//! re-executed in a harness mode of its own. It builds a production host,
+//! registers and attaches a vault with no documents, waits for ready, detaches,
+//! and reports zero documents derived. Its peak is the fixed addend every child
+//! of this binary carries: the binary's code pages, the runtime, the host's
+//! threads and the allocator's floor. The attach, read and plan ceilings bound
+//! a measured child's peak minus the minimum of three null peaks taken in the
+//! same test process. The flatness ratios still divide whole-process peaks, and
+//! the heap bars still count bytes. The rule, with why it takes the minimum and
+//! what the difference stops seeing, is in `baselines`, under *The null child
+//! and the differential ceilings*.
 //!
 //! [`the_gate_profile_attaches_inside_its_memory_bar`] and
 //! [`the_gate_profile_reads_inside_its_memory_bar`] are each both a bar and a

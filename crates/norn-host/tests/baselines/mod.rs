@@ -25,6 +25,13 @@
 //! [`assert_the_profile_the_bars_were_authored_on`]. Repeated local readings
 //! cover **macos-arm64** natively; those macOS readings predate NORN-443.
 //!
+//! **The three process ceilings bound a difference, not a peak.**
+//! [`ATTACH_PEAK_RSS_CEILING_BYTES`], [`READ_PEAK_RSS_CEILING_BYTES`] and
+//! [`PLAN_PEAK_RSS_CEILING_BYTES`] bound a measured child's peak minus the
+//! null child's peak, as [the null child](#the-null-child-and-the-differential-ceilings)
+//! sets out. Every other resident-set band here, the ratios and the soak
+//! bands, is still a whole-process reading.
+//!
 //! **The platform that gates is `ubuntu-latest` x86_64-glibc.** Every authored
 //! band below carries its hosted readings beside the local ones, the same way
 //! the generator's baselines carry both architectures they were measured on,
@@ -81,6 +88,87 @@
 //! That lane's record therefore carries a watcher-backend answer and no
 //! reading, and nothing in it should be read as a measurement of the candidate.
 //!
+//! # The null child and the differential ceilings
+//!
+//! Ruled on 2026-11-08 under Mimir task NORN-501. Before then, the attach, read
+//! and plan ceilings bounded each child's whole-process peak. Those peaks rose
+//! from about 17 to about 40 MiB between September and November 2026, and
+//! nearly all of the rise was the debug `memory` test binary's code. In
+//! `full memory invariant` run 42515170305, an attach child at its ready point
+//! held 25.1 MiB of the binary's 27.4 MiB executable segment and 7.3 MiB of
+//! anonymous memory. [`ATTACH_PEAK_RSS_CEILING_BYTES`] records how that rise
+//! tracked the segment's size, commit by commit.
+//!
+//! **The null child.** The null child is the `memory` test binary re-executed
+//! in a harness mode of its own, under the same process harness and measuring
+//! launcher as every measured child. It builds a production host the way the
+//! attach child does, registers a vault that holds a configuration and the
+//! minimal schema and no documents, attaches it, waits for ready, detaches, and
+//! reports that it derived zero documents. The parent holds it to that report,
+//! the same way the attach child is held to its document count, so a null
+//! child that never attached is not read as a cheap floor.
+//!
+//! **Why the null child shares everything with a measured child.** A child's
+//! peak carries a fixed addend that has nothing to do with the vault: the code
+//! pages the kernel maps from the binary (fault-around maps nearly all of a
+//! freshly copied binary), the runtime and test harness, the host's threads,
+//! and what the allocator keeps. Page size, the allocator and the binary's
+//! layout set that addend. The null child runs the same installed binary, on
+//! the same runner, under the same environment and allocator, so it carries
+//! the same addend, and the difference cancels it. A null child built from a
+//! different binary, or run on another machine, would cancel a different
+//! addend.
+//!
+//! **What each ceiling bounds.** Each ceiling bounds the measured child's peak
+//! resident set minus the null baseline, in bytes; the lane prints both in MiB.
+//! The measured children are the `realistic` attach child, the `realistic`
+//! reading child and the `realistic` planning child. Both peaks are the
+//! kernel's `ru_maxrss` for the child, read by the measuring launcher through
+//! `wait4`. The comparison is made in the `full memory invariant` job of
+//! `.github/workflows/regression.yml`, in its `Host memory bars` step. A
+//! difference below zero reads as zero.
+//!
+//! **Noise between children.** The null baseline is the *minimum* of three
+//! null-child peaks taken in the same test process, before the first measured
+//! child that needs it. The lane prints all three. The minimum is the cautious
+//! choice. Noise in a peak comes from timing (how far fault-around and the
+//! allocator's arenas got), and it mostly pushes a reading up. So the lowest
+//! of three is the best estimate of the addend, and charging everything above
+//! it to the subject can overstate the subject's cost but never understate it.
+//! A median or a maximum would let one high null reading make a measured
+//! child look cheaper. Each measured child is read once, as before; the 1.61x
+//! headroom the ceilings are authored with absorbs that child's own noise.
+//!
+//! **How the ceilings are authored.** Each ceiling is re-derived by the
+//! existing authoring rule: 1.61x the highest differential reading of its
+//! bar, rounded up to a whole MiB. The readings are hosted Linux readings
+//! from at least three `full memory invariant` runs of the branch that
+//! implements the differential. Each ceiling's doc records every reading it
+//! was derived from, with its run id and the three null readings beside it.
+//! Local readings may stand beside them, but they do not enter the rule.
+//!
+//! **What the difference catches.** It catches what a non-empty attachment,
+//! read or plan holds that an empty attachment does not: its anonymous
+//! memory, SQLite's caches, the touched pages of its thread stacks, and the
+//! code pages only that work faults in.
+//!
+//! **What it deliberately no longer catches.** It no longer catches growth in
+//! the binary's code. The two children carry it equally, so new code in the
+//! product or the suite no longer moves these bars. Code that only non-empty
+//! work runs stays partly in the difference, so code growth can still move it
+//! a little.
+//!
+//! **What catches vault-shaped cost.** A ceiling has never been what refuses a
+//! cost that scales with the vault, and the difference does not change that.
+//! The flatness pairs still do: [`ATTACH_PAIR_PEAK_RSS_PER_MILLE`] and
+//! [`READ_OVER_ATTACH_PEAK_RSS_PER_MILLE`] over whole-process peaks, and the
+//! heap-growth allowances over counted bytes. They are unchanged.
+//!
+//! **Platform scope.** The Linux measurement lane gates, as it does for every
+//! band here. On macOS the null child runs the same way, but `posix_spawn`, 16
+//! KiB pages and a different allocator set a different addend. A macOS
+//! difference is indicative of what a developer sees and gates nothing.
+//!
 //! Five integration binaries compile this module: `memory.rs` for the full-regression
 //! memory lane, `counter_gate.rs` for the full-regression counter lane, `fd_budget.rs`
 //! for the per-PR workspace suite, `host_soak.rs` for the scheduled lane and
@@ -95,7 +183,8 @@
 
 use std::time::Duration;
 
-/// Peak resident set attaching the `realistic` profile must stay under.
+/// How far attaching the `realistic` profile may raise a child's peak
+/// resident set above the null child's.
 ///
 /// The subject is a child process that adopts a tree the parent generated,
 /// attaches it through a production host, waits for the attachment to become
@@ -167,6 +256,15 @@ use std::time::Duration;
 /// the reading tracks the segment almost one to one, spread across the
 /// product's own code and its monomorphizations rather than one commit or crate.
 ///
+/// **From 2026-11-08 this ceiling bounds a difference.** It bounds the attach
+/// child's peak minus the null baseline, by the rule in
+/// [the null child](self#the-null-child-and-the-differential-ceilings). Every
+/// reading above is a whole-process peak and stays as the record of how the
+/// trend got here. The authored value below is still the whole-process
+/// ceiling. The change that adds the null child re-authors it at 1.61x the
+/// highest hosted differential reading, and records each reading with its run
+/// id here.
+///
 /// **Platform scope: the Linux measurement lane.** The full-regression `memory
 /// invariant` job on `ubuntu-latest` x86_64-glibc is where this gates; the
 /// macos-arm64 band above is what a developer running the same case sees, and
@@ -216,8 +314,8 @@ pub const ATTACH_PEAK_RSS_CEILING_BYTES: u64 = 40 * 1024 * 1024;
 /// cancels the fixed addend but not the allocator that produced both.
 pub const ATTACH_PAIR_PEAK_RSS_PER_MILLE: u64 = 1_600;
 
-/// Peak resident set attaching the `realistic` profile and running the read
-/// mix over it must stay under.
+/// How far attaching the `realistic` profile and running the read mix over it
+/// may raise a child's peak resident set above the null child's.
 ///
 /// The subject is a child process that adopts a tree the parent generated
 /// under a schema whose tag vocabulary leaves two of the generated tags out
@@ -268,6 +366,17 @@ pub const ATTACH_PAIR_PEAK_RSS_PER_MILLE: u64 = 1_600;
 /// 1.61x rule (69 MiB rounded up) and is kept rather than loosened.
 /// Whether the rise is a cost to cut or the bar should be re-authored is
 /// Mimir task NORN-501.
+///
+/// **From 2026-11-08 this ceiling bounds a difference.** It bounds the
+/// reading child's peak minus the null baseline, by the rule in
+/// [the null child](self#the-null-child-and-the-differential-ceilings), for
+/// the reason [`ATTACH_PEAK_RSS_CEILING_BYTES`] records: the rise was the
+/// binary's code. The readings above stay as the whole-process record. The
+/// authored value below is still the whole-process ceiling. The change that
+/// adds the null child re-authors it at 1.61x the highest hosted differential
+/// reading, and records each reading with its run id here. Where the
+/// paragraphs above say this ceiling bounds the process, that describes the
+/// ceiling before this change.
 ///
 /// **It is not what refuses a read whose cost is the vault.** Every shape
 /// answers a page, a single target or what a narrowing part admits, so what
@@ -452,9 +561,9 @@ pub const READ_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES: u64 = 4 * 1024;
 /// hosted reading stands beside the local ones yet.
 pub const HUB_WRITE_HEAP_GROWTH_ALLOWANCE_BYTES: u64 = 4 * 1024;
 
-/// Peak resident set attaching the `realistic` profile with the plan subjects
-/// planted beside it and running every plan of the planning child must stay
-/// under.
+/// How far attaching the `realistic` profile with the plan subjects planted
+/// beside it and running every plan of the planning child may raise a child's
+/// peak resident set above the null child's.
 ///
 /// The subject is a child process that adopts a tree the parent generated with
 /// the plan subjects planted beside it, attaches it through a production
@@ -520,6 +629,18 @@ pub const HUB_WRITE_HEAP_GROWTH_ALLOWANCE_BYTES: u64 = 4 * 1024;
 /// 1.61x rule (72 MiB rounded up) and is kept rather than loosened.
 /// Whether the rise is a cost to cut or the bar should be re-authored is
 /// Mimir task NORN-501.
+///
+/// **From 2026-11-08 this ceiling bounds a difference.** It bounds the
+/// planning child's peak minus the null baseline, by the rule in
+/// [the null child](self#the-null-child-and-the-differential-ceilings), for
+/// the reason [`ATTACH_PEAK_RSS_CEILING_BYTES`] records. The readings above
+/// stay as the whole-process record. The authored value below is still the
+/// whole-process ceiling. The change that adds the null child re-authors it at
+/// 1.61x the highest hosted differential reading, and records each reading
+/// with its run id here. Where the paragraph above says this ceiling bounds the
+/// process, that describes the ceiling before this change. The size child
+/// still carries no ceiling, so it needs no null baseline.
+///
 /// It is the coarse backstop: what refuses a plan whose memory is the vault is
 /// [`PLAN_PREVIEW_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES`] and
 /// [`PLAN_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES`].
