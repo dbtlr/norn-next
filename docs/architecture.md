@@ -2580,7 +2580,7 @@ above. The trust
 label does not say how warming was entered, so the entry's own state holds that fact: every
 hold of the entry gate ends by recording whether trust has stood unbroken since `Ready`, and
 moves the gate's stance signal where the hold changed the stance or how far the entry has
-derived the facts it took in. The bound runs from the read's first take of the entry gate and
+derived the facts it took in, or installed a reader over a settling entry. The bound runs from the read's first take of the entry gate and
 covers the waits the read takes to establish its snapshot or to refuse: that first take, the
 wait for the connection and the wait for the change together, and the retake of the gate after
 each. **After those, a read never waits for the entry gate**, so a gate another holder keeps —
@@ -2613,7 +2613,9 @@ wait never runs until the vault falls quiet, and no read answers from the state 
 change it met. A schema reload retires the pool from its activation until the leg that
 activates ends, so a read it settles answers once that leg installs another, `Ready` or
 healing, and from that pool; the read refuses only where the entry is no longer settling or
-serving. Past a bound, a lifecycle policy value whose
+serving. A read that first meets the entry while no reader stands records, in place of the
+position at that instant, the position once that leg has taken in its end drain, as the
+reload paragraphs below say. Past a bound, a lifecycle policy value whose
 production value is the 5-second settle ceiling, it refuses as `host/entry-not-ready` with the
 message "this vault is still indexing a change". A teardown's publication moves the stance and
 wakes every waiting read, which takes the gate again and refuses with what the entry then
@@ -3087,7 +3089,9 @@ schema-changing activation derives the whole vault under the new declaration ins
 and installs the new pool as that leg ends, so the facts its end's drain delivered are
 ordinary pending facts, derived by ordinary reconcile turns under the new declaration, as
 [ADR 0051](decisions/0051-a-schema-reload-serves-reads-again-when-its-activation-ends.md)
-rules. A schema reload has no reconcile turns of its own, and its answer implies `Ready` only
+rules. Installing that pool over the store the entry kept breaks no trust, so the entry
+settles across those turns as it does across any change; only a pool installed over a store
+that replaced the one before starts trust again. A schema reload has no reconcile turns of its own, and its answer implies `Ready` only
 where nothing was left; `vault status` reports where the entry stands. A candidate failure — a read or parse error,
 or any other refusal of the candidate before activation begins — leaves the entry as the fold
 and the leg's end left it, whatever state the reload was admitted at, and withdraws no trust
@@ -3108,7 +3112,11 @@ that met the change the entry was settling recorded a position no later than the
 so it answers once the fold commits, from the reader standing then, or once `Ready` returns. A
 schema-changing activation closes that reader after its fold, and a read still waiting
 answers from the pool its leg installs as it ends, since the activation has derived every
-fact that read met. Because a reload publishes `Ready` only where
+fact that read met. No poll runs while the activation derives the vault, so an edit made then
+stays with the watcher until the leg's end drain: a read that first meets the entry while no
+reader stands therefore records its position once the leg has taken in that drain, and
+answers once the ordinary reconcile turn that derives the drain's facts commits, never
+waiting for `Ready`. Because a reload publishes `Ready` only where
 nothing is left, no read establishes a snapshot without a change it met. A change still with
 the watcher is not one a read met, though: no poll runs while the reload holds the claim, so
 an edit made after the fold's drain stays with the watcher until the leg's end drain, and a
@@ -3321,10 +3329,12 @@ maintained inside the document's changeset beside the value they type; and their
 invalidation key is the standing schema pin held in `meta`. **The typed column joins what a
 re-pin discards**: the pin's own transaction clears every typed value, its least-value
 marker and its offset spelling beside the findings it discards, and the walk that follows
-refills them. That is safe because a schema reload retires the entry's pool and publishes `Warming` in its `Healing`
-phase from its activation until its leg ends, and that walk is the activation's own heal of the
+refills them. That is safe because a schema reload publishes `Warming` in its `Healing` phase
+at its activation and retires the entry's pool until its leg ends, and that walk is the activation's own heal of the
 whole vault, which converges inside the leg before it installs another pool, so no read
-observes a column the walk has half refilled.
+observes a column the walk has half refilled. An activation that fails after its re-pin
+withdraws trust and owes the recovery before any pool it leaves stands, so no read is served
+from that column either.
 The fold, the tag a value row names under a tag key — the `tags` carrier, declared or not,
 or a key declared `tags` — its `#` marker dropped and the tag fold applied, or the link a
 value row is under a key declared `link`, its alias dropped, read by the schema's link
@@ -3351,7 +3361,8 @@ and its invalidation key is the standing schema pin. **A re-pin does not discard
 pin's transaction leaves the column standing, and the heal that follows converges it by
 deriving every row below the pin again, so until that heal reaches a row, the row holds the
 count the old ignore set gave it. No read observes that window, because a schema reload
-retires the entry's pool until its leg ends, and the heal converges inside that leg. A re-decision inside the heal's own
+retires the entry's pool until its leg ends, and the heal converges inside that leg; an
+activation that fails before it converges withdraws trust, which refuses every read. A re-decision inside the heal's own
 changesets may read an old count, but a row whose admitting count the new set moves is not
 an in-place rewrite, so the changeset that writes it re-decides every link its class and
 path reach; the last such changeset in a class runs after every member is derived under the

@@ -20,8 +20,10 @@ ADR 0050 wrote it:
 - **The schema reload rule of *A read waits for the facts it met*.** A vault schema reload
   installed its new pool only once `Ready` returned, which a steady edit stream can hold off
   without end. The leg that activates the new declaration now installs the new pool as it
-  ends, so a read the reload settles answers from that pool then, under the healing that
-  stands where facts are left. The section
+  ends, and its leftover facts go to ordinary reconcile turns. A read the reload settles
+  answers from that pool once the facts it met are derived, under the healing that stands
+  where facts are left, and a read that met the entry while no reader stood counts as having
+  met every edit the leg's end drain takes in. The section
   [A schema reload serves reads again when its activation ends](#a-schema-reload-serves-reads-again-when-its-activation-ends)
   records the change.
 
@@ -258,8 +260,8 @@ holds that fact, beside the published demand, and the stance is read from it.
 
 **The wait obeys the standing rule: no acquisition waits while it holds the entry gate.** A
 settling read gives the gate back, waits outside it on a signal that moves when the stance
-changes or when the entry has derived further through the facts it has taken in, takes the
-gate again, and reads the published demand afresh.
+changes, when the entry has derived further through the facts it has taken in, or when a
+reader is installed over it, takes the gate again, and reads the published demand afresh.
 
 **A settling read waits for the facts it met, never for the ones that arrive after it.**
 Under the first hold that finds the entry settling, the read records how far the facts the
@@ -269,8 +271,11 @@ things it observes: the entry `Ready`, or the entry having derived every fact up
 record with a reader standing beside it. Either way the snapshot holds every fact the entry
 knew of when the read met it, so **it is never older than the change the read arrived
 during**. A vault schema reload replaces the pool: its activation closes the reader, and the
-leg that activates installs another as it ends, so a read it settles answers from that pool
-once the leg ends, as the section
+leg that activates installs another as it ends. A read that first meets the entry while no
+reader stands records, in place of the instant it met it, how far the facts run once that
+leg has taken in its end drain, because the edits the watcher held when the read arrived are
+among the ones that drain takes in. A read it settles answers from that pool once the facts
+it met are derived, as the section
 [A schema reload serves reads again when its activation ends](#a-schema-reload-serves-reads-again-when-its-activation-ends)
 records. **A settling read that finds a
 new reader after the wait acquires that reader and answers from it, under the same bound**;
@@ -360,7 +365,7 @@ under the claim. The wait stays inside the read's bound.
 Under ADR 0050, a schema-changing activation closed the reader, and the reload's own reconcile
 turns kept the entry without one until `Ready` returned. Each turn's end drain that found
 facts handed the claim to another such turn. So after a schema reload, a vault edited
-continuously, by a sync tool for example, never reached `Ready` again. Every read the reload
+continuously, by a sync tool for example, never served a read again. Every read the reload
 settled refused at its bound as still indexing, and the reload's asker, answered only at
 `Ready`, waited without a bound.
 
@@ -370,17 +375,31 @@ inside its leg, so at that leg's end the store stands where a reconcile turn's e
 derived under the active declaration through every fact the entry has taken in, with the
 facts its end drain delivered still pending. The leg installs the new pool there and ends as
 every other leg ends: `Ready` where nothing is left, and otherwise healing with trust
-unbroken, the claim going to the apply queue's head or to the reconcile owed. Ordinary
-reconcile turns derive the facts left under the new declaration, and the entry settles
-across them as it does across any change. A schema reload has no reconcile turns of its own.
+unbroken, the claim going to the apply queue's head or to the reconcile owed. Installing the
+pool over the store the entry kept breaks no trust: the store is the same one, its fact
+positions run on, and its derivation under the active declaration is complete through every
+fact taken in. Only a pool installed over a store that replaced the one before, as a rebuild
+from zero or a fresh attach installs one, starts trust again. Ordinary reconcile turns derive
+the facts left under the new declaration, and the entry settles across them as it does across
+any change. A schema reload has no reconcile turns of its own.
 
-A read the reload settled answers once the activation's leg ends: under `Ready` where nothing
-is left, and otherwise under healing, from the new pool, since the activation has derived
-every fact the read met. The reload's asker is answered at the same point, as a config-only
-activation's asker already is, so an answered schema reload no longer implies `Ready`; vault
-status reports where the entry stands. The gap in the known limit above is unchanged: a
+**A read the reload settles waits for the edits the activation could not see.** No poll runs
+while the leg holds the claim, so an edit made while the activation derives the vault stays
+with the watcher until the leg's end drain. A read that met the change before the activation
+closed the reader met only facts the activation derived, and it answers from the new pool as
+the leg ends. A read that first meets the entry while no reader stands records its position
+once the leg has taken in its end drain, so it waits for the ordinary reconcile turn that
+derives that drain's facts, never for `Ready`. Without that rule such a read would answer
+from the new pool without an edit made moments before it arrived, a gap as long as the
+activation's derivation of the whole vault, where the known limit above bounds the reload
+leg's gap by the work of reading two control files. With it, that limit is unchanged: a
 schema-changing activation publishes warming once it has judged its candidate and settles
-from then on.
+from then on. Installing the pool moves the signal a settling read waits on, so a read whose
+facts are derived wakes when the pool stands, not at the next commit.
+
+The reload's asker is answered as the leg ends, as a config-only activation's asker already
+is, so an answered schema reload no longer implies `Ready`; vault status reports where the
+entry stands.
 
 Considered options:
 
@@ -389,6 +408,12 @@ Considered options:
 - **Keep the reload's own turns under a bound** of turns or time, then install the pool. It
   keeps a second path for pending facts and adds a second bound to tune, to answer at `Ready`
   where no read needs it. Rejected.
+- **Install the pool at the leg's end and let a read that met the activation answer from it
+  at once.** It serves reads soonest, but opens an observation gap as long as the
+  activation's derivation of the vault, bounded by the vault's size. Rejected.
+- **Keep the old pool standing through the activation.** The re-pin clears every typed value
+  and the admitting count lags the new ignore set until the activation's heal converges, so a
+  read from the old pool would answer from a half-refilled store. Rejected.
 
 ## A from-zero build writes once, in steps
 
