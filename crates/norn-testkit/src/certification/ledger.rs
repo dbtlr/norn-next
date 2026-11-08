@@ -458,8 +458,18 @@ pub const NAMED_EXIT_BARS: &[ExitBar] = &[
         armed: true,
     },
     ExitBar {
+        name: "attach-null-peak-rss-over-code-ceiling",
+        authored_at: "crates/norn-host/tests/baselines/mod.rs::ATTACH_NULL_PEAK_RSS_OVER_CODE_CEILING_BYTES",
+        armed: true,
+    },
+    ExitBar {
         name: "attach-pair-peak-rss-ratio",
         authored_at: "crates/norn-host/tests/baselines/mod.rs::ATTACH_PAIR_PEAK_RSS_PER_MILLE",
+        armed: true,
+    },
+    ExitBar {
+        name: "attach-pair-peak-rss-growth-ceiling",
+        authored_at: "crates/norn-host/tests/baselines/mod.rs::ATTACH_PAIR_PEAK_RSS_GROWTH_CEILING_BYTES",
         armed: true,
     },
     ExitBar {
@@ -475,6 +485,11 @@ pub const NAMED_EXIT_BARS: &[ExitBar] = &[
     ExitBar {
         name: "read-over-attach-peak-rss-ratio",
         authored_at: "crates/norn-host/tests/baselines/mod.rs::READ_OVER_ATTACH_PEAK_RSS_PER_MILLE",
+        armed: true,
+    },
+    ExitBar {
+        name: "read-pair-peak-rss-growth-ceiling",
+        authored_at: "crates/norn-host/tests/baselines/mod.rs::READ_PAIR_PEAK_RSS_GROWTH_CEILING_BYTES",
         armed: true,
     },
     ExitBar {

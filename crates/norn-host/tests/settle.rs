@@ -279,8 +279,14 @@ fn the_ledgers_armed_claims_match_the_authored_baselines() {
             "ATTACH_PEAK_RSS_OVER_NULL_CEILING_BYTES" => {
                 always_authored(baselines::ATTACH_PEAK_RSS_OVER_NULL_CEILING_BYTES)
             }
+            "ATTACH_NULL_PEAK_RSS_OVER_CODE_CEILING_BYTES" => {
+                always_authored(baselines::ATTACH_NULL_PEAK_RSS_OVER_CODE_CEILING_BYTES)
+            }
             "ATTACH_PAIR_PEAK_RSS_PER_MILLE" => {
                 always_authored(baselines::ATTACH_PAIR_PEAK_RSS_PER_MILLE)
+            }
+            "ATTACH_PAIR_PEAK_RSS_GROWTH_CEILING_BYTES" => {
+                always_authored(baselines::ATTACH_PAIR_PEAK_RSS_GROWTH_CEILING_BYTES)
             }
             "SOAK_FD_GROWTH_ALLOWANCE" => always_authored(baselines::SOAK_FD_GROWTH_ALLOWANCE),
             "SOAK_RECOVERY_DOSE" => always_authored(baselines::SOAK_RECOVERY_DOSE),
@@ -297,6 +303,9 @@ fn the_ledgers_armed_claims_match_the_authored_baselines() {
             }
             "READ_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES" => {
                 always_authored(baselines::READ_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES)
+            }
+            "READ_PAIR_PEAK_RSS_GROWTH_CEILING_BYTES" => {
+                always_authored(baselines::READ_PAIR_PEAK_RSS_GROWTH_CEILING_BYTES)
             }
             "HUB_WRITE_HEAP_GROWTH_ALLOWANCE_BYTES" => {
                 always_authored(baselines::HUB_WRITE_HEAP_GROWTH_ALLOWANCE_BYTES)

@@ -166,6 +166,7 @@ use norn_store::{
     IncrementProvenance,
 };
 use norn_testkit::heap;
+use norn_testkit::image::{self, ResidencyReport};
 use norn_testkit::process::{Run, Sandbox};
 use norn_wire::{
     ApplyMode, ApplyParams, ApplyReport, AuthoredValue, ChangesetOutcome, Column, Confidence,
@@ -273,30 +274,366 @@ const ATTACH_DEADLINE: Duration = Duration::from_secs(300);
 #[ignore = "memory-lane case: runs in the ci memory job, not the workspace suite"]
 fn the_gate_profile_attaches_inside_its_memory_bar() {
     if let Some(root) = std::env::var_os(HARNESS_ENV) {
-        attach_and_report(&attach::accepted_harness_root(&root, HARNESS_TOKEN_ENV));
+        harness(&root, attach_and_report);
         return;
     }
 
+    let null = null_baseline();
     let peak = attach_peak("attach-gate", "realistic");
-    baselines::record(
+    hold_over_null(
+        null,
         "gate profile attachment",
+        "attaching `realistic`",
+        peak,
+        baselines::ATTACH_PEAK_RSS_OVER_NULL_CEILING_BYTES,
+    );
+}
+
+/// **The fixed cost**, and the harness the null child runs.
+///
+/// The null child attaches a vault that holds the minimal schema and no
+/// documents, so its peak is what every child of this binary carries whatever
+/// the vault: the executable, the runtime, the host's threads and caches, and
+/// the allocator's floor. Every other resident-set bar subtracts it, which is
+/// what makes this the one bar that sees it. What it bounds is the null
+/// baseline less the executable the same child held resident, so the
+/// executable's size, which grows with the codebase, does not move it.
+#[test]
+#[ignore = "memory-lane case: runs in the ci memory job, not the workspace suite"]
+fn an_empty_vault_attaches_inside_its_fixed_cost_bar() {
+    if let Some(root) = std::env::var_os(HARNESS_ENV) {
+        harness(&root, attach_and_report);
+        return;
+    }
+
+    let null = null_baseline();
+    let least = null.least();
+    let fixed = null.fixed_cost();
+    baselines::record(
+        "fixed cost of a host and an empty attach",
         &[
-            ("peak resident set (MiB)", baselines::mebibytes(peak)),
+            ("null peaks (MiB)", null.peaks()),
             (
-                "peak resident set ceiling (MiB)",
-                baselines::mebibytes(baselines::ATTACH_PEAK_RSS_OVER_NULL_CEILING_BYTES),
+                "null baseline, the least (MiB)",
+                baselines::mebibytes(least.peak_rss),
+            ),
+            (
+                "its executable resident (MiB)",
+                least
+                    .executable_resident
+                    .map_or_else(|| "not reported".to_string(), baselines::mebibytes),
+            ),
+            (
+                "baseline over the executable (MiB)",
+                match &fixed {
+                    Ok(Some(fixed)) => baselines::mebibytes(*fixed),
+                    Ok(None) => "not read".to_string(),
+                    Err(_) => "below zero".to_string(),
+                },
+            ),
+            (
+                "ceiling (MiB)",
+                baselines::mebibytes(baselines::ATTACH_NULL_PEAK_RSS_OVER_CODE_CEILING_BYTES),
             ),
         ],
     );
+    let fixed = fixed.unwrap_or_else(|problem| panic!("{problem}"));
+    // Residency is read on Linux only, the lane this bar gates in; elsewhere
+    // the null peaks above are the whole reading.
+    let Some(fixed) = fixed else { return };
     assert!(
-        peak > 0,
-        "the attaching child reported no peak resident set, so the ceiling holds no reading"
+        baselines::fits(
+            fixed,
+            baselines::ATTACH_NULL_PEAK_RSS_OVER_CODE_CEILING_BYTES
+        ),
+        "an empty attach held {} MiB beyond its executable, against a {} MiB bar: the null \
+         baseline was {} MiB, the least of the null peaks {}, with {} MiB of executable resident",
+        baselines::mebibytes(fixed),
+        baselines::mebibytes(baselines::ATTACH_NULL_PEAK_RSS_OVER_CODE_CEILING_BYTES),
+        baselines::mebibytes(least.peak_rss),
+        null.peaks(),
+        baselines::mebibytes(least.executable_resident.unwrap_or(0))
+    );
+}
+
+/// The case the null child re-executes, which is the one that reads it.
+const NULL_HARNESS_CASE: &str = "an_empty_vault_attaches_inside_its_fixed_cost_bar";
+
+/// How many null children the baseline is the least of.
+///
+/// The least of three biases an over-null difference upward on average, so
+/// those bars fail on noise sooner than they pass on it; the rule, and why the
+/// bias runs the other way for the fixed-cost bar, is in `baselines`.
+const NULL_READINGS: usize = 3;
+
+/// One null child's run: its peak, and the executable it held resident.
+#[derive(Debug, Clone, Copy)]
+struct NullReading {
+    peak_rss: u64,
+    executable_resident: Option<u64>,
+}
+
+/// The null baseline: the readings of [`NULL_READINGS`] null children, whose
+/// least peak every over-null bar subtracts.
+#[derive(Debug)]
+struct NullBaseline {
+    readings: [NullReading; NULL_READINGS],
+}
+
+impl NullBaseline {
+    /// The reading with the least peak, which is the baseline.
+    fn least(&self) -> NullReading {
+        *self
+            .readings
+            .iter()
+            .min_by_key(|reading| reading.peak_rss)
+            .expect("the baseline holds readings")
+    }
+
+    /// Every null peak, in MiB, in the order the children ran.
+    fn peaks(&self) -> String {
+        self.readings
+            .iter()
+            .map(|reading| baselines::mebibytes(reading.peak_rss))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// How far `subject`'s peak stands above the baseline.
+    ///
+    /// **A peak below the baseline is a failed instrument**, not a free
+    /// subject: no measured child of this binary does less than attach an
+    /// empty vault. So it fails, naming every reading it would subtract.
+    fn over(&self, subject: u64) -> Result<u64, String> {
+        let least = self.least().peak_rss;
+        subject.checked_sub(least).ok_or_else(|| {
+            format!(
+                "peaked at {} MiB, below the null baseline of {} MiB (null peaks {} MiB): a child \
+                 below an empty attach of the same binary is a failed instrument",
+                baselines::mebibytes(subject),
+                baselines::mebibytes(least),
+                self.peaks()
+            )
+        })
+    }
+
+    /// The baseline less the executable the same null child held resident,
+    /// or `None` where residency is not reported.
+    ///
+    /// A baseline below its own executable is a failed instrument too, and
+    /// fails the same way.
+    fn fixed_cost(&self) -> Result<Option<u64>, String> {
+        let least = self.least();
+        let Some(resident) = least.executable_resident else {
+            return Ok(None);
+        };
+        least
+            .peak_rss
+            .checked_sub(resident)
+            .map(Some)
+            .ok_or_else(|| {
+                format!(
+                    "the null baseline of {} MiB (null peaks {} MiB) is below the {} MiB of \
+                 executable its child held resident, so the instrument failed",
+                    baselines::mebibytes(least.peak_rss),
+                    self.peaks(),
+                    baselines::mebibytes(resident)
+                )
+            })
+    }
+}
+
+/// The null baseline this test process measured, taking it on first use:
+/// [`NULL_READINGS`] null children, run one after another before the first
+/// measured child that needs them.
+fn null_baseline() -> &'static NullBaseline {
+    static BASELINE: std::sync::OnceLock<NullBaseline> = std::sync::OnceLock::new();
+    BASELINE.get_or_init(|| NullBaseline {
+        readings: std::array::from_fn(|index| null_reading(&format!("null-{index}"))),
+    })
+}
+
+/// Run one null child over an empty vault and hand back its reading.
+///
+/// **A null reading is only a statement about an attach that happened.** The
+/// child reports what it derived, and anything but zero documents fails here
+/// rather than reading as a cheap floor.
+fn null_reading(label: &str) -> NullReading {
+    let run = child_run_over(label, NULL_HARNESS_CASE, |root| {
+        let schema = root.join("vault/.norn");
+        std::fs::create_dir_all(&schema).expect("create the empty vault's schema directory");
+        std::fs::write(schema.join("schema.yaml"), attach::SCHEMA).expect("write the vault schema");
+    });
+    assert!(
+        run.stdout.contains(&report_line(0)),
+        "the null child attaches a vault with no documents, and it reported: {}",
+        run.stdout
+    );
+    NullReading {
+        peak_rss: run.peak_rss,
+        executable_resident: run.executable_resident,
+    }
+}
+
+/// Hold `peak` above `null` under `ceiling`, recording both peaks, every null
+/// peak, the difference and the ceiling under `title`, and naming `subject` in
+/// a failure.
+fn hold_over_null(null: &NullBaseline, title: &str, subject: &str, peak: u64, ceiling: u64) {
+    let over = null.over(peak);
+    baselines::record(
+        title,
+        &[
+            ("peak resident set (MiB)", baselines::mebibytes(peak)),
+            ("null peaks (MiB)", null.peaks()),
+            (
+                "null baseline, the least (MiB)",
+                baselines::mebibytes(null.least().peak_rss),
+            ),
+            (
+                "peak over the null baseline (MiB)",
+                over.as_ref().map_or_else(
+                    |_| "below zero".to_string(),
+                    |over| baselines::mebibytes(*over),
+                ),
+            ),
+            ("ceiling (MiB)", baselines::mebibytes(ceiling)),
+        ],
+    );
+    let over = over.unwrap_or_else(|problem| panic!("{subject} {problem}"));
+    assert!(
+        baselines::fits(over, ceiling),
+        "{subject} peaked at {} MiB, {} MiB over the null baseline of {} MiB (null peaks {} MiB), \
+         against a {} MiB bar",
+        baselines::mebibytes(peak),
+        baselines::mebibytes(over),
+        baselines::mebibytes(null.least().peak_rss),
+        null.peaks(),
+        baselines::mebibytes(ceiling)
+    );
+}
+
+/// How far a pair's `realistic` peak stands above its `ambiguous` one, with a
+/// difference below zero compared as zero.
+///
+/// A `realistic` peak below its `ambiguous` one is noise around a flat
+/// subject, since either draw can land higher when the two scales cost about
+/// the same, so it is not a failure, as a heap pair already treats it.
+fn pair_growth(ambiguous: u64, realistic: u64) -> u64 {
+    realistic.saturating_sub(ambiguous)
+}
+
+/// The signed difference `realistic - ambiguous`, in MiB, for the lane's record.
+fn signed_mebibytes(ambiguous: u64, realistic: u64) -> String {
+    let bytes = i128::from(realistic) - i128::from(ambiguous);
+    format!("{:.2}", bytes as f64 / (1024.0 * 1024.0))
+}
+
+/// Hold a pair's `realistic` peak above its `ambiguous` peak under `ceiling`,
+/// recording both under `title`.
+fn hold_pair_growth(title: &str, ambiguous: u64, realistic: u64, ceiling: u64) {
+    let growth = pair_growth(ambiguous, realistic);
+    baselines::record(
+        title,
+        &[
+            (
+                "ambiguous, 300 documents (MiB)",
+                baselines::mebibytes(ambiguous),
+            ),
+            (
+                "realistic, 2000 documents (MiB)",
+                baselines::mebibytes(realistic),
+            ),
+            (
+                "realistic minus ambiguous (MiB)",
+                signed_mebibytes(ambiguous, realistic),
+            ),
+            ("ceiling (MiB)", baselines::mebibytes(ceiling)),
+        ],
     );
     assert!(
-        baselines::fits(peak, baselines::ATTACH_PEAK_RSS_OVER_NULL_CEILING_BYTES),
-        "attaching `realistic` peaked at {} MiB against a {} MiB bar",
-        baselines::mebibytes(peak),
-        baselines::mebibytes(baselines::ATTACH_PEAK_RSS_OVER_NULL_CEILING_BYTES)
+        baselines::fits(growth, ceiling),
+        "going from `ambiguous` (300 documents) to `realistic` (2000 documents) raised the peak \
+         by {} MiB, past the {} MiB bar: `ambiguous` peaked at {} MiB and `realistic` at {} MiB",
+        baselines::mebibytes(growth),
+        baselines::mebibytes(ceiling),
+        baselines::mebibytes(ambiguous),
+        baselines::mebibytes(realistic)
+    );
+}
+
+#[test]
+fn the_null_baseline_is_the_least_of_its_readings() {
+    let reading = |peak_rss| NullReading {
+        peak_rss,
+        executable_resident: Some(10),
+    };
+    let null = NullBaseline {
+        readings: [reading(300), reading(200), reading(250)],
+    };
+    assert_eq!(null.least().peak_rss, 200);
+    assert_eq!(null.over(260), Ok(60));
+    assert_eq!(null.over(200), Ok(0));
+    assert_eq!(null.fixed_cost(), Ok(Some(190)));
+}
+
+#[test]
+fn a_peak_below_the_null_baseline_fails_naming_every_null_reading() {
+    let mib = 1024 * 1024;
+    let reading = |peak_rss| NullReading {
+        peak_rss,
+        executable_resident: None,
+    };
+    let null = NullBaseline {
+        readings: [reading(30 * mib), reading(31 * mib), reading(32 * mib)],
+    };
+    let problem = null
+        .over(29 * mib)
+        .expect_err("a peak below the baseline fails");
+    for named in ["29.00", "30.00", "31.00", "32.00", "failed instrument"] {
+        assert!(
+            problem.contains(named),
+            "`{named}` is missing from: {problem}"
+        );
+    }
+}
+
+#[test]
+fn a_null_baseline_below_its_executable_fails() {
+    let null = NullBaseline {
+        readings: [NullReading {
+            peak_rss: 100,
+            executable_resident: Some(101),
+        }; NULL_READINGS],
+    };
+    let problem = null
+        .fixed_cost()
+        .expect_err("a baseline below its executable fails");
+    assert!(problem.contains("instrument failed"), "{problem}");
+}
+
+#[test]
+fn a_pair_difference_below_zero_compares_as_zero() {
+    assert_eq!(pair_growth(200, 150), 0);
+    assert_eq!(pair_growth(150, 200), 50);
+    assert_eq!(signed_mebibytes(2 * 1024 * 1024, 1024 * 1024), "-1.00");
+}
+
+#[test]
+#[should_panic(expected = "not wholly resident")]
+fn a_child_short_of_a_wholly_resident_executable_fails() {
+    let short = ResidencyReport {
+        after_prefault: image::Residency {
+            mapped: 8192,
+            resident: 8192,
+        },
+        at_end: image::Residency {
+            mapped: 8192,
+            resident: 4096,
+        },
+    };
+    held_executable(
+        "short",
+        &format!("attached 0 documents\n{}\n", short.line()),
     );
 }
 
@@ -344,6 +681,12 @@ fn peak_memory_holds_flat_from_the_ambiguity_profile_to_the_gate_profile() {
         baselines::multiple(baselines::ATTACH_PAIR_PEAK_RSS_PER_MILLE),
         baselines::mebibytes(small),
         baselines::mebibytes(large)
+    );
+    hold_pair_growth(
+        "attach peak growth across the two per-PR scales",
+        small,
+        large,
+        baselines::ATTACH_PAIR_PEAK_RSS_GROWTH_CEILING_BYTES,
     );
 }
 
@@ -407,7 +750,7 @@ fn plant_hub_in_links(vault: &attach::Vault) {
 #[ignore = "memory-lane case: runs in the ci memory job, not the workspace suite"]
 fn the_hub_write_heap_grows_inside_its_allowance_from_the_ambiguity_profile_to_the_gate_profile() {
     if let Some(root) = std::env::var_os(HARNESS_ENV) {
-        hub_write_and_report(&attach::accepted_harness_root(&root, HARNESS_TOKEN_ENV));
+        harness(&root, hub_write_and_report);
         return;
     }
 
@@ -452,34 +795,7 @@ fn hub_write_heap_growth(label: &str, profile: &str) -> u64 {
     let documents = norn_fixtures::Profile::by_name(profile)
         .unwrap_or_else(|| panic!("no profile named `{profile}`"))
         .docs;
-    baselines::assert_the_profile_the_bars_were_authored_on();
-    let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), label).expect("a sandbox");
-    let harness = sandbox
-        .install_binary(&std::env::current_exe().expect("this suite's own executable"))
-        .expect("installing the harness");
-    let root: PathBuf = sandbox.work_dir().join("attached");
-    let vault = attach::Vault::generate(&root, profile);
-    plant_hub_in_links(&vault);
-    let token = attach::issue_harness_token(&root);
-
-    let outcome = Run::new(&sandbox, &harness)
-        .args([
-            "--exact",
-            HUB_WRITE_HARNESS_CASE,
-            "--ignored",
-            "--nocapture",
-        ])
-        .env(HARNESS_ENV, &root)
-        .env(HARNESS_TOKEN_ENV, &token)
-        .deadline(ATTACH_DEADLINE)
-        .wait()
-        .expect("running the hub-write harness");
-    outcome.assert_success();
-    assert!(
-        !outcome.stdout_truncated,
-        "the harness wrote more than the capture limit, so what came back is a prefix"
-    );
-    let reported = outcome.stdout_text();
+    let reported = child_run(label, profile, HUB_WRITE_HARNESS_CASE, plant_hub_in_links).stdout;
     let expected = documents + HUB_WRITE_IN_LINKS + 1;
     assert!(
         reported.contains(&report_line(expected)),
@@ -557,30 +873,18 @@ fn hub_write_and_report(root: &Path) {
 #[ignore = "memory-lane case: runs in the ci memory job, not the workspace suite"]
 fn the_gate_profile_reads_inside_its_memory_bar() {
     if let Some(root) = std::env::var_os(HARNESS_ENV) {
-        read_and_report(&attach::accepted_harness_root(&root, HARNESS_TOKEN_ENV));
+        harness(&root, read_and_report);
         return;
     }
 
+    let null = null_baseline();
     let peak = read_child("read-gate", "realistic").peak_rss;
-    baselines::record(
+    hold_over_null(
+        null,
         "gate profile read",
-        &[
-            ("peak resident set (MiB)", baselines::mebibytes(peak)),
-            (
-                "peak resident set ceiling (MiB)",
-                baselines::mebibytes(baselines::READ_PEAK_RSS_OVER_NULL_CEILING_BYTES),
-            ),
-        ],
-    );
-    assert!(
-        peak > 0,
-        "the reading child reported no peak resident set, so the ceiling holds no reading"
-    );
-    assert!(
-        baselines::fits(peak, baselines::READ_PEAK_RSS_OVER_NULL_CEILING_BYTES),
-        "attaching and reading `realistic` peaked at {} MiB against a {} MiB bar",
-        baselines::mebibytes(peak),
-        baselines::mebibytes(baselines::READ_PEAK_RSS_OVER_NULL_CEILING_BYTES)
+        "attaching and reading `realistic`",
+        peak,
+        baselines::READ_PEAK_RSS_OVER_NULL_CEILING_BYTES,
     );
 }
 
@@ -646,8 +950,9 @@ fn reading_the_gate_profile_holds_the_process_near_its_attach_peak() {
 #[test]
 #[ignore = "memory-lane case: runs in the ci memory job, not the workspace suite"]
 fn the_read_mix_heap_grows_inside_its_allowance_from_the_ambiguity_profile_to_the_gate_profile() {
-    let small = read_child("read-heap-ambiguous", "ambiguous").heap_peak;
-    let large = read_child("read-heap-realistic", "realistic").heap_peak;
+    let small_child = read_child("read-heap-ambiguous", "ambiguous");
+    let large_child = read_child("read-heap-realistic", "realistic");
+    let (small, large) = (small_child.heap_peak, large_child.heap_peak);
     let growth = large.saturating_sub(small);
 
     baselines::record(
@@ -676,6 +981,12 @@ fn the_read_mix_heap_grows_inside_its_allowance_from_the_ambiguity_profile_to_th
          read mix holds by {growth} bytes, past the {} byte allowance: `ambiguous` held {small} \
          bytes and `realistic` {large}",
         baselines::READ_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES,
+    );
+    hold_pair_growth(
+        "read peak growth across the two per-PR scales",
+        small_child.peak_rss,
+        large_child.peak_rss,
+        baselines::READ_PAIR_PEAK_RSS_GROWTH_CEILING_BYTES,
     );
 }
 
@@ -1058,30 +1369,18 @@ fn unlinked_body(bytes: usize) -> Vec<u8> {
 #[ignore = "memory-lane case: runs in the ci memory job, not the workspace suite"]
 fn the_gate_profile_plans_inside_its_memory_bar() {
     if let Some(root) = std::env::var_os(HARNESS_ENV) {
-        plan_and_report(&attach::accepted_harness_root(&root, HARNESS_TOKEN_ENV));
+        harness(&root, plan_and_report);
         return;
     }
 
+    let null = null_baseline();
     let peak = plan_child("plan-gate", "realistic", &PLANNING).peak_rss;
-    baselines::record(
+    hold_over_null(
+        null,
         "gate profile plans",
-        &[
-            ("peak resident set (MiB)", baselines::mebibytes(peak)),
-            (
-                "peak resident set ceiling (MiB)",
-                baselines::mebibytes(baselines::PLAN_PEAK_RSS_OVER_NULL_CEILING_BYTES),
-            ),
-        ],
-    );
-    assert!(
-        peak > 0,
-        "the planning child reported no peak resident set, so the ceiling holds no reading"
-    );
-    assert!(
-        baselines::fits(peak, baselines::PLAN_PEAK_RSS_OVER_NULL_CEILING_BYTES),
-        "attaching `realistic` and planning over it peaked at {} MiB against a {} MiB bar",
-        baselines::mebibytes(peak),
-        baselines::mebibytes(baselines::PLAN_PEAK_RSS_OVER_NULL_CEILING_BYTES)
+        "attaching `realistic` and planning over it",
+        peak,
+        baselines::PLAN_PEAK_RSS_OVER_NULL_CEILING_BYTES,
     );
 }
 
@@ -1247,7 +1546,7 @@ fn the_repair_apply_heap_grows_inside_its_allowance_from_the_ambiguity_profile_t
 #[ignore = "memory-lane case: runs in the ci memory job, not the workspace suite"]
 fn previewing_a_move_holds_no_more_heap_for_a_large_document_than_for_a_small_one() {
     if let Some(root) = std::env::var_os(HARNESS_ENV) {
-        size_and_report(&attach::accepted_harness_root(&root, HARNESS_TOKEN_ENV));
+        harness(&root, size_and_report);
         return;
     }
 
@@ -1521,7 +1820,11 @@ fn plan_child(label: &str, profile: &str, child: &PlanChild) -> PlanReading {
     let documents = norn_fixtures::Profile::by_name(profile)
         .unwrap_or_else(|| panic!("no profile named `{profile}`"))
         .docs;
-    let (peak_rss, reported) = child_run(label, profile, child.case, child.plant);
+    let ChildRun {
+        peak_rss,
+        stdout: reported,
+        ..
+    } = child_run(label, profile, child.case, child.plant);
     let report =
         PlanReport::from_stdout(&reported, child).unwrap_or_else(|problem| panic!("{problem}"));
     if let Err(problem) = report.writes_as_pinned(child) {
@@ -2261,10 +2564,20 @@ fn read_child(label: &str, profile: &str) -> ReadReading {
 /// hand back the peak resident set the kernel accounted to that child with what
 /// it printed.
 fn child_peak(label: &str, profile: &str, schema: &[u8], case: &str) -> (u64, String) {
-    child_run(label, profile, case, |vault| {
+    let run = child_run(label, profile, case, |vault| {
         std::fs::write(vault.path().join(".norn/schema.yaml"), schema)
             .expect("write the vault schema");
-    })
+    });
+    (run.peak_rss, run.stdout)
+}
+
+/// What one child's run came to: the peak resident set the kernel accounted
+/// to it, what it printed, and how many bytes of its executable it held
+/// resident, which only a platform that reports residency reads.
+struct ChildRun {
+    peak_rss: u64,
+    stdout: String,
+    executable_resident: Option<u64>,
 }
 
 /// Generate `profile`'s tree, let `prepare` add to it, run `case` over it in a
@@ -2279,15 +2592,30 @@ fn child_run(
     profile: &str,
     case: &str,
     prepare: impl FnOnce(&attach::Vault),
-) -> (u64, String) {
+) -> ChildRun {
+    child_run_over(label, case, |root| {
+        let vault = attach::Vault::generate(root, profile);
+        prepare(&vault);
+    })
+}
+
+/// Lay a tree at the root `tree` is handed, run `case` over it in a child, and
+/// hand back what the child's run came to.
+///
+/// Every child of this suite starts here, the null child included, so the
+/// unoptimized-build guard covers each of them, and each runs its own freshly
+/// installed copy of this binary. **Every child is held to a wholly resident
+/// executable** where the platform reports it: a child that printed no
+/// residency, or one short of whole, fails here, because the differences the
+/// bars take cancel the executable only when every child holds all of it.
+fn child_run_over(label: &str, case: &str, tree: impl FnOnce(&Path)) -> ChildRun {
     baselines::assert_the_profile_the_bars_were_authored_on();
     let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), label).expect("a sandbox");
     let harness = sandbox
         .install_binary(&std::env::current_exe().expect("this suite's own executable"))
         .expect("installing the harness");
     let root: PathBuf = sandbox.work_dir().join("attached");
-    let vault = attach::Vault::generate(&root, profile);
-    prepare(&vault);
+    tree(&root);
     let token = attach::issue_harness_token(&root);
 
     let outcome = Run::new(&sandbox, &harness)
@@ -2307,7 +2635,78 @@ fn child_run(
         "the harness wrote more than the capture limit, so what came back is a prefix"
     );
 
-    (outcome.peak_rss_bytes, outcome.stdout_text())
+    let stdout = outcome.stdout_text();
+    let executable_resident = held_executable(label, &stdout);
+    ChildRun {
+        peak_rss: outcome.peak_rss_bytes,
+        stdout,
+        executable_resident,
+    }
+}
+
+/// The executable bytes the `label` child held resident, read from what it
+/// printed and recorded under the run, or `None` on a platform that reports no
+/// residency.
+fn held_executable(label: &str, stdout: &str) -> Option<u64> {
+    let report = ResidencyReport::from_stdout(stdout)
+        .unwrap_or_else(|problem| panic!("the `{label}` child: {problem}"));
+    let Some(report) = report else {
+        if cfg!(target_os = "linux") {
+            panic!(
+                "the `{label}` child reported no executable residency, so its peak cannot be \
+                 read against another child's: {stdout}"
+            );
+        }
+        return None;
+    };
+    baselines::record(
+        &format!("executable residency ({label})"),
+        &[
+            (
+                "executable-file mappings (MiB)",
+                baselines::mebibytes(report.after_prefault.mapped),
+            ),
+            (
+                "resident after the prefault (MiB)",
+                baselines::mebibytes(report.after_prefault.resident),
+            ),
+            (
+                "resident at the end (MiB)",
+                baselines::mebibytes(report.at_end.resident),
+            ),
+        ],
+    );
+    Some(
+        report
+            .wholly_resident()
+            .unwrap_or_else(|problem| panic!("the `{label}` child: {problem}")),
+    )
+}
+
+/// **Every child's entry**: prefault this binary's executable, take the root
+/// the parent issued, run `child` over it, and print the executable's
+/// residency as the child ends.
+///
+/// The prefault comes before anything the child is measured for, so every
+/// child, measured or null, holds every executable-file mapping whole and a
+/// difference between two children's peaks cancels the executable rather
+/// than keeping whatever fault-around reached in one and not the other.
+#[allow(clippy::disallowed_macros)] // The child's report is a machine-consumed stream its parent reads.
+fn harness(root: &std::ffi::OsStr, child: impl FnOnce(&Path)) {
+    image::prefault().expect("prefaulting this binary's executable");
+    let after_prefault = image::residency().expect("reading the executable's residency");
+    child(&attach::accepted_harness_root(root, HARNESS_TOKEN_ENV));
+    let at_end = image::residency().expect("reading the executable's residency");
+    if let (Some(after_prefault), Some(at_end)) = (after_prefault, at_end) {
+        println!(
+            "{}",
+            ResidencyReport {
+                after_prefault,
+                at_end
+            }
+            .line()
+        );
+    }
 }
 
 /// The harness: adopt the tree at `root`, attach it, and report what the
@@ -2809,8 +3208,19 @@ fn a_read_reading_stands_only_on_a_report_of_every_shape_answering_as_pinned() {
 fn fact_dense_derivation_stays_at_its_heap_floor() {
     const CASE: &str = "fact_dense_derivation_stays_at_its_heap_floor";
     if let Some(root) = std::env::var_os(HARNESS_ENV) {
-        let root = attach::accepted_harness_root(&root, HARNESS_TOKEN_ENV);
-        let vault = attach::Vault::adopt(&root);
+        harness(&root, dense_and_report);
+        return;
+    }
+    let report = child_run("dense-derivation", "ambiguous", CASE, |_| {}).stdout;
+    hold_dense_floor(&report);
+}
+
+/// The fact-dense harness: adopt the tree at `root`, attach it, derive each
+/// dense source at both scales, and report each derivation's heap peak.
+#[allow(clippy::disallowed_macros)] // Machine-consumed child measurements.
+fn dense_and_report(root: &Path) {
+    let vault = attach::Vault::adopt(root);
+    {
         let host = vault.host();
         let _lease = attach::attach_and_wait(&host, vault.name());
         let mut store = vault.store();
@@ -2835,9 +3245,13 @@ fn fact_dense_derivation_stays_at_its_heap_floor() {
                 println!("dense {shape} {scale} {peak}");
             }
         }
-        return;
     }
-    let (_, report) = child_run("dense-derivation", "ambiguous", CASE, |_| {});
+}
+
+/// Hold each dense shape's large derivation to its small one's heap peak and
+/// the shape's allowance, from the fact-dense child's `report`.
+#[allow(clippy::disallowed_macros)] // Machine-consumed child measurements.
+fn hold_dense_floor(report: &str) {
     eprintln!("{report}");
     for shape in ["tags", "links", "frontmatter"] {
         let peak = |scale| -> usize {

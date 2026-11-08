@@ -71,7 +71,7 @@
 //! from drifting into two meanings of one name.
 //!
 //! The measurement machinery is the same shape: [`counters`] compares counter
-//! readings, [`heap`] counts the live heap a binary that installs it holds, [`explain`] states plan assertions over emitted SQL, [`work`]
+//! readings, [`heap`] counts the live heap a binary that installs it holds, [`image`] makes a process's executable wholly resident and reads how much of it is, [`explain`] states plan assertions over emitted SQL, [`work`]
 //! holds a drain's engine-step count under a line in the rows it drained,
 //! [`scale`]
 //! expresses the size-independence pair, [`process`] spawns a child under
@@ -125,6 +125,7 @@ pub mod explain;
 pub mod fidelity;
 pub mod generated;
 pub mod heap;
+pub mod image;
 pub mod invalidation;
 pub mod invariants;
 pub mod isolation;

@@ -381,6 +381,15 @@ use std::time::Duration;
 /// walk would carry all 2000 documents' facts at once instead.
 pub const ATTACH_PEAK_RSS_OVER_NULL_CEILING_BYTES: u64 = 40 * 1024 * 1024;
 
+/// How far the null child's peak may stand above the executable it held
+/// resident: the fixed cost of a process with a host and an empty attach.
+///
+/// PROVISIONAL until the hosted readings are taken.
+///
+/// **Platform scope: the Linux measurement lane.** Residency is read on Linux
+/// only, so this bar reads nothing elsewhere.
+pub const ATTACH_NULL_PEAK_RSS_OVER_CODE_CEILING_BYTES: u64 = 16 * 1024 * 1024;
+
 /// How much of the `ambiguous` profile's attach peak the `realistic` profile's
 /// attach peak may reach, per mille.
 ///
@@ -421,6 +430,14 @@ pub const ATTACH_PEAK_RSS_OVER_NULL_CEILING_BYTES: u64 = 40 * 1024 * 1024;
 /// `ATTACH_PAIR_PEAK_RSS_GROWTH_CEILING_BYTES` bounds the same two children's
 /// difference in bytes, which cancels the addend.
 pub const ATTACH_PAIR_PEAK_RSS_PER_MILLE: u64 = 1_600;
+
+/// How many bytes the `realistic` attach peak may stand above the `ambiguous`
+/// one.
+///
+/// PROVISIONAL until the hosted readings are taken.
+///
+/// **Platform scope: the Linux measurement lane.**
+pub const ATTACH_PAIR_PEAK_RSS_GROWTH_CEILING_BYTES: u64 = 8 * 1024 * 1024;
 
 /// How far attaching the `realistic` profile and running the read mix over it
 /// may raise a child's peak resident set above the null child's.
@@ -624,6 +641,14 @@ pub const READ_OVER_ATTACH_PEAK_RSS_PER_MILLE: u64 = 1_500;
 /// [`READ_PEAK_RSS_OVER_NULL_CEILING_BYTES`] gates in. One hosted run stands beside the
 /// local readings, and no negative control has been read there.
 pub const READ_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES: u64 = 4 * 1024;
+
+/// How many bytes the `realistic` reading child's peak may stand above the
+/// `ambiguous` one's.
+///
+/// PROVISIONAL until the hosted readings are taken.
+///
+/// **Platform scope: the Linux measurement lane.**
+pub const READ_PAIR_PEAK_RSS_GROWTH_CEILING_BYTES: u64 = 8 * 1024 * 1024;
 
 /// How many more bytes of heap a hub write may hold above the attach beneath
 /// it over the `realistic` profile than over the `ambiguous` profile.
