@@ -25,7 +25,7 @@
 //! [`assert_the_profile_the_bars_were_authored_on`]. Repeated local readings
 //! cover **macos-arm64** natively; those macOS readings predate NORN-443.
 //!
-//! **Five resident-set bars bound a difference, not a peak.** The three
+//! **Six resident-set bars bound a difference, not a peak.** The three
 //! process ceilings bound a measured child's peak minus a null child's peak,
 //! a fixed-cost bar bounds the null child's peak minus its code, and two pair
 //! bars bound a `realistic` peak minus an `ambiguous` one, as
@@ -91,7 +91,7 @@
 //! # The null child and the differential ceilings
 //!
 //! Ruled on 2026-11-08 under Mimir task NORN-501, and revised the same day
-//! after a design review. Before then, the attach, read and plan ceilings
+//! after a design review and a delta review. Before then, the attach, read and plan ceilings
 //! bounded each child's whole-process peak. Those peaks rose from about 17 to
 //! about 40 MiB between September and November 2026, and nearly all of the
 //! rise was the debug `memory` test binary's code. In `full memory invariant`
@@ -100,25 +100,30 @@
 //! [`ATTACH_PEAK_RSS_OVER_NULL_CEILING_BYTES`] records how that rise tracked
 //! the segment's size, commit by commit.
 //!
-//! **Every child prefaults its code.** Fault-around maps cached pages only in
-//! a window around the pages a child touches, so two children that run
-//! different code hold different parts of the segment. A null child that runs
-//! no derivation, read, search or planning code would then leave those paths'
-//! pages in every difference, and that term would grow with the codebase. So
-//! every child of this suite, measured or null, makes its whole executable
-//! segment resident at harness entry, before it does anything it is measured
-//! for. On Linux the child finds its executable's `r-xp` mapping in
-//! `/proc/self/maps` and calls `madvise(MADV_POPULATE_READ)` over it. Where the
-//! kernel refuses that advice (before Linux 5.14), the child reads one byte of
-//! every page. On macOS the child reads one byte of every page of its main
-//! image's `__TEXT` segment. With the prefault, the code term is the whole
-//! segment in every child, by construction rather than by how far
-//! fault-around got. On Linux each child reads its executable mapping's `Rss`
-//! from `/proc/self/smaps` after the prefault and again as it ends, and
-//! reports both with the mapping's size. A child whose mapping is not wholly
-//! resident at both points fails, naming the three numbers. The lane prints
-//! them for every child, and the hosted readings are recorded beside each bar
-//! below.
+//! **Every child prefaults its executable.** Fault-around maps cached pages
+//! only in a window around the pages a child touches, so two children that
+//! run different code hold different parts of the binary. A null child that
+//! runs no derivation, read, search or planning code would then leave those
+//! paths' pages in every difference, and that term would grow with the
+//! codebase. The same holds for the read-only data the code reads beside it,
+//! such as `.rodata`, `.eh_frame` and `.gcc_except_table`. So every child of
+//! this suite, measured or null, makes **every executable-file mapping**
+//! wholly resident at harness entry, before it does anything it is measured
+//! for. An executable-file mapping is any mapping of the executable's own
+//! file, whatever its permissions (`r-xp`, `r--p` or `rw-p`), so a linker
+//! layout that splits or merges segments is still covered. On Linux the child
+//! finds those mappings in `/proc/self/maps` and calls
+//! `madvise(MADV_POPULATE_READ)` over each. Where the kernel refuses that
+//! advice (before Linux 5.14), the child reads one byte of every page. On
+//! macOS the child reads one byte of every page of each segment of its main
+//! image that is mapped readable. With the prefault, the executable term is
+//! the whole file's mapped size in every child, by construction rather than by
+//! how far fault-around got. On Linux each child sums the `Rss` and `Size` of
+//! its executable-file mappings from `/proc/self/smaps` after the prefault
+//! and again as it ends, and reports the three numbers. A child whose
+//! executable-file mappings are not wholly resident at both points fails,
+//! naming the three numbers. The lane prints them for every child, and the
+//! hosted readings are recorded beside each bar below.
 //!
 //! **The null child.** The null child is the `memory` test binary re-executed
 //! in a harness mode of its own, through the same `child_run` as every
@@ -155,30 +160,46 @@
 //!   [`PLAN_PEAK_RSS_OVER_NULL_CEILING_BYTES`] bound the peak of the `realistic`
 //!   attach child, reading child and planning child, each minus the null
 //!   baseline.
-//! - `ATTACH_NULL_PEAK_RSS_OVER_CODE_CEILING_BYTES` bounds the fixed non-code
-//!   cost. That is the null baseline minus the executable mapping's resident
-//!   size, which the null child that gave the baseline reported. Subtracting
-//!   the measured residency rather than the mapping's size keeps a short
-//!   prefault from reading as fixed cost; the child already fails when the two
-//!   differ. The case that runs the null child carries this bar, so the null
-//!   entry point is a bar, as the suite's convention requires.
-//! - `ATTACH_PAIR_PEAK_RSS_GROWTH_CEILING_BYTES` and
-//!   `READ_PAIR_PEAK_RSS_GROWTH_CEILING_BYTES` bound the `realistic` peak minus
-//!   the `ambiguous` peak. One pair is the attach flatness pair's two
+//! - [`ATTACH_NULL_PEAK_RSS_OVER_CODE_CEILING_BYTES`] bounds the fixed
+//!   non-code cost. That is the null baseline minus the resident size of every
+//!   executable-file mapping, which the null child that gave the baseline
+//!   reported. Subtracting the measured residency rather than the mapped size
+//!   keeps a short prefault from reading as fixed cost; the child already
+//!   fails when the two differ. The case that runs the null child carries this
+//!   bar, so the null entry point is a bar, as the suite's convention requires.
+//! - [`ATTACH_PAIR_PEAK_RSS_GROWTH_CEILING_BYTES`] and
+//!   [`READ_PAIR_PEAK_RSS_GROWTH_CEILING_BYTES`] bound the `realistic` peak
+//!   minus the `ambiguous` peak. One pair is the attach flatness pair's two
 //!   children. The other is the two reading children of the read heap pair.
-//!   The two children of a pair run the same code paths over trees of 300 and
-//!   2,000 documents. So their difference cancels code and fixed cost exactly,
-//!   with no null child.
+//!   The two children of a pair prefault the same executable and run the same
+//!   code paths over trees of 300 and 2,000 documents. So their difference
+//!   cancels code and fixed cost by construction, with no null child. It does
+//!   not cancel noise: each peak is one draw, and the two draws' spread stays
+//!   in the difference.
+//!
+//! **Every bar is in the exit-bar registry.** The six constants are named in
+//! `norn_testkit::certification::ledger::NAMED_EXIT_BARS`, each `armed: true`:
+//! `attach-peak-rss-over-null-ceiling`, `read-peak-rss-over-null-ceiling`,
+//! `plan-peak-rss-over-null-ceiling`, `attach-null-peak-rss-over-code-ceiling`,
+//! `attach-pair-peak-rss-growth-ceiling` and `read-pair-peak-rss-growth-ceiling`.
+//! Each has an `always_authored` arm in `settle.rs`, which holds the registry
+//! to the constants.
 //!
 //! The lane prints, for every bar, each child's peak, every null peak, the
 //! difference and the ceiling.
 //!
-//! **A negative difference fails.** If a measured peak is below the null
-//! baseline, a `realistic` peak is below its `ambiguous` peak, or the null
-//! baseline is below its own code residency, the instrument failed. It did
-//! not find a free subject. The bar fails and names every reading it
-//! subtracted, the three null peaks included. This matches the suite's
-//! refusal of vacuous readings.
+//! **A negative difference over the null child fails.** If a measured peak is
+//! below the null baseline, or the null baseline is below its own executable
+//! residency, the instrument failed. It did not find a free subject. The bar
+//! fails and names every reading it subtracted, the three null peaks included.
+//! This matches the suite's refusal of vacuous readings.
+//!
+//! **A negative pair difference compares as zero.** A `realistic` peak below
+//! its `ambiguous` peak is noise around a flat subject, not a broken
+//! instrument: the two scales cost about the same, and either draw can land
+//! higher. So the pair bars compare `realistic` minus `ambiguous` saturated at
+//! zero, as [`READ_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES`] already does, and print
+//! the signed difference.
 //!
 //! **Noise between children.** The null baseline is the *minimum* of three
 //! null-child peaks taken in the same test process, before the first measured
@@ -188,11 +209,14 @@
 //! nulls. Then the difference understates the subject's cost by that gap. What
 //! the minimum does is bias the difference upward on average. Noise in a peak
 //! comes from timing, such as how far the allocator's arenas grew, and the
-//! lowest of three is the draw least lifted by it. So a bar is more likely to
-//! fail on noise than to pass on it. A median of three would also ignore one
-//! outlier. The minimum is chosen for the upward bias, not because it alone
-//! resists outliers. The 1.61x headroom absorbs what is left of the noise in
-//! both directions.
+//! lowest of three is the draw least lifted by it. **So each of the three
+//! over-null ceilings is more likely to fail on noise than to pass on it.**
+//! The bias runs the other way for the fixed-cost bar: its reading *is* the
+//! minimum, less its residency, so taking the lowest of three biases it toward
+//! passing. The pair bars use no null and carry no such bias. A median of
+//! three would also ignore one outlier. The minimum is chosen for the over-null
+//! ceilings' upward bias, not because it alone resists outliers. The 1.61x
+//! headroom absorbs what is left of the noise in both directions.
 //!
 //! **How the ceilings are authored.** Each ceiling is 1.61x the highest
 //! reading of its bar, rounded up to a whole MiB. That is the proportion the
@@ -221,8 +245,8 @@
 //!   class, and so do the heap pairs, so this bar is the only one that sees it.
 //! - **The pair byte bars** catch what grows between 300 and 2,000 documents,
 //!   in bytes: a cost that scales with the vault, at the profiles the suite
-//!   runs. They cancel code and fixed cost exactly. A cost the same at both
-//!   scales passes them.
+//!   runs. They cancel code and fixed cost by construction, but not the noise
+//!   between their two children. A cost the same at both scales passes them.
 //! - **The ratios**, [`ATTACH_PAIR_PEAK_RSS_PER_MILLE`] and
 //!   [`READ_OVER_ATTACH_PEAK_RSS_PER_MILLE`], catch the same growth as a share
 //!   of the whole-process peak. They divide whole-process peaks, so the code
@@ -235,7 +259,7 @@
 //!   they do not see them either.
 //!
 //! **What the differences deliberately no longer catch** is growth in the
-//! binary's code. Every child holds the whole segment, so new code in the
+//! binary's code. Every child holds every executable-file mapping whole, so new code in the
 //! product or the suite no longer moves the differential ceilings or the pair
 //! bars. **The soak ceilings stay exposed to it.**
 //! [`SOAK_PEAK_RSS_CEILING_BYTES`] and [`SOAK_HIGH_WATER_RSS_CEILING_BYTES`]

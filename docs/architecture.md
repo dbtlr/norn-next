@@ -44,11 +44,12 @@ The invariant is *measured*, not asserted:
 
 - Full nightly/manual regression asserts peak memory at a realistic ~2k-document profile, alongside
   size-independence pairs expressed as counts rather than clocks. Every child of the memory
-  lane first makes its whole executable segment resident. Its attach, read and plan ceilings
-  then bound a child's peak minus the peak of a null child: the same binary attaching a vault
-  with no documents. Both children hold the same code and runtime, which grow with the
-  codebase rather than the vault, so the difference leaves them out; the lane records each
-  child's segment residency as the evidence. A separate bar holds the null child's peak above
+  lane first makes every mapping of its executable file wholly resident. Its attach, read and
+  plan ceilings then bound a child's peak minus the peak of a null child: the same binary
+  attaching a vault with no documents. Both children then hold the same executable pages,
+  which grow with the codebase rather than the vault, and the same runtime, so the difference
+  leaves them out. Each child reports its executable mappings' residency, and a child whose
+  mappings are not wholly resident fails. A separate bar holds the null child's peak above
   its code, the fixed cost of a host and an empty attach, and the attach and read pairs carry
   a byte bar on the larger profile's peak above the smaller's. The soak lane's ceilings are
   still whole-process peaks.
@@ -1555,16 +1556,16 @@ reads more at the larger scale. The counter lane bars writes through the host as
 apply reads each file it touches the per-target read budget for what its plan does to that
 file and no other file, commits one changeset, and mints at most one reader; a `set --where`'s
 selector costs the same at 300 documents as at 2000; and a mass delete through the host holds
-the Layer 3 per-key limit the store's own bar holds. In the memory lane, three `read-` bars
+the Layer 3 per-key limit the store's own bar holds. In the memory lane, four `read-` bars
 hold one process that attached a bounded memory profile and ran the read mix through the host's
 read verbs: a find under a predicate, sorted and paged; a count by field; a get with suffix
 resolve; links-to and backlinks; a validate narrowed by a path part, which is
-findings-for-path; lexical search; and describe. Two bars hold the ~2k-document profile's
-process to a ceiling on its peak above the null child's and to a ratio over the peak of the
-same attach without the reads, and a byte bar holds the reading process at the ~2k-document
-profile to its peak at the 300-document profile. The kernel reports one
-peak per process, so they hold the highest peak any shape reached rather than each shape's
-own. The third reads the most the shapes raised the live heap above the attached host,
+findings-for-path; lexical search; and describe. Three bars hold whole-process peaks: the
+~2k-document profile's process to a ceiling on its peak above the null child's and to a ratio
+over the peak of the same attach without the reads, and the reading process at the
+~2k-document profile to a byte bar over its peak at the 300-document profile. The kernel
+reports one peak per process, so they hold the highest peak any shape reached rather than
+each shape's own. The fourth reads the most the shapes raised the live heap above the attached host,
 counted by the process's own allocator, at the 300-document and ~2k-document profiles, and
 bounds in bytes how far the second reading may exceed the first: a shape that keeps an
 eight-byte id for every document while the find's pages are held fails it, even where the

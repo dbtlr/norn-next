@@ -15,10 +15,11 @@
 //! the 300-document `ambiguous` profile's peak and `realistic`'s two ways: in
 //! bytes, by how far the larger may exceed the smaller, and as a ratio. The
 //! pair is the sharper instrument: a ceiling passes anything that fits under
-//! it, and a pair fails the moment two scales stop moving together. Both profiles are under 5k documents, so both are this
-//! lane's work under ADR 0004's by-kind split.
+//! it, and a pair fails the moment two scales stop moving together. Both
+//! profiles are under 5k documents, so both are this lane's work under ADR
+//! 0004's by-kind split.
 //!
-//! **A read is held three ways, over one read mix.** A child attaches a
+//! **A read is held four ways, over one read mix.** A child attaches a
 //! profile, keeps it attached, and runs the mix's eight shapes through the
 //! host's read verbs, each verb taking its own live hold: a find under a
 //! predicate, paged newest first, with each row carrying its fields, its tags
@@ -30,12 +31,13 @@
 //! what a read adds to a process that attached is a page's rows rather than
 //! the vault's.
 //!
-//! Two of the three are read off whole-process peaks at `realistic`: a ceiling
-//! on how far the reading child's peak stands above the null child's, and a
-//! ratio of the reading child's peak to the peak of an attach-only child of
-//! the same tree. The kernel reports one peak per child, so the mix is one
-//! child, and what those bars bound is the highest any shape reached, over
-//! the attach under all of them. **The third is the heap.** This binary's
+//! Three of the four are read off whole-process peaks: a ceiling on how far
+//! the reading child's peak at `realistic` stands above the null child's, a
+//! ratio of that peak to the peak of an attach-only child of the same tree,
+//! and a byte bar on how far the reading child's peak at `realistic` may
+//! exceed its peak at `ambiguous`. The kernel reports one peak per child, so
+//! the mix is one child, and what those bars bound is the highest any shape
+//! reached, over the attach under all of them. **The fourth is the heap.** This binary's
 //! global allocator counts the live heap, and the reading child marks it once
 //! the attachment is ready and before the first shape runs, then reports the
 //! most the shapes raised it above that mark. A child at `ambiguous` and one
