@@ -1747,11 +1747,12 @@ fn judge(store: &mut Store, statement: ExplainedStatement<'_>, order: StoredPath
     // read; the runs' union, at most a head per count the key's segments
     // reach, is sorted whole and cut again: a sort bounded by the key's
     // segments, never the class. Candidate suffix probes use the same merge
-    // with a bound of two. A page of a write's links is read in path
-    // order off the change-feed index, which does not say a path is one
-    // document's, so SQLite sorts the links of one path by ordinal — the one
-    // document's own links, which the changeset wrote — and the page's limit
-    // stops the read. Every other statement sorts nothing.
+    // with a bound of two, each range's class read once. A page of a write's
+    // links is read in path order off the change-feed index, which does not
+    // say a path is one document's, so SQLite sorts the links of one path by
+    // ordinal — the one document's own links, which the changeset wrote —
+    // and the page's limit stops the read. Every other statement sorts
+    // nothing.
     let sorted = match statement {
         ExplainedStatement::LinkHealthHeads | ExplainedStatement::LinkHealthSuffixes => {
             Some("USE TEMP B-TREE FOR ORDER BY")
@@ -1775,7 +1776,7 @@ fn judge(store: &mut Store, statement: ExplainedStatement<'_>, order: StoredPath
                 if matches!(statement, ExplainedStatement::LinkHealthHeads) {
                     2
                 } else if matches!(statement, ExplainedStatement::LinkHealthSuffixes) {
-                    8
+                    4
                 } else {
                     1
                 }

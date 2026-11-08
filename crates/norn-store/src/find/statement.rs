@@ -1016,12 +1016,14 @@ pub(crate) struct SpellingRange<'a> {
 /// and the document's id, in no order.
 ///
 /// The ranges drive the statement — `CROSS JOIN` keeps them the outer loop.
-/// Each admitting count opens one seek of the suffix comparison key,
-/// cut at two documents in ladder order. The bounded heads are merged and
-/// cut at two before their documents are emitted, each reached by row id.
-/// A range costs at most two members per admitting count, however large the
-/// class. Every class range uses [`resolve::range_rows`], less the deeper
-/// members where a document stands at one of the spelling's exact paths
+/// Each range's class is read once, documents and files merged inside it,
+/// and the at most two ids it keeps are gathered into one array the range's
+/// row expands. Each admitting count opens one seek of the suffix comparison
+/// key, cut at two documents in ladder order. The bounded heads are merged
+/// and cut at two before their documents are emitted. A range costs at most
+/// two members per admitting count, however large the class. Every class
+/// range uses [`resolve::range_rows`], less the deeper members where a
+/// document stands at one of the spelling's exact paths
 /// ([`resolve::exact_first`]), an equality seek per exact key. Exact members
 /// lead each run, so the cut at two keeps them.
 pub(crate) fn compose_candidate_suffixes(
@@ -1066,17 +1068,11 @@ pub(crate) fn compose_candidate_suffixes(
         "json_array_length(json_extract(j.value, '$[3]')) = 1",
     );
     Ok((
-        resolve::CANDIDATES
-            .map(|candidates| {
-                let table = candidates.table;
-                let dc = candidates.alias("c");
-                format!(
-                    "SELECT j.key, {dc}.id FROM json_each(?1) AS j
-             CROSS JOIN {table} AS {dc}
-             WHERE {dc}.id IN (SELECT dr.id FROM ({class}) AS dr WHERE {exact_first})"
-                )
-            })
-            .join(" UNION ALL "),
+        format!(
+            "SELECT j.key, m.value FROM json_each(?1) AS j CROSS JOIN json_each((
+                 SELECT json_group_array(dr.id) FROM ({class}) AS dr WHERE {exact_first}
+             )) AS m"
+        ),
         vec![Value::Text(listed)],
     ))
 }

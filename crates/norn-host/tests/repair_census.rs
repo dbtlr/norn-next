@@ -1232,7 +1232,8 @@ fn admitted_sort(plan: &QueryPlan, normalized_sql: &str, sort: &PlanRow) -> Opti
     let a_count = opens_with("SELECT count(*) <=");
     let a_class_head = opens_with("SELECT dr.id, dr.path FROM (");
     let a_health_head = opens_with("SELECT 0, j.key, dc.id, dc.path,");
-    let a_suffix_head = opens_with("SELECT j.key, dc.id FROM json_each(?1) AS j");
+    let a_suffix_head =
+        opens_with("SELECT j.key, m.value FROM json_each(?1) AS j CROSS JOIN json_each((");
     match sort.detail.as_str() {
         "USE TEMP B-TREE FOR ORDER BY" if (a_health_head || a_suffix_head) && admitted_runs() => {
             Some("bounded admitted-run heads")
