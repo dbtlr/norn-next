@@ -361,14 +361,23 @@ use std::time::Duration;
 ///
 /// **From 2026-11-08 this ceiling bounds a difference.** It bounds the attach
 /// child's peak minus the null baseline, both children having prefaulted
-/// their code, by the rule in
+/// every executable-file mapping, by the rule in
 /// [the null child](self#the-null-child-and-the-differential-ceilings). Every
 /// reading above is a whole-process peak, taken without the prefault, and
-/// stays as the record of how the trend got here. The authored value below is
-/// still the whole-process ceiling. The change that adds the null child
-/// re-authors it at 1.61x the highest hosted differential reading, rounded up
-/// to a whole MiB, and records here each reading with its run id, the null
-/// peaks it subtracted, and both children's executable-segment residency.
+/// stays as the record of how the trend got here.
+///
+/// On `ubuntu-latest` x86_64-glibc, `full memory invariant` runs 42520083097, 42521526249 and 42523022587, all at 866a02f1, read the attach
+/// child at **6.63, 6.69 and 6.67 MiB over the null baseline**, from
+/// whole-process peaks of 47.24, 47.26 and 47.21 MiB.
+/// The null peaks those runs subtracted were 40.69, 40.84 and 40.60 MiB,
+/// 40.66, 40.70 and 40.57, and 40.73, 40.54 and 40.62, so the baselines were
+/// 40.60, 40.57 and 40.54 MiB.
+/// Every child of those runs, null and measured, held its executable-file
+/// mappings wholly resident after the prefault and at its end: 37.28 of 37.28
+/// MiB in every reading.
+///
+/// The ceiling is **11 MiB**: 1.61x the highest reading, 6.69 MiB, is 10.77,
+/// rounded up to a whole MiB. It replaces the 40 MiB whole-process ceiling.
 ///
 /// **Platform scope: the Linux measurement lane.** The full-regression `memory
 /// invariant` job on `ubuntu-latest` x86_64-glibc is where this gates; the
@@ -379,16 +388,36 @@ use std::time::Duration;
 /// tree and commits it in bounded changesets, so what stays resident is one
 /// changeset's documents rather than the vault's — an attachment that held its
 /// walk would carry all 2000 documents' facts at once instead.
-pub const ATTACH_PEAK_RSS_OVER_NULL_CEILING_BYTES: u64 = 40 * 1024 * 1024;
+pub const ATTACH_PEAK_RSS_OVER_NULL_CEILING_BYTES: u64 = 11 * 1024 * 1024;
 
 /// How far the null child's peak may stand above the executable it held
 /// resident: the fixed cost of a process with a host and an empty attach.
 ///
-/// PROVISIONAL until the hosted readings are taken.
+/// The subject is the null child of
+/// [the null child](self#the-null-child-and-the-differential-ceilings): this
+/// binary prefaulting every executable-file mapping, building a production
+/// host, and attaching a vault with the minimal schema and no documents. The
+/// reading is the null baseline, the least of three null peaks, less the
+/// executable bytes that same child held resident. What it catches is what
+/// every other resident-set bar cancels: more threads or deeper stacks,
+/// SQLite connections and caches opened whatever the vault holds,
+/// preallocated pools and buffers, engines or tables built eagerly at host
+/// construction, the runtime's statics, and allocator retention. Taking the
+/// least of three biases this reading toward passing, as the rule records.
+///
+/// On `ubuntu-latest` x86_64-glibc, `full memory invariant` runs 42520083097, 42521526249 and 42523022587, all at 866a02f1, read **3.32,
+/// 3.28 and 3.26 MiB**: null baselines of 40.60, 40.57 and 40.54 MiB, each
+/// less 37.28 MiB of executable resident. The null peaks were 40.69, 40.84
+/// and 40.60 MiB, 40.66, 40.70 and 40.57, and 40.73, 40.54 and 40.62.
+///
+/// The ceiling is **6 MiB**: 1.61x the highest reading, 3.32 MiB, is 5.35,
+/// rounded up to a whole MiB.
 ///
 /// **Platform scope: the Linux measurement lane.** Residency is read on Linux
-/// only, so this bar reads nothing elsewhere.
-pub const ATTACH_NULL_PEAK_RSS_OVER_CODE_CEILING_BYTES: u64 = 16 * 1024 * 1024;
+/// only, so this bar reads nothing elsewhere; on macos-arm64 the lane prints
+/// the null peaks, 77.45–77.62 MiB on 2026-11-08 with the whole Mach-O image
+/// prefaulted, and judges nothing.
+pub const ATTACH_NULL_PEAK_RSS_OVER_CODE_CEILING_BYTES: u64 = 6 * 1024 * 1024;
 
 /// How much of the `ambiguous` profile's attach peak the `realistic` profile's
 /// attach peak may reach, per mille.
@@ -420,6 +449,12 @@ pub const ATTACH_NULL_PEAK_RSS_OVER_CODE_CEILING_BYTES: u64 = 16 * 1024 * 1024;
 /// are **1.06, 1.06 and 1.09**:
 /// 37.16 against 39.57 MiB, 37.08 against 39.49, and 36.12 against 39.44.
 ///
+/// With every child prefaulting its executable (2026-11-08), `full memory
+/// invariant` runs 42520083097, 42521526249 and 42523022587 read **1.05, 1.05
+/// and 1.05**: 44.77 against 47.02 MiB, 44.47 against 47.08, and 44.64 against
+/// 46.92. The prefault adds the whole executable to both peaks, so the same
+/// growth reads closer to 1 than before.
+///
 /// The bar is 1.6, which leaves a quarter of headroom over the highest reading
 /// while staying far below the 6.7x a vault-shaped cost would show.
 ///
@@ -434,10 +469,22 @@ pub const ATTACH_PAIR_PEAK_RSS_PER_MILLE: u64 = 1_600;
 /// How many bytes the `realistic` attach peak may stand above the `ambiguous`
 /// one.
 ///
-/// PROVISIONAL until the hosted readings are taken.
+/// The subject is the two children of the flatness pair
+/// [`ATTACH_PAIR_PEAK_RSS_PER_MILLE`] reads. Both prefault the same executable
+/// and run the same code over 300 and 2,000 documents, so their difference
+/// cancels code and fixed cost by construction and leaves what grows with the
+/// vault, plus the noise between two draws. A difference below zero compares
+/// as zero.
+///
+/// On `ubuntu-latest` x86_64-glibc, `full memory invariant` runs 42520083097, 42521526249 and 42523022587, all at 866a02f1, read **2.25,
+/// 2.61 and 2.28 MiB**: 44.77 against 47.02 MiB, 44.47 against 47.08, and
+/// 44.64 against 46.92.
+///
+/// The ceiling is **5 MiB**: 1.61x the highest reading, 2.61 MiB, is 4.20,
+/// rounded up to a whole MiB.
 ///
 /// **Platform scope: the Linux measurement lane.**
-pub const ATTACH_PAIR_PEAK_RSS_GROWTH_CEILING_BYTES: u64 = 8 * 1024 * 1024;
+pub const ATTACH_PAIR_PEAK_RSS_GROWTH_CEILING_BYTES: u64 = 5 * 1024 * 1024;
 
 /// How far attaching the `realistic` profile and running the read mix over it
 /// may raise a child's peak resident set above the null child's.
@@ -497,10 +544,17 @@ pub const ATTACH_PAIR_PEAK_RSS_GROWTH_CEILING_BYTES: u64 = 8 * 1024 * 1024;
 /// [the null child](self#the-null-child-and-the-differential-ceilings), for
 /// the reason [`ATTACH_PEAK_RSS_OVER_NULL_CEILING_BYTES`] records: the rise
 /// was the binary's code. The readings above stay as the whole-process
-/// record. The authored value below is still the whole-process ceiling. The
-/// change that adds the null child re-authors it at 1.61x the highest hosted
-/// differential reading, rounded up to a whole MiB, and records here each
-/// reading with its run id and the null peaks it subtracted.
+/// record.
+///
+/// On `ubuntu-latest` x86_64-glibc, `full memory invariant` runs 42520083097, 42521526249 and 42523022587, all at 866a02f1, read the reading
+/// child at **9.54, 9.23 and 9.67 MiB over the null baseline**, from
+/// whole-process peaks of 50.14, 49.80 and 50.21 MiB.
+/// The null peaks those runs subtracted were 40.69, 40.84 and 40.60 MiB,
+/// 40.66, 40.70 and 40.57, and 40.73, 40.54 and 40.62, so the baselines were
+/// 40.60, 40.57 and 40.54 MiB.
+///
+/// The ceiling is **16 MiB**: 1.61x the highest reading, 9.67 MiB, is 15.57,
+/// rounded up to a whole MiB. It replaces the 48 MiB whole-process ceiling.
 ///
 /// **It is not what refuses a read whose cost is the vault.** Every shape
 /// answers a page, a single target or what a narrowing part admits, so what
@@ -511,7 +565,7 @@ pub const ATTACH_PAIR_PEAK_RSS_GROWTH_CEILING_BYTES: u64 = 8 * 1024 * 1024;
 ///
 /// **Platform scope: the Linux measurement lane.** The full-regression `memory
 /// invariant` job on `ubuntu-latest` x86_64-glibc is where this gates.
-pub const READ_PEAK_RSS_OVER_NULL_CEILING_BYTES: u64 = 48 * 1024 * 1024;
+pub const READ_PEAK_RSS_OVER_NULL_CEILING_BYTES: u64 = 16 * 1024 * 1024;
 
 /// How much of the attach-only peak at the `realistic` profile the peak of
 /// attaching it and running the read mix may reach, per mille.
@@ -539,6 +593,11 @@ pub const READ_PEAK_RSS_OVER_NULL_CEILING_BYTES: u64 = 48 * 1024 * 1024;
 /// On `ubuntu-latest` x86_64-glibc, `full memory invariant` runs
 /// 41323116407, 41324737076 and 41329840687 read **1.08, 1.06 and 1.08**:
 /// 39.41 against 42.82 MiB, 39.60 against 42.10, and 39.44 against 42.66.
+///
+/// With every child prefaulting its executable (2026-11-08), `full memory
+/// invariant` runs 42520083097, 42521526249 and 42523022587 read **1.06, 1.06
+/// and 1.05**: 47.30 against 50.43 MiB, 47.23 against 50.15, and 47.25 against
+/// 49.71.
 ///
 /// The bar is 1.5, by the rule [`ATTACH_PAIR_PEAK_RSS_PER_MILLE`] is authored
 /// under: a quarter of headroom over the highest reading, local or hosted,
@@ -645,10 +704,22 @@ pub const READ_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES: u64 = 4 * 1024;
 /// How many bytes the `realistic` reading child's peak may stand above the
 /// `ambiguous` one's.
 ///
-/// PROVISIONAL until the hosted readings are taken.
+/// The subject is the two reading children of
+/// [`READ_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES`]'s pair. Both prefault the same
+/// executable and run the same read mix over 300 and 2,000 documents, so
+/// their difference cancels code and fixed cost by construction and leaves
+/// what grows with the vault, plus the noise between two draws. A difference
+/// below zero compares as zero.
+///
+/// On `ubuntu-latest` x86_64-glibc, `full memory invariant` runs 42520083097, 42521526249 and 42523022587, all at 866a02f1, read **1.86,
+/// 1.84 and 2.12 MiB**: 48.44 against 50.30 MiB, 48.44 against 50.28, and
+/// 48.27 against 50.39.
+///
+/// The ceiling is **4 MiB**: 1.61x the highest reading, 2.12 MiB, is 3.41,
+/// rounded up to a whole MiB.
 ///
 /// **Platform scope: the Linux measurement lane.**
-pub const READ_PAIR_PEAK_RSS_GROWTH_CEILING_BYTES: u64 = 8 * 1024 * 1024;
+pub const READ_PAIR_PEAK_RSS_GROWTH_CEILING_BYTES: u64 = 4 * 1024 * 1024;
 
 /// How many more bytes of heap a hub write may hold above the attach beneath
 /// it over the `realistic` profile than over the `ambiguous` profile.
@@ -767,12 +838,19 @@ pub const HUB_WRITE_HEAP_GROWTH_ALLOWANCE_BYTES: u64 = 4 * 1024;
 /// planning child's peak minus the null baseline, by the rule in
 /// [the null child](self#the-null-child-and-the-differential-ceilings), for
 /// the reason [`ATTACH_PEAK_RSS_OVER_NULL_CEILING_BYTES`] records. The
-/// readings above stay as the whole-process record. The authored value below
-/// is still the whole-process ceiling. The change that adds the null child
-/// re-authors it at 1.61x the highest hosted differential reading, rounded up
-/// to a whole MiB, and records here each reading with its run id and the null
-/// peaks it subtracted. The size child still carries no ceiling, so it needs
-/// no null baseline, but it prefaults its code like every child.
+/// readings above stay as the whole-process record. The size child still
+/// carries no ceiling, so it needs no null baseline, but it prefaults its
+/// executable like every child.
+///
+/// On `ubuntu-latest` x86_64-glibc, `full memory invariant` runs 42520083097, 42521526249 and 42523022587, all at 866a02f1, read the plan gate
+/// child at **9.78, 9.80 and 9.66 MiB over the null baseline**, from
+/// whole-process peaks of 50.38, 50.37 and 50.21 MiB.
+/// The null peaks those runs subtracted were 40.69, 40.84 and 40.60 MiB,
+/// 40.66, 40.70 and 40.57, and 40.73, 40.54 and 40.62, so the baselines were
+/// 40.60, 40.57 and 40.54 MiB.
+///
+/// The ceiling is **16 MiB**: 1.61x the highest reading, 9.80 MiB, is 15.78,
+/// rounded up to a whole MiB. It replaces the 53 MiB whole-process ceiling.
 ///
 /// It is the coarse backstop: what refuses a plan whose memory is the vault is
 /// [`PLAN_PREVIEW_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES`] and
@@ -780,7 +858,7 @@ pub const HUB_WRITE_HEAP_GROWTH_ALLOWANCE_BYTES: u64 = 4 * 1024;
 ///
 /// **Platform scope: the Linux measurement lane.** The full-regression `memory
 /// invariant` job on `ubuntu-latest` x86_64-glibc is where this gates.
-pub const PLAN_PEAK_RSS_OVER_NULL_CEILING_BYTES: u64 = 53 * 1024 * 1024;
+pub const PLAN_PEAK_RSS_OVER_NULL_CEILING_BYTES: u64 = 16 * 1024 * 1024;
 
 /// How many more bytes of heap the plan previews may hold above the attach
 /// over the `realistic` profile than over the `ambiguous` profile.
