@@ -8412,6 +8412,282 @@ mod tests {
         ops.detach(&name, attachment);
     }
 
+    /// Forward each named `EntryOps` method to `self.inner` unchanged.
+    macro_rules! forward_to_inner {
+        ($(fn $method:ident(&self $(, $arg:ident: $ty:ty)*) $(-> $ret:ty)?;)*) => {
+            $(fn $method(&self $(, $arg: $ty)*) $(-> $ret)? {
+                self.inner.$method($($arg),*)
+            })*
+        };
+    }
+
+    /// Production ops whose reconcile and reload legs each take `delay`
+    /// longer than their work before they return. A delay past the watcher's
+    /// longest batch age means that under a steady edit stream every drain
+    /// ending one of those legs finds a batch waiting. Every leg is the
+    /// production one, only later.
+    struct SlowLegs {
+        inner: ProductionEntryOps,
+        delay: Duration,
+    }
+
+    impl EntryOps for SlowLegs {
+        type Attachment = ProductionAttachment;
+        #[cfg(feature = "induced-failure")]
+        fn loading_reconcile_boundary(&self) {
+            self.inner.loading_reconcile_boundary();
+        }
+        #[cfg(feature = "induced-failure")]
+        fn loading_read_boundary(&self, completed: bool) {
+            self.inner.loading_read_boundary(completed);
+        }
+        fn reconcile(
+            &self,
+            name: &VaultName,
+            attachment: &mut Self::Attachment,
+            work: ReconcileWork,
+            progress: &ProgressReporter<Self::Attachment>,
+        ) -> Result<(), JobFailure> {
+            let reconciled = self.inner.reconcile(name, attachment, work, progress);
+            thread::sleep(self.delay);
+            reconciled
+        }
+        fn reload(
+            &self,
+            name: &VaultName,
+            attachment: &mut Self::Attachment,
+            progress: &ProgressReporter<Self::Attachment>,
+        ) -> Result<ReloadJudgment, crate::EntryReloadFailure> {
+            let reloaded = self.inner.reload(name, attachment, progress);
+            thread::sleep(self.delay);
+            reloaded
+        }
+        forward_to_inner! {
+            fn first_index_candidate(&self, registration: &Registration) -> bool;
+            fn trim_readers(&self, now: Instant);
+            fn attach(&self, registration: &Registration, progress: &ProgressReporter<Self::Attachment>) -> Result<Self::Attachment, JobFailure>;
+            fn recover(&self, name: &VaultName, attachment: &mut Self::Attachment, progress: &ProgressReporter<Self::Attachment>) -> Result<(), JobFailure>;
+            fn judge_reload(&self, name: &VaultName, attachment: &Self::Attachment) -> Result<ReloadJudgment, crate::EntryReloadFailure>;
+            fn active_fingerprints(&self, attachment: &Self::Attachment) -> Option<crate::ActiveFingerprints>;
+            fn active_content_model(&self, attachment: &Self::Attachment) -> Arc<ContentModel>;
+            fn control_root(&self, attachment: &Self::Attachment) -> Option<PathBuf>;
+            fn plan_ground(&self, attachment: &Self::Attachment) -> Option<PlanGround>;
+            fn apply(&self, name: &VaultName, attachment: &mut Self::Attachment, plan: PlanDocument, apply: &ApplyProgress, progress: &ProgressReporter<Self::Attachment>) -> Result<ApplyEnd, JobFailure>;
+            fn withheld_trust(&self, attachment: &Self::Attachment) -> Option<UntrustedReason>;
+            fn advisories(&self, attachment: &Self::Attachment) -> Vec<AttachmentAdvisory>;
+            fn count_leg_mint(&self, statements: u64);
+            fn semantic(&self) -> Option<&crate::semantic::SemanticEngines>;
+            fn poll(&self, name: &VaultName, attachment: &mut Self::Attachment) -> Result<Option<norn_fs::Batch>, JobFailure>;
+            fn rebuild(&self, name: &VaultName, attachment: Self::Attachment, progress: &ProgressReporter<Self::Attachment>) -> Result<Self::Attachment, JobFailure>;
+            fn rolling_heal(&self, attachment: &Self::Attachment) -> Option<norn_wire::RollingHealStatus>;
+            fn maintain_quiet(&self, name: &VaultName, attachment: &mut Self::Attachment, quiet: bool, turn: &mut MaintenanceTurn, progress: &ProgressReporter<Self::Attachment>) -> Result<(), JobFailure>;
+            fn maintenance_deadline(&self, attachment: &Self::Attachment) -> Option<Instant>;
+            fn mint_feed(&self, attachment: &Self::Attachment) -> Option<norn_store::FeedSource>;
+            fn background_owed(&self, name: &VaultName) -> bool;
+            fn background_unit(&self, name: &VaultName) -> crate::BackgroundUnit;
+            fn background_deadline(&self, name: &VaultName) -> Option<Instant>;
+            fn store_lifetime_current(&self, name: &VaultName, epoch: &str) -> bool;
+            fn retire_background(&self);
+            fn maintain(&self, name: &VaultName, attachment: &mut Self::Attachment) -> Result<(), JobFailure>;
+            fn detach(&self, name: &VaultName, attachment: Self::Attachment);
+            fn record(&self, registration: &Registration) -> Result<(), RecordRefusal>;
+            fn retire(&self, registration: &Registration, keep_state: bool, standing: &[Registration]) -> Result<(), RetireRefusal>;
+            fn amend(&self, current: &Registration, amended: &Registration, standing: &[Registration]) -> Result<(), RetireRefusal>;
+            fn discard(&self, name: &VaultName);
+        }
+    }
+
+    /// Every derived row's path and content hash in `store`, in path order.
+    fn stored_hashes(store: &mut Store) -> Vec<(String, Option<String>)> {
+        store
+            .begin_request()
+            .stored_documents_after_ordered(None, 512, StoredPathOrder::Sensitive)
+            .unwrap()
+            .into_iter()
+            .map(|row| (row.path.as_str().to_owned(), row.content_hash))
+            .collect()
+    }
+
+    /// **A schema reload under a steady edit stream answers while the edits
+    /// keep arriving, and the reads beside it answer rather than refuse.**
+    /// Every reconcile and reload leg here outlasts the watcher's longest
+    /// batch age, so each drain that ends one finds the stream's next batch.
+    /// The leg that activates the new schema installs its pool and answers as
+    /// it ends, and ordinary reconcile turns derive what keeps arriving, so
+    /// neither the asker nor a read the reload settles waits for the vault to
+    /// fall quiet. Once the stream stops, the store holds what a build from
+    /// zero of the same tree under the new schema holds.
+    #[test]
+    fn a_schema_reload_under_an_edit_stream_answers_and_serves_reads_while_the_edits_continue() {
+        let f = Fixture::new("schema-reload-edit-stream");
+        let stream = f.vault().join("stream");
+        fs::create_dir_all(&stream).unwrap();
+        for index in 0..4 {
+            fs::write(stream.join(format!("note-{index}.md")), "# Stream\n").unwrap();
+        }
+        fs::write(
+            f.vault().join("dated.md"),
+            "---\ncreated: not a date\n---\n",
+        )
+        .unwrap();
+        let registration = f.registration();
+        let name = registration.name.clone();
+        let host = crate::Host::new(
+            crate::RegistryRead::from_entries([registration]),
+            SlowLegs {
+                inner: fixture_ops(&f),
+                delay: norn_fs::watch::MAX_BATCH_AGE + Duration::from_millis(100),
+            },
+            crate::LifecyclePolicy {
+                idle_after: Duration::from_secs(60),
+                worker_slots: 1,
+                watch_poll_interval: Duration::from_millis(25),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_threads: crate::BACKGROUND_THREADS,
+                background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
+            },
+        )
+        .unwrap();
+        norn_fs::watch::settle_prior_changes(f.root.root(), lifecycle_budget().work()).unwrap();
+        let lease = host.demand(&name).unwrap();
+        wait_state(&host, &name, norn_wire::TrustState::Ready);
+
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        let stop = AtomicBool::new(false);
+        let edits = AtomicUsize::new(0);
+        let wait_for_edits = |count: usize| {
+            wait_until(
+                "the edit stream to write",
+                lifecycle_budget(),
+                || match edits.load(Ordering::SeqCst) {
+                    written if written >= count => Observed::Met(()),
+                    written => Observed::Pending(format!("{written} edits written")),
+                },
+            )
+            .unwrap_or_else(|failure| panic!("{failure}"));
+        };
+        let refused = thread::scope(|scope| {
+            scope.spawn(|| {
+                let mut index = 0_usize;
+                while !stop.load(Ordering::SeqCst) {
+                    fs::write(
+                        stream.join(format!("note-{}.md", index % 4)),
+                        format!("# Stream {index}\n"),
+                    )
+                    .unwrap();
+                    edits.fetch_add(1, Ordering::SeqCst);
+                    index += 1;
+                    thread::sleep(Duration::from_millis(5));
+                }
+            });
+            let reads = scope.spawn(|| {
+                let mut refused = Vec::new();
+                while !stop.load(Ordering::SeqCst) {
+                    if let Err(refusal) = host.begin_read(&name) {
+                        refused.push(refusal);
+                    }
+                }
+                refused
+            });
+            wait_for_edits(20);
+
+            fs::write(
+                f.vault().join(".norn/schema.yaml"),
+                "version: 1\nfields:\n  created:\n    type: date\n",
+            )
+            .unwrap();
+            let (sent, answer) = std::sync::mpsc::channel();
+            let reloading = &host;
+            let reloaded = &name;
+            scope.spawn(move || {
+                let _ = sent.send(reloading.reload(reloaded));
+            });
+            let answered = answer.recv_timeout(lifecycle_budget().work());
+            // The stream goes on past the answer, so the answer did not wait
+            // for the vault to fall quiet.
+            if answered.is_ok() {
+                let at_the_answer = edits.load(Ordering::SeqCst);
+                wait_for_edits(at_the_answer + 20);
+            }
+            stop.store(true, Ordering::SeqCst);
+            let judgment = answered
+                .expect("the schema reload did not answer while the edits kept arriving")
+                .expect("the schema reload was refused");
+            assert_eq!(judgment.outcome, ReloadOutcome::SchemaChanged);
+            reads.join().unwrap()
+        });
+        assert!(
+            refused.is_empty(),
+            "reads beside the schema reload were refused: {refused:?}"
+        );
+
+        // The stream's last batch arrives some while after its last write,
+        // so `Ready` alone may still stand from before it.
+        let database = ConfigDirs::new(f.root.join("config"), f.root.join("data"))
+            .unwrap()
+            .derived_dir(&name)
+            .join("store.sqlite3");
+        let on_disk = |index: usize| {
+            let bytes = fs::read(stream.join(format!("note-{index}.md"))).unwrap();
+            Some(norn_fs::ContentHash::of(&bytes).to_string())
+        };
+        wait_until(
+            "the store to hold the stream's last bytes",
+            lifecycle_budget(),
+            || {
+                if host.state(&name) != answered(norn_wire::TrustState::Ready) {
+                    return Observed::Pending("the entry is not Ready".into());
+                }
+                let mut store =
+                    Store::open(&database, proven_order(&f), crate::DERIVATION_VERSION).unwrap();
+                let held = stored_hashes(&mut store);
+                let behind = (0..4).find(|&index| {
+                    let path = format!("stream/note-{index}.md");
+                    !held
+                        .iter()
+                        .any(|(at, hash)| at == &path && *hash == on_disk(index))
+                });
+                match behind {
+                    None => Observed::Met(()),
+                    Some(index) => Observed::Pending(format!("note-{index} holds older bytes")),
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+        drop(lease);
+        drop(host);
+
+        let mut reloaded =
+            Store::open(&database, proven_order(&f), crate::DERIVATION_VERSION).unwrap();
+        let from_zero_dirs = ConfigDirs::new(
+            f.root.join("from-zero-config"),
+            f.root.join("from-zero-data"),
+        )
+        .unwrap();
+        let from_zero_ops =
+            ProductionEntryOps::new(from_zero_dirs, ProductionPolicy::new(2, 2).unwrap());
+        let mut built = from_zero_ops
+            .attach(&f.registration(), &ProgressReporter::disconnected())
+            .unwrap();
+        assert_eq!(
+            stored_hashes(&mut reloaded),
+            stored_hashes(&mut built.store),
+            "the reloaded store holds rows a build from zero does not"
+        );
+        assert_eq!(
+            every_finding(&mut reloaded),
+            every_finding(&mut built.store),
+            "the reloaded store holds findings a build from zero does not"
+        );
+        assert!(
+            every_finding(&mut built.store)
+                .iter()
+                .any(|(path, _, _)| path == "dated.md"),
+            "the build from zero found nothing under the new schema, so the comparison proves nothing"
+        );
+        from_zero_ops.detach(&name, built);
+    }
+
     #[test]
     fn schema_reload_revalidates_lane_one_before_it_returns_ready() {
         let f = Fixture::new("schema-reload");
