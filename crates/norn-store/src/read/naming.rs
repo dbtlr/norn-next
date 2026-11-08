@@ -380,11 +380,17 @@ impl Snapshot {
 /// compiled once, and the ranges [`FindStatement::CandidateSuffixes`] reads
 /// them through: the one way a candidate's minimal disambiguating suffix is
 /// found, whichever connection the statement runs on.
+///
+/// Candidates of one class share their shorter spellings, so each distinct
+/// spelling is compiled and read once, however many candidates spell it:
+/// what the statement answers for a spelling depends on the spelling alone.
 pub(crate) struct SuffixSpellings {
-    /// Each candidate's id, one of its spellings, and the class it opens, in
-    /// the order the candidate's spellings run.
-    spelled: Vec<(i64, String, TargetClass)>,
-    /// The index in `spelled` of the spelling each range of the statement
+    /// Each distinct spelling of the candidates, and the class it opens.
+    spellings: Vec<(String, TargetClass)>,
+    /// Each candidate's id and the index in `spellings` of one of its
+    /// spellings, in the order the candidate's spellings run.
+    spelled: Vec<(i64, usize)>,
+    /// The index in `spellings` of the spelling each range of the statement
     /// belongs to.
     owners: Vec<usize>,
 }
@@ -396,29 +402,49 @@ impl SuffixSpellings {
         named: &BTreeMap<i64, &str>,
         ignore: &AmbiguityIgnore,
     ) -> Result<Self, StoreError> {
-        let mut spelled: Vec<(i64, String, TargetClass)> = Vec::new();
+        let mut spellings: Vec<(String, TargetClass)> = Vec::new();
+        // A spelling no class compiles from is refused for every candidate
+        // that spells it, and is no spelling of any of them.
+        let mut compiled: HashMap<String, Option<usize>> = HashMap::new();
+        let mut spelled: Vec<(i64, usize)> = Vec::new();
         for (document, path) in named {
             for spelling in DocumentPath::new(path)?.suffix_spellings() {
-                if let Ok(class) = TargetClass::compile(&spelling, ignore) {
-                    spelled.push((*document, spelling, class));
+                let at = match compiled.get(&spelling) {
+                    Some(at) => *at,
+                    None => {
+                        let at = TargetClass::compile(&spelling, ignore).ok().map(|class| {
+                            spellings.push((spelling.clone(), class));
+                            spellings.len() - 1
+                        });
+                        compiled.insert(spelling, at);
+                        at
+                    }
+                };
+                if let Some(at) = at {
+                    spelled.push((*document, at));
                 }
             }
         }
-        let owners = spelled
+        let owners = spellings
             .iter()
             .enumerate()
-            .flat_map(|(at, (_, _, class))| class.probe().ranges().map(move |_| at))
+            .flat_map(|(at, (_, class))| class.probe().ranges().map(move |_| at))
             .collect();
-        Ok(SuffixSpellings { spelled, owners })
+        Ok(SuffixSpellings {
+            spellings,
+            spelled,
+            owners,
+        })
     }
 
     /// The statement that reads at most two documents of each range of each
-    /// spelling's class, each row the range's index and a document's id.
+    /// distinct spelling's class, each row the range's index and a
+    /// document's id.
     pub(crate) fn statement(&self) -> Result<(String, Vec<Value>), StoreError> {
         let ranges: Vec<SpellingRange<'_>> = self
-            .spelled
+            .spellings
             .iter()
-            .flat_map(|(_, spelling, class)| {
+            .flat_map(|(spelling, class)| {
                 let segments = spelling.split('/').count();
                 let exact_keys: Vec<&str> =
                     class.probe().ranges().map(|(lower, _)| lower).collect();
@@ -443,11 +469,14 @@ impl SuffixSpellings {
     /// candidate's suffix only where it changes one of them.
     pub(crate) fn naming_classes(&self) -> HashMap<i64, BTreeSet<ClassKey>> {
         let mut classes: HashMap<i64, BTreeSet<ClassKey>> = HashMap::new();
-        for (document, _, class) in &self.spelled {
-            classes
-                .entry(*document)
-                .or_default()
-                .extend(class.class_keys().iter().map(ClassKey::leading));
+        for (document, at) in &self.spelled {
+            classes.entry(*document).or_default().extend(
+                self.spellings[*at]
+                    .1
+                    .class_keys()
+                    .iter()
+                    .map(ClassKey::leading),
+            );
         }
         classes
     }
@@ -459,7 +488,7 @@ impl SuffixSpellings {
         self,
         rows: Vec<(usize, i64)>,
     ) -> Result<HashMap<i64, String>, StoreError> {
-        let mut members: Vec<BTreeSet<i64>> = vec![BTreeSet::new(); self.spelled.len()];
+        let mut members: Vec<BTreeSet<i64>> = vec![BTreeSet::new(); self.spellings.len()];
         for (range, document) in rows {
             let owner = self.owners.get(range).ok_or_else(|| StoreError::Damaged {
                 what: format!("a suffix read answered a range it was not asked, {range}"),
@@ -467,9 +496,11 @@ impl SuffixSpellings {
             members[*owner].insert(document);
         }
         let mut suffixes: HashMap<i64, String> = HashMap::new();
-        for ((document, spelling, _), members) in self.spelled.into_iter().zip(members) {
-            if members.len() == 1 && members.contains(&document) {
-                suffixes.entry(document).or_insert(spelling);
+        for (document, at) in self.spelled {
+            if members[at].len() == 1 && members[at].contains(&document) {
+                suffixes
+                    .entry(document)
+                    .or_insert_with(|| self.spellings[at].0.clone());
             }
         }
         Ok(suffixes)
@@ -481,4 +512,49 @@ pub(crate) fn wire_path(path: &str) -> Result<norn_wire::DocumentPath, StoreErro
     norn_wire::DocumentPath::new(path).map_err(|problem| StoreError::Damaged {
         what: format!("`documents.path` holds no document path: {problem}"),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use norn_db::rusqlite::types::Value;
+
+    use super::SuffixSpellings;
+    use crate::resolve::AmbiguityIgnore;
+
+    /// How many ranges the suffix statement reads to name `paths`.
+    fn ranges_read(paths: &[String]) -> usize {
+        let named: BTreeMap<i64, &str> = (1..).zip(paths.iter().map(String::as_str)).collect();
+        let spellings =
+            SuffixSpellings::new(&named, &AmbiguityIgnore::none()).expect("the candidates spell");
+        let (_, values) = spellings.statement().expect("the suffix statement");
+        let [Value::Text(listed)] = &values[..] else {
+            panic!("the suffix statement binds its ranges as one list: {values:?}");
+        };
+        serde_json::from_str::<Vec<serde_json::Value>>(listed)
+            .expect("the ranges are a JSON list")
+            .len()
+    }
+
+    /// **Candidates read the spellings they share once.** Each of
+    /// `dN/hub.md` spells `hub` and `hub.md`, three ranges between them,
+    /// which every candidate of the class shares, and `dN/hub` and
+    /// `dN/hub.md`, three more of its own. So naming one candidate reads six
+    /// ranges, and each candidate more reads three: the ranges that tell it
+    /// apart, never again the ones its class shares.
+    #[test]
+    fn candidates_read_the_spellings_they_share_once() {
+        let candidates = |count: usize| -> Vec<String> {
+            (0..count).map(|at| format!("d{at}/hub.md")).collect()
+        };
+        assert_eq!(ranges_read(&candidates(1)), 6);
+        assert_eq!(ranges_read(&candidates(2)), 9);
+        assert_eq!(ranges_read(&candidates(5)), 18);
+        // Candidates that share no spelling read every range of their own.
+        assert_eq!(
+            ranges_read(&["a/one.md".to_string(), "b/two.md".to_string()]),
+            12
+        );
+    }
 }
