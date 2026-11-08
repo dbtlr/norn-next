@@ -1603,6 +1603,67 @@ fn a_read_that_met_the_activation_answers_once_the_next_intake_derives_the_end_d
     drop((lease, host));
 }
 
+/// **A schema activation that unwound after closing the reader leaves no wait
+/// behind it**: once the vault is attached again, a read meeting it while it
+/// settles an edit answers at the turn that derives that edit, under the
+/// healing that still stands, not at `Ready` or its bound.
+#[test]
+fn a_read_after_a_schema_activation_unwound_answers_at_the_turn_that_derives_its_edit() {
+    let ops = Arc::new(FakeOps::default());
+    let (host, name, lease) = a_ready_vault(&ops);
+    ops.reload_schema_changed.store(true, Ordering::SeqCst);
+    ops.panic_in_schema_reload.store(true, Ordering::SeqCst);
+    assert_eq!(
+        host.reload(&name),
+        Err(ReloadRefusal::Unreported(Demand::State(unwound(
+            SCHEMA_RELOAD_PANIC
+        ))))
+    );
+    ops.panic_in_schema_reload.store(false, Ordering::SeqCst);
+    drop(host.demand(&name).unwrap());
+    wait_for_state(&host, &name, TrustState::Ready);
+    wait_for_a_quiet_entry(&host, &name);
+    {
+        let entry = host.shared.entries.get(&name).unwrap();
+        let state = entry.gate.lock().unwrap();
+        assert!(
+            state.reload_replacing_at.is_some(),
+            "the unwound activation left no record, so this case no longer reaches \
+             the state it guards"
+        );
+    }
+
+    hold_a_settling_turn(&host, &ops, &name);
+    let held_turn = ops.reconciles.load(Ordering::SeqCst);
+    let before = host.read_evidence();
+    thread::scope(|scope| {
+        let reading = scope.spawn(|| host.begin_read(&name));
+        wait_for_settle_waits(&host, before, 1);
+
+        // Facts keep arriving at every drain, and every turn after the held
+        // one is held too, so the entry is still healing when the held turn
+        // commits the edit the read met.
+        arrange_for(&ops.continuous_fact_handoff_for, &name);
+        ops.hold_reconciles_from
+            .store(held_turn + 1, Ordering::SeqCst);
+        ops.reconcile_release.store(true, Ordering::SeqCst);
+        let hold = reading
+            .join()
+            .expect("the read finished")
+            .expect("a read whose edit was derived was refused");
+        assert_eq!(
+            hold.reading().published(),
+            &Demand::State(healing()),
+            "the read waited past the turn that derived its edit"
+        );
+        drop(hold);
+        *ops.continuous_fact_handoff_for.lock().unwrap() = None;
+        ops.later_reconcile_release.store(true, Ordering::SeqCst);
+    });
+    wait_for_state(&host, &name, TrustState::Ready);
+    drop((lease, host));
+}
+
 /// **A schema-changing reload over a quiet vault answers with `Ready`**, from
 /// a pool installed in place of the one its activation closed.
 #[test]

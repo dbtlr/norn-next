@@ -1757,10 +1757,11 @@ enum ReadStance {
 /// entry's read stance, how far its reconciles have derived the facts it has
 /// taken in, and whether a reader stands. A committed turn moves the second
 /// while the first stands at settle, and a waiting read whose facts that turn
-/// derived answers from it. A schema-changing activation's leg moves the
-/// third as it installs the new pool over a settling entry, so a read whose
-/// facts the activation derived answers from that pool as the leg ends, not
-/// at the next commit.
+/// derived answers from it. The third moves whenever the entry closes or
+/// installs a reader. The move a waiting read needs is a schema-changing
+/// activation's leg installing the new pool over a settling entry, so a read
+/// whose facts the activation derived answers from that pool as the leg ends,
+/// not at the next commit; a close wakes a read that then answers nothing.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ReadStanding {
     stance: ReadStance,
@@ -2492,9 +2493,15 @@ impl<A: SnapshotSource> EntryState<A> {
     ///
     /// It is the activation's closed slot, not any empty slot: a settling
     /// entry whose mint failed has no end drain to wait for, and its reads
-    /// keep the ordinary rule. The epoch is read with the record because a leg
-    /// that unwinds leaves its record behind, and the invalidation that
-    /// answers the unwind moves the entry past it.
+    /// keep the ordinary rule.
+    ///
+    /// The epoch is read with the record because an activation that unwinds
+    /// after it began, a panic inside its derivation, leaves its record
+    /// behind: only a reload leg's end clears it, and the invalidation that
+    /// answers the unwind moves the entry past it instead. Without the epoch,
+    /// every settling read after the entry attaches again would wait for an
+    /// end drain no leg will take, answering only at `Ready` or its bound,
+    /// until the next reload leg ends.
     fn activation_replaces_the_reader(&self) -> bool {
         self.reload_replacing_at
             .is_some_and(|leg| self.claim.stands_at(leg))
@@ -2508,9 +2515,11 @@ impl<A: SnapshotSource> EntryState<A> {
     /// through, where it holds a reader: every fact the entry knew of when
     /// the read met it is committed, so the snapshot established now is not
     /// the state before the change, whatever arrived after it. An entry
-    /// holding no reader — a schema-changing activation closed it — answers
-    /// nothing until the activation's leg installs the new pool as it ends,
-    /// `Ready` or healing. Every other entry answers nothing.
+    /// holding no reader answers nothing, whichever emptied the slot: a
+    /// schema-changing activation that closed it, until the activation's leg
+    /// installs the new pool as it ends, `Ready` or healing; or a mint that
+    /// failed, until a later publication mints one or the entry serves and
+    /// the read mints for itself. Every other entry answers nothing.
     fn answers_a_read(&self, met_at: Option<u64>) -> bool {
         match self.read_stance() {
             ReadStance::Serve => true,
@@ -9395,8 +9404,12 @@ enum ReloadLegEnd<'entry, A: SnapshotSource> {
 }
 
 /// Bring a reload-shaped leg's work back under the gate: give back its pin,
-/// clear the record of a replacement it began, and end the leg where it no
-/// longer stands over the entry.
+/// clear the record of a replacement, and end the leg where it no longer
+/// stands over the entry.
+///
+/// The record cleared is the one this leg began, or a stale one an earlier
+/// leg left at an older epoch when it unwound before reaching its own end;
+/// only the first tells this leg it was replacing the derived state.
 ///
 /// The claim this leg ran under may have been taken away while it ran, so the
 /// work it did is not what stands over the entry any more; or a release may
@@ -10849,6 +10862,10 @@ mod tests {
         panic_in_reconcile: std::sync::atomic::AtomicBool,
         panic_in_recover: std::sync::atomic::AtomicBool,
         panic_in_reload: std::sync::atomic::AtomicBool,
+        /// Whether a schema-changing reload panics once it has begun replacing
+        /// the derived state, as a derivation that unwinds mid-activation
+        /// does: the leg's record of that replacement is left behind.
+        panic_in_schema_reload: std::sync::atomic::AtomicBool,
         panic_in_judge_reload: std::sync::atomic::AtomicBool,
         /// Whether every maintenance leg panics once its block, if any, is
         /// released.
@@ -11023,6 +11040,7 @@ mod tests {
     const POLL_PANIC: &str = "the fake poll unwound";
     const DETACH_PANIC: &str = "the fake detach unwound";
     const RELOAD_PANIC: &str = "the fake reload unwound";
+    const SCHEMA_RELOAD_PANIC: &str = "the fake schema activation unwound";
     const JUDGE_RELOAD_PANIC: &str = "the fake reload judgment unwound";
     const MAINTENANCE_PANIC: &str = "the fake maintenance unwound";
     const RETIRE_PANIC: &str = "the fake retirement unwound";
@@ -11367,6 +11385,9 @@ mod tests {
             }
             if self.reload_schema_changed.load(Ordering::SeqCst) {
                 progress.begin_schema_reload();
+                if self.panic_in_schema_reload.load(Ordering::SeqCst) {
+                    panic!("{SCHEMA_RELOAD_PANIC}");
+                }
                 if self.block_schema_reload.load(Ordering::SeqCst) {
                     self.reload_started.store(true, Ordering::SeqCst);
                     wait_for_release("reload_release", &self.reload_release);
