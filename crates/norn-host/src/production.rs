@@ -8772,6 +8772,9 @@ mod tests {
             },
         )
         .unwrap();
+        // FSEvents can deliver the fixture's own writes after the watch's
+        // history marker, as a batch the reload's end drain would meet.
+        norn_fs::watch::settle_prior_changes(f.root.root(), lifecycle_budget().work()).unwrap();
         let lease = host.demand(&name).unwrap();
         wait_state(&host, &name, norn_wire::TrustState::Ready);
         let before = host.inspect(&name).unwrap().active_fingerprints.unwrap();
@@ -8782,10 +8785,14 @@ mod tests {
         )
         .unwrap();
         host.reload(&name).expect("the schema reload");
+        // A schema reload answers as its activation leg ends, and is `Ready`
+        // only where its end drain left nothing: the watcher's own report of
+        // the schema write can land after the candidate was read, and an
+        // ordinary reconcile takes it in.
+        wait_state(&host, &name, norn_wire::TrustState::Ready);
 
         let inspection = host.inspect(&name).unwrap();
         let after = inspection.active_fingerprints.unwrap();
-        assert_eq!(inspection.trust, norn_wire::TrustState::Ready);
         assert_ne!(before.schema, after.schema);
         assert_eq!(before.config, after.config);
         drop(lease);
