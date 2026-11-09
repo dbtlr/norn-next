@@ -449,8 +449,9 @@ pub struct ExitBar {
 /// writing through its plan, `plan-` for previewing and applying a write plan
 /// through a live hold, `soak-host-` for the host under a
 /// long mixed load, `soak-settle-` for how long churn takes to settle,
-/// `generator-` for generating a fixture tree, and `text-` for parsing
-/// document text.
+/// `generator-` for generating a fixture tree, `text-` for parsing document
+/// text, `walk-` for walking a vault's tree, and `count-` for a store's
+/// retained count results.
 pub const NAMED_EXIT_BARS: &[ExitBar] = &[
     ExitBar {
         name: "attach-peak-rss-over-null-ceiling",
@@ -680,6 +681,26 @@ pub const NAMED_EXIT_BARS: &[ExitBar] = &[
     ExitBar {
         name: "text-bound-parse-ceiling",
         authored_at: "crates/norn-text/tests/baselines/mod.rs::BOUND_PARSE_CEILING",
+        armed: true,
+    },
+    ExitBar {
+        name: "walk-realistic-peak-rss-ceiling",
+        authored_at: "crates/norn-fs/tests/baselines/mod.rs::REALISTIC_PEAK_RSS_CEILING_BYTES",
+        armed: true,
+    },
+    ExitBar {
+        name: "walk-realistic-to-ambiguous-peak-rss-ratio",
+        authored_at: "crates/norn-fs/tests/baselines/mod.rs::REALISTIC_TO_AMBIGUOUS_PEAK_RSS_PER_MILLE",
+        armed: true,
+    },
+    ExitBar {
+        name: "count-peak-rss-ceiling",
+        authored_at: "crates/norn-store/tests/baselines/mod.rs::MEMORY_CEILING",
+        armed: true,
+    },
+    ExitBar {
+        name: "count-peak-rss-growth-allowance",
+        authored_at: "crates/norn-store/tests/baselines/mod.rs::MEMORY_GROWTH",
         armed: true,
     },
 ];

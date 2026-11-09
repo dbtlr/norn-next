@@ -389,6 +389,15 @@ pub const MANIFEST_FILES: &[ManifestFile] = &[
               against",
     },
     ManifestFile {
+        path: "crates/norn-fs/tests/baselines/mod.rs",
+        why: "the walker's recorded readings, which its memory suite fails a peak past",
+    },
+    ManifestFile {
+        path: "crates/norn-store/tests/baselines/mod.rs",
+        why: "the store's recorded readings, which its retained-count memory suite fails a peak \
+              or a growth past",
+    },
+    ManifestFile {
         path: "crates/norn-host/tests/baselines/mod.rs",
         why: "the host's recorded readings — the attach memory ceilings and ratios a lane step \
               fails against",
