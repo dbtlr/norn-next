@@ -739,7 +739,7 @@ marks the folder instead — and a reading that reaches no spelling while a fold
 nothing, so the place keeps what it holds until the folder reads again. A walk rooted below an unrendered ancestor that a real
 folder's own marker-carrying name puts above it concludes nothing at the places there either, so the
 leg reads those places the same way: its own place where a mark stands, and the places beneath it
-found from the spelling findings and marks standing there. **The content finding is the exception**: it is filed only at a spelling the
+found from the spelling findings and marks standing there. A scoped merge or prune rooted there (`heal_subtree`) still acts on part of such a place: it files only the spellings it walked, and its first record replaces the place's spelling side, which may drop a colliding refused sibling's finding (not confirmed by a test) until the next vault heal — an accepted limitation. **The content finding is the exception**: it is filed only at a spelling the
 document grammar admits, which renders onto itself, so it is about the one file spelled as its place
 is. A walk whose scope reaches that spelling, withheld nothing over it and filed no content finding
 there, because it found the document gone, ends the content finding there and no other, so a deleted document whose own name or folder carries the marker converges at
