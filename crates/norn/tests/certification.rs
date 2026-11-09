@@ -1761,6 +1761,7 @@ fn assert_complete_active_matrix(workflow: &str, full: bool) {
             "architecture gate",
             &[
                 ".github/scripts/flake-tripwire.sh cargo test --locked -p norn-testkit --test architecture",
+                ".github/scripts/flake-tripwire.sh cargo test --locked -p norn-testkit --test shards",
             ],
         ),
         (
