@@ -1258,6 +1258,202 @@ fn admitted_sort(plan: &QueryPlan, normalized_sql: &str, sort: &PlanRow) -> Opti
     }
 }
 
+const ADMITTED_RUN: &str = "SEARCH dl USING INDEX documents_admitted_suffix_key \
+     (admitting_segments=? AND suffix_key>? AND suffix_key<?)";
+const COUNT_ONLY_RUN: &str =
+    "SEARCH dl USING INDEX documents_admitted_suffix_key (admitting_segments=?)";
+const CHANGE_FEED_SEARCH: &str = "SEARCH documents USING INDEX documents_change_feed (path>?)";
+const PATH_SEARCH: &str = "SEARCH documents USING INDEX documents_path (path>?)";
+const SOURCE_CO_ROUTINE: &str = "CO-ROUTINE dv";
+const MATCHED_SEARCH: &str = "SEARCH dv USING INTEGER PRIMARY KEY (rowid=?)";
+
+const ORDER_BY: &str = "USE TEMP B-TREE FOR ORDER BY";
+const LAST_TERM: &str = "USE TEMP B-TREE FOR LAST TERM OF ORDER BY";
+const LAST_TWO_TERMS: &str = "USE TEMP B-TREE FOR LAST 2 TERMS OF ORDER BY";
+const DISTINCT: &str = "USE TEMP B-TREE FOR DISTINCT";
+const GROUP_BY: &str = "USE TEMP B-TREE FOR GROUP BY";
+
+const HEALTH_HEAD: &str = "SELECT 0, j.key, dc.id, dc.path, dc.x FROM t";
+const SUFFIX_HEAD: &str = "SELECT j.key, m.value FROM json_each(?1) AS j CROSS JOIN json_each((x";
+const CLASS_HEAD: &str = "SELECT dr.id, dr.path FROM (x";
+const COUNT: &str = "SELECT count(*) <= ?1 FROM (x";
+const PAGE: &str = "SELECT f.id, f.kind, f.severity, f.path, f.x FROM t";
+const SUMMARY: &str = "SELECT f.kind, f.severity, COUNT(*) FROM t";
+const OTHER: &str = "SELECT a, b FROM t";
+
+/// One constructed input to [`admitted_sort`]: the admission the row guards,
+/// the statement it opens with, the other plan rows around the sort, the sort,
+/// and the admission it must get (`None` for a refusal).
+type SortCase = (
+    &'static str,
+    &'static str,
+    &'static [&'static str],
+    &'static str,
+    Option<&'static str>,
+);
+
+/// Each admission in [`admitted_sort`] answers its own shape and refuses its
+/// neighbours: the other statements' select lists and the other sort details.
+/// The census only asserts that every observed sort is admitted, so a widened
+/// admission would pass it; these constructed inputs pin the refusals, and the
+/// exact admission each accepted row gets pins which arm took it (the head
+/// select lists share one arm, so widening one to the other changes nothing,
+/// but widening either to the class head's select list changes the answer).
+#[test]
+fn admitted_sort_refuses_the_shape_outside_each_admission() {
+    const HEADS: Option<&str> = Some("bounded admitted-run heads");
+    const RUNS: &[&str] = &[ADMITTED_RUN];
+    const BARE_RUN: &[&str] = &[COUNT_ONLY_RUN];
+    const SOURCED: &[&str] = &[SOURCE_CO_ROUTINE];
+    const MATCHED: &[&str] = &[MATCHED_SEARCH];
+    const SOURCED_AND_MATCHED: &[&str] = &[SOURCE_CO_ROUTINE, MATCHED_SEARCH];
+    const FEED: &[&str] = &[CHANGE_FEED_SEARCH];
+    const NONE: &[&str] = &[];
+    let cases: &[SortCase] = &[
+        // Each admission answers its own shape.
+        ("health head", HEALTH_HEAD, RUNS, ORDER_BY, HEADS),
+        ("suffix head", SUFFIX_HEAD, RUNS, ORDER_BY, HEADS),
+        (
+            "class head",
+            CLASS_HEAD,
+            RUNS,
+            ORDER_BY,
+            Some("a class's head"),
+        ),
+        ("count", COUNT, NONE, DISTINCT, Some("a part's count")),
+        (
+            "written links",
+            OTHER,
+            FEED,
+            LAST_TERM,
+            Some("LinkHealthWrittenLinks"),
+        ),
+        (
+            "sourced page",
+            PAGE,
+            SOURCED,
+            LAST_TWO_TERMS,
+            Some("one document's findings on a page a part's source drives"),
+        ),
+        (
+            "matched page",
+            PAGE,
+            MATCHED,
+            ORDER_BY,
+            Some("a page the documents a part matched drive"),
+        ),
+        (
+            "summary",
+            SUMMARY,
+            MATCHED,
+            GROUP_BY,
+            Some("a summary a document part drives"),
+        ),
+        // The head admissions: their select lists, their runs, their sort.
+        (
+            "health head: sort detail",
+            HEALTH_HEAD,
+            RUNS,
+            DISTINCT,
+            None,
+        ),
+        (
+            "health head: sort detail",
+            HEALTH_HEAD,
+            RUNS,
+            GROUP_BY,
+            None,
+        ),
+        (
+            "health head: sort detail",
+            HEALTH_HEAD,
+            RUNS,
+            LAST_TWO_TERMS,
+            None,
+        ),
+        ("health head: runs", HEALTH_HEAD, NONE, ORDER_BY, None),
+        ("health head: bounds", HEALTH_HEAD, BARE_RUN, ORDER_BY, None),
+        (
+            "suffix head: sort detail",
+            SUFFIX_HEAD,
+            RUNS,
+            DISTINCT,
+            None,
+        ),
+        ("suffix head: runs", SUFFIX_HEAD, NONE, ORDER_BY, None),
+        ("heads: other select list", OTHER, RUNS, ORDER_BY, None),
+        ("heads: count select list", COUNT, RUNS, ORDER_BY, None),
+        ("heads: page select list", PAGE, RUNS, ORDER_BY, None),
+        ("class head: sort detail", CLASS_HEAD, RUNS, DISTINCT, None),
+        ("class head: runs", CLASS_HEAD, NONE, ORDER_BY, None),
+        ("class head: bounds", CLASS_HEAD, BARE_RUN, ORDER_BY, None),
+        // The count admission: only a count's DISTINCT.
+        ("count: sort detail", COUNT, RUNS, GROUP_BY, None),
+        ("count: sort detail", COUNT, RUNS, LAST_TERM, None),
+        ("count: class head", CLASS_HEAD, RUNS, DISTINCT, None),
+        ("count: health head", HEALTH_HEAD, RUNS, DISTINCT, None),
+        ("count: suffix head", SUFFIX_HEAD, RUNS, DISTINCT, None),
+        ("count: page", PAGE, MATCHED, DISTINCT, None),
+        ("count: other select list", OTHER, RUNS, DISTINCT, None),
+        // Written links: the change-feed search is the whole bound.
+        ("written links: change feed", OTHER, NONE, LAST_TERM, None),
+        (
+            "written links: change feed",
+            OTHER,
+            &[PATH_SEARCH],
+            LAST_TERM,
+            None,
+        ),
+        ("written links: sort detail", OTHER, FEED, ORDER_BY, None),
+        // The page admissions: the page select list and who drives it.
+        (
+            "sourced page: select list",
+            OTHER,
+            SOURCED,
+            LAST_TWO_TERMS,
+            None,
+        ),
+        ("sourced page: source", PAGE, NONE, LAST_TWO_TERMS, None),
+        ("sourced page: source", PAGE, MATCHED, LAST_TWO_TERMS, None),
+        ("sourced page: sort detail", PAGE, SOURCED, DISTINCT, None),
+        ("matched page: select list", OTHER, MATCHED, ORDER_BY, None),
+        ("matched page: matched", PAGE, NONE, ORDER_BY, None),
+        (
+            "matched page: sourced",
+            PAGE,
+            SOURCED_AND_MATCHED,
+            ORDER_BY,
+            None,
+        ),
+        ("matched page: sort detail", PAGE, MATCHED, LAST_TERM, None),
+        // The summary admission: a summary select list and a matched part.
+        ("summary: select list", OTHER, MATCHED, GROUP_BY, None),
+        ("summary: select list", PAGE, MATCHED, GROUP_BY, None),
+        ("summary: matched", SUMMARY, NONE, GROUP_BY, None),
+        ("summary: sort detail", SUMMARY, MATCHED, ORDER_BY, None),
+        ("summary: sort detail", SUMMARY, MATCHED, DISTINCT, None),
+    ];
+    let wrong: Vec<String> = cases
+        .iter()
+        .filter_map(|&(guards, sql, around, sort, admitted)| {
+            let mut rows: Vec<PlanRow> = (1..)
+                .zip(around)
+                .map(|(id, detail)| PlanRow::new(id, 0, (*detail).to_string()))
+                .collect();
+            let sort_row = PlanRow::new(100, 0, sort.to_string());
+            rows.push(sort_row.clone());
+            let plan = QueryPlan::new(sql, rows);
+            let got = admitted_sort(&plan, &normalized(sql), &sort_row);
+            (got != admitted).then(|| {
+                format!(
+                    "{guards}: {sql} with {around:?} and {sort:?} got {got:?}, wanted {admitted:?}"
+                )
+            })
+        })
+        .collect();
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
 /// The statement whose bound admits `scan` of a whole relation in `plan`;
 /// `None` for a scan nothing admits.
 ///
