@@ -255,6 +255,8 @@ jobs:
   # local crate the workspace does not hold as a member; and it holds the
   # invariant-to-mechanism mapping to the boundary lints configured in
   # clippy.toml. The lints themselves bind in the lint job, where clippy runs.
+  # The shard certification beside it holds the two package-shard jobs above to
+  # building every package's tests with the whole-workspace feature set.
   #
   # It also lints the workflows themselves with actionlint, whose image carries
   # shellcheck for every `run:` script: an unknown runner label, a bad
@@ -277,3 +279,5 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Gate
         run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-testkit --test architecture
+      - name: Shard certification
+        run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-testkit --test shards

@@ -139,6 +139,7 @@ pub mod readings;
 pub mod regression;
 pub mod scale;
 pub mod scratch;
+pub mod shards;
 pub mod volume;
 pub mod wait;
 pub mod work;

@@ -14,7 +14,12 @@ except `norn-host` and `norn-testkit`) and
 Their package lists must match exactly, so new crates join the catch-all and
 every package's doctests run exactly once through ordinary `cargo test`.
 The shard pair preserves whole-workspace test membership, and each shard builds
-tests with the whole-workspace feature set.
+tests with the whole-workspace feature set. The architecture job enforces both
+claims with `cargo test -p norn-testkit --test shards`: it reads each shard's
+selection from `ci.yml`, resolves features with `cargo tree` (normal,
+development and build edges, host target) for the whole workspace and for each
+shard, and fails naming the package and feature when a shard builds a package
+with a different feature set, or when the shards do not partition the workspace.
 The whole feature-enabled
 `norn-host` package runs in `host functional (induced-failure)`, so current and
 future ordinary targets and cases join PR coverage automatically.
@@ -26,7 +31,7 @@ future ordinary targets and cases join PR coverage automatically.
 | Lint and document | Format, all five clippy contexts, performance-harness unit tests, denied-warning rustdoc |
 | Host functional (induced-failure) | Complete ordinary feature-enabled host suite, including churn and rolling-heal correctness and work counters |
 | macOS platform | Embedding determinism, filesystem contracts, Obsidian parity, exact case-rename and unreadable-document/subtree cases, folding-root spelling bar |
-| Architecture | Actionlint and the architecture gate |
+| Architecture | Actionlint, the architecture gate and the shard certification |
 
 `regression.yml` runs the complete seven-job matrix at 02:17 UTC daily and by
 manual dispatch. Its `full ` job names retain the build, induced-failure,
