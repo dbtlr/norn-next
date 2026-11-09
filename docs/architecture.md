@@ -3002,7 +3002,10 @@ is deleted pins the empty declaration, while a missing explicit `schema_source` 
 error. A schema whose
 declaration this build cannot read — a later grammar version, a key the grammar does not
 hold — is one of those errors: the vault is already serving a declaration it can read, and
-replacing it with one nothing reads would take that away. A successful candidate clears that
+replacing it with one nothing reads would take that away. So is a schema the store refuses
+to pin: the pin is one transaction, so the store goes on pinning the declaration served, and
+the activation, which retired the entry's pool before it pinned, mints the pool again over
+that declaration as its leg ends, with trust unbroken. A successful candidate clears that
 error. A dry run is admitted and run as a reload is, holding the entry while it reads, and
 judges the same candidate the same way. A dry run that completes activates nothing and records
 nothing about the candidate — no active fingerprint, retained error or config delivery. A
@@ -3347,7 +3350,8 @@ at its activation and retires the entry's pool until its leg ends, and that walk
 whole vault, which converges inside the leg before it installs another pool, so no read
 observes a column the walk has half refilled. An activation that fails after its re-pin
 withdraws trust and owes the recovery or the rebuild before any pool it leaves stands, so no read is served
-from that column either.
+from that column either. A re-pin the store refuses clears nothing, so the pool its leg mints
+again reads the column whole.
 The fold, the tag a value row names under a tag key — the `tags` carrier, declared or not,
 or a key declared `tags` — its `#` marker dropped and the tag fold applied, or the link a
 value row is under a key declared `link`, its alias dropped, read by the schema's link
