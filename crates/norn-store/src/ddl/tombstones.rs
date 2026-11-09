@@ -8,32 +8,35 @@
 //!
 //! # Why a dead path is worth a row
 //!
-//! **Ordering, against a filesystem that reports out of order.** A watcher may
-//! deliver a change for a path after the heal that pruned it, and a request may
-//! arrive between the two. Without a record, the late event finds no document
-//! and has to guess whether it is describing a file that is gone or a file
-//! nothing has derived yet — and the two want opposite responses. With one, the
-//! event compares its own hash and generation against the death and answers
-//! without racing anything.
+//! **The death feed.** A lane-2 consumer that read only the living would keep
+//! deriving from a path that is gone. The semantic engine retracts a dead
+//! path's rows by reading deaths, its census counts by them, and the host's
+//! search margin counts the deaths past the engine's watermark. See the feed
+//! section below.
 //!
-//! **Reasoning, for heal and doctor.** `provenance` says how the death was
-//! learned, and it is a closed vocabulary of four: a full tree heal that found
-//! the file absent, a watcher removal, an applied plan that deleted it, or a
-//! quarantine — a file that is **present** and yields no facts the store can
-//! represent. A vault losing documents to the wrong provenance is the shape of a
-//! defect that is otherwise invisible, which is why the column is checked
-//! against that vocabulary by [`crate::Store::verify_integrity`] rather than
-//! trusted, and why a quarantine is not spelled as one of the deaths that mean
-//! the path is gone.
+//! **Move-following evidence.** A document moved outside norn leaves a death
+//! at its old path and a live row holding the same bytes at its new one, and
+//! repair follows a broken link through that move by the death its address
+//! names. See [`crate::moved`].
+//!
+//! **Provenance, checked by verification.** `provenance` says how the death
+//! was learned, and it is a closed vocabulary of four: a full tree heal that
+//! found the file absent, a watcher removal, an applied plan that deleted it,
+//! or a quarantine — a file that is **present** and yields no facts the store
+//! can represent. A vault losing documents to the wrong provenance is the
+//! shape of a defect that is otherwise invisible, which is why the column is
+//! checked against that vocabulary by [`crate::Store::verify_integrity`]
+//! rather than trusted, and why a quarantine is not spelled as one of the
+//! deaths that mean the path is gone.
 //!
 //! # One row per path, holding the most recent death
 //!
-//! `path` is unique and a re-death replaces the row. The comparison a late
-//! event makes is against the *most recent* death, so keeping a history of
-//! deaths would mean every such comparison started with a `MAX(generation)`
-//! over rows nothing else reads.
+//! `path` is unique and a re-death replaces the row. Every reader wants the
+//! latest death and none wants a history: the feed delivers a path's death at
+//! the generation it was last recorded, and move-following pools deaths
+//! distinct by path.
 //!
-//! **A tombstone stands exactly while its path is dead.** The
+//! **A tombstone stands only while its path is dead.** The
 //! `tombstones_clear_on_derive` trigger removes the same-path tombstone when a
 //! document row is inserted — see [`crate::Change::Upsert`] — so at rest the
 //! two pillars are disjoint: a path holds a document row, or a tombstone, or
@@ -44,27 +47,37 @@
 //! live row means no tombstone stands to clear. [`crate::Store::verify_integrity`]
 //! checks the disjointness at rest rather than trusting the trigger.
 //!
-//! The clear loses nothing a late event needs, because the live row carries a
-//! newer generation and the current hash — a better comparison basis than the
-//! death it replaced. It also spends the death's provenance: the record of how
-//! a path died is deliberately present-tense, and a death the path recovered
-//! from is not retained for diagnosis. Retention for a path that dies and
-//! never comes back — when its tombstone has outlived the disorder it was
-//! recorded to survive — is not decided here.
+//! The clear loses nothing a reader needs: the live row reaches the feed at a
+//! newer generation, and a link naming the path is no longer broken, so
+//! move-following has no link there to start from. It also spends the death's provenance:
+//! the record of how a path died is deliberately present-tense, and a death
+//! the path recovered from is not retained for diagnosis.
+//!
+//! **A death that never comes back is kept only while a reader needs it**
+//! ([ADR 0052]).
+//! It stands while the vault's semantic engine or its census has not read
+//! past it in the death feed, or while a link holding a current broken-link
+//! finding is held under one of the keys the death's path yields — its path
+//! key and each segment-aligned suffix key. Otherwise a claim-bound
+//! maintenance unit prunes it, and store meta records the highest generation
+//! pruned as the death floor in the same transaction. A healthy link to a
+//! same-named document keeps no death, and quarantine deaths follow the same
+//! rule.
+//!
+//! [ADR 0052]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0052-a-death-is-kept-only-while-lane-2-or-a-broken-link-needs-it.md
 //!
 //! `path` here means the stored spelling. The store never folds case — see
 //! [`crate::ddl::documents`] — so on a folding volume one vault *place* can
 //! stand live under one spelling and dead under another. The disjointness is a
 //! claim about stored paths, not about places.
 //!
-//! # The class outlives the document, and the suffix keys are stored for a seek
+//! # The suffix keys are stored for a seek
 //!
-//! A deletion **changes an ambiguity class**, and the class has to stay
-//! reachable once the document row is gone: a path that was one of three
-//! candidates for `glossary` leaves two behind, and the findings that named that
-//! class are the ones a deletion has to revisit. See [`crate::ddl::findings`].
-//! That class comes from `path`, and [`crate::DocumentPath`] derives it on the
-//! way out.
+//! A deletion **changes an ambiguity class**: a path that was one of three
+//! candidates for `glossary` leaves two behind. The deletion's own
+//! transaction re-judges the findings that named that class, deriving the
+//! class from the path it deletes — see [`crate::ddl::findings`] — so nothing
+//! reads the tombstone for the class afterwards.
 //!
 //! `suffix_key` and `path_key` are stored for move-following seeks. Both
 //! use [`crate::comparison_key`] and are computed with the original path by
@@ -77,13 +90,12 @@
 //! `last_content_hash` is nullable, because a death can be learned from a path
 //! that is already absent and there is nothing left to hash. A re-death of a
 //! path whose hash is already recorded **keeps** the recorded one: the hash is
-//! the comparison basis a late event needs, and a second death learned from an
-//! absent file carries nothing better to replace it with.
+//! what move-following matches a live holder by, and a second death learned
+//! from an absent file carries nothing better to replace it with.
 //!
 //! # A death is half of the change feed, and this index is its side of it
 //!
-//! A lane-2 consumer that read only the living would keep deriving from a path
-//! that is gone. `tombstones_change_feed` orders by `generation` and breaks ties
+//! `tombstones_change_feed` orders by `generation` and breaks ties
 //! on `path`, then carries `last_content_hash`, so a page of the death feed is a
 //! seek into the index and a walk along it — the row itself is never read and
 //! nothing sorts.

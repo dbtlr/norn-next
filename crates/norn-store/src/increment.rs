@@ -90,21 +90,23 @@ pub enum Change {
     ///
     /// The hash is not supplied: it is the one the store last derived the path
     /// at, read out of the row this entry removes. **A path that dies twice
-    /// keeps the hash already recorded** — that hash is the comparison basis a
-    /// tombstone exists to carry, and a death learned from an absent file has
+    /// keeps the hash already recorded** — that hash is what move-following
+    /// matches a live holder by, and a death learned from an absent file has
     /// nothing better to put in its place. A re-death is the only way to reach
     /// a standing tombstone, and it never carries a hash: a tombstone standing
     /// means no document row stands (an insert clears it), so the delete this
     /// entry runs finds nothing to hash. The write's replace-with-newer arm is
     /// therefore vacuous, kept as a defensive contract.
     ///
-    /// A path nothing had derived still gets a tombstone. The ordering it
-    /// carries is the point, and it is worth most exactly when a derivation
-    /// never happened: a late event then has something to compare against
-    /// instead of guessing. The one place no death is entered for is a place no
-    /// row ever stood at, whose bytes never decoded: the heal never tombstones
-    /// one, and [`Change::Vacated`] ends its quarantine. A row whose bytes stop
-    /// decoding does die, as a [`Provenance::Quarantine`].
+    /// A death is news about a row, so every producer — a watcher removal, a
+    /// heal's prune, a plan's delete, a quarantine — enters one only for a
+    /// path it found a stored document row at. This entry does not check, and
+    /// given a path no row stands at it records a tombstone without a hash. No
+    /// producer does that, because a tombstone there would state the removal of
+    /// a document the vault never held. A place no row ever stood
+    /// at, whose bytes never decoded, is left by [`Change::Vacated`], which
+    /// ends its quarantine. A row whose bytes stop decoding does die, as a
+    /// [`Provenance::Quarantine`].
     Death {
         path: DocumentPath,
         provenance: Provenance,
@@ -113,9 +115,8 @@ pub enum Change {
     /// finding its undecodable bytes left goes, in this transaction, and nothing
     /// else is written.
     ///
-    /// **It is not a death.** A death tombstones a path, and the ordering a
-    /// tombstone carries is wanted wherever a late event could otherwise guess.
-    /// A place whose bytes never decoded is one the heal deliberately never
+    /// **It is not a death.** A death tombstones a path a document row stood
+    /// at. A place whose bytes never decoded is one the heal deliberately never
     /// tombstones, so a build from zero over the emptied tree holds no tombstone
     /// there, and a death would leave a state that build does not produce. What
     /// the place holds is a quarantine finding — its bytes are not a document —
