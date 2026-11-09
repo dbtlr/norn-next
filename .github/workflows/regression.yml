@@ -256,6 +256,9 @@ jobs:
       - name: Gate
         if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
         run: .github/scripts/flake-tripwire.sh cargo test --locked --no-fail-fast -p norn-testkit --test architecture
+      - name: Shard certification
+        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
+        run: .github/scripts/flake-tripwire.sh cargo test --locked --no-fail-fast -p norn-testkit --test shards
       - name: Upload candidate identity
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
