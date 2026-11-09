@@ -4582,14 +4582,12 @@ impl Account {
     /// **A walk rooted below an unrendered ancestor acts on part of a place.**
     /// That happens when a real folder's own name carries U+FFFD, such as a
     /// dirty `bad\u{fffd}dir` beside a colliding refused sibling `bad\x01dir`.
-    /// The merge files the spellings it walked, and its first record replaces
-    /// the place's spelling side, so the sibling's finding can be dropped. A
-    /// deleted real document whose own name carries U+FFFD and whose bytes are
-    /// not UTF-8 likewise keeps its `document/body-bytes-not-utf8` finding.
-    /// That is an accepted limitation: it needs a name collision at a folder
-    /// whose own name is marker-carrying, the places are left standing rather
-    /// than guessed at, and the next vault heal, which is rooted at every
-    /// place's ancestor, converges them.
+    /// A scoped merge or prune rooted there (`heal_subtree`) files only the
+    /// spellings it walked, and its first record replaces the place's spelling
+    /// side, so the sibling's finding may be dropped; no test has confirmed
+    /// this. That is an accepted limitation: it needs a name collision at a
+    /// folder whose own name is marker-carrying, and the next vault heal, which
+    /// is rooted at every place's ancestor, converges it.
     fn concluded(&self, walked: &Walked, subject: &DocumentPath) -> bool {
         folded_reaches(
             walked.scope.root(),
@@ -4780,8 +4778,9 @@ impl Withheld {
         // subfolder, this job-wide hold reaches the marker-carrying places
         // under the old name too, so the scoped leg leaves that mark and its
         // findings standing. That is an accepted limitation of a hold that
-        // cannot tell which places the refused root hid; only a vault heal
-        // clears them.
+        // cannot tell which places the refused root hid. A build from zero
+        // clears them; a vault heal does too only once no unlistable refused
+        // folder remains, since one that still meets it sets this same hold.
         if self.rendered && subject.carries_marker() {
             return true;
         }
@@ -5350,8 +5349,8 @@ impl<'s> Pending<'s> {
     /// few shapes, with colliding refused siblings that are unlistable, where
     /// the scoped leg filed no `directory/unreadable` mark. The cause is not
     /// confirmed; it is thought to be tied to those colliding unlistable
-    /// siblings. That is an accepted limitation: a vault heal, or a build from
-    /// zero, files the missing mark.
+    /// siblings. That is an accepted limitation: a build from zero files the
+    /// missing mark, and a vault heal is expected to.
     fn unlistable(&mut self, path: &Path, cause: &std::io::Error) -> Result<(), JobFailure> {
         self.settle_content()?;
         self.account.withheld.absorb(path);
