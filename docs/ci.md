@@ -18,8 +18,8 @@ tests with the whole-workspace feature set. The architecture job enforces both
 claims with `cargo test -p norn-testkit --test shards`: it reads each shard's
 selection from `ci.yml`, resolves features with `cargo tree` (normal,
 development and build edges, host target) for the whole workspace and for each
-shard, and fails naming the package and feature when a shard builds a package
-with a different feature set, or when the shards do not partition the workspace.
+shard, and fails naming the shard, package and feature when a shard builds any package
+in its graph, selected root or dependency, with a different feature set, or when the shards do not partition the workspace.
 The whole feature-enabled
 `norn-host` package runs in `host functional (induced-failure)`, so current and
 future ordinary targets and cases join PR coverage automatically.

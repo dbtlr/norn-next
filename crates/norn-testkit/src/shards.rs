@@ -10,6 +10,10 @@
 //! `cargo metadata` does not, since it resolves the whole workspace whatever
 //! is selected.
 //!
+//! Every package in a shard's resolved graph is compared, the selected roots
+//! and every dependency alike, since a dev-dependency in one shard can switch a
+//! feature on in a dependency the other shard's test binaries link.
+//!
 //! The selections come from `.github/workflows/ci.yml` itself, so the guard
 //! cannot drift from the jobs it certifies. Both reads include normal,
 //! development and build edges for the host target, the one tests are built
@@ -31,13 +35,15 @@ pub type Selection = Vec<String>;
 pub struct TreeReading {
     /// The workspace packages the selection names, the roots of the tree.
     pub selected: BTreeSet<String>,
+    /// Every package in the resolved graph: the roots and every dependency.
+    pub packages: BTreeSet<String>,
     /// The features each package in the tree is built with, by package name.
     pub features: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl TreeReading {
-    /// Reads `cargo tree --prefix depth` output: a depth-0 package line is a
-    /// selected root, and every `name feature "f"` line, at any depth, is a
+    /// Reads `cargo tree --prefix depth` output: a package line is a package in
+    /// the graph, a depth-0 one is also a selected root, and every `name feature "f"` line, at any depth, is a
     /// feature the resolve turned on for `name`.
     ///
     /// The `default` node is not read: cargo prints it for a package a
@@ -61,8 +67,11 @@ impl TreeReading {
                         .or_default()
                         .insert(feature.to_string());
                 }
-            } else if &line[..depth] == "0" && second.starts_with('v') {
-                reading.selected.insert(name.to_string());
+            } else if second.starts_with('v') {
+                reading.packages.insert(name.to_string());
+                if &line[..depth] == "0" {
+                    reading.selected.insert(name.to_string());
+                }
             }
         }
         reading
@@ -174,8 +183,9 @@ fn selection_of(command: &str) -> Result<Selection, String> {
 }
 
 /// Everything the shards fail to certify, as sentences naming the package and
-/// the feature: a package in no shard or in both, and a package built under a
-/// shard with other features than the whole-workspace run gives it.
+/// the feature: a package in no shard or in both, and any package in a shard's
+/// graph, selected root or dependency, built with other features than the
+/// whole-workspace run gives it.
 pub fn violations(whole: &TreeReading, shards: &[(Shard, TreeReading)]) -> Vec<String> {
     let mut found = Vec::new();
     for package in &whole.selected {
@@ -199,18 +209,23 @@ pub fn violations(whole: &TreeReading, shards: &[(Shard, TreeReading)]) -> Vec<S
                 shard.job
             ));
         }
-        for package in reading.selected.intersection(&whole.selected) {
+        for package in &reading.packages {
+            let role = if reading.selected.contains(package) {
+                "selected root"
+            } else {
+                "dependency"
+            };
             let (whole_features, shard_features) =
                 (whole.features_of(package), reading.features_of(package));
             for feature in whole_features.difference(&shard_features) {
                 found.push(format!(
-                    "shard `{}` builds `{package}` without feature `{feature}`, which a whole-workspace run enables",
+                    "shard `{}` builds {role} `{package}` without feature `{feature}`, which a whole-workspace run enables",
                     shard.job
                 ));
             }
             for feature in shard_features.difference(&whole_features) {
                 found.push(format!(
-                    "shard `{}` builds `{package}` with feature `{feature}`, which a whole-workspace run does not enable",
+                    "shard `{}` builds {role} `{package}` with feature `{feature}`, which a whole-workspace run does not enable",
                     shard.job
                 ));
             }
@@ -228,7 +243,9 @@ mod tests {
             selected: selected.iter().map(|s| (*s).to_string()).collect(),
             ..TreeReading::default()
         };
+        reading.packages.extend(reading.selected.clone());
         for (package, feature) in features {
+            reading.packages.insert((*package).to_string());
             reading
                 .features
                 .entry((*package).to_string())
@@ -281,6 +298,35 @@ mod tests {
         let found = violations(&whole, &shards);
         assert_eq!(found.len(), 1, "{found:?}");
         assert!(found[0].contains("`a`") && found[0].contains("feature `x`"));
+    }
+
+    #[test]
+    fn a_feature_one_shard_loses_on_a_dependency_is_named_as_a_dependency() {
+        let whole = reading(&["a", "b"], &[("dep", "x")]);
+        let mut lacking = reading(&["a"], &[]);
+        lacking.packages.insert("dep".to_string());
+        let shards = [
+            (shard("one"), lacking),
+            (shard("two"), reading(&["b"], &[("dep", "x")])),
+        ];
+        let found = violations(&whole, &shards);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(
+            found[0].contains("`one`")
+                && found[0].contains("dependency `dep`")
+                && found[0].contains("feature `x`"),
+            "{found:?}"
+        );
+    }
+
+    #[test]
+    fn a_package_absent_from_a_shard_graph_is_not_compared() {
+        let whole = reading(&["a", "b"], &[("dep", "x")]);
+        let shards = [
+            (shard("one"), reading(&["a"], &[])),
+            (shard("two"), reading(&["b"], &[("dep", "x")])),
+        ];
+        assert_eq!(violations(&whole, &shards), Vec::<String>::new());
     }
 
     #[test]
