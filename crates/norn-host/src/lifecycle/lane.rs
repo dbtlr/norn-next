@@ -110,6 +110,26 @@ pub(super) struct Lane {
     set: Mutex<LaneSet>,
     ready: Condvar,
     reading: Mutex<LaneReading>,
+    /// Every turn's unit count, clock, and the budget check's clock that let
+    /// its last unit through, in the order the turns ended, so a case can check each turn
+    /// against its own boundary rather than the aggregate in `reading`.
+    #[cfg(test)]
+    turn_log: Mutex<Vec<TurnRecord>>,
+}
+
+/// One background turn as the lane recorded it, for a case that checks the
+/// turn against its own boundary.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+pub(super) struct TurnRecord {
+    /// The units the turn ran.
+    pub(super) units: u32,
+    /// The turn's clock when it ended.
+    pub(super) took: Duration,
+    /// The clock the between-units budget check read when it let the turn's
+    /// last unit through; zero where that unit was the turn's first, which
+    /// runs with no check.
+    pub(super) last_began: Duration,
 }
 
 fn tolerant<T>(lock: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -176,15 +196,27 @@ impl Lane {
         tolerant(&self.set).stopping
     }
 
-    fn record(&self, units: u32, took: Duration) {
+    fn record(&self, units: u32, took: Duration, #[cfg(test)] last_began: Duration) {
         if units == 0 {
             return;
         }
+        #[cfg(test)]
+        tolerant(&self.turn_log).push(TurnRecord {
+            units,
+            took,
+            last_began,
+        });
         let mut reading = tolerant(&self.reading);
         reading.turns += 1;
         reading.units += u64::from(units);
         reading.most_units_in_a_turn = reading.most_units_in_a_turn.max(units);
         reading.longest_turn = reading.longest_turn.max(took);
+    }
+
+    /// Each turn as the lane recorded it.
+    #[cfg(test)]
+    pub(super) fn turn_log(&self) -> Vec<TurnRecord> {
+        tolerant(&self.turn_log).clone()
     }
 
     pub(super) fn reading(&self) -> LaneReading {
@@ -241,10 +273,21 @@ fn turn<O: EntryOps>(shared: &Arc<Shared<O>>, name: &VaultName) -> bool {
     let began = Instant::now();
     let mut owed = true;
     let mut units = 0;
+    // The clock the budget check last read, and the reading that admitted
+    // the turn's last unit; a first unit runs with no check, so zero.
+    #[cfg(test)]
+    let decided = std::cell::Cell::new(Duration::ZERO);
+    #[cfg(test)]
+    let mut last_began = Duration::ZERO;
     super::background::run_units_until(
         shared.background_turn_budget,
         &mut units,
-        || began.elapsed(),
+        || {
+            let elapsed = began.elapsed();
+            #[cfg(test)]
+            decided.set(elapsed);
+            elapsed
+        },
         || -> Result<bool, std::convert::Infallible> {
             if !owed || shared.lane.stopping() {
                 return Ok(false);
@@ -252,6 +295,10 @@ fn turn<O: EntryOps>(shared: &Arc<Shared<O>>, name: &VaultName) -> bool {
             if !feeds(shared, name) {
                 owed = false;
                 return Ok(false);
+            }
+            #[cfg(test)]
+            {
+                last_began = decided.get();
             }
             match shared.ops.background_unit(name) {
                 BackgroundUnit::NothingOwed => {
@@ -278,7 +325,12 @@ fn turn<O: EntryOps>(shared: &Arc<Shared<O>>, name: &VaultName) -> bool {
         },
     )
     .unwrap_or_else(|never| match never {});
-    shared.lane.record(units, began.elapsed());
+    shared.lane.record(
+        units,
+        began.elapsed(),
+        #[cfg(test)]
+        last_began,
+    );
     // A unit on a clock moves the clock on, and the scheduler's last ask read
     // it as owed rather than as a deadline: the clock's next reading is handed
     // back here, so the store comes due again with no wake.

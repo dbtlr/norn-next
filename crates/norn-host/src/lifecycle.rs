@@ -10765,9 +10765,10 @@ mod tests {
         lane_owed: Mutex<BTreeMap<VaultName, usize>>,
         /// The vault of every lane unit run, in the order the lane ran them.
         lane_ran: Mutex<Vec<VaultName>>,
-        /// What each lane unit takes, and the longest one took as the unit
-        /// measured itself.
+        /// What each lane unit takes, what each took as the unit measured
+        /// itself in the order the lane ran them, and the longest of those.
         lane_unit_cost: Mutex<Duration>,
+        lane_unit_took: Mutex<Vec<Duration>>,
         longest_lane_unit: Mutex<Duration>,
         /// While set, the next lane unit holds inside itself until released.
         block_lane_unit: std::sync::atomic::AtomicBool,
@@ -11565,8 +11566,10 @@ mod tests {
                 wait_for_release("lane_unit_release", &self.lane_unit_release);
             }
             thread::sleep(*self.lane_unit_cost.lock().unwrap());
+            let took = began.elapsed();
+            self.lane_unit_took.lock().unwrap().push(took);
             let mut longest = self.longest_lane_unit.lock().unwrap();
-            *longest = (*longest).max(began.elapsed());
+            *longest = (*longest).max(took);
             BackgroundUnit::Ran { owed: left > 0 }
         }
 

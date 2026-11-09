@@ -79,10 +79,22 @@ fn owed_lane_work_starts_at_its_wake_without_a_poll_tick() {
 }
 
 /// **A background turn ends within its budget plus one unit.** The vault owes
-/// far more 10 ms units than a 30 ms budget holds, so a turn runs more than
-/// one and stops at the first unit boundary past the budget: its clock, as
-/// the lane records it, reaches the budget and stays inside the budget plus
-/// the longest unit it ran. The store, still owed, takes the next turn.
+/// far more 10 ms units than a 30 ms budget holds. Each turn stops at the
+/// first unit boundary at or past the budget, checked against the units'
+/// own measured durations rather than a count fixed for an unloaded machine:
+///
+/// - a turn that is not the last reached the budget on its own clock, so a
+///   lane that stopped early (one unit per turn while units fit) fails;
+/// - the units before its last one finished inside the budget, so a lane that
+///   ran past the boundary fails;
+/// - the budget check that let its last unit through read a clock still
+///   inside the budget, so a lane that took another unit after the budget
+///   was spent fails. That is the reading the decision itself used, so no
+///   scheduling delay after it can move it past a boundary the lane honoured;
+///   a turn's first unit runs with no check and reads zero.
+///
+/// A runner that oversleeps a 10 ms unit past the budget ends every turn
+/// after one unit, which these properties allow.
 #[test]
 fn a_background_turn_ends_within_its_budget_plus_one_unit() {
     let ops = Arc::new(FakeOps::default());
@@ -107,27 +119,30 @@ fn a_background_turn_ends_within_its_budget_plus_one_unit() {
     )
     .unwrap_or_else(|failure| panic!("{failure}"));
     let reading = host.lane_reading();
-    assert!(reading.turns >= 3, "{reading:?}");
-    assert!(
-        (2..=4).contains(&reading.most_units_in_a_turn),
-        "a turn ran {} units under a 30 ms budget of 10 ms units",
-        reading.most_units_in_a_turn
-    );
-    let longest_unit = *ops.longest_lane_unit.lock().unwrap();
-    assert!(
-        reading.longest_turn >= budget,
-        "the longest turn ended at {:?}, short of its {budget:?} budget",
-        reading.longest_turn
-    );
-    // The turn's clock also covers each unit's entry-gate lock and the
-    // scheduler's delay, so its slack is generous: an overrun is caught by
-    // the units-per-turn assertion above, and this bound only checks that a
-    // turn stops at a unit boundary.
-    assert!(
-        reading.longest_turn < budget + longest_unit + Duration::from_millis(25),
-        "a turn took {:?}, past its {budget:?} budget plus one unit of {longest_unit:?}",
-        reading.longest_turn
-    );
+    let turns = host.shared.lane.turn_log();
+    let took = ops.lane_unit_took.lock().unwrap().clone();
+    assert_eq!(turns.len() as u64, reading.turns, "{reading:?}");
+    assert_eq!(took.len(), 12, "{took:?}");
+    let mut next_unit = 0;
+    for (index, turn) in turns.iter().copied().enumerate() {
+        let (units, clock) = (turn.units as usize, turn.took);
+        let mine = &took[next_unit..next_unit + units];
+        next_unit += units;
+        let before_last: Duration = mine[..units - 1].iter().sum();
+        let describe = format!("turn {index} ran {units} units {mine:?} in {clock:?}; {turns:?}");
+        // The lane checks the budget only between units, so every unit but
+        // the last began with the clock still inside it.
+        assert!(before_last < budget, "past the boundary: {describe}");
+        if index + 1 < turns.len() {
+            // The store was still owed, so only the budget ended the turn.
+            assert!(clock >= budget, "stopped short of the budget: {describe}");
+        }
+        assert!(
+            turn.last_began < budget,
+            "let a unit through past the budget at {:?}: {describe}",
+            turn.last_began
+        );
+    }
     drop((leases, host));
 }
 
