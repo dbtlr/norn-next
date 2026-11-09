@@ -366,7 +366,10 @@ fn a_directory_cannot_masquerade_as_configured_file_bytes() {
 /// fails a whole reconcile over one path that a walk would simply not yield.
 #[test]
 fn a_socket_and_an_unnameable_length_are_answers_rather_than_faults() {
-    let scratch = Scratch::new("socket-schema");
+    // Under `/tmp`, not `TMPDIR`: a socket path must fit `sun_path` (104 bytes on macOS).
+    let scratch = Scratch(
+        scratch::Scratch::under(Path::new("/tmp"), "norn-fs-sock").expect("a short scratch"),
+    );
     let socket = scratch.at("sock.md");
     let listener = std::os::unix::net::UnixListener::bind(&socket).expect("a bound socket");
 
