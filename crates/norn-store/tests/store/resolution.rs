@@ -579,6 +579,79 @@ fn a_case_variant_rename_changes_the_resolved_spelling() {
     });
 }
 
+/// **A side resolving to no document beneath a directory mark carries the
+/// mark's gap, as link health reads one**: the removed `locked/gone.md`
+/// leaves its link marked after the plan, the created `locked/new.md` was
+/// marked before it, and the same changes beside the mark carry none. A
+/// snapshot holding no mark probes nothing; one holding a mark probes only
+/// the path keys of the links resolving to nothing.
+#[test]
+fn a_side_resolving_to_nothing_beneath_a_mark_carries_its_gap() {
+    both_orders("resolution-directory-gap", |mut vault| {
+        vault.write(&[
+            (
+                "ref.md",
+                "[a](/locked/gone.md) [b](/open/gone.md) [c](/locked/new.md) [d](/open/new.md)\n",
+            ),
+            ("locked/gone.md", "gone\n"),
+            ("open/gone.md", "gone\n"),
+        ]);
+        let plan = overlay(
+            &["locked/new.md", "open/new.md"],
+            &["locked/gone.md", "open/gone.md"],
+        );
+        let gaps = |vault: &Vault| {
+            let mut gaps = BTreeMap::new();
+            let work = vault
+                .snapshot()
+                .resolution_changes(&plan, &[], &declared(), |change| {
+                    gaps.insert(
+                        change.link.target.clone(),
+                        (change.before_gap, change.after_gap),
+                    );
+                })
+                .unwrap_or_else(|refusal| panic!("{:?}: a judgment: {refusal}", vault.order));
+            let probes = work
+                .ran
+                .iter()
+                .filter(|ran| **ran == ResolutionStatement::DirectoryMarks)
+                .count();
+            (gaps, probes)
+        };
+        use norn_wire::TargetGap::{Marked, None as Unmarked};
+
+        let (unmarked, probes) = gaps(&vault);
+        assert_eq!(probes, 0);
+        assert!(
+            unmarked.values().all(|gaps| *gaps == (Unmarked, Unmarked)),
+            "{unmarked:?}"
+        );
+
+        vault
+            .store
+            .begin_request()
+            .record_finding(&crate::health::directory_mark("locked"))
+            .unwrap();
+        let (marked, probes) = gaps(&vault);
+        assert_eq!(
+            marked,
+            BTreeMap::from([
+                ("/locked/gone.md".to_string(), (Unmarked, Marked)),
+                ("/locked/new.md".to_string(), (Marked, Unmarked)),
+                ("/open/gone.md".to_string(), (Unmarked, Unmarked)),
+                ("/open/new.md".to_string(), (Unmarked, Unmarked)),
+            ])
+        );
+        // Each of the four links is held under two path keys, probed in turn
+        // until one is marked: both of each `open/` link's, the first of each
+        // `locked/` link's.
+        assert_eq!(
+            probes, 6,
+            "one probe per path key of a link resolving to nothing"
+        );
+    });
+}
+
 /// A link ending in `.md` is held under both document-name keys. A plan
 /// creating a candidate in each class reaches the link twice and judges it once.
 #[test]

@@ -119,7 +119,7 @@ use norn_store::{
 use norn_text::RewriteSkip;
 use norn_wire::{
     Backlinks, DocumentPath, FileState, LinkAddress, LinkAddressKind, LinkAdvisory, LinkFamily,
-    LinkHealth, LinkKey, Operation, OperationKind, PlanCondition, Resolves,
+    LinkHealth, LinkKey, Operation, OperationKind, PlanCondition, Resolves, TargetGap,
 };
 
 use super::compose::{After, Composition, Kept, Skipped};
@@ -667,6 +667,8 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
             address: change.address,
             before: change.before,
             after: change.after,
+            before_gap: change.before_gap,
+            after_gap: change.after_gap,
             written: false,
             unwritten: false,
             members_moved: false,
@@ -1377,12 +1379,14 @@ pub(crate) enum Named<'a> {
 }
 
 impl<'a> Named<'a> {
-    /// What `change`'s link named before the plan.
+    /// What `change`'s link named before the plan, its directory mark read
+    /// as link health reads it: a link a mark leaves unjudged is no broken
+    /// link.
     pub(crate) fn of(change: &'a LinkChange) -> Self {
         match &change.before {
             Resolves::One { path } => Named::One(path),
             Resolves::None {}
-                if LinkHealth::of_address(change.address, 0, norn_wire::TargetGap::None)
+                if LinkHealth::of_address(change.address, 0, change.before_gap)
                     == LinkHealth::Broken =>
             {
                 Named::Broken(&change.before_targets)
@@ -1635,6 +1639,12 @@ struct Judged {
     address: LinkAddressKind,
     before: Resolves,
     after: Resolves,
+    /// Whether a directory mark leaves `before`'s absent path target
+    /// unjudged ([`LinkChange::before_gap`]).
+    before_gap: TargetGap,
+    /// Whether a directory mark leaves `after`'s absent path target
+    /// unjudged ([`LinkChange::after_gap`]).
+    after_gap: TargetGap,
     written: bool,
     /// The key holds a link the plan does not write: a link of no rewrite's,
     /// or one a cascade kept beside a link it wrote there.
@@ -1683,8 +1693,10 @@ impl Judged {
     /// holds such a link, though a cascade wrote another link there too.
     ///
     /// **Otherwise each side is read as link health judges it**
-    /// ([`LinkHealth::of_address`]): a link healthy or ambiguous before and
-    /// broken after is left broken; one ambiguous after and not before is
+    /// ([`LinkHealth::of_address`]), its directory mark included, so a path
+    /// target left without a document beneath a directory marked unreadable
+    /// is not judged, as a read says, and is never left broken: a link
+    /// healthy or ambiguous before and broken after is left broken; one ambiguous after and not before is
     /// made ambiguous; an ambiguous link the plan does not write — the
     /// key holding one, whatever else it holds — is retargeted where it is healthy after, or ambiguous after with members
     /// the plan moved — the last having no entry, since several on both
@@ -1710,15 +1722,18 @@ impl Judged {
                 return Some(LinkAdvisory::skipped_ambiguous(key));
             }
         }
-        let health = |resolves: &Resolves| {
+        let health = |resolves: &Resolves, gap: TargetGap| {
             let targets = match resolves {
                 Resolves::None {} => 0,
                 Resolves::One { .. } => 1,
                 Resolves::Several {} => 2,
             };
-            LinkHealth::of_address(self.address, targets, norn_wire::TargetGap::None)
+            LinkHealth::of_address(self.address, targets, gap)
         };
-        match (health(&self.before), health(&self.after)) {
+        match (
+            health(&self.before, self.before_gap),
+            health(&self.after, self.after_gap),
+        ) {
             (LinkHealth::Healthy | LinkHealth::Ambiguous, LinkHealth::Broken) => {
                 Some(LinkAdvisory::left_broken(key))
             }
@@ -2055,6 +2070,44 @@ pub(crate) mod testing {
             }
         }
 
+        /// An empty store holding the unreadable-directory mark a heal files
+        /// at `folder`, filed by hand: the index a case judges a link beneath
+        /// a marked directory on.
+        pub(crate) fn marking(folder: &str) -> Self {
+            let scratch = Scratch::new("planner-links-marked");
+            let mut store = Store::open_throwaway(
+                scratch.join("store.sqlite3"),
+                StoredPathOrder::Sensitive,
+                crate::DERIVATION_VERSION,
+            )
+            .expect("a throwaway store");
+            store
+                .begin_request()
+                .record_finding(&norn_store::FindingFacts {
+                    kind: norn_wire::FindingKind::UnreadableDirectory,
+                    severity: norn_wire::Severity::Error,
+                    path: norn_store::DocumentPath::new(folder).expect("a folder path"),
+                    class_keys: std::collections::BTreeSet::new(),
+                    path_keys: std::collections::BTreeSet::new(),
+                    target: None,
+                    span: None,
+                    ordinal: None,
+                    candidates: Vec::new(),
+                    candidates_total: 0,
+                    message: format!("`{folder}` could not be listed"),
+                    detail: Some("Permission denied".to_string()),
+                    rules: std::collections::BTreeSet::new(),
+                    value: None,
+                })
+                .expect("a mark");
+            EmptyStore {
+                snapshot: snapshot_of(&store),
+                declared: ContentModel::none(),
+                _store: store,
+                _scratch: scratch,
+            }
+        }
+
         /// The index over the empty store.
         pub(crate) fn index(&self) -> PlanSnapshot<'_> {
             PlanSnapshot::held(vault(), &self.snapshot, &self.declared)
@@ -2261,7 +2314,7 @@ mod tests {
     use norn_fs::{CaseSensitivity, PathNormalizer};
     use norn_wire::{
         AuthoredPlan, DocumentPath, FileState, LinkAddressKind, LinkAdvisory, LinkFamily, LinkKey,
-        Operation, OperationKind, PlanCondition, Resolves, RootIdentity,
+        Operation, OperationKind, PlanCondition, Resolves, RootIdentity, TargetGap,
     };
 
     use super::testing::{EmptyStore, Untouched, vault};
@@ -3142,6 +3195,39 @@ mod tests {
         resolution
     }
 
+    /// **A link left without a document beneath a directory marked
+    /// unreadable is not forecast left broken**, as a read calls it
+    /// `not_judged`, while the same delete beside the mark still leaves its
+    /// link broken. The mark is filed by hand beside documents a heal would
+    /// have withheld: the case states the forecast's rule, not a tree.
+    #[test]
+    fn a_link_left_without_a_document_beneath_a_marked_directory_is_not_left_broken() {
+        let files = MemoryVault::with(&[
+            ("l.md", "See [x](/locked/gone.md) and [y](/open/gone.md).\n"),
+            ("locked/gone.md", "gone\n"),
+            ("open/gone.md", "gone\n"),
+        ]);
+        let deleting =
+            |at: &str| Operation::new(OperationKind::delete_document_breaking_links(path(at)));
+        let resolution = planned(
+            &files,
+            vec![
+                deleting("locked/gone.md"),
+                deleting("open/gone.md"),
+                Operation::new(OperationKind::str_replace(path("l.md"), "See", "Read")),
+            ],
+            &EmptyStore::marking("locked"),
+        );
+        assert_eq!(
+            resolution.forecast.links,
+            [LinkAdvisory::left_broken(LinkKey::new(
+                path("l.md"),
+                LinkFamily::Markdown,
+                "/open/gone.md"
+            ))]
+        );
+    }
+
     /// The transition the plan carries at `at`.
     fn transition_at<'p>(
         resolution: &'p crate::planner::resolve::Resolution,
@@ -3279,6 +3365,8 @@ mod tests {
                 address: LinkAddressKind::Vault,
                 before,
                 after,
+                before_gap: TargetGap::None,
+                after_gap: TargetGap::None,
                 written: false,
                 unwritten: true,
                 members_moved: true,
@@ -3304,6 +3392,51 @@ mod tests {
         );
     }
 
+    /// **A path target left without a document beneath a directory marked
+    /// unreadable is not judged, so the forecast never leaves it broken**,
+    /// as a read calls it `not_judged`; one a mark leaves unjudged before
+    /// the plan is no healthy link either, so its resolving after is made
+    /// ambiguous only where it names several.
+    #[test]
+    fn a_link_into_a_marked_directory_is_never_left_broken() {
+        let link = key("b.md", "/locked/gone.md");
+        let judged = |before: Resolves, after: Resolves, gaps: (TargetGap, TargetGap)| {
+            Judged {
+                key: link.clone(),
+                address: LinkAddressKind::Vault,
+                before,
+                after,
+                before_gap: gaps.0,
+                after_gap: gaps.1,
+                written: false,
+                unwritten: true,
+                members_moved: true,
+                named_removed: true,
+                left_behind: false,
+                target_has_twin: false,
+                ambiguous_among_moved: false,
+                names_another: false,
+            }
+            .advisory(None)
+        };
+        let gone = || Resolves::one(path("locked/gone.md"));
+        let (marked, unmarked) = (TargetGap::Marked, TargetGap::None);
+        assert_eq!(judged(gone(), Resolves::none(), (unmarked, marked)), None);
+        assert_eq!(
+            judged(Resolves::several(), Resolves::none(), (unmarked, marked)),
+            None
+        );
+        assert_eq!(
+            judged(gone(), Resolves::none(), (unmarked, unmarked)),
+            Some(LinkAdvisory::left_broken(link.clone()))
+        );
+        assert_eq!(
+            judged(Resolves::none(), Resolves::several(), (marked, unmarked)),
+            Some(LinkAdvisory::made_ambiguous(link.clone()))
+        );
+        assert_eq!(judged(Resolves::none(), gone(), (marked, unmarked)), None);
+    }
+
     /// **The forecast advises on what a caller should look at.** A link that
     /// resolved and resolves to none is left broken; one that did not resolve
     /// to several and does is made ambiguous; an ambiguous link the plan does
@@ -3318,6 +3451,8 @@ mod tests {
                 address: LinkAddressKind::Vault,
                 before,
                 after,
+                before_gap: TargetGap::None,
+                after_gap: TargetGap::None,
                 written,
                 unwritten: !written,
                 members_moved,

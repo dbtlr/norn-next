@@ -4233,7 +4233,10 @@ that file's hashes guard it; and the forecast names the links the plan leaves as
 leaves broken, makes ambiguous or retargets — a link retargeted being one the plan resolves
 otherwise without rewriting it, an ambiguous one or one leaving a document for another, as a
 document appearing at or leaving a suffix link's exact path makes it — and the files a
-folder move leaves behind. A moved holder's own relative link no spelling uniquely reaches
+folder move leaves behind. Each side of a link is judged as a read judges it, directory marks
+included: a path target left without a document beneath a directory marked unreadable is not
+judged, so it is never forecast left broken, and the marks are probed only for the links the
+plan judges that resolve to nothing. A moved holder's own relative link no spelling uniquely reaches
 is left as written and advised where the move changes what it names. A folder move expands
 at planning into one document move per document the folder holds, at any depth and in path
 order, as a `where` target does, each keeping what the folder move carries beyond its kind;
