@@ -318,9 +318,9 @@ pub struct LinkChange {
     /// Whether a directory marked unreadable covers the path target that
     /// [`before`](Self::before) resolves to no document at, as link health
     /// reads one ([`norn_wire::LinkHealth::of_address`]):
-    /// [`TargetGap::Marked`] only for a vault link resolving to none whose
-    /// path key lies beneath a mark this snapshot holds, so a caller judges
-    /// the link `not_judged` where a read would.
+    /// [`TargetGap::Marked`] only for a path-form link resolving to none
+    /// whose path key lies beneath a mark this snapshot holds, so a caller
+    /// judges the link `not_judged` where a read would.
     pub before_gap: TargetGap,
     /// [`before_gap`](Self::before_gap) for [`after`](Self::after): the path
     /// target its holder after the plan names. Marks are the snapshot's,
@@ -1008,23 +1008,26 @@ impl<'a, R: Runner> Judging<'a, R> {
         keys.iter().any(|(text, _, _)| self.sought.contains(text))
     }
 
-    /// Whether a directory mark leaves a link of `address`, resolving to
-    /// `resolves` under `keys`, unjudged — link health's own rule for a held
-    /// link: only a vault link resolving to no document, through a path key
-    /// (one naming no suffix class and spelling a folder), beneath a mark.
+    /// Whether a directory mark leaves `link`, resolving to `resolves` under
+    /// `keys`, unjudged — the rule a read of its health applies: only a link
+    /// whose address is a path form ([`link::is_path_form`]) resolving to no
+    /// document, through a path key spelling a folder, beneath a mark. A
+    /// same-note link's key is its holder's path, but it names no path a
+    /// mark covers, so a read calls it broken.
     ///
     /// **The probes follow the judged links**: none where the snapshot holds
-    /// no mark, none for a link that resolves, and one indexed ancestor probe
-    /// per distinct path key otherwise, remembered for the judgment.
+    /// no mark, none for a link that resolves or is no path form, and one
+    /// indexed ancestor probe per distinct path key otherwise, remembered
+    /// for the judgment.
     fn gap(
         &mut self,
-        address: LinkAddressKind,
+        link: &LinkFact,
         resolves: &Resolves,
         keys: &[Key],
     ) -> Result<TargetGap, StoreError> {
         if !self.marks_present
-            || address != LinkAddressKind::Vault
             || !matches!(resolves, Resolves::None {})
+            || !link::is_path_form(link)
         {
             return Ok(TargetGap::None);
         }
@@ -1085,8 +1088,8 @@ impl<'a, R: Runner> Judging<'a, R> {
                     .chain(&judged.after)
                     .any(|key| self.held(key).members.changes);
             let before_targets = self.before_targets(&judged.before);
-            let before_gap = self.gap(judged.address, &before, &judged.before)?;
-            let after_gap = self.gap(judged.address, &after, &judged.after)?;
+            let before_gap = self.gap(&judged.link, &before, &judged.before)?;
+            let after_gap = self.gap(&judged.link, &after, &judged.after)?;
             each(LinkChange {
                 holder: judged.holder,
                 link: judged.link,

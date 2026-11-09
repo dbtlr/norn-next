@@ -652,6 +652,97 @@ fn a_side_resolving_to_nothing_beneath_a_mark_carries_its_gap() {
     });
 }
 
+/// Each link's gaps before and after a plan creating `locked/new.md`, which
+/// holds the link `probed_body` writes if any, with `ref.md` holding
+/// `stored` and `locked` marked unreadable, keyed by holder and target.
+fn gaps_beneath_a_mark(
+    vault: &mut Vault,
+    stored: &str,
+    probed_body: Option<&str>,
+) -> BTreeMap<(String, String), (norn_wire::TargetGap, norn_wire::TargetGap)> {
+    vault.write(&[("ref.md", stored)]);
+    vault
+        .store
+        .begin_request()
+        .record_finding(&crate::health::directory_mark("locked"))
+        .unwrap();
+    let probes: Vec<ProbedLink> = probed_body
+        .map(|body| probed("locked/new.md", "locked/new.md", body, true))
+        .into_iter()
+        .collect();
+    let mut gaps = BTreeMap::new();
+    vault
+        .snapshot()
+        .resolution_changes(
+            &overlay(&["locked/new.md"], &[]),
+            &probes,
+            &declared(),
+            |change| {
+                gaps.insert(
+                    (
+                        change.holder.as_str().to_string(),
+                        change.link.target.clone(),
+                    ),
+                    (change.before_gap, change.after_gap),
+                );
+            },
+        )
+        .unwrap_or_else(|refusal| panic!("{:?}: a judgment: {refusal}", vault.order));
+    gaps
+}
+
+/// **A same-note link carries no gap**: it names its holder, never a path
+/// beneath a mark, so where its holder is created beneath one a read calls
+/// the link broken before the plan, not unjudged.
+#[test]
+fn a_same_note_link_whose_holder_lies_beneath_a_mark_carries_no_gap() {
+    use norn_wire::TargetGap::None as Unmarked;
+    both_orders("resolution-gap-same-note", |mut vault| {
+        let gaps = gaps_beneath_a_mark(&mut vault, "plain\n", Some("[[#heading]]\n"));
+        assert_eq!(
+            gaps,
+            BTreeMap::from([(
+                ("locked/new.md".to_string(), String::new()),
+                (Unmarked, Unmarked)
+            )])
+        );
+    });
+}
+
+/// **A stem link carries no gap**: a suffix address names no path a mark
+/// could cover, so a read calls it broken where it resolves to nothing.
+#[test]
+fn a_stem_link_beneath_a_mark_carries_no_gap() {
+    use norn_wire::TargetGap::None as Unmarked;
+    both_orders("resolution-gap-stem", |mut vault| {
+        let gaps = gaps_beneath_a_mark(&mut vault, "[[locked/new]]\n", None);
+        assert_eq!(
+            gaps,
+            BTreeMap::from([(
+                ("ref.md".to_string(), "locked/new".to_string()),
+                (Unmarked, Unmarked)
+            )])
+        );
+    });
+}
+
+/// **A relative path link carries the gap**: read from its holder's folder,
+/// it names a path beneath the mark, as a rooted one does.
+#[test]
+fn a_relative_path_link_beneath_a_mark_carries_its_gap() {
+    use norn_wire::TargetGap::{Marked, None as Unmarked};
+    both_orders("resolution-gap-relative", |mut vault| {
+        let gaps = gaps_beneath_a_mark(&mut vault, "[r](./locked/new.md)\n", None);
+        assert_eq!(
+            gaps,
+            BTreeMap::from([(
+                ("ref.md".to_string(), "./locked/new.md".to_string()),
+                (Marked, Unmarked)
+            )])
+        );
+    });
+}
+
 /// A link ending in `.md` is held under both document-name keys. A plan
 /// creating a candidate in each class reaches the link twice and judges it once.
 #[test]

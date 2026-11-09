@@ -27,7 +27,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use norn_db::rusqlite::types::Value;
-use norn_wire::{Anchor, Candidate, CandidateHead, LinkAddress, LinkRow, TargetGap};
+use norn_wire::{Anchor, Candidate, CandidateHead, LinkRow, TargetGap};
 
 use super::Ran;
 use crate::error::{self, StoreError};
@@ -204,11 +204,10 @@ impl Snapshot {
             .into_iter()
             .zip(targets)
             .map(|((id, link), targets)| {
-                let path_form = matches!(
-                    LinkAddress::of(link.family.wire(), link.protocol.as_deref(), &link.target),
-                    LinkAddress::Rooted(_) | LinkAddress::Relative(_) | LinkAddress::RootedName(_)
-                );
-                let gap = if self.directory_marks_present && targets.total() == 0 && path_form {
+                let gap = if self.directory_marks_present
+                    && targets.total() == 0
+                    && crate::link::is_path_form(&link)
+                {
                     let marked = self
                         .run_statement(
                             record,
