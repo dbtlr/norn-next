@@ -87,8 +87,10 @@ fn owed_lane_work_starts_at_its_wake_without_a_poll_tick() {
 ///   lane that stopped early (one unit per turn while units fit) fails;
 /// - the units before its last one finished inside the budget, so a lane that
 ///   ran past the boundary fails;
-/// - its clock stays inside the budget plus its last unit and a slack for
-///   the entry-gate lock and scheduling.
+/// - its last unit began with its clock still inside the budget, so a lane
+///   that took another unit after the budget was spent fails. That clock is
+///   read where the lane begins the unit, so scheduling delays around a unit
+///   cannot move it past a boundary the lane honoured.
 ///
 /// A runner that oversleeps a 10 ms unit past the budget ends every turn
 /// after one unit, which these properties allow.
@@ -120,10 +122,9 @@ fn a_background_turn_ends_within_its_budget_plus_one_unit() {
     let took = ops.lane_unit_took.lock().unwrap().clone();
     assert_eq!(turns.len() as u64, reading.turns, "{reading:?}");
     assert_eq!(took.len(), 12, "{took:?}");
-    let slack = Duration::from_millis(25);
     let mut next_unit = 0;
-    for (index, (units, clock)) in turns.iter().copied().enumerate() {
-        let units = units as usize;
+    for (index, turn) in turns.iter().copied().enumerate() {
+        let (units, clock) = (turn.units as usize, turn.took);
         let mine = &took[next_unit..next_unit + units];
         next_unit += units;
         let before_last: Duration = mine[..units - 1].iter().sum();
@@ -135,10 +136,10 @@ fn a_background_turn_ends_within_its_budget_plus_one_unit() {
             // The store was still owed, so only the budget ended the turn.
             assert!(clock >= budget, "stopped short of the budget: {describe}");
         }
-        let last = mine[units - 1];
         assert!(
-            clock < budget + last + slack,
-            "past the budget plus one unit: {describe}"
+            turn.last_began < budget,
+            "began a unit past the budget at {:?}: {describe}",
+            turn.last_began
         );
     }
     drop((leases, host));
