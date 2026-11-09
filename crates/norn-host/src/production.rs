@@ -1152,12 +1152,15 @@ impl ProductionEntryOps {
         }
 
         progress.begin_schema_reload();
-        // A pin the store refused leaves the store pinning the schema the
-        // entry served under, so the refusal is the schema's to report. The
-        // activation has already closed the entry's reader, so the lifecycle
-        // takes it as an activation that failed after it began: trust is
-        // withdrawn, and the recovery owed pins and reads the active schema
-        // again before the entry serves.
+        // A pin the store refused without damage leaves the store pinning the
+        // schema the entry served under — the pin is one transaction — so the
+        // refusal is the schema's to report, and the entry keeps serving: the
+        // lifecycle takes it as a refused candidate, minting the reader the
+        // activation closed again over the active schema with trust unbroken.
+        // A refusal typed as damage keeps its class and owes the rebuild. The pin
+        // stays after the activation closes the reader, because its commit
+        // discards findings and typed values a reader on the old pool would
+        // observe.
         Self::pin_candidate(&mut attachment.store, &candidate).map_err(
             |failure| match failure {
                 JobFailure::Environmental(detail) => {
@@ -7711,6 +7714,65 @@ mod tests {
         ops.detach(&name, attachment);
     }
 
+    /// **A schema pin the store refuses is the candidate's refusal, and leaves
+    /// the store pinning the schema the attachment served.** The pin is one
+    /// transaction, so the refusal commits nothing of the candidate: the
+    /// reload answers a refused apply — the class the lifecycle takes as a
+    /// refused candidate, which leaves the entry serving — and the next reload
+    /// of the same candidate still finds a schema to change.
+    #[test]
+    fn a_schema_pin_the_store_refuses_leaves_the_served_schema_pinned() {
+        let f = Fixture::new("refused-schema-pin");
+        fs::write(f.vault().join(".norn/schema.yaml"), "version: 1\n").unwrap();
+        let (ops, name) = f.ops(64);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let served = attachment
+            .store
+            .begin_request()
+            .vault_schema_pin()
+            .unwrap()
+            .expect("the attach pinned the served schema");
+        let fingerprints = ops.active_fingerprints(&attachment);
+
+        fs::write(
+            f.vault().join(".norn/schema.yaml"),
+            "version: 1\n# a candidate\n",
+        )
+        .unwrap();
+        // The pin's transaction reads the standing pin first, and nothing on
+        // this thread reads a pinned scalar before it.
+        norn_store::induced_failure::fail_next_meta_read_as_busy();
+        let refused = ops.reload(&name, &mut attachment, &progress);
+        norn_store::induced_failure::clear_the_meta_read_arm();
+        assert!(
+            matches!(
+                refused,
+                Err(crate::EntryReloadFailure::Runtime(JobFailure::Reload(
+                    ReloadError::SchemaApply(_)
+                )))
+            ),
+            "the refused pin was answered {refused:?}"
+        );
+        assert_eq!(
+            attachment.store.begin_request().vault_schema_pin().unwrap(),
+            Some(served),
+            "the refused pin moved the store's pin"
+        );
+        assert_eq!(
+            ops.active_fingerprints(&attachment),
+            fingerprints,
+            "the refused pin changed the declaration the attachment serves"
+        );
+
+        let outcome = ops
+            .reload(&name, &mut attachment, &progress)
+            .expect("the candidate pinned once the store took it")
+            .outcome;
+        assert_eq!(outcome, ReloadOutcome::SchemaChanged);
+        ops.detach(&name, attachment);
+    }
+
     /// **A schema this build cannot read does not hide the vault.** The attach
     /// acquires everything a read runs on — the maintainer lock, watcher
     /// coverage, the derived store — pins nothing and derives nothing, and the
@@ -8710,6 +8772,9 @@ mod tests {
             },
         )
         .unwrap();
+        // FSEvents can deliver the fixture's own writes after the watch's
+        // history marker, as a batch the reload's end drain would meet.
+        norn_fs::watch::settle_prior_changes(f.root.root(), lifecycle_budget().work()).unwrap();
         let lease = host.demand(&name).unwrap();
         wait_state(&host, &name, norn_wire::TrustState::Ready);
         let before = host.inspect(&name).unwrap().active_fingerprints.unwrap();
@@ -8720,10 +8785,14 @@ mod tests {
         )
         .unwrap();
         host.reload(&name).expect("the schema reload");
+        // A schema reload answers as its activation leg ends, and is `Ready`
+        // only where its end drain left nothing: the watcher's own report of
+        // the schema write can land after the candidate was read, and an
+        // ordinary reconcile takes it in.
+        wait_state(&host, &name, norn_wire::TrustState::Ready);
 
         let inspection = host.inspect(&name).unwrap();
         let after = inspection.active_fingerprints.unwrap();
-        assert_eq!(inspection.trust, norn_wire::TrustState::Ready);
         assert_ne!(before.schema, after.schema);
         assert_eq!(before.config, after.config);
         drop(lease);

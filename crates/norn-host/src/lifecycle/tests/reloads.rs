@@ -1686,12 +1686,103 @@ fn a_schema_reload_over_a_quiet_vault_answers_with_ready_over_a_new_pool() {
     drop((lease, host));
 }
 
-/// **A schema-changing activation over a settling vault that fails after it
-/// began replacing the derived state withdraws trust and owes the
-/// recovery**, though the fold published healing before it began: whether it
-/// had begun is what the leg recorded, never the trust label.
+/// What a schema activation whose pin the store refused is answered: the
+/// candidate's own error, as the fake refuses it.
+fn a_refused_pin() -> Answer {
+    Err(ReloadRefusal::Core(ReloadError::SchemaApply(
+        "the candidate could not be pinned".into(),
+    )))
+}
+
+/// **A schema activation whose pin the store refuses leaves the vault serving
+/// under the schema it served**: the store still pins that schema, so the
+/// refusal is the candidate's, as one refused before activation is. The
+/// reader the activation closed is minted again, a read answers at `Ready`
+/// with trust unbroken, the refusal is retained, and no recovery runs.
 #[test]
-fn a_schema_activation_failing_after_it_began_over_a_settling_vault_withdraws_trust() {
+fn a_refused_schema_pin_leaves_the_vault_serving_under_the_schema_it_served() {
+    let ops = Arc::new(FakeOps::default());
+    let (host, name, lease) = a_ready_vault(&ops);
+    ops.reload_schema_changed.store(true, Ordering::SeqCst);
+    ops.reload_schema_apply_failure
+        .store(true, Ordering::SeqCst);
+    let closed = standing_reader(&host, &name).expect("a ready entry holds a reader");
+
+    assert_eq!(host.reload(&name), a_refused_pin());
+
+    assert_eq!(host.state(&name), answered(TrustState::Ready));
+    let minted = standing_reader(&host, &name).expect("the refused activation left no reader");
+    assert!(
+        !Arc::ptr_eq(&minted, &closed),
+        "the activation never closed the reader, so this case no longer reaches the refusal \
+         it guards"
+    );
+    let hold = host
+        .begin_read(&name)
+        .expect("a read over the refused activation was refused");
+    assert_eq!(
+        hold.reading().published(),
+        &Demand::State(TrustState::Ready)
+    );
+    drop(hold);
+    {
+        let entry = host.shared.entries.get(&name).unwrap();
+        let state = entry.gate.lock().unwrap();
+        assert!(
+            state.trust_unbroken_since_ready,
+            "the refused pin broke trust"
+        );
+        assert!(!state.owes_a_rung(), "the refused pin owes a rung");
+        assert_eq!(
+            state.last_reload_error,
+            Some(ReloadError::SchemaApply(
+                "the candidate could not be pinned".into()
+            )),
+            "the refusal was not retained"
+        );
+    }
+    assert_eq!(ops.recovers.load(Ordering::SeqCst), 0);
+    drop((lease, host));
+}
+
+/// **A read that meets a schema activation whose pin is then refused answers
+/// as the leg ends**, from the reader minted again over the schema the vault
+/// goes on serving: it waits out the activation as it would one that
+/// succeeded, and is neither refused for the reader the activation closed
+/// nor kept waiting for a recovery.
+#[test]
+fn a_read_meeting_an_activation_whose_pin_is_refused_answers_as_the_leg_ends() {
+    let ops = Arc::new(FakeOps::default());
+    let (host, name, lease) = a_ready_vault_settling_within(&ops, LONG_SETTLE);
+    ops.reload_schema_apply_failure
+        .store(true, Ordering::SeqCst);
+    let answer = a_held_schema_activation(&host, &ops, &name);
+
+    let before = host.read_evidence();
+    thread::scope(|scope| {
+        let reading = scope.spawn(|| host.begin_read(&name));
+        wait_for_settle_waits(&host, before, 1);
+        ops.reload_release.store(true, Ordering::SeqCst);
+        let hold = reading
+            .join()
+            .expect("the read finished")
+            .expect("a read meeting the refused activation was refused");
+        assert_eq!(
+            hold.reading().published(),
+            &Demand::State(TrustState::Ready)
+        );
+    });
+    assert_eq!(answer_of(&answer), a_refused_pin());
+    assert_eq!(ops.recovers.load(Ordering::SeqCst), 0);
+    drop((lease, host));
+}
+
+/// **A schema activation over a settling vault whose pin is refused keeps
+/// the vault settling with trust unbroken**, the fold's derivation standing:
+/// the fact its end drain met goes to an ordinary reconcile turn, the vault
+/// reaches `Ready` once it is derived, and no recovery is owed.
+#[test]
+fn a_refused_schema_pin_over_a_settling_vault_keeps_it_settling_with_trust_unbroken() {
     let ops = Arc::new(FakeOps::default());
     let (host, name, lease) = a_ready_vault(&ops);
     ops.reload_schema_changed.store(true, Ordering::SeqCst);
@@ -1699,33 +1790,44 @@ fn a_schema_activation_failing_after_it_began_over_a_settling_vault_withdraws_tr
         .store(true, Ordering::SeqCst);
     hold_a_settling_turn(&host, &ops, &name);
     let answer = a_waiting_reload(&host, &name, false);
-    ops.block_recover.store(true, Ordering::SeqCst);
+    // The held turn, then the reload's fold; the turn after them is the one
+    // the leg's end hands the fact its drain met on to.
+    let next_turn = ops.reconciles.load(Ordering::SeqCst) + 2;
+    ops.hold_reconciles_from.store(next_turn, Ordering::SeqCst);
+    ops.once_the_candidate_is_read(|ops| {
+        ops.facts_on_next_polls.store(1, Ordering::SeqCst);
+    });
 
     end_the_turn_leaving_a_fact(&ops);
 
-    let answered = answer_of(&answer);
-    assert!(
-        matches!(answered, Err(ReloadRefusal::Core(_))),
-        "the reload answered {answered:?}"
-    );
-    let entry = host.shared.entries.get(&name).unwrap();
+    assert_eq!(answer_of(&answer), a_refused_pin());
+    wait_for_reconciles(&ops, next_turn, "the reconcile the leg's end handed on to");
     {
+        let entry = host.shared.entries.get(&name).unwrap();
         let state = entry.gate.lock().unwrap();
-        assert!(
-            matches!(state.trust, TrustState::Untrusted { .. }),
-            "the failed activation left the trust at {:?}",
-            state.trust
+        assert_eq!(
+            state.trust,
+            healing(),
+            "the refused pin left the vault there"
         );
-        assert!(state.recovery_required, "no recovery is owed");
+        assert_eq!(
+            state.read_stance(),
+            ReadStance::Settle,
+            "the refused pin broke trust"
+        );
+        assert!(!state.owes_a_rung(), "the refused pin owes a rung");
     }
-    ops.recover_release.store(true, Ordering::SeqCst);
-    drop((entry, lease, host));
+    ops.later_reconcile_release.store(true, Ordering::SeqCst);
+    wait_for_state(&host, &name, TrustState::Ready);
+    assert_eq!(ops.recovers.load(Ordering::SeqCst), 0);
+    drop((lease, host));
 }
 
-/// Damage the end drain meets after a failed activation owes a rebuild,
-/// while the reload still answers with the candidate's own error.
+/// Damage the end drain meets after a refused pin owes a rebuild, and the
+/// reload is answered with the damage, as a candidate refused before
+/// activation whose end drain meets damage is.
 #[test]
-fn a_failed_schema_activation_whose_end_drain_meets_damage_owes_a_rebuild() {
+fn a_refused_schema_pin_whose_end_drain_meets_damage_owes_a_rebuild() {
     let ops = Arc::new(FakeOps::default());
     let (host, name, lease) = a_ready_vault(&ops);
     ops.reload_schema_changed.store(true, Ordering::SeqCst);
@@ -1743,8 +1845,8 @@ fn a_failed_schema_activation_whose_end_drain_meets_damage_owes_a_rebuild() {
     ops.rebuild_release.store(true, Ordering::SeqCst);
     assert_eq!(
         answer,
-        Err(ReloadRefusal::Core(ReloadError::SchemaApply(
-            "the candidate could not be pinned".into()
+        Err(ReloadRefusal::Runtime(JobFailure::StoreDamaged(
+            "the watcher cursor points into a truncated page".into()
         )))
     );
     assert_eq!(

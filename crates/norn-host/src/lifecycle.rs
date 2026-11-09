@@ -378,6 +378,16 @@ pub trait EntryOps: Send + Sync + 'static {
     /// answer what was decided about the schema and the fingerprints of the
     /// candidate put into service. The default reports unsupported, which does
     /// not change the vault state.
+    ///
+    /// **A [`JobFailure::Reload`] it answers is the candidate's refusal, and
+    /// leaves the attachment serving the declaration it served**, before or
+    /// after [`ProgressReporter::begin_schema_reload`]: the lifecycle mints
+    /// the reader again over that declaration and withdraws no trust. A store
+    /// that refuses the candidate's pin without damage is one such refusal,
+    /// since the pin is one transaction. A pin refused as damage, and any
+    /// failure once the store pins the candidate, is never this class: each
+    /// keeps its own, whose policy applies — withdrawn trust and an owed rung,
+    /// or a release.
     fn reload(
         &self,
         _: &VaultName,
@@ -940,10 +950,14 @@ impl<A: SnapshotSource> ProgressReporter<A> {
     /// since `Ready`, which is also what the leg's own fold publishes. A call
     /// from another state would overwrite its trust reason.
     ///
-    /// The record, not the label, is what a failure later in the leg reads
-    /// to decide whether it withdraws trust: the label is healing before this
-    /// call wherever the reload was admitted over a settling entry or its
-    /// fold took in facts.
+    /// The record is what a read meeting the entry reads to wait for the
+    /// leg's end, where the reader is minted again; it decides nothing about
+    /// trust. A candidate the store then refuses to pin without damage leaves
+    /// the store pinning the schema the entry served, so the leg ends as for
+    /// any refused candidate, minting the reader again over that schema with
+    /// trust unbroken. A pin refused as damage, and a failure after the pin
+    /// lands, keeps its own class, and that class's policy applies — withdrawn
+    /// trust and an owed rung, or a release.
     pub fn begin_schema_reload(&self) {
         let Some(entry) = self.entry.upgrade() else {
             return;
@@ -1415,20 +1429,15 @@ struct EntryState<A: SnapshotSource> {
     last_reload_error: Option<ReloadError>,
     /// The epoch of the reload leg that has begun replacing the entry's
     /// derived state under a new declaration, as
-    /// [`ProgressReporter::begin_schema_reload`] records it.
+    /// [`ProgressReporter::begin_schema_reload`] records it. It is cleared
+    /// only where a reload leg ends.
     ///
-    /// **Whether a failed reload withdraws trust is read here, never off the
-    /// trust label**: a reload admitted over a settling entry, or one whose
-    /// fold took in facts, publishes healing before it reads its candidate,
-    /// so the label cannot tell a candidate refused before activation from
-    /// an activation that failed after it began. An epoch the entry has
-    /// moved past names no leg that can read it again, so the record is
-    /// cleared only where a reload leg ends.
-    ///
-    /// A read reads it too, through
+    /// A read reads it, through
     /// [`EntryState::activation_replaces_the_reader`]: one that meets the
     /// entry while the record names the leg the entry stands at waits for the
-    /// facts that leg's end drain takes in.
+    /// facts that leg's end drain takes in, whether the leg installs a new
+    /// pool or, its pin refused, mints the reader again over the schema the
+    /// entry served.
     reload_replacing_at: Option<u64>,
     /// The advisories the entry's last attachment carried, as
     /// [`EntryOps::advisories`] read them at the last publication that
@@ -9393,10 +9402,8 @@ fn begin_reload_leg<A: SnapshotSource>(
 /// Where a reload-shaped leg stands once its work is back under the gate.
 enum ReloadLegEnd<'entry, A: SnapshotSource> {
     /// The claim still stands at the leg's epoch and no release opened over
-    /// it: the leg publishes what its work met, under this hold. The flag says
-    /// whether the leg had begun replacing the entry's derived state under a
-    /// new declaration, as [`ProgressReporter::begin_schema_reload`] recorded.
-    Standing(GateHold<'entry, EntryState<A>>, A, bool),
+    /// it: the leg publishes what its work met, under this hold.
+    Standing(GateHold<'entry, EntryState<A>>, A),
     /// The claim was taken away or a release opened while the leg ran. The
     /// asker has been told where the entry stands, and the job returns this
     /// attachment for the release to take.
@@ -9408,8 +9415,9 @@ enum ReloadLegEnd<'entry, A: SnapshotSource> {
 /// stands over the entry.
 ///
 /// The record cleared is the one this leg began, or a stale one an earlier
-/// leg left at an older epoch when it unwound before reaching its own end;
-/// only the first tells this leg it was replacing the derived state.
+/// leg left at an older epoch when it unwound before reaching its own end.
+/// A read that waited on this leg's record wakes at the hold that parks the
+/// coverage and mints the reader the activation closed.
 ///
 /// The claim this leg ran under may have been taken away while it ran, so the
 /// work it did is not what stands over the entry any more; or a release may
@@ -9425,13 +9433,13 @@ fn end_reload_leg<'entry, A: SnapshotSource>(
 ) -> ReloadLegEnd<'entry, A> {
     let mut state = entry.gate.lock().expect("entry gate poisoned");
     state.unpin_leg(Leg::Job(epoch));
-    let replacing = state.reload_replacing_at.take() == Some(epoch);
+    state.reload_replacing_at = None;
     if !state.claim.stands_at(epoch) || state.detach_in_flight {
         reply.stand_down(&state);
         drop(state);
         return ReloadLegEnd::Superseded(attachment);
     }
-    ReloadLegEnd::Standing(state, attachment, replacing)
+    ReloadLegEnd::Standing(state, attachment)
 }
 
 /// A reload's first step, as an apply's first step is its intake: derive the
@@ -9586,49 +9594,21 @@ fn run_reload_job<O: EntryOps>(
         _ => Some(drain_observed(&shared.ops, &name, &mut attachment)),
     };
 
-    let (mut state, attachment, replacing) = match end_reload_leg(entry, epoch, attachment, &reply)
-    {
-        ReloadLegEnd::Standing(state, attachment, replacing) => (state, attachment, replacing),
+    let (mut state, attachment) = match end_reload_leg(entry, epoch, attachment, &reply) {
+        ReloadLegEnd::Standing(state, attachment) => (state, attachment),
         ReloadLegEnd::Superseded(attachment) => return Some(attachment),
     };
     let activates = matches!(step, ReloadStep::Activate);
 
     let result = match result {
         None => Err(ReloadRefusal::Unsupported),
-        Some(Err(JobFailure::Reload(error))) if replacing => {
-            // A failed activation owes recovery unless its end drain met a
-            // runtime failure whose policy must decide what the entry owes.
-            record_active_declaration(&mut state, &*shared.ops, &name, &attachment);
-            let detail = state.record_reload_error(error.clone());
-            match drained {
-                Some(Err(failure)) if !matches!(failure, JobFailure::Reload(_)) => {
-                    return apply_reload_runtime_failure(
-                        shared,
-                        entry,
-                        state,
-                        name,
-                        epoch,
-                        attachment,
-                        failure,
-                        reply,
-                        FailureAnswer::Core(error),
-                    );
-                }
-                Some(Ok((observed, _))) => state.pending.merge(observed),
-                _ => {}
-            }
-            state.park_coverage(&*shared.ops, epoch, attachment);
-            state.require_recovery();
-            state.pending.merge(Batch::rescan(RescanScope::Vault));
-            state.withdraw_trust(UntrustedReason::environmental_refusal(detail));
-            state.claim.release();
-            drop(state);
-            let _ = reply.send(Err(ReloadRefusal::Core(error)));
-            return None;
-        }
-        // A candidate refused before activation began: retained by an
-        // activation, recorded nowhere by a dry run, and no trust withdrawn
-        // of its own — the fold's derivation stands.
+        // A refused candidate: retained by an activation, recorded nowhere by
+        // a dry run, and no trust withdrawn of its own — the fold's
+        // derivation stands. That holds for a schema the store refused to pin
+        // after the activation closed the reader too: the store still pins
+        // the schema the entry served ([`EntryOps::reload`]), so the parking
+        // below mints the reader again over it, and the leg ends over its
+        // drain as it ends for any other refused candidate.
         Some(Err(JobFailure::Reload(error))) => {
             if activates {
                 record_active_declaration(&mut state, &*shared.ops, &name, &attachment);
@@ -9800,9 +9780,6 @@ fn end_reload_leg_over_its_drain<O: EntryOps>(
 /// What the asker of a reload whose leg met a runtime failure is answered.
 #[derive(Clone)]
 enum FailureAnswer {
-    /// The candidate failed after activation began; the drain's failure
-    /// decides the entry's policy while the candidate's error stays the reply.
-    Core(ReloadError),
     /// `vault/reload-failed`, with what the leg met.
     Runtime,
     /// Where the entry stands once the failure's policy has published: a
@@ -9821,10 +9798,8 @@ enum FailureAnswer {
 /// the leg read, so an activation and a dry run that meet one both answer it
 /// here. `answered` says how the asker is told: `vault/reload-failed` with
 /// what the leg met, or where the entry then stands for a watcher loss the
-/// end's drain met, or the candidate's own error where its failed activation
-/// also met a drain failure. A failure the reload's fold met is ended as an
-/// apply's intake ends it, by
-/// [`end_fold_on_failure`].
+/// end's drain met. A failure the reload's fold met is ended as an apply's
+/// intake ends it, by [`end_fold_on_failure`].
 #[expect(
     clippy::too_many_arguments,
     reason = "the leg's whole standing: its gate hold, its coverage, its epoch and its asker"
@@ -9841,7 +9816,6 @@ fn apply_reload_runtime_failure<O: EntryOps>(
     answered: FailureAnswer,
 ) -> Option<O::Attachment> {
     let refusal = |state: &EntryState<O::Attachment>, failure: JobFailure| match &answered {
-        FailureAnswer::Core(error) => ReloadRefusal::Core(error.clone()),
         FailureAnswer::Runtime => ReloadRefusal::Runtime(failure),
         FailureAnswer::WhereItStands => state.reload_stood_down(reply.candidate_read()),
     };
@@ -12886,20 +12860,31 @@ mod tests {
         drop(host);
     }
 
+    /// **A schema reload that fails untrusting the entry keeps a reader
+    /// through the recovery it owes**: a refusing environment its end drain
+    /// meets, after the activation closed the reader, parks coverage that
+    /// mints one again, and the recovery leaves it readable.
     #[test]
     fn failed_schema_reload_keeps_a_reader_through_recovery() {
         let ops = Arc::new(FakeOps::default());
         ops.reload_supported.store(true, Ordering::SeqCst);
         ops.reload_schema_changed.store(true, Ordering::SeqCst);
-        ops.reload_schema_apply_failure
-            .store(true, Ordering::SeqCst);
+        ops.once_the_candidate_is_read(|ops| {
+            ops.environmental_poll.store(true, Ordering::SeqCst);
+        });
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let _initial_lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
-        let failure = ReloadError::SchemaApply("the candidate could not be pinned".into());
-        assert_eq!(host.reload(&name), Err(ReloadRefusal::Core(failure)));
+        let refused = host.reload(&name);
+        assert!(
+            matches!(
+                refused,
+                Err(ReloadRefusal::Runtime(JobFailure::Environmental(_)))
+            ),
+            "the refusing environment answered {refused:?}"
+        );
         assert!(
             reader_stands(&host, &name),
             "retained coverage lost its reader after schema reload failed"
@@ -12923,37 +12908,34 @@ mod tests {
         );
     }
 
-    /// **A reload that fails untrusting the entry is named once**: the
-    /// untrusted state it publishes tells the reload failure it retains, and
-    /// the roll-up and `doctor` name the reload failure alone.
+    /// **A control-file failure that untrusts the entry is named once**: the
+    /// untrusted state a reconcile that could not read a control file
+    /// publishes tells the reload failure it retains, and the roll-up and
+    /// `doctor` name the reload failure alone.
     #[test]
     fn a_reload_failure_that_untrusts_the_entry_is_named_once() {
         let ops = Arc::new(FakeOps::default());
-        ops.reload_supported.store(true, Ordering::SeqCst);
-        ops.reload_schema_changed.store(true, Ordering::SeqCst);
-        ops.reload_schema_apply_failure
-            .store(true, Ordering::SeqCst);
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let _lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
-        let failure = ReloadError::SchemaApply("the candidate could not be pinned".into());
-        assert_eq!(
-            host.reload(&name),
-            Err(ReloadRefusal::Core(failure.clone()))
-        );
-
-        assert!(
-            matches!(
-                status_of(&host, &name).published,
+        ops.control_file_reconcile.store(true, Ordering::SeqCst);
+        report_through_a_driven_poll(&ops, &host, &name, &ops.off_thread_fact_poll_batches);
+        wait_until(
+            "the reconcile's control-file failure to untrust the entry",
+            lifecycle_wait_budget(),
+            || match status_of(&host, &name).published {
                 norn_wire::Published::State {
                     state: TrustState::Untrusted { .. },
                     ..
-                }
-            ),
-            "the failed reload left the entry trusted"
-        );
+                } => Observed::Met(()),
+                published => Observed::pending(format!("the entry publishes {published:?}")),
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+
+        let failure = ReloadError::SchemaParse("the schema does not parse".into());
         let named = [norn_wire::Attention::reload_failed(
             name.clone(),
             crate::refusal::control_file_failure(&failure),
@@ -25818,11 +25800,12 @@ mod tests {
         );
     }
 
-    /// **A schema activation that fails schedules the teardown due at its
-    /// release**: the recovery it leaves owed waits for a demand, and a
-    /// teardown is what an entry with no demand is due.
+    /// **A schema activation whose pin is refused schedules the teardown due
+    /// at its release**, as a candidate refused before activation does: the
+    /// refusal leaves the entry serving, and a teardown is what an entry with
+    /// no demand is due.
     #[test]
-    fn a_failed_schema_activation_schedules_a_due_teardown_at_its_release() {
+    fn a_refused_schema_pin_schedules_a_due_teardown_at_its_release() {
         let response = a_reload_released_due_a_teardown(Job::Reload, |ops| {
             ops.reload_schema_changed.store(true, Ordering::SeqCst);
             ops.reload_schema_apply_failure
@@ -25833,7 +25816,7 @@ mod tests {
                 response,
                 Err(ReloadRefusal::Core(ReloadError::SchemaApply(_)))
             ),
-            "the failed activation answered {response:?}"
+            "the refused pin answered {response:?}"
         );
     }
 

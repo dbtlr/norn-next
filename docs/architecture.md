@@ -3002,8 +3002,13 @@ is deleted pins the empty declaration, while a missing explicit `schema_source` 
 error. A schema whose
 declaration this build cannot read — a later grammar version, a key the grammar does not
 hold — is one of those errors: the vault is already serving a declaration it can read, and
-replacing it with one nothing reads would take that away. A successful candidate clears that
-error. A dry run is admitted and run as a reload is, holding the entry while it reads, and
+replacing it with one nothing reads would take that away. So is a schema the store refuses
+to pin without damage: the pin is one transaction, so the store goes on pinning the declaration served, and
+the activation, which retired the entry's pool before it pinned, mints the pool again over
+that declaration as its leg ends, with trust unbroken, unless the leg's end drain meets a
+failure of its own, whose policy then applies. A pin the store refuses as damage is
+no fact about the candidate: it keeps its damaged class and owes the rebuild. A successful
+candidate clears that error. A dry run is admitted and run as a reload is, holding the entry while it reads, and
 judges the same candidate the same way. A dry run that completes activates nothing and records
 nothing about the candidate — no active fingerprint, retained error or config delivery. A
 runtime failure a dry run meets — damaged derived state, a moved path order, a lost
@@ -3104,15 +3109,12 @@ rules. Installing that pool over the store the entry kept breaks no trust, so th
 settles across those turns as it does across any change; only a pool installed over a store
 that replaced the one before starts trust again. A schema reload has no reconcile turns of its own, and its answer implies `Ready` only
 where nothing was left; `vault status` reports where the entry stands. A candidate failure — a read or parse error,
-or any other refusal of the candidate before activation begins — leaves the entry as the fold
-and the leg's end left it, whatever state the reload was admitted at, and withdraws no trust
-of its own: the fold's derivation stands, and the entry is `Ready` only where nothing is left. A
-schema-changing activation that fails after it has begun replacing the derived state withdraws
-trust and owes the recovery. If its end drain also meets a runtime failure other than a
-candidate error, that failure decides the entry's policy while the reload retains and replies
-with the candidate's own error. Whether it had begun is a fact the leg records, never one read
-back off the trust label, because a reload admitted over a settling entry publishes healing
-before it begins.
+a declaration this build cannot read, or a pin the store refuses without damage, including one the activation
+meets after it retired the entry's pool — leaves the entry as the fold and the leg's end left
+it, whatever state the reload was admitted at, and withdraws no trust of its own: the fold's
+derivation stands, and the entry is `Ready` only where nothing is left. A failure after the pin
+lands is no candidate failure, and neither is a pin the store refuses as damage: each keeps its
+own class, and that class's policy applies — withdrawn trust and an owed rung, or a release.
 
 **A dry run waits and folds as an activation does, and activates nothing.** Its fold commits
 the derivation the reconcile it displaced would have committed, so the entry it hands back is
@@ -3347,7 +3349,8 @@ at its activation and retires the entry's pool until its leg ends, and that walk
 whole vault, which converges inside the leg before it installs another pool, so no read
 observes a column the walk has half refilled. An activation that fails after its re-pin
 withdraws trust and owes the recovery or the rebuild before any pool it leaves stands, so no read is served
-from that column either.
+from that column either. A re-pin the store refuses clears nothing, so any pool its leg mints
+again reads the column whole.
 The fold, the tag a value row names under a tag key — the `tags` carrier, declared or not,
 or a key declared `tags` — its `#` marker dropped and the tag fold applied, or the link a
 value row is under a key declared `link`, its alias dropped, read by the schema's link
