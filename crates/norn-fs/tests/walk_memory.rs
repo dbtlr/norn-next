@@ -14,42 +14,10 @@ use norn_fixtures::Profile;
 use norn_fs::{WalkFact, walk};
 use norn_testkit::process::{Run, Sandbox};
 
+mod baselines;
+
 const CHILD_ROOT: &str = "NORN_FS_WALK_MEMORY_ROOT";
 const SEED: u64 = 7;
-
-// Three native macos-arm64 debug readings after the descriptor-safe fix on
-// 2026-08-01 put `ambiguous` at 2.81-2.89 MiB and `realistic` at 3.22-3.27 MiB,
-// ratios of 1.13-1.16. These macOS readings predate NORN-443.
-// The ceiling is more than twice the observed top; the
-// ratio below is the sharp instrument against retaining the realistic tree's
-// roughly 4.3 MiB of clutter in addition to the executable's resident floor.
-#[cfg(target_os = "macos")]
-const REALISTIC_PEAK_RSS_CEILING_BYTES: u64 = 8 * 1024 * 1024;
-
-// The existing fixture generator's ubuntu-latest x86_64-glibc baseline is
-// 3.50-3.62 MiB versus 3.7-4.2 MiB on macos-arm64. Before this walker lane's
-// first hosted reading, Linux therefore used the same conservative bar;
-// subsequent changes move it only with reviewed measurement evidence. This is
-// the same 8 MiB conservative ceiling already used for that generator lane.
-// On ubuntu-latest x86_64-glibc, full memory invariant runs 41323116407,
-// 41324737076 and 41329840687 at PR #423 head 5dd80988b read ambiguous at
-// 3.78, 3.66 and 3.66 MiB, realistic at 3.86, 3.88 and 3.84 MiB, and ratios
-// of 1.02, 1.06 and 1.05. These are the child's own peaks (NORN-443).
-// The ceiling stays at 8 MiB, the smallest whole MiB above twice the top
-// reading (2 * 3.88 = 7.76 MiB).
-#[cfg(target_os = "linux")]
-const REALISTIC_PEAK_RSS_CEILING_BYTES: u64 = 8 * 1024 * 1024;
-
-// Other Unix targets have no hosted reading yet; use the same conservative
-// ceiling until one earns a target-specific measured bar.
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-const REALISTIC_PEAK_RSS_CEILING_BYTES: u64 = 8 * 1024 * 1024;
-
-// A retained-tree cost grows by several MiB between these profiles. A 2x bar
-// tolerates process-accounting noise around the executable's fixed floor but
-// still rejects growth proportional to the generated tree. The hosted
-// 1.02-1.06x readings above leave this rule unchanged.
-const REALISTIC_TO_AMBIGUOUS_PEAK_RSS_PER_MILLE: u64 = 2_000;
 
 struct Reading {
     peak_rss_bytes: u64,
@@ -75,20 +43,20 @@ fn walk_peak_memory_is_bounded_by_the_frontier_not_the_tree() {
         realistic.facts,
         mebibytes(realistic.peak_rss_bytes),
         ratio as f64 / 1_000.0,
-        REALISTIC_TO_AMBIGUOUS_PEAK_RSS_PER_MILLE as f64 / 1_000.0,
+        baselines::REALISTIC_TO_AMBIGUOUS_PEAK_RSS_PER_MILLE as f64 / 1_000.0,
     );
 
     assert!(
-        realistic.peak_rss_bytes <= REALISTIC_PEAK_RSS_CEILING_BYTES,
+        realistic.peak_rss_bytes <= baselines::REALISTIC_PEAK_RSS_CEILING_BYTES,
         "walking `realistic` peaked at {:.2} MiB against a {:.2} MiB bar",
         mebibytes(realistic.peak_rss_bytes),
-        mebibytes(REALISTIC_PEAK_RSS_CEILING_BYTES),
+        mebibytes(baselines::REALISTIC_PEAK_RSS_CEILING_BYTES),
     );
     assert!(
-        ratio <= REALISTIC_TO_AMBIGUOUS_PEAK_RSS_PER_MILLE,
+        ratio <= baselines::REALISTIC_TO_AMBIGUOUS_PEAK_RSS_PER_MILLE,
         "walking `realistic` moved peak memory by {:.2}x from `ambiguous`, past the {:.2}x bar",
         ratio as f64 / 1_000.0,
-        REALISTIC_TO_AMBIGUOUS_PEAK_RSS_PER_MILLE as f64 / 1_000.0,
+        baselines::REALISTIC_TO_AMBIGUOUS_PEAK_RSS_PER_MILLE as f64 / 1_000.0,
     );
 }
 

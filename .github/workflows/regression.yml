@@ -363,7 +363,7 @@ jobs:
   # that fits under it, and a ratio fails the moment its two readings stop
   # moving together. Their readings are in each crate's tests/baselines/mod.rs.
   # The store's retained-count RSS case instead pairs 512 and 4096 documents
-  # with a ceiling and an absolute growth bound, defined beside the case.
+  # with a ceiling and an absolute growth bound, also in its crate's tests/baselines/mod.rs.
   # Every bar is authored and moves only by a reviewed edit.
   #
   # These cases live in this full-regression job alone. They are `#[ignore]`d
