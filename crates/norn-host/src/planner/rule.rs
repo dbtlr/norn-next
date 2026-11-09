@@ -99,8 +99,10 @@
 //! folds case, `TASK-8.md` counts for `task-`. A number past what the
 //! allocator can count leaves the operation unresolved naming the file
 //! rather than numbering below it. A folder that does not stand yet numbers
-//! from 1. A directory at a matching name counts as a file does: it
-//! occupies the name. The folder is listed once per slot for a plan, and its
+//! from 1. A folder the host cannot list or descend leaves the operation
+//! unresolved naming that folder, since the numbers it holds are unknown;
+//! the plan's other operations still resolve. A directory at a matching
+//! name counts as a file does: it occupies the name. The folder is listed once per slot for a plan, and its
 //! listing is folded into a running highest number as it streams, never
 //! collected. Allocation is a reading, not a reservation: a name another
 //! writer takes before the plan lands is a taken name the applier refuses,
@@ -123,6 +125,7 @@ use norn_config::schema::{
     CaseFold, CreationRule, LocalTimestamp, NotALocalTimestamp, RuleDefaultsRefusal, RuleWork,
     SeqSlot, Target, TemplateValues, VaultSchema,
 };
+use norn_fs::NormalizedPath;
 use norn_text::{LineEnding, Mapping, opens_frontmatter, render_document};
 use norn_wire::{
     ConflictingDefault, DefaultCandidate, DocumentPath, Operation, OperationKind, UnresolvedReason,
@@ -403,9 +406,24 @@ fn listed_highest<V: VaultView>(slot: &SeqSlot, view: &V) -> Result<Result<u64, 
     } else if let Ok(folder) = view.normalizer().normalize(Path::new(slot.folder())) {
         // A slot's folder is a filled target's, which schema read and the
         // fill hold to a path inside the vault, so it always normalizes.
-        view.visit_folder_names(&folder, &mut visit)?;
+        match view.visit_folder_names(&folder, &mut visit) {
+            Ok(()) => {}
+            Err(error) => match V::unlistable_folder(&error) {
+                Some(unlistable) => return Ok(Err(unlistable_slot(unlistable))),
+                None => return Err(error),
+            },
+        }
     }
     Ok(past.map_or(Ok(highest), Err))
+}
+
+/// Why a slot whose folder lies at or beneath `folder`, which the host
+/// cannot list, cannot be counted, in words.
+fn unlistable_slot(folder: &NormalizedPath) -> String {
+    format!(
+        "the folder `{}` cannot be listed, so the numbers already used there are unknown",
+        folder.as_path().display()
+    )
 }
 
 /// Why `path` cannot be counted, in words.
@@ -679,13 +697,16 @@ inbox:
 
     /// `operations` planned over `vault` under `schema`, the clock giving
     /// `at` and counting how often it is read in `reads`.
-    fn planned_reading(
-        vault: &MemoryVault,
+    fn planned_reading<V: VaultView>(
+        vault: &V,
         schema: &VaultSchema,
         operations: Vec<Operation>,
         at: Result<LocalTimestamp, NotALocalTimestamp>,
         reads: &Cell<usize>,
-    ) -> Resolution {
+    ) -> Resolution
+    where
+        V::Error: std::fmt::Debug,
+    {
         let clock = || {
             reads.set(reads.get() + 1);
             at
@@ -1059,6 +1080,48 @@ inbox:
             assert!(detail.contains(held), "{held}: {detail}");
             assert!(resolution.plan.transitions.is_empty(), "{held}");
         }
+    }
+
+    /// **A slot whose folder the host cannot list leaves only its creation
+    /// unresolved, naming the folder**, since the numbers it already holds
+    /// are unknown; the plan's other operation still resolves, and nothing
+    /// refuses the plan. Skipped where this account lists a mode-000 folder.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: the tree a case reads.
+    fn a_slot_folder_the_host_cannot_list_leaves_only_its_creation_unresolved() {
+        use super::super::control::SchemaPlace;
+        use super::super::view::TreeView;
+        use super::super::view::denied::Unlistable;
+
+        let scratch = norn_testkit::scratch::Scratch::new("planner-rule-unlistable");
+        std::fs::create_dir_all(scratch.join("tasks")).expect("a folder");
+        std::fs::write(scratch.join("tasks/NORN-4.md"), "4\n").expect("a document");
+        let view = TreeView::open(scratch.root(), &[], &SchemaPlace::default()).expect("a vault");
+        let Some(_denied) = Unlistable::deny(&scratch.join("tasks")) else {
+            return;
+        };
+
+        let resolution = planned_reading(
+            &view,
+            &schema(SCHEMA),
+            vec![task(), Operation::new(create("notes/free.md", "free\n"))],
+            Ok(reading()),
+            &Cell::new(0),
+        );
+
+        let detail = left_in_words(&resolution);
+        assert!(detail.contains("`tasks`"), "{detail}");
+        assert!(detail.contains("cannot be listed"), "{detail}");
+        assert_eq!(resolution.unresolved[0].operation, task());
+        assert_eq!(
+            resolution
+                .plan
+                .operations
+                .iter()
+                .map(|operation| operation.kind.clone())
+                .collect::<Vec<_>>(),
+            vec![create("notes/free.md", "free\n")]
+        );
     }
 
     /// **A slot at the vault root counts the root's own names.**

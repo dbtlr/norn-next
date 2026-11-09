@@ -504,40 +504,75 @@ impl Vault {
     /// no promised order, with nothing skipped: a caller asking whether a
     /// folder would be empty counts a shadow or an excluded entry inside it as
     /// something that keeps it standing.
-    #[allow(clippy::disallowed_methods)] // norn-fs owns the vault walk and its listings.
     pub fn visit_folder_names(
         &self,
         relative: &Path,
-        mut visit: impl FnMut(&OsStr) -> ControlFlow<()>,
+        visit: impl FnMut(&OsStr) -> ControlFlow<()>,
     ) -> Result<bool, WalkError> {
-        let (directory, access) = if relative.as_os_str().is_empty() {
-            (self.root_fd.clone(), self.root.to_path_buf())
+        self.visit_folder_names_or_unreadable(relative, visit)?
+            .map_err(|fact| {
+                environment(
+                    fact.operation,
+                    &self.root.join(fact.path.as_path()),
+                    fact.cause,
+                )
+            })
+    }
+
+    /// [`visit_folder_names`](Self::visit_folder_names), except that a path
+    /// failure at a folder the listing descends through, or at the folder
+    /// itself, answers the unreadable fact naming that folder rather than an
+    /// environmental error.
+    ///
+    /// A caller that can do without one folder's names — a planner skipping
+    /// the one fix that needed them — takes this answer. The vault root's own
+    /// listing, and process resource failures anywhere, remain the
+    /// `WalkError`: no folder answers for the root.
+    #[allow(clippy::disallowed_methods)] // norn-fs owns the vault walk and its listings.
+    pub fn visit_folder_names_or_unreadable(
+        &self,
+        relative: &Path,
+        mut visit: impl FnMut(&OsStr) -> ControlFlow<()>,
+    ) -> Result<Result<bool, UnreadableFact>, WalkError> {
+        let (directory, access, folder) = if relative.as_os_str().is_empty() {
+            (self.root_fd.clone(), self.root.to_path_buf(), None)
         } else {
             let folder = self.normalize(relative)?;
             if self.exclusions.covering_root(&folder).is_some() {
-                return Ok(false);
+                return Ok(Ok(false));
             }
             let directory = match self.descend(folder.as_path())? {
                 Descent::Reached { directory, .. } => directory,
                 Descent::Stopped {
                     stop: Stop::Unlistable(fact),
                     ..
-                } => {
-                    return Err(environment(
-                        fact.operation,
-                        &self.root.join(fact.path.as_path()),
-                        fact.cause,
-                    ));
-                }
-                Descent::Stopped { .. } => return Ok(false),
+                } => return Ok(Err(fact)),
+                Descent::Stopped { .. } => return Ok(Ok(false)),
             };
-            (directory, self.root.join(folder.as_path()))
+            let access = self.root.join(folder.as_path());
+            (directory, access, Some(folder))
         };
-        let entries = Dir::read_from(&directory)
-            .map_err(|source| environment_errno("reading directory", &access, source))?;
+        // A listing failure is the folder's own where there is a folder to
+        // name, and the root's environmental error where there is none.
+        let failed = |operation: &'static str, source: rustix::io::Errno| match &folder {
+            Some(folder) => unreadable_at(
+                folder.clone(),
+                UnreadKind::Directory,
+                operation,
+                &access,
+                io::Error::from_raw_os_error(source.raw_os_error()),
+            ),
+            None => Err(environment_errno(operation, &access, source)),
+        };
+        let entries = match Dir::read_from(&directory) {
+            Ok(entries) => entries,
+            Err(source) => return failed("reading directory", source).map(Err),
+        };
         for entry in entries {
-            let entry =
-                entry.map_err(|source| environment_errno("reading entry in", &access, source))?;
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(source) => return failed("reading entry in", source).map(Err),
+            };
             let name = entry.file_name().to_bytes();
             if name == b"." || name == b".." {
                 continue;
@@ -547,7 +582,7 @@ impl Vault {
                 break;
             }
         }
-        Ok(true)
+        Ok(Ok(true))
     }
 
     /// Descends `names` from this vault's root, deciding each name the way the

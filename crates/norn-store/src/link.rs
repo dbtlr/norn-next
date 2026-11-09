@@ -91,6 +91,13 @@ pub(crate) fn address_kind(link: &LinkFact) -> LinkAddressKind {
     LinkAddress::of(link.family.wire(), link.protocol.as_deref(), &link.target).kind()
 }
 
+/// Whether `link`'s address is a path form ([`LinkAddress::is_path_form`]):
+/// the one address a directory mark can leave unjudged, which a read of
+/// link health and a plan's forecast of it both test.
+pub(crate) fn is_path_form(link: &LinkFact) -> bool {
+    LinkAddress::of(link.family.wire(), link.protocol.as_deref(), &link.target).is_path_form()
+}
+
 /// One key the link index holds a link under.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct LinkKey {

@@ -2674,6 +2674,77 @@ fn an_unreadable_destination_skips_only_its_route_as_destination_taken() {
     assert!(!stands(&vault, "tasks/a.md"));
 }
 
+/// A folder whose permissions a case took away, given back when the case
+/// ends however it ends, so the sandbox's cleanup can remove it.
+struct Unlistable(std::path::PathBuf);
+
+impl Unlistable {
+    /// Take every permission from `folder`; `None`, giving them back at
+    /// once, where this account lists it anyway (as root does), in which case
+    /// the case proves nothing and says so.
+    fn deny(folder: &Path) -> Option<Self> {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o000))
+            .expect("take the folder's permissions");
+        let denied = Unlistable(folder.to_owned());
+        if std::fs::read_dir(folder).is_ok() {
+            eprintln!("skipped: this account lists a mode-000 folder");
+            return None;
+        }
+        Some(denied)
+    }
+}
+
+impl Drop for Unlistable {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+    }
+}
+
+/// **A route whose destination lies in a folder the host cannot list skips
+/// as an unlistable folder naming it, and an independent route still
+/// moves**: one folder's permissions refuse no repair. Skipped where this
+/// account lists a mode-000 folder.
+#[test]
+fn a_route_into_an_unlistable_folder_skips_naming_it_while_an_independent_route_moves() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-route-unlistable-folder",
+        AREAS,
+        &[
+            ("open/a.md", b"---\ntype: task\n---\n# Open\n"),
+            ("sealed/b.md", b"---\ntype: task\n---\n# Sealed\n"),
+        ],
+    );
+    let sealed = vault.path().join(FOLDER).join("sealed/tasks");
+    std::fs::create_dir_all(&sealed).expect("make the folder");
+    let Some(_denied) = Unlistable::deny(&sealed) else {
+        return;
+    };
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let open = misplaced_of(&host, &vault, "open/a.md");
+    let blocked = misplaced_of(&host, &vault, "sealed/b.md");
+
+    let plan = previewed(host.repair(repairing_beneath(&vault, ApplyMode::Preview)));
+
+    assert_eq!(
+        kinds(&plan),
+        vec![OperationKind::move_document(
+            at("open/a.md"),
+            at("open/tasks/a.md")
+        )]
+    );
+    assert_eq!(provenance(&plan).citations, vec![citing(1, &[open])]);
+    let skip = provenance(&plan)
+        .skipped
+        .iter()
+        .find(|skip| skip.finding == blocked)
+        .expect("the blocked route is skipped");
+    assert_eq!(skip.reason, SkipReason::UnlistableFolder);
+    let note = skip.note.as_deref().expect("the skip names the folder");
+    assert!(note.contains("`zz-repair/sealed/tasks`"), "{note}");
+}
+
 /// A rule routing a `p` into `tasks/`, and one routing a `q` standing in
 /// `q/<area>/` into `tasks/<area>/`, so one route's destination can be a
 /// folder another names as a document.

@@ -59,7 +59,8 @@ fn folders_made<V: VaultView>(
 /// Every folder above a removed document that the plan leaves empty: every
 /// entry it lists is a document the plan removes or a folder it empties, and
 /// no create lands inside it. This is what the applier's emptying after the
-/// removals takes, deepest first and upward until a folder is not empty.
+/// removals takes, deepest first and upward until a folder is not empty. A
+/// folder the host cannot list is not emptied: something may stand there.
 fn folders_removed<V: VaultView>(
     removals: &[&DocumentPath],
     creates: &[&DocumentPath],
@@ -88,7 +89,7 @@ fn folders_removed<V: VaultView>(
     let mut removed = BTreeSet::new();
     for (folder, spelled) in candidates {
         let mut emptied = true;
-        view.visit_folder_names(&folder, &mut |name| {
+        let listed = view.visit_folder_names(&folder, &mut |name| {
             let inside = identity(&folder.as_path().join(name), view);
             if inside.is_some_and(|inside| gone.contains(&inside)) {
                 ControlFlow::Continue(())
@@ -96,7 +97,14 @@ fn folders_removed<V: VaultView>(
                 emptied = false;
                 ControlFlow::Break(())
             }
-        })?;
+        });
+        match listed {
+            Ok(()) => {}
+            // A folder the host cannot list may hold anything, so it is not
+            // forecast emptied, and neither is any folder above it.
+            Err(error) if V::unlistable_folder(&error).is_some() => emptied = false,
+            Err(error) => return Err(error),
+        }
         if emptied {
             gone.insert(folder);
             removed.insert(spelled);
@@ -213,6 +221,33 @@ mod tests {
             &[remove("a/x.md"), remove("b/x.md"), remove("c/x.md")],
         );
         assert_eq!(forecast.folders_removed, folders(&["c"]));
+    }
+
+    /// **A folder the host cannot list is not forecast emptied, and neither
+    /// is any folder above it**: something may stand inside it, so the
+    /// forecast neither claims its removal nor refuses the plan. Skipped where
+    /// this account lists a mode-000 folder.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: the tree a case reads.
+    fn a_folder_the_host_cannot_list_is_not_forecast_removed() {
+        use super::super::control::SchemaPlace;
+        use super::super::view::TreeView;
+        use super::super::view::denied::Unlistable;
+
+        let scratch = norn_testkit::scratch::Scratch::new("planner-forecast-unlistable");
+        std::fs::create_dir_all(scratch.join("old/locked")).expect("a folder");
+        std::fs::write(scratch.join("old/locked/x.md"), "x").expect("a document");
+        std::fs::create_dir_all(scratch.join("gone")).expect("a folder");
+        std::fs::write(scratch.join("gone/y.md"), "y").expect("a document");
+        let view = TreeView::open(scratch.root(), &[], &SchemaPlace::default()).expect("a vault");
+        let Some(_denied) = Unlistable::deny(&scratch.join("old/locked")) else {
+            return;
+        };
+
+        let forecast = forecast(&[remove("old/locked/x.md"), remove("gone/y.md")], &view)
+            .expect("an unlistable folder refuses no forecast");
+
+        assert_eq!(forecast.folders_removed, folders(&["gone"]));
     }
 
     #[test]

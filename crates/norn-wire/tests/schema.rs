@@ -4326,6 +4326,7 @@ fn the_repair_vocabularies_are_closed_strings() {
         "excluded_class",
         "judge_would_refuse",
         "destination_taken",
+        "unlistable_folder",
         "respells_a_judged_link",
         "too_common",
         "too_short",

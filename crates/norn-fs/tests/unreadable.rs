@@ -78,6 +78,58 @@ fn a_failing_final_name_stat_is_an_unreadable_answer_to_a_reach_that_asks_for_it
     ));
 }
 
+/// **A folder the account cannot list answers its unreadable fact to a
+/// listing that asks for it**, naming the folder, whether the listing is of
+/// that folder or of one beneath it; the plain listing keeps answering the
+/// environmental error. Skipped where this account lists a mode-000 folder.
+#[cfg(unix)]
+#[test]
+fn a_denied_folder_is_an_unreadable_answer_to_a_listing_that_asks_for_it() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let scratch = norn_testkit::scratch::Scratch::new("fs-denied-listing");
+    let locked = scratch.join("locked");
+    std::fs::create_dir_all(locked.join("inner")).unwrap();
+    std::fs::write(scratch.join("open.md"), b"body").unwrap();
+    let vault = Vault::open(scratch.root(), &[]).unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let denied = std::fs::read_dir(&locked).is_err();
+    let answers = ["locked", "locked/inner"].map(|folder| {
+        (
+            vault.visit_folder_names_or_unreadable(Path::new(folder), |_| {
+                std::ops::ControlFlow::Continue(())
+            }),
+            vault.visit_folder_names(Path::new(folder), |_| std::ops::ControlFlow::Continue(())),
+        )
+    });
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    if !denied {
+        eprintln!("skipped: this account lists a mode-000 folder");
+        return;
+    }
+    for (unreadable, plain) in answers {
+        let fact = unreadable
+            .unwrap()
+            .expect_err("the denied folder answers its fact");
+        assert_eq!(fact.path().as_path(), Path::new("locked"));
+        assert_eq!(fact.kind(), UnreadKind::Directory);
+        assert_eq!(fact.cause().raw_os_error(), Some(libc::EACCES));
+        assert!(matches!(plain, Err(WalkError::Environment { .. })));
+    }
+    let mut names = Vec::new();
+    assert!(
+        vault
+            .visit_folder_names_or_unreadable(Path::new(""), |name| {
+                names.push(name.to_owned());
+                std::ops::ControlFlow::Continue(())
+            })
+            .unwrap()
+            .unwrap()
+    );
+    names.sort();
+    assert_eq!(names, ["locked", "open.md"]);
+}
+
 #[test]
 fn path_targeted_descriptor_exhaustion_crosses_threads_and_ends_with_its_guard() {
     let scratch = norn_testkit::scratch::Scratch::new("fs-targeted-open");

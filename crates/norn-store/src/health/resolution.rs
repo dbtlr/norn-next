@@ -124,7 +124,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use norn_db::rusqlite::types::Value;
-use norn_wire::{Candidate, CandidateHead, LinkAddressKind, Resolves};
+use norn_wire::{Candidate, CandidateHead, LinkAddressKind, Resolves, TargetGap};
 
 use super::run::{OnSnapshot, ResolutionStatement, Runner};
 use super::{Held, Key, LINK_HEALTH_CHUNK, Pages, occupied_keys, statement};
@@ -315,6 +315,17 @@ pub struct LinkChange {
     /// What it resolves to from its holder, with every target at its
     /// after-state.
     pub after: Resolves,
+    /// Whether a directory marked unreadable covers the path target that
+    /// [`before`](Self::before) resolves to no document at, as link health
+    /// reads one ([`norn_wire::LinkHealth::of_address`]):
+    /// [`TargetGap::Marked`] only for a path-form link resolving to none
+    /// whose path key lies beneath a mark this snapshot holds, so a caller
+    /// judges the link `not_judged` where a read would.
+    pub before_gap: TargetGap,
+    /// [`before_gap`](Self::before_gap) for [`after`](Self::after): the path
+    /// target its holder after the plan names. Marks are the snapshot's,
+    /// since no plan files or ends one.
+    pub after_gap: TargetGap,
     /// Whether the plan writes the link's text ([`ProbedLink::written`]).
     pub written: bool,
     /// Whether what the link names moved under it: its two holders give it
@@ -466,7 +477,12 @@ impl Snapshot {
     ) -> Result<ResolutionWork, PageRefusal> {
         let mut lookups = Lookups::default();
         self.declaration_pinned(declared, &mut lookups)?;
-        let mut judging = Judging::new(declared.ambiguity_ignore(), overlay, OnSnapshot::new(self));
+        let mut judging = Judging::new(
+            declared.ambiguity_ignore(),
+            overlay,
+            OnSnapshot::new(self),
+            self.directory_marks_present,
+        );
         judging.run(probed, &mut each).map_err(PageRefusal::from)?;
         Ok(judging.finished())
     }
@@ -517,7 +533,12 @@ impl Snapshot {
     ) -> Result<(Vec<TargetNaming>, ResolutionWork), PageRefusal> {
         let mut lookups = Lookups::default();
         self.declaration_pinned(declared, &mut lookups)?;
-        let mut judging = Judging::new(declared.ambiguity_ignore(), overlay, OnSnapshot::new(self));
+        let mut judging = Judging::new(
+            declared.ambiguity_ignore(),
+            overlay,
+            OnSnapshot::new(self),
+            self.directory_marks_present,
+        );
         let namings = addresses
             .iter()
             .map(|address| judging.name(address, headed))
@@ -653,10 +674,21 @@ struct Judging<'a, R> {
     /// Every target and reached place read off the overlay so far
     /// ([`ResolutionWork::targets_read`]).
     targets_read: std::cell::Cell<u64>,
+    /// Whether the snapshot holds any unreadable-directory mark: where it
+    /// holds none, no link's gap is probed.
+    marks_present: bool,
+    /// Whether a mark covers each path key probed so far, so a target many
+    /// judged links name is probed once for the judgment.
+    marked: BTreeMap<String, bool>,
 }
 
 impl<'a, R: Runner> Judging<'a, R> {
-    fn new(ignore: &'a AmbiguityIgnore, overlay: &'a PathOverlay, runner: R) -> Self {
+    fn new(
+        ignore: &'a AmbiguityIgnore,
+        overlay: &'a PathOverlay,
+        runner: R,
+        marks_present: bool,
+    ) -> Self {
         let key = SuffixKey::Comparison;
         let mut naming: BTreeMap<String, Vec<usize>> = BTreeMap::new();
         let mut sought = BTreeSet::new();
@@ -695,6 +727,8 @@ impl<'a, R: Runner> Judging<'a, R> {
             passing: BTreeMap::new(),
             work,
             targets_read: std::cell::Cell::new(0),
+            marks_present,
+            marked: BTreeMap::new(),
         }
     }
 
@@ -974,6 +1008,59 @@ impl<'a, R: Runner> Judging<'a, R> {
         keys.iter().any(|(text, _, _)| self.sought.contains(text))
     }
 
+    /// Whether a directory mark leaves `link`, resolving to `resolves` under
+    /// `keys`, unjudged — the rule a read of its health applies: only a link
+    /// whose address is a path form ([`link::is_path_form`]) resolving to no
+    /// document, through a path key spelling a folder, beneath a mark. A
+    /// same-note link's key is its holder's path, but it names no path a
+    /// mark covers, so a read calls it broken.
+    ///
+    /// **The probes follow the judged links**: none where the snapshot holds
+    /// no mark, none for a link that resolves or is no path form, and one
+    /// indexed ancestor probe per distinct path key otherwise, remembered
+    /// for the judgment.
+    fn gap(
+        &mut self,
+        link: &LinkFact,
+        resolves: &Resolves,
+        keys: &[Key],
+    ) -> Result<TargetGap, StoreError> {
+        if !self.marks_present
+            || !matches!(resolves, Resolves::None {})
+            || !link::is_path_form(link)
+        {
+            return Ok(TargetGap::None);
+        }
+        for (text, segments, _) in keys {
+            if segments.is_some() || !text.contains('/') {
+                continue;
+            }
+            let marked = match self.marked.get(text) {
+                Some(marked) => *marked,
+                None => {
+                    let (sql, values) = statement::directory_probe(text)?;
+                    let marked = self
+                        .runner
+                        .read_all(
+                            ResolutionStatement::DirectoryMarks,
+                            sql,
+                            values,
+                            |row| Ok(Ok(row.get::<_, bool>(0)?)),
+                            "probing directory marks",
+                        )?
+                        .first()
+                        == Some(&true);
+                    self.marked.insert(text.clone(), marked);
+                    marked
+                }
+            };
+            if marked {
+                return Ok(TargetGap::Marked);
+            }
+        }
+        Ok(TargetGap::None)
+    }
+
     /// Resolve every key `chunk` holds that is not yet resolved, hand each of
     /// its links to `each`, and keep only the keys it held.
     fn judge(
@@ -1001,12 +1088,16 @@ impl<'a, R: Runner> Judging<'a, R> {
                     .chain(&judged.after)
                     .any(|key| self.held(key).members.changes);
             let before_targets = self.before_targets(&judged.before);
+            let before_gap = self.gap(&judged.link, &before, &judged.before)?;
+            let after_gap = self.gap(&judged.link, &after, &judged.after)?;
             each(LinkChange {
                 holder: judged.holder,
                 link: judged.link,
                 address: judged.address,
                 before,
                 after,
+                before_gap,
+                after_gap,
                 written: judged.written,
                 members_moved,
                 before_targets,

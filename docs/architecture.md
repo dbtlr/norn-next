@@ -3772,7 +3772,9 @@ links written with the extension — not the class once per link, and where each
 its own, not every route's keys once per chunk. Destinations are then claimed in batch order: a
 destination something stands at — a document a route of the batch moves away included — or
 beneath a document that stands, or at, above or beneath an earlier route's destination, is
-`destination_taken`; a skipped route claims none. **The resolved plan is held to its planning's
+`destination_taken`; a destination whose reach descends a folder the host cannot list is
+`unlistable_folder`, its note naming the folder, since what stands there is unknown, and the
+rest of the repair proceeds; a skipped route claims none. **The resolved plan is held to its planning's
 claims.** What the planning claims of every selected finding its document's judgment names —
 fixed, dropped, or still standing where the document ends — is compared with the applier's
 judgment of the resolved plan, cascades and all; a plan that introduces a violation, still
@@ -4103,7 +4105,9 @@ Allocation is a reading, not a reservation: a
 name another writer took before the plan lands is drift or a taken name, refused as any
 create's is, and the caller plans again. An unknown rule, a capture where no inbox is
 declared, a declared variable missing or an undeclared one supplied, a value that would break
-the target's path, a number past what the allocator counts, a clock outside the years
+the target's path, a number past what the allocator counts, a slot folder the host cannot list
+or descend (named, since the numbers it holds are unknown, while the plan's other operations
+still resolve), a clock outside the years
 `{{date}}` writes, and a document the renderer refuses leave the operation unresolved naming
 why; rule defaults that disagree and a default read from a capture bound several ways are
 named structurally (`defaults_conflict`, `ambiguous_capture`). A resolved plan still carrying
@@ -4229,7 +4233,10 @@ that file's hashes guard it; and the forecast names the links the plan leaves as
 leaves broken, makes ambiguous or retargets — a link retargeted being one the plan resolves
 otherwise without rewriting it, an ambiguous one or one leaving a document for another, as a
 document appearing at or leaving a suffix link's exact path makes it — and the files a
-folder move leaves behind. A moved holder's own relative link no spelling uniquely reaches
+folder move leaves behind. Each side of a link is judged as a read judges it, directory marks
+included: a path target left without a document beneath a directory marked unreadable is not
+judged, so it is never forecast left broken, and the marks are probed only for the links the
+plan judges that resolve to nothing. A moved holder's own relative link no spelling uniquely reaches
 is left as written and advised where the move changes what it names. A folder move expands
 at planning into one document move per document the folder holds, at any depth and in path
 order, as a `where` target does, each keeping what the folder move carries beyond its kind;

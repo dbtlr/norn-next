@@ -541,6 +541,18 @@ impl<'a> LinkAddress<'a> {
         }
     }
 
+    /// Whether the address is a path form — a rooted name, or a path read
+    /// from the vault root or the holding document's folder — the one
+    /// address a directory marked unreadable can leave unjudged where it
+    /// resolves to no document ([`TargetGap::Marked`]). A suffix address and
+    /// the holding document name no path a mark covers.
+    pub fn is_path_form(&self) -> bool {
+        matches!(
+            self,
+            LinkAddress::RootedName(_) | LinkAddress::Relative(_) | LinkAddress::Rooted(_)
+        )
+    }
+
     /// How the address stands to judging the link: the one classification a
     /// link's health ([`LinkHealth::of_link`]) and a store's stored kind both
     /// read.
@@ -893,9 +905,10 @@ impl LinkRow {
             return self;
         };
         let address = LinkAddress::of(self.family, self.protocol.as_deref(), &self.target);
-        let gap = match address {
-            LinkAddress::RootedName(_) | LinkAddress::Relative(_) | LinkAddress::Rooted(_) => gap,
-            _ => TargetGap::None,
+        let gap = if address.is_path_form() {
+            gap
+        } else {
+            TargetGap::None
         };
         self.health = LinkHealth::of_address(address.kind(), targets.total(), gap);
         self
@@ -945,14 +958,10 @@ impl<'de> Deserialize<'de> for LinkRow {
             (Some(targets), health) => {
                 let address =
                     LinkAddress::of(fields.family, fields.protocol.as_deref(), &fields.target);
-                let gap = match (&address, health) {
-                    (
-                        LinkAddress::RootedName(_)
-                        | LinkAddress::Relative(_)
-                        | LinkAddress::Rooted(_),
-                        LinkHealth::NotJudged,
-                    ) => TargetGap::Marked,
-                    _ => TargetGap::None,
+                let gap = if address.is_path_form() && health == LinkHealth::NotJudged {
+                    TargetGap::Marked
+                } else {
+                    TargetGap::None
                 };
                 let derived = LinkHealth::of_address(address.kind(), targets.total(), gap);
                 ElsewhereNamesDocuments::check(derived, targets.total())
