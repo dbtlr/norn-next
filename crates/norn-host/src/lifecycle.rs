@@ -383,9 +383,11 @@ pub trait EntryOps: Send + Sync + 'static {
     /// leaves the attachment serving the declaration it served**, before or
     /// after [`ProgressReporter::begin_schema_reload`]: the lifecycle mints
     /// the reader again over that declaration and withdraws no trust. A store
-    /// that refuses the candidate's pin is one such refusal, since the pin is
-    /// one transaction. A failure once the store pins the candidate is never
-    /// this class: it keeps its own, whose policy withdraws trust.
+    /// that refuses the candidate's pin without damage is one such refusal,
+    /// since the pin is one transaction. A pin refused as damage, and any
+    /// failure once the store pins the candidate, is never this class: each
+    /// keeps its own, whose policy applies — withdrawn trust and an owed rung,
+    /// or a release.
     fn reload(
         &self,
         _: &VaultName,
@@ -950,11 +952,12 @@ impl<A: SnapshotSource> ProgressReporter<A> {
     ///
     /// The record is what a read meeting the entry reads to wait for the
     /// leg's end, where the reader is minted again; it decides nothing about
-    /// trust. A candidate the store then refuses to pin leaves the store
-    /// pinning the schema the entry served, so the leg ends as for any
-    /// refused candidate, minting the reader again over that schema with
-    /// trust unbroken. A failure after the pin lands keeps its own class, and
-    /// that class's policy withdraws trust.
+    /// trust. A candidate the store then refuses to pin without damage leaves
+    /// the store pinning the schema the entry served, so the leg ends as for
+    /// any refused candidate, minting the reader again over that schema with
+    /// trust unbroken. A pin refused as damage, and a failure after the pin
+    /// lands, keeps its own class, and that class's policy applies — withdrawn
+    /// trust and an owed rung, or a release.
     pub fn begin_schema_reload(&self) {
         let Some(entry) = self.entry.upgrade() else {
             return;
