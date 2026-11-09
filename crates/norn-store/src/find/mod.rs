@@ -222,13 +222,13 @@ pub(crate) use hydrate::{
     wire_span,
 };
 pub use statement::{FIND_STATEMENTS, FindStatement, Nested, PageDirection};
-use statement::{Section, SectionStart, compose_page};
 pub(crate) use statement::{
-    SpellingRange, compose_bare_directory, compose_candidate_suffixes, compose_class_head,
-    compose_class_total, compose_document_span, compose_finding_candidates,
+    ListedRanges, SpellingRange, compose_bare_directory, compose_candidate_suffixes,
+    compose_class_head, compose_class_total, compose_document_span, compose_finding_candidates,
     compose_finding_classes, compose_known_key, compose_link_targets, compose_match_probe,
     compose_offset_spellings, compose_universe, path_list,
 };
+use statement::{Section, SectionStart, compose_page};
 
 /// Where a page stopped, or where a continuation resumes: the value the row
 /// was ordered by, and its path. The order it stands in is the request's.
