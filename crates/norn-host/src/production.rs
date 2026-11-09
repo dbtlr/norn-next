@@ -3854,7 +3854,9 @@ pub(crate) struct PlanEffect {
 /// walks no scope whose unaccounted findings a prune would take. A death at a
 /// path carrying the rendering marker U+FFFD can also discard a different file's
 /// finding at the same rendered subject. This changeset does not re-read those
-/// other spellings. A rebuild restores the finding.
+/// other spellings. A rebuild restores the finding. That is an accepted
+/// limitation: it needs a refused spelling colliding with the removed one at a
+/// marker-carrying subject, and the next vault heal or rebuild converges it.
 pub(crate) fn commit_plan_changeset(
     store: &mut Store,
     root: &Path,
@@ -4576,6 +4578,18 @@ impl Account {
     ///   are outside what this walk enumerated. A root the walk *refuses* is not
     ///   one of these: the refusal stands, so the walk concludes the places
     ///   beneath it.
+    ///
+    /// **A walk rooted below an unrendered ancestor acts on part of a place.**
+    /// That happens when a real folder's own name carries U+FFFD, such as a
+    /// dirty `bad\u{fffd}dir` beside a colliding refused sibling `bad\x01dir`.
+    /// The merge files the spellings it walked, and its first record replaces
+    /// the place's spelling side, so the sibling's finding can be dropped. A
+    /// deleted real document whose own name carries U+FFFD and whose bytes are
+    /// not UTF-8 likewise keeps its `document/body-bytes-not-utf8` finding.
+    /// That is an accepted limitation: it needs a name collision at a folder
+    /// whose own name is marker-carrying, the places are left standing rather
+    /// than guessed at, and the next vault heal, which is rooted at every
+    /// place's ancestor, converges them.
     fn concluded(&self, walked: &Walked, subject: &DocumentPath) -> bool {
         folded_reaches(
             walked.scope.root(),
@@ -4761,6 +4775,13 @@ impl Withheld {
     /// the folding this scope's own page bounded the subjects by, which is what
     /// keeps the page and the gate addressing one set of places.
     fn covers(&self, subject: &DocumentPath, order: StoredPathOrder) -> bool {
+        // **A refused root's hold also covers a renamed-away folder.** When a
+        // valid folder is renamed away while it holds an unreadable refused
+        // subfolder, this job-wide hold reaches the marker-carrying places
+        // under the old name too, so the scoped leg leaves that mark and its
+        // findings standing. That is an accepted limitation of a hold that
+        // cannot tell which places the refused root hid; only a vault heal
+        // clears them.
         if self.rendered && subject.carries_marker() {
             return true;
         }
@@ -5323,6 +5344,14 @@ impl<'s> Pending<'s> {
     }
 
     /// Withhold a directory's range and file its account only on the first failure.
+    ///
+    /// **A maintained store can lack a mark a build from zero files.** A
+    /// randomized probe that compared marks against a build from zero found a
+    /// few shapes, with colliding refused siblings that are unlistable, where
+    /// the scoped leg filed no `directory/unreadable` mark. The cause is not
+    /// confirmed; it is thought to be tied to those colliding unlistable
+    /// siblings. That is an accepted limitation: a vault heal, or a build from
+    /// zero, files the missing mark.
     fn unlistable(&mut self, path: &Path, cause: &std::io::Error) -> Result<(), JobFailure> {
         self.settle_content()?;
         self.account.withheld.absorb(path);
