@@ -7275,16 +7275,15 @@ mod tests {
 
         assert_eq!(error.file(), crate::ReloadFile::Config);
         assert_eq!(error.stage(), crate::ReloadStage::Parse);
-        assert_eq!(host.state(&name), answered(norn_wire::TrustState::Ready));
+        wait_ready_with_trust_unbroken(&host, &name);
         let inspection = host.inspect(&name).expect("the served vault");
-        assert_eq!(inspection.trust, norn_wire::TrustState::Ready);
         assert_eq!(inspection.active_fingerprints, active);
         assert_eq!(inspection.last_reload_error, Some(error));
 
         fs::write(f.vault().join(".norn/config.toml"), "").unwrap();
         host.reload(&name).expect("the corrected config reload");
+        wait_ready_with_trust_unbroken(&host, &name);
         let inspection = host.inspect(&name).expect("the served vault");
-        assert_eq!(inspection.trust, norn_wire::TrustState::Ready);
         assert_ne!(inspection.active_fingerprints, active);
         assert_eq!(inspection.last_reload_error, None);
     }
@@ -7321,8 +7320,8 @@ mod tests {
 
         assert_eq!(error.file(), crate::ReloadFile::Schema);
         assert_eq!(error.stage(), crate::ReloadStage::Parse);
+        wait_ready_with_trust_unbroken(&host, &name);
         let inspection = host.inspect(&name).expect("the served vault");
-        assert_eq!(inspection.trust, norn_wire::TrustState::Ready);
         assert_eq!(inspection.active_fingerprints, active);
         assert_eq!(inspection.last_reload_error, Some(error));
     }
@@ -7975,7 +7974,7 @@ mod tests {
         assert_eq!(reload_evidence.documents_upserted, 0);
         assert_eq!(reload_evidence.documents_deleted, 0);
         assert_eq!(reload_evidence.findings_discarded, 0);
-        assert_eq!(host.state(&name), answered(norn_wire::TrustState::Ready));
+        wait_ready_with_trust_unbroken(&host, &name);
         let seen = receiver.seen.lock().unwrap();
         assert!(seen.iter().all(|(vault, _)| vault == &name));
         let values = seen
@@ -27431,6 +27430,29 @@ mod tests {
     /// what tells the two ways a wait expires apart: an entry still installing
     /// coverage and an entry whose heal is not advancing both stand at zero
     /// healed against an unknown total.
+    /// Wait for `Ready` after a reload that leaves trust unbroken. A reload
+    /// answers as its leg ends, and the watcher's late report of the case's
+    /// own control-file writes can leave the vault healing for an ordinary
+    /// reconcile, so `Ready` is waited for; any state but healing on the way
+    /// there means the reload broke trust.
+    fn wait_ready_with_trust_unbroken<O: EntryOps>(host: &crate::Host<O>, name: &VaultName) {
+        wait_until(
+            "Ready with trust unbroken",
+            lifecycle_budget(),
+            || match host.state(name) {
+                Ok(norn_wire::TrustState::Ready) => Observed::Met(()),
+                Ok(
+                    state @ norn_wire::TrustState::Warming {
+                        phase: norn_wire::WarmingPhase::Healing,
+                        ..
+                    },
+                ) => Observed::Pending(format!("the state is {state:?}")),
+                other => panic!("a reload broke trust: the state is {other:?}"),
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+    }
+
     fn wait_state<O: EntryOps>(
         host: &crate::Host<O>,
         name: &VaultName,
