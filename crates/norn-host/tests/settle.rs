@@ -276,18 +276,24 @@ fn the_ledgers_armed_claims_match_the_authored_baselines() {
             }
             "SOAK_SETTLE_CEILING" => baselines::SOAK_SETTLE_CEILING.is_some(),
             "SOAK_QUIESCENT_FD_RETENTION" => baselines::SOAK_QUIESCENT_FD_RETENTION.is_some(),
-            "ATTACH_PEAK_RSS_CEILING_BYTES" => {
-                always_authored(baselines::ATTACH_PEAK_RSS_CEILING_BYTES)
+            "ATTACH_PEAK_RSS_OVER_NULL_CEILING_BYTES" => {
+                always_authored(baselines::ATTACH_PEAK_RSS_OVER_NULL_CEILING_BYTES)
+            }
+            "ATTACH_NULL_PEAK_RSS_OVER_CODE_CEILING_BYTES" => {
+                always_authored(baselines::ATTACH_NULL_PEAK_RSS_OVER_CODE_CEILING_BYTES)
             }
             "ATTACH_PAIR_PEAK_RSS_PER_MILLE" => {
                 always_authored(baselines::ATTACH_PAIR_PEAK_RSS_PER_MILLE)
+            }
+            "ATTACH_PAIR_PEAK_RSS_GROWTH_CEILING_BYTES" => {
+                always_authored(baselines::ATTACH_PAIR_PEAK_RSS_GROWTH_CEILING_BYTES)
             }
             "SOAK_FD_GROWTH_ALLOWANCE" => always_authored(baselines::SOAK_FD_GROWTH_ALLOWANCE),
             "SOAK_RECOVERY_DOSE" => always_authored(baselines::SOAK_RECOVERY_DOSE),
             "SOAK_RSS_SLOPE_PER_MILLE" => always_authored(baselines::SOAK_RSS_SLOPE_PER_MILLE),
             "FD_BUDGET" => always_authored(baselines::FD_BUDGET),
-            "READ_PEAK_RSS_CEILING_BYTES" => {
-                always_authored(baselines::READ_PEAK_RSS_CEILING_BYTES)
+            "READ_PEAK_RSS_OVER_NULL_CEILING_BYTES" => {
+                always_authored(baselines::READ_PEAK_RSS_OVER_NULL_CEILING_BYTES)
             }
             "READ_OVER_ATTACH_PEAK_RSS_PER_MILLE" => {
                 always_authored(baselines::READ_OVER_ATTACH_PEAK_RSS_PER_MILLE)
@@ -297,6 +303,9 @@ fn the_ledgers_armed_claims_match_the_authored_baselines() {
             }
             "READ_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES" => {
                 always_authored(baselines::READ_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES)
+            }
+            "READ_PAIR_PEAK_RSS_GROWTH_CEILING_BYTES" => {
+                always_authored(baselines::READ_PAIR_PEAK_RSS_GROWTH_CEILING_BYTES)
             }
             "HUB_WRITE_HEAP_GROWTH_ALLOWANCE_BYTES" => {
                 always_authored(baselines::HUB_WRITE_HEAP_GROWTH_ALLOWANCE_BYTES)
@@ -331,8 +340,8 @@ fn the_ledgers_armed_claims_match_the_authored_baselines() {
             "APPLY_SHADOW_READS_PER_WRITTEN_TARGET" => {
                 always_authored(baselines::APPLY_SHADOW_READS_PER_WRITTEN_TARGET)
             }
-            "PLAN_PEAK_RSS_CEILING_BYTES" => {
-                always_authored(baselines::PLAN_PEAK_RSS_CEILING_BYTES)
+            "PLAN_PEAK_RSS_OVER_NULL_CEILING_BYTES" => {
+                always_authored(baselines::PLAN_PEAK_RSS_OVER_NULL_CEILING_BYTES)
             }
             "PLAN_PREVIEW_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES" => {
                 always_authored(baselines::PLAN_PREVIEW_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES)
@@ -458,7 +467,7 @@ fn every_read_bar_the_ledger_names_is_armed() {
 /// is what says the dose is a bound and not a number the summary prints.
 #[test]
 fn a_reading_past_a_ceiling_is_refused_by_the_comparison_every_bar_makes() {
-    let bytes = baselines::ATTACH_PEAK_RSS_CEILING_BYTES;
+    let bytes = baselines::ATTACH_PEAK_RSS_OVER_NULL_CEILING_BYTES;
     assert!(baselines::fits(bytes, bytes));
     assert!(!baselines::fits(bytes + 1, bytes));
 
