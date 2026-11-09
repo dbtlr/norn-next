@@ -40,6 +40,15 @@ pub(crate) trait VaultView {
         false
     }
 
+    /// The folder a read failed at because the host cannot list or descend
+    /// it — a path failure, never the environment's — so the one fix whose
+    /// planning needed it can skip naming it, or a forecast can count what
+    /// stands there as unknown; `None` for every other failure, which still
+    /// refuses. The vault root is never such a folder.
+    fn unlistable_folder(_error: &Self::Error) -> Option<&NormalizedPath> {
+        None
+    }
+
     /// The root's identity rule.
     fn normalizer(&self) -> &PathNormalizer;
 
@@ -70,13 +79,17 @@ pub(crate) trait VaultView {
     /// control files directly beneath the root, and so does this.
     fn control_entry(&self, path: &NormalizedPath) -> Result<Entry, Self::Error>;
 
-    /// Whether a folder stands at `folder`.
+    /// Whether a folder stands at `folder`; a folder above it the host
+    /// cannot descend answers an error naming it
+    /// ([`unlistable_folder`](Self::unlistable_folder)).
     fn folder_stands(&self, folder: &NormalizedPath) -> Result<bool, Self::Error>;
 
     /// Hand `visit` the name of every entry directly inside `folder`,
     /// whatever its kind — a document, a folder, or anything else that keeps
     /// it from being empty — in no promised order, until it breaks. Nothing
-    /// where no folder stands.
+    /// where no folder stands. A folder at or above `folder` the host cannot
+    /// list or descend answers an error naming it
+    /// ([`unlistable_folder`](Self::unlistable_folder)).
     ///
     /// **The listing streams**: no name is kept once visited, so a listing
     /// holds one name however wide the folder is.
@@ -293,6 +306,10 @@ impl<V: VaultView> VaultView for Remembered<'_, V> {
         V::is_unreadable(error)
     }
 
+    fn unlistable_folder(error: &Self::Error) -> Option<&NormalizedPath> {
+        V::unlistable_folder(error)
+    }
+
     fn normalizer(&self) -> &PathNormalizer {
         self.view.normalizer()
     }
@@ -433,7 +450,33 @@ pub(crate) enum TreeViewError {
         operation: &'static str,
         path: PathBuf,
         cause: std::io::Error,
+        /// The folder above the document the descent could not pass, where
+        /// the failure was that folder's rather than the document's own.
+        beneath: Option<NormalizedPath>,
     },
+    /// A path failure at a folder a reach or a listing had to descend or
+    /// list: the folder's own condition, not the environment's
+    /// ([`VaultView::unlistable_folder`]). Answered in the words the walk's
+    /// environmental error carries, so a caller that does not skip refuses
+    /// as it did.
+    UnlistableFolder {
+        folder: NormalizedPath,
+        operation: &'static str,
+        path: PathBuf,
+        cause: std::io::Error,
+    },
+}
+
+impl TreeViewError {
+    /// The unlistable folder `fact` names, beneath `root`.
+    fn unlistable(root: &Path, fact: &norn_fs::UnreadableFact) -> Self {
+        TreeViewError::UnlistableFolder {
+            folder: fact.path().clone(),
+            operation: fact.operation(),
+            path: root.join(fact.path().as_path()),
+            cause: std::io::Error::new(fact.cause().kind(), fact.cause().to_string()),
+        }
+    }
 }
 
 impl std::fmt::Display for TreeViewError {
@@ -445,6 +488,13 @@ impl std::fmt::Display for TreeViewError {
                 operation,
                 path,
                 cause,
+                ..
+            }
+            | TreeViewError::UnlistableFolder {
+                operation,
+                path,
+                cause,
+                ..
             } => write!(formatter, "{operation} {}: {cause}", path.display()),
         }
     }
@@ -455,7 +505,8 @@ impl std::error::Error for TreeViewError {
         match self {
             TreeViewError::Walk(error) => Some(error),
             TreeViewError::Read(refusal) => Some(refusal),
-            TreeViewError::Unreadable { cause, .. } => Some(cause),
+            TreeViewError::Unreadable { cause, .. }
+            | TreeViewError::UnlistableFolder { cause, .. } => Some(cause),
         }
     }
 }
@@ -477,12 +528,19 @@ impl TreeView {
         })
     }
 
-    fn reach(&self, path: &Path) -> Result<Reach, TreeViewError> {
-        self.vault.reach(path).map_err(TreeViewError::Walk)
+    /// What stands at the folder `path`, or the folder at or above it the
+    /// descent could not pass ([`TreeViewError::UnlistableFolder`]).
+    fn reach_folder(&self, path: &Path) -> Result<Reach, TreeViewError> {
+        self.vault
+            .reach_or_unreadable(path)
+            .map_err(TreeViewError::Walk)?
+            .map_err(|fact| TreeViewError::unlistable(&self.root, &fact))
     }
 
     /// The spelling a document made at `path` takes: the deepest folder above
-    /// it that stands, as the tree lists it, and the rest as asked.
+    /// it that stands, as the tree lists it, and the rest as asked. A folder
+    /// above it the descent cannot pass answers that folder
+    /// ([`TreeViewError::UnlistableFolder`]).
     fn spelled_where_absent(&self, path: &NormalizedPath) -> Result<Entry, TreeViewError> {
         let asked = path.as_path();
         for above in asked.ancestors().skip(1) {
@@ -492,7 +550,7 @@ impl TreeView {
             if let Reach::Stands {
                 kind: PathKind::Directory,
                 at,
-            } = self.reach(above)?
+            } = self.reach_folder(above)?
             {
                 let rest = asked
                     .strip_prefix(above)
@@ -555,6 +613,9 @@ impl TreeView {
         {
             Ok(reached) => reached,
             Err(unreadable) => {
+                // A fact short of the asked name is a folder above it the
+                // descent could not pass.
+                let beneath = (unreadable.path() != path).then(|| unreadable.path().clone());
                 return Err(TreeViewError::Unreadable {
                     operation: unreadable.operation(),
                     path: self.root.join(unreadable.path().as_path()),
@@ -562,6 +623,7 @@ impl TreeView {
                         unreadable.cause().kind(),
                         unreadable.cause().to_string(),
                     ),
+                    beneath,
                 });
             }
         };
@@ -621,8 +683,9 @@ impl TreeView {
                     } => {
                         return Err(TreeViewError::Unreadable {
                             operation,
-                            path: self.root.join(folder),
+                            path: self.root.join(&folder),
                             cause,
+                            beneath: self.normalizer().normalize(&folder).ok(),
                         });
                     }
                     norn_fs::Opened::Unreadable { operation, cause } => {
@@ -630,6 +693,7 @@ impl TreeView {
                             operation,
                             path: self.root.join(at.as_path()),
                             cause,
+                            beneath: None,
                         });
                     }
                     norn_fs::Opened::Read((hash, body)) => Entry::Document {
@@ -648,6 +712,17 @@ impl VaultView for TreeView {
 
     fn is_unreadable(error: &Self::Error) -> bool {
         matches!(error, TreeViewError::Unreadable { .. })
+    }
+
+    fn unlistable_folder(error: &Self::Error) -> Option<&NormalizedPath> {
+        match error {
+            TreeViewError::UnlistableFolder { folder, .. }
+            | TreeViewError::Unreadable {
+                beneath: Some(folder),
+                ..
+            } => Some(folder),
+            _ => None,
+        }
     }
 
     fn normalizer(&self) -> &PathNormalizer {
@@ -767,7 +842,7 @@ impl VaultView for TreeView {
 
     fn folder_stands(&self, folder: &NormalizedPath) -> Result<bool, TreeViewError> {
         Ok(matches!(
-            self.reach(folder.as_path())?,
+            self.reach_folder(folder.as_path())?,
             Reach::Stands {
                 kind: PathKind::Directory,
                 ..
@@ -781,11 +856,14 @@ impl VaultView for TreeView {
         visit: &mut dyn FnMut(&OsStr) -> ControlFlow<()>,
     ) -> Result<(), TreeViewError> {
         self.vault
-            .visit_folder_names(folder.as_path(), visit)
+            .visit_folder_names_or_unreadable(folder.as_path(), visit)
+            .map_err(TreeViewError::Walk)?
             .map(drop)
-            .map_err(TreeViewError::Walk)
+            .map_err(|fact| TreeViewError::unlistable(&self.root, &fact))
     }
 
+    /// The root's listing failing is the environment's: the vault root is no
+    /// folder a fix can skip.
     fn visit_root_names(
         &self,
         visit: &mut dyn FnMut(&OsStr) -> ControlFlow<()>,
@@ -1128,6 +1206,41 @@ pub(crate) mod memory {
             if visit(&name).is_break() {
                 break;
             }
+        }
+    }
+}
+
+/// A folder on disk this account cannot list, for the planner's own tests.
+#[cfg(test)]
+pub(crate) mod denied {
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+
+    /// A folder whose permissions a case took away, given back when the case
+    /// ends however it ends, so the fixture's own cleanup can remove it.
+    pub(crate) struct Unlistable(PathBuf);
+
+    impl Unlistable {
+        /// Take every permission from `folder`; `None`, giving them back at
+        /// once, where this account lists it anyway (as root does), in which
+        /// case the case proves nothing and says so.
+        #[allow(clippy::disallowed_methods)] // Harness scaffolding: the tree a case reads.
+        pub(crate) fn deny(folder: &Path) -> Option<Self> {
+            std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o000))
+                .expect("take the folder's permissions");
+            let denied = Unlistable(folder.to_owned());
+            if std::fs::read_dir(folder).is_ok() {
+                eprintln!("skipped: this account lists a mode-000 folder");
+                return None;
+            }
+            Some(denied)
+        }
+    }
+
+    impl Drop for Unlistable {
+        #[allow(clippy::disallowed_methods)] // Harness scaffolding: the tree a case reads.
+        fn drop(&mut self) {
+            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
         }
     }
 }
@@ -1493,6 +1606,53 @@ mod tests {
             names,
             vec![OsString::from("folder"), OsString::from("link")]
         );
+    }
+
+    /// **Every read that must list or descend a folder the host cannot list
+    /// fails naming that folder** — the folder's own listing, whether a
+    /// folder beneath it stands, and a document made beneath it — so a fix
+    /// needing it can skip; the read of an unreadable document stays the
+    /// document's own, and a plain plan still refuses in the walk's words.
+    /// Skipped where this account lists a mode-000 folder.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: the tree a case reads.
+    fn a_folder_the_host_cannot_list_is_named_by_every_read_through_it() {
+        let (scratch, view) = tree();
+        std::fs::create_dir_all(scratch.join("folder/locked/inner")).expect("a folder");
+        let Some(_denied) = denied::Unlistable::deny(&scratch.join("folder/locked")) else {
+            return;
+        };
+        let at = |spelled: &str| view.normalizer().normalize(Path::new(spelled)).unwrap();
+        let named = |error: &TreeViewError| {
+            TreeView::unlistable_folder(error).map(|folder| folder.as_path().to_owned())
+        };
+        let locked = Some(Path::new("folder/locked").to_owned());
+
+        let listed = view
+            .visit_folder_names(&at("folder/locked"), &mut |_| ControlFlow::Continue(()))
+            .expect_err("the folder does not list");
+        assert_eq!(named(&listed), locked);
+        assert!(!TreeView::is_unreadable(&listed));
+        assert!(
+            listed.to_string().starts_with("opening directory "),
+            "{listed}"
+        );
+        let stands = view
+            .folder_stands(&at("folder/locked/inner"))
+            .expect_err("nothing beneath it is known");
+        assert_eq!(named(&stands), locked);
+        let made = view
+            .streamed_entry(&at("folder/locked/inner/new.md"))
+            .expect_err("nothing beneath it is known");
+        assert_eq!(named(&made), locked);
+        assert!(
+            view.folder_stands(&at("folder/locked"))
+                .expect("the folder itself stats")
+        );
+        assert!(matches!(
+            entry(&view, "folder/a.md"),
+            Entry::Document { .. }
+        ));
     }
 
     /// On a volume that folds case, a spelling the fold equates is the

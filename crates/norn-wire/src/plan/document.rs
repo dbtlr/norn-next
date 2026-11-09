@@ -492,6 +492,10 @@ pub enum SkipReason {
     /// destination something stands at, or that another route of the batch
     /// moves a document to, above, or beneath.
     DestinationTaken,
+    /// Planning the fix must list or descend a folder the host cannot list,
+    /// so what stands there is unknown. The note names the folder; the rest
+    /// of the repair proceeds.
+    UnlistableFolder,
     /// The fix moves a document, and the move's link cascade would respell
     /// a link to it in a frontmatter field a schema rule reads by value — a
     /// selector key, a closed set, a length limit, a forbidden field, the

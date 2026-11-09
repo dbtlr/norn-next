@@ -11767,6 +11767,7 @@ fn a_skip_reason_is_one_of_the_closed_snake_case_reasons() {
         (SkipReason::ExcludedClass, "excluded_class"),
         (SkipReason::JudgeWouldRefuse, "judge_would_refuse"),
         (SkipReason::DestinationTaken, "destination_taken"),
+        (SkipReason::UnlistableFolder, "unlistable_folder"),
         (SkipReason::RespellsAJudgedLink, "respells_a_judged_link"),
         (SkipReason::TooCommon, "too_common"),
         (SkipReason::TooShort, "too_short"),

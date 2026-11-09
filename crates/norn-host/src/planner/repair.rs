@@ -283,6 +283,11 @@ pub(crate) enum Destination {
     /// No document can be made there — a place the vault does not read, or a
     /// spelling that names none — and why.
     Closed(String),
+    /// What stands there is unknown: reaching it descends a folder the host
+    /// cannot list, named here
+    /// ([`VaultView::unlistable_folder`]). Only that route skips; the rest
+    /// of the repair proceeds.
+    Unlistable(NormalizedPath),
 }
 
 /// What the pinned snapshot reads to follow a broken link through a move:
@@ -454,7 +459,9 @@ impl<V: VaultView, I: Following + ?Sized> Reading for Over<'_, V, I> {
 
     /// What stands at `path` as the view reads it streamed, under the root's
     /// identity rule: the read the move's own planning makes of its
-    /// destination, which a shared view answers again from memory.
+    /// destination, which a shared view answers again from memory. A folder
+    /// on the way the host cannot list or descend is that folder, ahead of
+    /// an unreadable name, which is taken.
     fn destination(&self, path: &DocumentPath) -> Result<Destination, Self::Error> {
         let normalizer = self.view.normalizer();
         let place = identity_of(normalizer, path);
@@ -481,8 +488,11 @@ impl<V: VaultView, I: Following + ?Sized> Reading for Over<'_, V, I> {
             Ok(Entry::Document { .. } | Entry::Folder | Entry::Blocked { .. }) => {
                 Destination::Taken
             }
-            Err(error) if V::is_unreadable(&error) => Destination::Taken,
-            Err(error) => return Err(Unread::View(error)),
+            Err(error) => match V::unlistable_folder(&error) {
+                Some(folder) => Destination::Unlistable(folder.clone()),
+                None if V::is_unreadable(&error) => Destination::Taken,
+                None => return Err(Unread::View(error)),
+            },
         })
     }
 

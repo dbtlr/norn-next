@@ -27,7 +27,10 @@
 //! [`SkipReason::DestinationTaken`]; a document that stands includes one a
 //! route of the batch moves away, so a destination another route vacates is
 //! taken too. A place the vault reads no document at is
-//! [`SkipReason::JudgeWouldRefuse`].
+//! [`SkipReason::JudgeWouldRefuse`]. A destination whose reach descends a
+//! folder the host cannot list is [`SkipReason::UnlistableFolder`], noting
+//! the folder: what stands there is unknown, so only this route skips and
+//! the rest of the repair proceeds.
 //!
 //! **The move is judged where it lands**, first, before any other fix of the
 //! document: its bytes at the destination against its before-state, by the
@@ -169,6 +172,17 @@ pub(super) fn route<R: Reading>(
                 "no document can be moved to `{}`: {detail}",
                 first.value
             )));
+        }
+        Destination::Unlistable(folder) => {
+            return skipped(
+                skip(row, SkipReason::UnlistableFolder)
+                    .with_candidates(candidates.clone())
+                    .with_note(format!(
+                        "the folder `{}` cannot be listed, so what stands at `{}` is unknown",
+                        folder.as_path().display(),
+                        first.value
+                    )),
+            );
         }
     };
     let landed = match reckoned.document.judged(
