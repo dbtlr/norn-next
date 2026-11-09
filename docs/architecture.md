@@ -3003,10 +3003,11 @@ error. A schema whose
 declaration this build cannot read — a later grammar version, a key the grammar does not
 hold — is one of those errors: the vault is already serving a declaration it can read, and
 replacing it with one nothing reads would take that away. So is a schema the store refuses
-to pin: the pin is one transaction, so the store goes on pinning the declaration served, and
+to pin without damage: the pin is one transaction, so the store goes on pinning the declaration served, and
 the activation, which retired the entry's pool before it pinned, mints the pool again over
-that declaration as its leg ends, with trust unbroken. A successful candidate clears that
-error. A dry run is admitted and run as a reload is, holding the entry while it reads, and
+that declaration as its leg ends, with trust unbroken. A pin the store refuses as damage is
+no fact about the candidate: it keeps its damaged class and owes the rebuild. A successful
+candidate clears that error. A dry run is admitted and run as a reload is, holding the entry while it reads, and
 judges the same candidate the same way. A dry run that completes activates nothing and records
 nothing about the candidate — no active fingerprint, retained error or config delivery. A
 runtime failure a dry run meets — damaged derived state, a moved path order, a lost
@@ -3107,12 +3108,12 @@ rules. Installing that pool over the store the entry kept breaks no trust, so th
 settles across those turns as it does across any change; only a pool installed over a store
 that replaced the one before starts trust again. A schema reload has no reconcile turns of its own, and its answer implies `Ready` only
 where nothing was left; `vault status` reports where the entry stands. A candidate failure — a read or parse error,
-a declaration this build cannot read, or a pin the store refuses, including one the activation
+a declaration this build cannot read, or a pin the store refuses without damage, including one the activation
 meets after it retired the entry's pool — leaves the entry as the fold and the leg's end left
 it, whatever state the reload was admitted at, and withdraws no trust of its own: the fold's
 derivation stands, and the entry is `Ready` only where nothing is left. A failure after the pin
-lands is no candidate failure: it keeps its own class, and that class's policy withdraws trust
-and owes its rung.
+lands is no candidate failure, and neither is a pin the store refuses as damage: each keeps its
+own class, and that class's policy applies — withdrawn trust and an owed rung, or a release.
 
 **A dry run waits and folds as an activation does, and activates nothing.** Its fold commits
 the derivation the reconcile it displaced would have committed, so the entry it hands back is

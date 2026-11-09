@@ -1152,11 +1152,12 @@ impl ProductionEntryOps {
         }
 
         progress.begin_schema_reload();
-        // A pin the store refused leaves the store pinning the schema the
-        // entry served under — the pin is one transaction — so the refusal is
-        // the schema's to report, and the entry keeps serving: the lifecycle
-        // takes it as a refused candidate, minting the reader the activation
-        // closed again over the active schema with trust unbroken. The pin
+        // A pin the store refused without damage leaves the store pinning the
+        // schema the entry served under — the pin is one transaction — so the
+        // refusal is the schema's to report, and the entry keeps serving: the
+        // lifecycle takes it as a refused candidate, minting the reader the
+        // activation closed again over the active schema with trust unbroken.
+        // A refusal typed as damage keeps its class and owes the rebuild. The pin
         // stays after the activation closes the reader, because its commit
         // discards findings and typed values a reader on the old pool would
         // observe.
