@@ -19898,11 +19898,20 @@ mod tests {
         )
         .unwrap_or_else(|failure| panic!("{failure}"));
 
-        assert_eq!(
-            ops.readers.closed.load(Ordering::SeqCst),
-            1,
-            "the handle over the database the rung discarded still stands"
-        );
+        // The rung retires the handle under the hold that publishes Ready, and
+        // the handle drops only once that hold lets the gate go — a retired
+        // reader is never released under the gate — so a Ready read above can
+        // land before the close does. The close is waited for, not assumed.
+        let closed = wait_until(
+            "the handle over the database the rung discarded to end",
+            lifecycle_wait_budget(),
+            || match ops.readers.closed.load(Ordering::SeqCst) {
+                0 => Observed::pending("the handle over the discarded database still stands"),
+                closed => Observed::Met(closed),
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+        assert_eq!(closed, 1, "the rung ended a handle it did not discard");
         assert_eq!(
             ops.readers.opened.load(Ordering::SeqCst),
             2,
