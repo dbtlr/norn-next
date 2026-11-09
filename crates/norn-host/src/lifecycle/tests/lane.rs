@@ -87,10 +87,11 @@ fn owed_lane_work_starts_at_its_wake_without_a_poll_tick() {
 ///   lane that stopped early (one unit per turn while units fit) fails;
 /// - the units before its last one finished inside the budget, so a lane that
 ///   ran past the boundary fails;
-/// - its last unit began with its clock still inside the budget, so a lane
-///   that took another unit after the budget was spent fails. That clock is
-///   read where the lane begins the unit, so scheduling delays around a unit
-///   cannot move it past a boundary the lane honoured.
+/// - the budget check that let its last unit through read a clock still
+///   inside the budget, so a lane that took another unit after the budget
+///   was spent fails. That is the reading the decision itself used, so no
+///   scheduling delay after it can move it past a boundary the lane honoured;
+///   a turn's first unit runs with no check and reads zero.
 ///
 /// A runner that oversleeps a 10 ms unit past the budget ends every turn
 /// after one unit, which these properties allow.
@@ -138,7 +139,7 @@ fn a_background_turn_ends_within_its_budget_plus_one_unit() {
         }
         assert!(
             turn.last_began < budget,
-            "began a unit past the budget at {:?}: {describe}",
+            "let a unit through past the budget at {:?}: {describe}",
             turn.last_began
         );
     }

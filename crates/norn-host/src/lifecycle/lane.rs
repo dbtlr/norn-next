@@ -110,8 +110,8 @@ pub(super) struct Lane {
     set: Mutex<LaneSet>,
     ready: Condvar,
     reading: Mutex<LaneReading>,
-    /// Every turn's unit count, clock, and the clock when its last unit
-    /// began, in the order the turns ended, so a case can check each turn
+    /// Every turn's unit count, clock, and the budget check's clock that let
+    /// its last unit through, in the order the turns ended, so a case can check each turn
     /// against its own boundary rather than the aggregate in `reading`.
     #[cfg(test)]
     turn_log: Mutex<Vec<TurnRecord>>,
@@ -126,8 +126,9 @@ pub(super) struct TurnRecord {
     pub(super) units: u32,
     /// The turn's clock when it ended.
     pub(super) took: Duration,
-    /// The turn's clock when its last unit began, which the lane's
-    /// between-units budget check let through.
+    /// The clock the between-units budget check read when it let the turn's
+    /// last unit through; zero where that unit was the turn's first, which
+    /// runs with no check.
     pub(super) last_began: Duration,
 }
 
@@ -272,12 +273,21 @@ fn turn<O: EntryOps>(shared: &Arc<Shared<O>>, name: &VaultName) -> bool {
     let began = Instant::now();
     let mut owed = true;
     let mut units = 0;
+    // The clock the budget check last read, and the reading that admitted
+    // the turn's last unit; a first unit runs with no check, so zero.
+    #[cfg(test)]
+    let decided = std::cell::Cell::new(Duration::ZERO);
     #[cfg(test)]
     let mut last_began = Duration::ZERO;
     super::background::run_units_until(
         shared.background_turn_budget,
         &mut units,
-        || began.elapsed(),
+        || {
+            let elapsed = began.elapsed();
+            #[cfg(test)]
+            decided.set(elapsed);
+            elapsed
+        },
         || -> Result<bool, std::convert::Infallible> {
             if !owed || shared.lane.stopping() {
                 return Ok(false);
@@ -288,7 +298,7 @@ fn turn<O: EntryOps>(shared: &Arc<Shared<O>>, name: &VaultName) -> bool {
             }
             #[cfg(test)]
             {
-                last_began = began.elapsed();
+                last_began = decided.get();
             }
             match shared.ops.background_unit(name) {
                 BackgroundUnit::NothingOwed => {
