@@ -110,6 +110,11 @@ pub(super) struct Lane {
     set: Mutex<LaneSet>,
     ready: Condvar,
     reading: Mutex<LaneReading>,
+    /// Every turn's unit count and clock, in the order the turns ended, so a
+    /// case can check each turn against the units it ran rather than the
+    /// aggregate in `reading`.
+    #[cfg(test)]
+    turn_log: Mutex<Vec<(u32, Duration)>>,
 }
 
 fn tolerant<T>(lock: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -180,11 +185,19 @@ impl Lane {
         if units == 0 {
             return;
         }
+        #[cfg(test)]
+        tolerant(&self.turn_log).push((units, took));
         let mut reading = tolerant(&self.reading);
         reading.turns += 1;
         reading.units += u64::from(units);
         reading.most_units_in_a_turn = reading.most_units_in_a_turn.max(units);
         reading.longest_turn = reading.longest_turn.max(took);
+    }
+
+    /// Each turn's unit count and clock, as the lane recorded them.
+    #[cfg(test)]
+    pub(super) fn turn_log(&self) -> Vec<(u32, Duration)> {
+        tolerant(&self.turn_log).clone()
     }
 
     pub(super) fn reading(&self) -> LaneReading {
