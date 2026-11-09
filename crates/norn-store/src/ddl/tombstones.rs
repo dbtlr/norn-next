@@ -56,13 +56,14 @@
 //! **A death that never comes back is kept only while a reader needs it**
 //! ([ADR 0052]).
 //! It stands while the vault's semantic engine or its census has not read
-//! past it in the death feed, or while a link holding a current broken-link
-//! finding is held under one of the keys the death's path yields — its path
-//! key and each segment-aligned suffix key. Otherwise a claim-bound
-//! maintenance unit prunes it, and store meta records the highest generation
-//! pruned as the death floor in the same transaction. A healthy link to a
-//! same-named document keeps no death, and quarantine deaths follow the same
-//! rule.
+//! past it in the death feed, up to one unread death per live document, or
+//! while it is one of the at most two deaths the move-following reads return
+//! for a link holding a current broken-link finding. Otherwise the death
+//! prune, a claim-bound maintenance unit, removes it, and store meta records
+//! the highest generation removed as the death floor in the same transaction.
+//! A healthy or ambiguous link keeps no death, and no link keeps a quarantine
+//! death, which move-following never reads. The death prune is not built yet,
+//! so until it is a tombstone stands until its path derives again.
 //!
 //! [ADR 0052]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0052-a-death-is-kept-only-while-lane-2-or-a-broken-link-needs-it.md
 //!

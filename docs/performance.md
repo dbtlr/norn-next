@@ -7,7 +7,7 @@ known-answer fixtures, executable identity, and a self-contained HTML report.
 These measurements describe the selected workflows. They are not acceptance
 thresholds, correctness oracles, CLI measurements, or long-duration leak tests.
 Reads that meet a from-zero build use production early admission under
-[ADR 0050](decisions/0050-a-reload-leg-opens-the-gap-a-maintenance-leg-opens.md). The baseline uses an
+[ADR 0052](decisions/0052-a-death-is-kept-only-while-lane-2-or-a-broken-link-needs-it.md). The baseline uses an
 opt-in integration-test worker, which adds no product dependency or API.
 
 ## Build and run

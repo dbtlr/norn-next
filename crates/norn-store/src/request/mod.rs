@@ -27,9 +27,9 @@
 //! rather than replaced, so deleting a `documents` row keeps exactly one
 //! meaning — the document died — and the cascade fires only for a death.
 //!
-//! What is *not* here is retention: when a tombstone has outlived the disorder
-//! it was recorded to survive is a policy over generations, and nothing in this
-//! crate decides it.
+//! What is *not* here yet is the death prune ADR 0052 rules: the unit that
+//! removes a death once neither lane 2 nor a broken link needs it. Until it is
+//! built, a tombstone stands until its path derives again.
 //!
 //! From-zero construction fills provisional names through separate content and
 //! structure writers inside [`crate::StepGroup`]. Ordinary increments refuse
@@ -46,9 +46,11 @@
 //! question: *what has moved, in what order*. Each is a generation-ordered walk
 //! of current state, paged by a [`FeedCursor`] valid within one store epoch, and
 //! each projects fingerprints alone so a consumer decides what to fetch without
-//! fetching anything. **The feed is a query, never a retained log**: nothing is
-//! kept for a consumer and nothing is evicted once every consumer has passed it,
-//! so a slow consumer costs latency and never retention.
+//! fetching anything. **The feed is a query, never a retained log**: the store
+//! registers no consumer and keeps no change for one. A death is the one row a
+//! consumer's progress holds back: ADR 0052 keeps a death lane 2 has not read,
+//! up to one unread death per live document, so a slow consumer costs
+//! retention only up to that bound, and past it a reconcile from current state.
 //!
 //! The probe readers — [`Request::suffix_candidates`] and
 //! [`Request::findings_in_class`] — are the range reads the resolution ladder
@@ -334,7 +336,7 @@ impl<'a> Request<'a> {
     /// # Link health is re-decided and recorded by the store itself
     ///
     /// **Link-health findings are the one family the store judges and
-    /// records** ([ADR 0047]): broken, ambiguous, missing an anchor and vault-scheme, each
+    /// records** ([ADR 0052]): broken, ambiguous, missing an anchor and vault-scheme, each
     /// about one link. After every entry is written, the subject and path
     /// discards have run and the findings handed over are recorded, the store
     /// re-decides every link the changeset reaches — each link a written
@@ -359,7 +361,7 @@ impl<'a> Request<'a> {
     /// from-zero deferral these discards still run, and link health waits for
     /// [`Request::judge_link_health_once`].
     ///
-    /// [ADR 0047]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0047-a-write-re-decides-only-the-links-whose-inputs-it-moved.md
+    /// [ADR 0052]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0052-a-death-is-kept-only-while-lane-2-or-a-broken-link-needs-it.md
     ///
     /// # Streaming, and what a changeset holds
     ///
@@ -1253,8 +1255,8 @@ impl<'a> Request<'a> {
 
     /// The next bounded page of tombstones, in path order.
     ///
-    /// [`Request::stored_tombstone`] answers about one path, which is the
-    /// question a late watcher fact asks. This answers what the pillar holds,
+    /// [`Request::stored_tombstone`] answers about one path. This answers what
+    /// the pillar holds,
     /// which is the question a verification of the recorded deaths asks — and no
     /// composition of per-path reads can ask it, because the paths that have
     /// died are not a set anything else enumerates.
@@ -1711,14 +1713,14 @@ impl<'a> Request<'a> {
     /// key once across them ([`KeySummaries`]). A class or path key spelled
     /// outside the store's key space is refused.
     ///
-    /// The re-decision [ADR 0047] rules into [`Request::apply_increment`]
+    /// The re-decision [ADR 0052] rules into [`Request::apply_increment`]
     /// runs this judgment over the links a changeset reaches — its written
     /// documents' links, and the links held under the classes and paths it
     /// changes — and files what it finds in the changeset's transaction. This
     /// door judges and files nothing; a class or a path key is read here a
     /// chunk at a time, as the re-decision reads it.
     ///
-    /// [ADR 0047]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0047-a-write-re-decides-only-the-links-whose-inputs-it-moved.md
+    /// [ADR 0052]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0052-a-death-is-kept-only-while-lane-2-or-a-broken-link-needs-it.md
     pub fn judge_selected_links(
         &self,
         selection: LinkSelection<'_>,

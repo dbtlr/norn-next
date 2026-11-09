@@ -1884,7 +1884,7 @@ fn measured(vault: &mut Vault, changes: Vec<Change>) -> (DerivationCounters, u64
 }
 
 /// **An in-place rewrite that moves no anchor value re-decides only its own
-/// links** (ADR 0047). `hub.md` is linked by every holder six ways — by its
+/// links** (ADR 0052). `hub.md` is linked by every holder six ways — by its
 /// stem and by its path, with anchors it holds and lacks, one of them a path
 /// link whose missing anchor is filed under the class `hub/` through its
 /// candidate's name. Rewriting its body with its heading and block kept, and
@@ -1941,7 +1941,7 @@ fn an_in_place_rewrite_that_moves_no_anchor_redecides_only_its_own_links() {
 }
 
 /// **An in-place rewrite that moves an anchor value re-decides the links
-/// naming what it moved** (ADR 0047): beside its own links, exactly the
+/// naming what it moved** (ADR 0052): beside its own links, exactly the
 /// anchored links that could name the document and name a moved heading
 /// reading, heading slug or block id. Each rewrite here moves one value — a
 /// heading renamed, a heading added, a heading's reading moved where its slug
@@ -2062,7 +2062,7 @@ fn an_in_place_rewrite_that_moves_an_anchor_redecides_the_links_naming_it() {
 }
 
 /// **A moved anchor's work follows the links naming the moved value**
-/// (ADR 0047's write-work bar). `hub.md` is linked three ways: by holders
+/// (ADR 0052's write-work bar). `hub.md` is linked three ways: by holders
 /// `n/NNN.md` naming the heading the rewrite renames, by holders `o/NNN.md`
 /// naming its other heading, its block and a heading it lacks, and, beside a
 /// second document of the same class `z/hub.md` holding the same heading, by
@@ -2134,7 +2134,7 @@ fn a_moved_anchors_work_follows_the_links_naming_it() {
 }
 
 /// **A link reached by a names move and by an anchor move in one changeset
-/// holds one finding** (ADR 0047). A path link `[q](./a/note.md#Gone)` misses
+/// holds one finding** (ADR 0052). A path link `[q](./a/note.md#Gone)` misses
 /// its anchor, and its finding is filed under the path `a/note.md` and,
 /// through its candidate's name, under the class `note/`. One changeset adds
 /// the heading `Gone` to `a/note.md` in place and gives birth to `b/note.md`,
@@ -2193,7 +2193,7 @@ fn redecided_by(vault: &mut Vault, changes: Vec<Change>, findings: &[DerivedFind
     counted(&request.finish(), "links_redecided")
 }
 
-/// **A moved marked reading reaches the links naming it** (ADR 0047). A
+/// **A moved marked reading reaches the links naming it** (ADR 0052). A
 /// heading anchor is matched by its marked reading too, the text past its
 /// `#` markers, so `[[t### Intro]]` names the heading `Intro`. Adding the
 /// heading ends the link's missing anchor and removing it files the finding
@@ -2229,7 +2229,7 @@ fn a_moved_marked_reading_reaches_the_links_naming_it() {
     }
 }
 
-/// **A link two arms reach is judged once** (ADR 0047). Beside an in-place
+/// **A link two arms reach is judged once** (ADR 0052). Beside an in-place
 /// rewrite that moves the anchor a link names, the link is also reached by a
 /// second moved value it names, by a birth in its class, by its path, by a
 /// directory mark over its path, and, for a link in the rewritten document
@@ -2318,7 +2318,7 @@ fn a_link_two_arms_reach_is_judged_once() {
 }
 
 /// **A hub rewritten twice in one changeset, across several pages of
-/// in-links, equals a rebuild** (ADR 0047). Five hundred and nineteen
+/// in-links, equals a rebuild** (ADR 0052). Five hundred and nineteen
 /// holders — more than two of the anchor arm's pages — name `t.md` seven
 /// ways. One changeset rewrites it twice, moving its anchors each time, and
 /// rewrites every fifth holder; the next moves them back beside a death of an
@@ -2392,7 +2392,7 @@ fn a_hub_rewritten_twice_over_several_pages_equals_a_rebuild() {
 }
 
 /// **A write that is not an in-place rewrite moves its names and reaches
-/// every link to them** (ADR 0047): a birth, a death, a rename, a respelling
+/// every link to them** (ADR 0052): a birth, a death, a rename, a respelling
 /// only a folding comparison calls the same path, a readable document
 /// becoming names alone and a names-only row becoming readable — with the
 /// same anchors on both sides, and with none, where only whether the body is
@@ -2499,7 +2499,7 @@ fn a_write_that_is_not_in_place_reaches_every_link_to_its_names() {
 }
 
 /// **A row whose admitting count a re-pin moves is not rewritten in place**
-/// (ADR 0047). `[[hub]]` names `a/hub.md` alone while `archive/**` keeps
+/// (ADR 0052). `[[hub]]` names `a/hub.md` alone while `archive/**` keeps
 /// `archive/hub.md` out of the class, and both alone once a schema declaring
 /// no glob is pinned. The heal after the pin writes the holder first, which
 /// judges its link against the count the old glob left on `archive/hub.md`,
@@ -2823,7 +2823,7 @@ fn mixed_step(
 }
 
 /// **Narrowing in-place rewrites leaves the findings a rebuild files**
-/// (ADR 0047). A seeded script of changesets of exactly one, two, five and
+/// (ADR 0052). A seeded script of changesets of exactly one, two, five and
 /// sixteen entries — mostly bodies rewritten with their anchors kept, beside
 /// anchors moved, fresh writes, deaths, renames, documents left with their
 /// names alone and read again, and now and then a pin that moves the
@@ -3161,7 +3161,7 @@ fn comparison_twins_rejudge_link_health_when_created_and_removed() {
 }
 
 /// **Link health re-decides a suffix link when a document appears or
-/// disappears at its exact vault path** (ADR 0040, ADR 0047), in both
+/// disappears at its exact vault path** (ADR 0040, ADR 0052), in both
 /// families. Creating `a/x.md` beside `deep/a/x.md` and `other/a/x.md` turns
 /// `[[a/x]]` and `[x](a/x.md)` from ambiguous to naming it alone, and
 /// deleting it restores the ambiguity. `[[b/y]]`, naming `deep/b/y.md` alone,

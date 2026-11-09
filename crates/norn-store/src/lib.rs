@@ -14,7 +14,7 @@
 //! rows mean.
 //!
 //! Its verbs translate cleanly to SQL and carry no business logic beyond how a
-//! query is composed, save two exceptions. One is the rule [ADR 0047] rules
+//! query is composed, save two exceptions. One is the rule [ADR 0052] rules
 //! into it: link health, judged in SQL and filed inside every changeset
 //! ([`Request::apply_increment`]), save a from-zero build's, which judges every
 //! stored link once after its facts have landed. The other is the similarity measure
@@ -26,7 +26,7 @@
 //! trigram is. The store takes **typed facts rather than documents**: parsing
 //! is orchestration's job, so nothing here reads document text.
 //!
-//! [ADR 0047]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0047-a-write-re-decides-only-the-links-whose-inputs-it-moved.md
+//! [ADR 0052]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0052-a-death-is-kept-only-while-lane-2-or-a-broken-link-needs-it.md
 //!
 //! # Where to start
 //!
@@ -117,9 +117,13 @@
 //!   is handed; deciding what belongs in one — what the watcher's facts imply,
 //!   what a plan's blast radius is — is orchestration's, and so is re-recording
 //!   the findings the increment discarded by class.
-//! - **Tombstone retention.** When a death has outlived the disorder it was
-//!   recorded to survive is a policy over generations, and nothing here decides
-//!   it: a tombstone is kept until something says otherwise.
+//! - **The death prune.** ADR 0052 keeps a death only while lane 2 has not
+//!   read it, up to one unread death per live document, or while the
+//!   move-following reads return it for a link that is broken now, and rules
+//!   a claim-bound unit that removes every other death and raises the death
+//!   floor. That unit, the floor and the read-through generation the host
+//!   hands it are not built yet, so a tombstone stands until its path derives
+//!   again.
 //! - **Anything that reads a document.** One parser, and it is not this crate.
 
 pub mod ddl;

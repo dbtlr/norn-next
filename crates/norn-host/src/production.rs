@@ -23576,7 +23576,7 @@ mod tests {
         ops.detach(&name, attachment);
     }
 
-    /// ADR 0050: each requeue takes once, so an attach finishes under a file
+    /// ADR 0052: each requeue takes once, so an attach finishes under a file
     /// that never stops changing. Its requeue calls are bounded by the vault's
     /// shape, measured by a quiet attach of the same tree, not by the edit
     /// rate; and the store converges on the writer's last bytes, so no fact

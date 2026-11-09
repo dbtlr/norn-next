@@ -27,7 +27,7 @@
 //!
 //! The census lives in the sidecar because the sidecar is the engine's whole
 //! state: the store's tables carry nothing a lane-2 engine derives (ADR
-//! 0047), and the feed is the one surface the engine reads the store through.
+//! 0052), and the feed is the one surface the engine reads the store through.
 
 use norn_db::rusqlite::{Connection, OptionalExtension, params};
 use norn_embed::Model;

@@ -1,5 +1,6 @@
 ---
-status: accepted
+status: superseded
+superseded-by: 0052-a-death-is-kept-only-while-lane-2-or-a-broken-link-needs-it.md
 date: 2026-11-01
 ---
 

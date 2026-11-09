@@ -57,7 +57,7 @@
 //!   and outside the projection.
 //! - **Document vectors.** The store holds no vector state: embeddings are
 //!   lane-2 engine state in a sidecar database ([ADR
-//!   0047](../../../docs/decisions/0047-a-write-re-decides-only-the-links-whose-inputs-it-moved.md)),
+//!   0052](../../../docs/decisions/0052-a-death-is-kept-only-while-lane-2-or-a-broken-link-needs-it.md)),
 //!   outside the lane-1 projection this comparator reads. Two derivations
 //!   converging on the same vectors is the engine's own convergence bar, judged
 //!   against the sidecar rather than here.
@@ -979,7 +979,7 @@ impl DerivedRows {
 ///   the row it is about and is meaningless without one. So the pairing is
 ///   two-directional and this leg reads it both ways, over every finding the
 ///   store holds rather than over the ones a case thought to ask about. See
-///   [ADR 0023]; the vocabulary is `norn-wire`'s `FindingKind::scope`.
+///   [ADR 0046]; the vocabulary is `norn-wire`'s `FindingKind::scope`.
 ///
 ///   **Nothing structural holds this.** The findings table keys by path and
 ///   carries no foreign key to `documents` — deliberately, because a
@@ -988,7 +988,7 @@ impl DerivedRows {
 ///   re-derivation condition on the heal. A store at rest is where the two meet,
 ///   which is why the claim is asked here.
 ///
-///   [ADR 0023]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0023-a-walk-refusal-that-stands-is-a-reading.md
+///   [ADR 0046]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0046-one-unreadable-path-never-breaks-the-vault.md
 /// - Names-only descendants of an unreadable directory need no per-document
 ///   finding: the place-scoped directory finding accounts for their unread bytes.
 ///   Their retained names and empty content participate in the projection alike.

@@ -271,11 +271,10 @@
 //! re-decides when a changeset writes or kills one of them. Every finding the
 //! host files carries no path key.
 //!
-//! A tombstone keeps the same class computable for the same reason: a deletion
-//! changes a class, and the class has to stay derivable after the document row
-//! is gone. It carries the `path` and nothing derived from it — the class is
-//! recomputed from the path, which is how the tombstone is read in the first
-//! place.
+//! A deletion changes a class too. Its own transaction derives the class from
+//! the path it deletes and re-decides the findings filed under it, so nothing
+//! reads a tombstone for the class afterwards. The suffix and path keys a
+//! tombstone stores are for move-following's seeks, not for this discard.
 //!
 //! A finding's class set may be **empty**, because not every finding is about
 //! resolution. A finding about a frontmatter field violating the vault schema has

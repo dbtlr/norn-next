@@ -321,7 +321,7 @@ fn a_links_address_column_agrees_with_link_health_of_link() {
     store.verify_integrity().expect("a store just written to");
 }
 
-/// Links are held under normalized suffix or complete-path keys (ADR 0047,
+/// Links are held under normalized suffix or complete-path keys (ADR 0052,
 /// ADR 0040): an unprefixed target in either family by the classes it opens,
 /// a `./`, `../`, `/` or `vault://` target by the paths it names. Only `.md`
 /// opens two readings, of either kind; other extensions remain in the leaf.
@@ -827,9 +827,11 @@ fn a_delete_takes_the_derived_rows_and_leaves_a_tombstone() {
     store.verify_integrity().expect("a store after a delete");
 }
 
-/// A death learned for a path nothing had derived is still recorded. The
-/// ordering a tombstone carries is worth most exactly then: a late event has
-/// something to compare against instead of guessing.
+/// A death entered for a path nothing had derived is still recorded, without
+/// a hash. The entry does not check that a row stood: every producer enters a
+/// death only where it found a stored document row (see
+/// [`norn_store::Change::Death`]), so this pins the entry's own contract, not a
+/// state a producer reaches.
 #[test]
 fn a_death_learned_for_an_underived_path_is_still_recorded() {
     let scratch = Scratch::new("unknown-delete");
@@ -906,9 +908,9 @@ fn a_tombstone_holds_the_most_recent_death_and_an_upsert_clears_it() {
     assert_eq!(request.pillars().expect("a pillar report").tombstones, 1);
 
     // Recreated, the path holds a document row and nothing else: the upsert
-    // clears the tombstone its earlier death left. The live row carries a newer
-    // generation and the current hash, so a late event compares against it, and
-    // the death feed stops replaying a death the path has outlived.
+    // clears the tombstone its earlier death left. The live row reaches the feed
+    // at a newer generation, so the death feed stops replaying a death the path
+    // has outlived.
     write_document(
         &mut request,
         &document(subject.as_str(), "hash-3", "three\n"),
@@ -933,10 +935,10 @@ fn a_tombstone_holds_the_most_recent_death_and_an_upsert_clears_it() {
     );
 }
 
-/// **A re-death keeps the hash already recorded.** The hash is the comparison
-/// basis a tombstone exists to carry, and a death learned from a path that is
-/// already absent has nothing to hash — so overwriting with nothing would destroy
-/// the one fact a late event needs and leave a tombstone that can only guess.
+/// **A re-death keeps the hash already recorded.** The hash is what
+/// move-following matches a live holder by, and a death learned from a path
+/// that is already absent has nothing to hash — so overwriting with nothing
+/// would leave a tombstone no move could be followed through.
 #[test]
 fn a_re_death_with_no_hash_of_its_own_keeps_the_one_recorded() {
     let scratch = Scratch::new("re-death-hash");
@@ -962,7 +964,7 @@ fn a_re_death_with_no_hash_of_its_own_keeps_the_one_recorded() {
     assert_eq!(
         tombstone.last_content_hash.as_deref(),
         Some("hash-1"),
-        "the re-death overwrote the comparison basis the tombstone carried"
+        "the re-death overwrote the hash move-following matches a holder by"
     );
     // Everything the second death did know is the most recent answer.
     assert_eq!(tombstone.provenance, Provenance::HealPrune);
