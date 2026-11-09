@@ -3107,15 +3107,12 @@ rules. Installing that pool over the store the entry kept breaks no trust, so th
 settles across those turns as it does across any change; only a pool installed over a store
 that replaced the one before starts trust again. A schema reload has no reconcile turns of its own, and its answer implies `Ready` only
 where nothing was left; `vault status` reports where the entry stands. A candidate failure — a read or parse error,
-or any other refusal of the candidate before activation begins — leaves the entry as the fold
-and the leg's end left it, whatever state the reload was admitted at, and withdraws no trust
-of its own: the fold's derivation stands, and the entry is `Ready` only where nothing is left. A
-schema-changing activation that fails after it has begun replacing the derived state withdraws
-trust and owes the recovery. If its end drain also meets a runtime failure other than a
-candidate error, that failure decides the entry's policy while the reload retains and replies
-with the candidate's own error. Whether it had begun is a fact the leg records, never one read
-back off the trust label, because a reload admitted over a settling entry publishes healing
-before it begins.
+a declaration this build cannot read, or a pin the store refuses, including one the activation
+meets after it retired the entry's pool — leaves the entry as the fold and the leg's end left
+it, whatever state the reload was admitted at, and withdraws no trust of its own: the fold's
+derivation stands, and the entry is `Ready` only where nothing is left. A failure after the pin
+lands is no candidate failure: it keeps its own class, and that class's policy withdraws trust
+and owes its rung.
 
 **A dry run waits and folds as an activation does, and activates nothing.** Its fold commits
 the derivation the reconcile it displaced would have committed, so the entry it hands back is
