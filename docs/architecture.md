@@ -3005,7 +3005,8 @@ hold — is one of those errors: the vault is already serving a declaration it c
 replacing it with one nothing reads would take that away. So is a schema the store refuses
 to pin without damage: the pin is one transaction, so the store goes on pinning the declaration served, and
 the activation, which retired the entry's pool before it pinned, mints the pool again over
-that declaration as its leg ends, with trust unbroken. A pin the store refuses as damage is
+that declaration as its leg ends, with trust unbroken, unless the leg's end drain meets a
+failure of its own, whose policy then applies. A pin the store refuses as damage is
 no fact about the candidate: it keeps its damaged class and owes the rebuild. A successful
 candidate clears that error. A dry run is admitted and run as a reload is, holding the entry while it reads, and
 judges the same candidate the same way. A dry run that completes activates nothing and records
@@ -3348,7 +3349,7 @@ at its activation and retires the entry's pool until its leg ends, and that walk
 whole vault, which converges inside the leg before it installs another pool, so no read
 observes a column the walk has half refilled. An activation that fails after its re-pin
 withdraws trust and owes the recovery or the rebuild before any pool it leaves stands, so no read is served
-from that column either. A re-pin the store refuses clears nothing, so the pool its leg mints
+from that column either. A re-pin the store refuses clears nothing, so any pool its leg mints
 again reads the column whole.
 The fold, the tag a value row names under a tag key — the `tags` carrier, declared or not,
 or a key declared `tags` — its `#` marker dropped and the tag fold applied, or the link a
