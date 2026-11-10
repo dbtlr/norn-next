@@ -141,7 +141,7 @@
 //! Whether a document holds the place a link's anchor names is an equality
 //! over the document's heading readings, heading slugs and block ids, so an
 //! in-place rewrite moving one of those values can change only the verdicts
-//! of the links naming it ([ADR 0047]). Those links are found here: one row
+//! of the links naming it ([ADR 0052]). Those links are found here: one row
 //! per key `link_keys` holds an anchored link
 //! under, and per value its anchor is matched by — its text reading and its
 //! marked reading as `reading`, which a heading's reading matches, the
@@ -165,7 +165,7 @@
 //! document's anchor rows by seek. The table is `WITHOUT ROWID` because the
 //! primary key is the whole row.
 //!
-//! [ADR 0047]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0047-a-write-re-decides-only-the-links-whose-inputs-it-moved.md
+//! [ADR 0052]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0052-a-death-is-kept-only-while-lane-2-or-a-broken-link-needs-it.md
 
 //! # `headings` is addressed two ways
 //!

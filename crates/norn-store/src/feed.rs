@@ -2,8 +2,9 @@
 //!
 //! [`FeedRead`] is the whole of what a lane-2 engine may ask the store — the
 //! two feed drains, the two targeted fetches a fed row is resolved through,
-//! the epoch its cursors are valid within, and the write generation a drain
-//! records how far it had caught up to. **No write verb crosses this
+//! the epoch its cursors are valid within, the write generation a drain
+//! records how far it had caught up to, and the death floor its cursors are
+//! valid above ([ADR 0052]). **No write verb crosses this
 //! seam.** That is the partition boundary invariant 12 leans on: an engine
 //! derives inferred state from committed lane-1 records, and inferred state
 //! never becomes a finding, a plan, or a repair input — so the surface the
@@ -25,6 +26,19 @@
 //! Every method here is a delegation: the statements, their `EXPLAIN` bars
 //! and their contracts are [`crate::Request`]'s, stated on the methods this
 //! borrows.
+//!
+//! # A cursor is valid within one epoch and above the death floor
+//!
+//! The death prune removes deaths no reader needs, and records the highest
+//! generation it removed as the death floor ([`FeedRead::death_floor`]). A
+//! consumer whose read-through generation stands below the floor may have
+//! deaths it never read gone from the feed, so it reconciles against current
+//! state rather than seeking forward, as it does after an epoch change. Over a
+//! page the floor is read inside the page's own snapshot, beside the epoch the
+//! source checked when its connection opened, so it describes the instant
+//! every row the page reads does.
+//!
+//! [ADR 0052]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0052-a-death-is-kept-only-while-lane-2-or-a-broken-link-needs-it.md
 
 use std::path::PathBuf;
 
@@ -34,7 +48,7 @@ use crate::StoreError;
 use crate::facts::{FeedDocument, FeedTombstone, StoredDocument, StoredFacts};
 use crate::path::DocumentPath;
 use crate::request::{FeedCursor, ReadWork, Request};
-use crate::store::Store;
+use crate::store::{Store, StoreReading};
 
 /// A read-only handle over one store, scoped to the lane-2 consumer's
 /// questions.
@@ -199,6 +213,32 @@ impl FeedRead<'_> {
                 crate::store::last_write_generation(database.connection())
             }
         }
+    }
+
+    /// The death floor — see [`crate::Request::death_floor`]: the highest
+    /// generation of any death the death prune has removed, or `None` where
+    /// it has removed none. Over a page it is read in the page's own
+    /// snapshot. A consumer checks it before each page against the
+    /// generation it has read through, and reconciles where it stands below.
+    pub fn death_floor(&mut self) -> Result<Option<i64>, StoreError> {
+        match &mut self.source {
+            Source::Writer(store) => store.begin_request().death_floor(),
+            Source::Page { database, .. } => crate::store::death_floor(database.connection()),
+        }
+    }
+
+    /// The store reading this handle reads under: its epoch, and the write
+    /// generation and the death floor read together in one statement, so
+    /// over a page both describe the page's own snapshot.
+    pub fn store_reading(&mut self) -> Result<StoreReading, StoreError> {
+        let (write_generation, death_floor) = match &mut self.source {
+            Source::Writer(store) => crate::store::generation_and_floor(store.connection())?,
+            Source::Page { database, .. } => {
+                crate::store::generation_and_floor(database.connection())?
+            }
+        };
+        Ok(StoreReading::of(self.epoch().to_string(), write_generation)
+            .with_death_floor(death_floor))
     }
 
     /// The next page of current document rows in feed order — see

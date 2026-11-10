@@ -2,6 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::iter::Peekable;
 
+mod death_prune;
+pub use death_prune::{DEATH_PRUNE_PERIOD, DeathPruneReading};
 pub(crate) mod loading;
 mod places;
 #[cfg(test)]
@@ -21,8 +23,8 @@ use norn_fs::{
 };
 use norn_store::{
     Change, ContentModel, DerivedFinding, DirectoryPrefix, DocumentPath, FeedRead, FindingFacts,
-    IncrementProvenance, Provenance, RebuildReason, SchemaPin, Store, StoreError, StoreReading,
-    StoredDocument, StoredPathOrder, StoredTarget, SubjectScope,
+    IncrementProvenance, Provenance, RebuildReason, SchemaPin, Store, StoreError, StoredDocument,
+    StoredPathOrder, StoredTarget, SubjectScope,
 };
 use norn_wire::{
     FindingKind, FindingScope, MaintainerIdentity, PlanDocument, UntrustedReason, VaultName,
@@ -161,6 +163,8 @@ pub struct ProductionPolicy {
     pub changeset_size: usize,
     #[cfg(test)]
     pub(crate) rolling_period: Duration,
+    #[cfg(test)]
+    pub(crate) death_prune_period: Duration,
 }
 
 impl ProductionPolicy {
@@ -181,7 +185,19 @@ impl ProductionPolicy {
             changeset_size,
             #[cfg(test)]
             rolling_period: rolling::PASS_PERIOD,
+            #[cfg(test)]
+            death_prune_period: DEATH_PRUNE_PERIOD,
         })
+    }
+    fn death_prune_period(&self) -> Duration {
+        #[cfg(test)]
+        {
+            self.death_prune_period
+        }
+        #[cfg(not(test))]
+        {
+            DEATH_PRUNE_PERIOD
+        }
     }
     fn rolling_period(&self) -> Duration {
         #[cfg(test)]
@@ -278,6 +294,9 @@ pub struct ProductionEntryOps {
     /// Every attached store's periodic verification: one background unit of
     /// the lane, bound to the store lifetime an attach or a rebuild opened.
     verifications: Arc<crate::verification::StoreVerifications>,
+    /// What this host's death-prune units have done, counted beside the
+    /// clock their legs keep.
+    death_prunes: Arc<death_prune::DeathPrunes>,
 }
 
 pub struct ProductionAttachment {
@@ -354,6 +373,9 @@ pub struct ProductionAttachment {
     skipped_links: SkippedLinks,
     last_shadow_sweep: Instant,
     rolling: rolling::RollingHeal,
+    /// The death prune's clock, its pass in progress and what the last pass
+    /// left for the due cases ([`death_prune::DeathPrune`]).
+    death_prune: death_prune::DeathPrune,
     /// The retirement of the store lifetime's periodic verification, declared
     /// beside the engine's for the same reason: an attachment dropped on an
     /// unwinding stack stops a verification in flight over its store, and
@@ -433,8 +455,8 @@ fn apply_over(
     let ground = attachment.plan_ground();
     let snapshot = {
         let mut feed = attachment.store.feed_read();
-        match feed.write_generation() {
-            Ok(generation) => StoreReading::of(feed.epoch(), generation),
+        match feed.store_reading() {
+            Ok(reading) => reading,
             Err(error) => {
                 let told = crate::refusal::store_refusal_told(&error);
                 return match error.damage() {
@@ -767,6 +789,7 @@ impl ProductionEntryOps {
             verifications: Arc::new(crate::verification::StoreVerifications::new(
                 STORE_VERIFICATION_INTERVAL,
             )),
+            death_prunes: Arc::default(),
         };
         if let Err(error) = ops.sweep_count_orphans() {
             ops.record_cleanup_failure(error);
@@ -785,6 +808,12 @@ impl ProductionEntryOps {
     /// What the lane's periodic verifications came to since the host began.
     pub fn verification_reading(&self) -> crate::VerificationReading {
         self.verifications.reading()
+    }
+
+    /// What this host's death-prune units have done since the host began:
+    /// the passes, the units, the floor raises and the work they read.
+    pub fn death_prune_reading(&self) -> crate::DeathPruneReading {
+        self.death_prunes.reading()
     }
 
     /// The eight most recent cleanup failures, with a dropped count.
@@ -869,9 +898,24 @@ impl ProductionEntryOps {
         attachment: &mut ProductionAttachment,
         progress: &ProgressReporter<ProductionAttachment>,
     ) {
+        self.death_prune_may_be_owed(attachment, progress);
         if let Some(semantic) = &self.semantic {
             self.record_store_reading(attachment, progress);
             semantic.owe(name);
+            progress.owe_background_work();
+        }
+    }
+
+    /// Note that a leg may have committed lane-1 work, which is the only way a
+    /// death or a change to the broken-link set arrives, so the death prune's
+    /// clock may owe a pass again; where that is news, wake the scheduler to
+    /// read the clock.
+    fn death_prune_may_be_owed(
+        &self,
+        attachment: &mut ProductionAttachment,
+        progress: &ProgressReporter<ProductionAttachment>,
+    ) {
+        if attachment.death_prune.lane_one_may_have_moved() {
             progress.owe_background_work();
         }
     }
@@ -909,7 +953,9 @@ impl ProductionEntryOps {
 
     /// One unit of a maintenance leg, answering whether one ran.
     ///
-    /// The sweep runs whether or not the claim is quiet. The store's
+    /// A leg runs its units in this order: the shadow sweep, then at most one
+    /// rolling-heal slice, then death-prune units. The sweep and the death
+    /// prune run whether or not the claim is quiet. The store's
     /// verification is no unit of a leg: it runs whole on the background lane,
     /// through read-only connections, holding neither the claim nor the
     /// writer.
@@ -917,8 +963,10 @@ impl ProductionEntryOps {
     /// rechecked before it, so the lifecycle drains watcher batches and hands
     /// on applies, facts and teardown before the next slice, and what a slice
     /// committed is published at the leg's end before another follows it. A
-    /// rolling-heal slice keeps its own work bounds. Semantic work is no unit
-    /// of a leg: it runs on the background lane, off the claim.
+    /// rolling-heal slice keeps its own work bounds. The slice comes before
+    /// the death prune, so a leg whose budget the death prune would fill still
+    /// runs it. Semantic work is no unit of a leg: it runs on the background
+    /// lane, off the claim.
     fn maintenance_unit(
         &self,
         name: &VaultName,
@@ -931,20 +979,38 @@ impl ProductionEntryOps {
         if self.sweep_unit(attachment) {
             return Ok(true);
         }
+        match self.slice_unit(name, attachment, quiet, sliced, progress)? {
+            Sliced::Ran => return Ok(true),
+            Sliced::EndTheLeg => return Ok(false),
+            Sliced::NotOwed => {}
+        }
+        self.death_prune_unit(name, attachment, progress)
+    }
+
+    /// The leg's one rolling-heal slice, where its clock is due and the claim
+    /// is quiet.
+    fn slice_unit(
+        &self,
+        name: &VaultName,
+        attachment: &mut ProductionAttachment,
+        quiet: bool,
+        sliced: &mut bool,
+        progress: &ProgressReporter<ProductionAttachment>,
+    ) -> Result<Sliced, JobFailure> {
         if *sliced || !quiet || !attachment.rolling.due() {
-            return Ok(false);
+            return Ok(Sliced::NotOwed);
         }
         // A settled batch may have arrived since the claim was taken. Leave
         // it for the lifecycle's normal drain before claiming another slice.
         if !attachment.heal_observed.is_empty() {
-            return Ok(false);
+            return Ok(Sliced::EndTheLeg);
         }
         if let Some(batch) = poll_subscription(attachment)? {
             attachment.heal_observed.merge(batch);
-            return Ok(false);
+            return Ok(Sliced::EndTheLeg);
         }
         if !progress.quiet_maintenance_allowed() {
-            return Ok(false);
+            return Ok(Sliced::NotOwed);
         }
         let _job = self.evidence.attributing();
         *sliced = true;
@@ -952,23 +1018,125 @@ impl ProductionEntryOps {
         if ended.is_ok() {
             self.owe_semantic(name, attachment, progress);
         }
-        self.leg_ended(attachment, progress, ended).map(|()| true)
+        self.leg_ended(attachment, progress, ended)
+            .map(|()| Sliced::Ran)
     }
 
-    /// Record where `attachment`'s lane-1 store stands through `progress`,
-    /// and hand back the feed-read handle the reading was taken over. A
-    /// reading that cannot be taken is recorded as none, which is nothing to
-    /// judge against.
+    /// How far `name`'s engine has read the death feed of `attachment`'s store,
+    /// as a death-prune unit is handed it: `None` where no engine stands for
+    /// the vault because its configuration turns the engine off, or the host
+    /// composes no engine at all ([`crate::semantic::SemanticEngines::read_through`]).
+    fn read_through(
+        &self,
+        name: &VaultName,
+        attachment: &ProductionAttachment,
+    ) -> Option<norn_store::ReadThrough> {
+        self.semantic
+            .as_ref()
+            .and_then(|semantic| semantic.read_through(name, attachment.store.epoch()))
+    }
+
+    /// One death-prune unit, where the death prune's clock owes a pass or one
+    /// is in progress: answers whether one ran ([ADR 0052]).
+    ///
+    /// The unit runs only over a store whose from-zero build has ended and
+    /// whose link health is admitted. Its read-through generation is sampled
+    /// for this unit from the engine's report. A unit that raises the death
+    /// floor records the store reading a status judges against, as a leg
+    /// records it where its lane-1 work commits, and where the new floor
+    /// passed the generation the unit was handed — it removed deaths a reader
+    /// had not read — it owes the engine its reconcile and wakes the lane.
+    ///
+    /// [ADR 0052]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0052-a-death-is-kept-only-while-lane-2-or-a-broken-link-needs-it.md
+    fn death_prune_unit(
+        &self,
+        name: &VaultName,
+        attachment: &mut ProductionAttachment,
+        progress: &ProgressReporter<ProductionAttachment>,
+    ) -> Result<bool, JobFailure> {
+        if !death_prune::admitted(&attachment.store) {
+            return Ok(false);
+        }
+        let read_through = self.read_through(name, attachment);
+        let began = !attachment.death_prune.in_progress();
+        let store = &mut attachment.store;
+        let owed = attachment
+            .death_prune
+            .begin_if_owed(
+                Instant::now(),
+                || store.begin_request().death_prune_marks(),
+                read_through,
+            )
+            .map_err(store_effect)?;
+        if began && owed != death_prune::Owed::NotDue {
+            self.death_prunes.count(|reading| {
+                reading.due_checks += 1;
+                if owed == death_prune::Owed::Pass {
+                    reading.passes_begun += 1;
+                }
+            });
+        }
+        if owed != death_prune::Owed::Pass {
+            return Ok(false);
+        }
+        let _job = self.evidence.attributing();
+        let bound_before = attachment.death_prune.upper_bound();
+        let unit = match attachment.store.begin_request().death_prune_unit(
+            attachment.death_prune.pass(),
+            read_through,
+            norn_store::DEATH_PRUNE_UNIT_ROWS,
+        ) {
+            Ok(unit) => unit,
+            // The store refuses a unit over a store whose from-zero build has
+            // not ended or whose link health is deferred, which is checked
+            // above: a refusal here ran nothing and changed nothing.
+            Err(StoreError::Lifecycle { .. }) => return Ok(false),
+            Err(error) => return self.leg_ended(attachment, progress, Err(store_effect(error))),
+        };
+        if unit.restarted || attachment.death_prune.upper_bound() != bound_before {
+            let marks = attachment
+                .store
+                .begin_request()
+                .death_prune_marks()
+                .map_err(store_effect)?;
+            attachment.death_prune.began_again(marks);
+        }
+        attachment.death_prune.unit_ended(&unit);
+        let wakes = unit
+            .floor_raised
+            .is_some_and(|floor| death_prune::passes_read_through(floor, read_through));
+        self.death_prunes.count(|reading| {
+            reading.units += 1;
+            reading.passes_finished += u64::from(unit.finished);
+            reading.floor_raises += u64::from(unit.floor_raised.is_some());
+            reading.engine_wakes += u64::from(wakes && self.semantic.is_some());
+            death_prune::add_work(&mut reading.work, &unit.work);
+        });
+        if unit.floor_raised.is_some()
+            && let Some(semantic) = &self.semantic
+        {
+            progress.record_store_reading(Some(unit.reading));
+            if wakes {
+                semantic.owe(name);
+                progress.owe_background_work();
+            }
+        }
+        Ok(true)
+    }
+
+    /// Record where `attachment`'s lane-1 store stands through `progress` —
+    /// its epoch, and the write generation and the death floor read together,
+    /// which a status judges the engine's watermarks and read-through
+    /// generation against — and hand back the feed-read handle the reading
+    /// was taken over. A reading that cannot be taken is recorded as none,
+    /// which is nothing to judge against.
     fn record_store_reading<'a>(
         &self,
         attachment: &'a mut ProductionAttachment,
         progress: &ProgressReporter<ProductionAttachment>,
     ) -> FeedRead<'a> {
         let mut feed = attachment.store.feed_read();
-        let reading = feed
-            .write_generation()
-            .ok()
-            .map(|generation| StoreReading::of(feed.epoch(), generation));
+        let reading = feed.store_reading().ok();
         progress.record_store_reading(reading);
         feed
     }
@@ -979,15 +1147,19 @@ impl ProductionEntryOps {
     /// the engine its attachment was delivered, and a status judges that
     /// engine against this reading. A leg that succeeded recorded its
     /// reading where it owed its slice. A host that composes no engine records
-    /// nothing.
+    /// nothing. Either way the death prune's clock learns that lane-1 work may
+    /// have committed.
     fn leg_ended<T, E>(
         &self,
         attachment: &mut ProductionAttachment,
         progress: &ProgressReporter<ProductionAttachment>,
         ended: Result<T, E>,
     ) -> Result<T, E> {
-        if ended.is_err() && self.semantic.is_some() {
-            self.record_store_reading(attachment, progress);
+        if ended.is_err() {
+            self.death_prune_may_be_owed(attachment, progress);
+            if self.semantic.is_some() {
+                self.record_store_reading(attachment, progress);
+            }
         }
         ended
     }
@@ -1094,6 +1266,7 @@ impl ProductionEntryOps {
             self.record_cleanup_failure(error.to_string());
         }
         attachment.rolling.reset_after_rebuild();
+        attachment.death_prune.reset_after_rebuild();
         // The first point a recovery holds both the order its new coverage
         // proved and the store it will derive into, and the judgment is taken
         // whatever the declaration says. A store derived under the other order
@@ -1603,6 +1776,10 @@ impl ProductionEntryOps {
             skipped_links: SkippedLinks::default(),
             last_shadow_sweep: Instant::now(),
             rolling,
+            death_prune: death_prune::DeathPrune::new(
+                Instant::now(),
+                self.policy.death_prune_period(),
+            ),
             verification_retirement,
             engine_retirement: EngineRetirement(
                 self.semantic
@@ -1776,6 +1953,7 @@ impl ProductionEntryOps {
             attachment.store.verification_source(),
         );
         attachment.rolling.reset_after_rebuild();
+        attachment.death_prune.reset_after_rebuild();
         attachment.read_pinned_model()?;
         // Controls a leg held for this rung are the ones the rebuilt store is
         // pinned and derived under.
@@ -2470,9 +2648,10 @@ impl EntryOps for ProductionEntryOps {
         Some(attachment.rolling.status())
     }
 
-    /// A leg's units in today's order: the shadow sweep, then one rolling-heal
-    /// slice, each taken only where its clock says it is owed and the leg's
-    /// budget lasts. Only the rolling-heal slice requires a quiet claim. The
+    /// A leg's units in order: the shadow sweep, then one rolling-heal slice,
+    /// then death-prune units, each taken only where its clock says it is
+    /// owed and the leg's budget lasts. Only the rolling-heal slice requires a
+    /// quiet claim. The
     /// store's verification is a background unit of the lane, never a unit of
     /// a leg.
     fn maintain_quiet(
@@ -2487,13 +2666,23 @@ impl EntryOps for ProductionEntryOps {
         turn.run_units(|| self.maintenance_unit(name, attachment, quiet, &mut sliced, progress))
     }
 
-    /// One maintenance leg serves independent cleanup and rolling clocks,
-    /// whichever comes due first. A rolling pass in progress keeps its clock
-    /// past due until the pass completes. The verification's clock is the
-    /// lane's ([`EntryOps::background_deadline`]).
+    /// One maintenance leg serves independent cleanup, rolling and
+    /// death-prune clocks, whichever comes due first. A rolling pass or a
+    /// death-prune pass in progress keeps its clock past due until the pass
+    /// completes. The death prune's clock contributes a deadline only where a
+    /// pass could be owed (the death prune's `DeathPrune::deadline`), which reads
+    /// the engine's report through the semantic set's map lock and the
+    /// report's leaf lock — the order a publication takes them in under the
+    /// entry gate — and does no I/O. The verification's clock is the lane's
+    /// ([`EntryOps::background_deadline`]).
     fn maintenance_deadline(&self, attachment: &Self::Attachment) -> Option<Instant> {
         let swept_due = attachment.last_shadow_sweep + norn_fs::SHADOW_AGE_THRESHOLD;
-        Some(swept_due.min(attachment.rolling.due))
+        let due = swept_due.min(attachment.rolling.due);
+        let name = &attachment.registration.name;
+        let pruned = attachment
+            .death_prune
+            .deadline(&attachment.store, || self.read_through(name, attachment));
+        Some(pruned.map_or(due, |pruned| due.min(pruned)))
     }
 
     /// The engines read the store lifetime through a source minted here, in
@@ -6151,6 +6340,17 @@ fn data_dir_effect(error: norn_fs::Refusal) -> JobFailure {
 /// reload's failure — so both are told through
 /// [`store_refusal_told`](crate::refusal::store_refusal_told), from the
 /// refusal's typed facts, and name no file.
+/// What a leg's rolling-heal slice came to.
+enum Sliced {
+    /// A slice ran.
+    Ran,
+    /// A watcher batch settled since the claim was taken: the leg ends so the
+    /// lifecycle drains it.
+    EndTheLeg,
+    /// No slice is owed this leg, or the claim is not quiet for one.
+    NotOwed,
+}
+
 fn store_effect(error: StoreError) -> JobFailure {
     let told = crate::refusal::store_refusal_told(&error);
     match error.damage() {
@@ -6996,6 +7196,13 @@ mod tests {
     #[cfg(unix)]
     mod marks {
         include!("production/mark_tests.rs");
+    }
+
+    /// The death prune as a unit of a maintenance leg: its clock and due
+    /// cases, the read-through generation it is handed, what a floor raise
+    /// tells the engine and a status, and what a pass costs.
+    mod death_prune_cases {
+        include!("production/death_prune_tests.rs");
     }
 
     /// The store's periodic verification as one background unit of the lane:
@@ -9573,7 +9780,7 @@ mod tests {
             let generation = feed.write_generation().expect("the store's generation");
             let store = norn_store::StoreReading::of(feed.epoch(), generation);
             assert_eq!(
-                freshness(&answer.watermarks, &store),
+                freshness(&answer.watermarks, &answer.read_through, &store),
                 Freshness::trailing(0)
             );
         }
@@ -23576,7 +23783,7 @@ mod tests {
         ops.detach(&name, attachment);
     }
 
-    /// ADR 0050: each requeue takes once, so an attach finishes under a file
+    /// ADR 0052: each requeue takes once, so an attach finishes under a file
     /// that never stops changing. Its requeue calls are bounded by the vault's
     /// shape, measured by a quiet attach of the same tree, not by the edit
     /// rate; and the store converges on the writer's last bytes, so no fact

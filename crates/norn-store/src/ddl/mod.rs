@@ -78,9 +78,10 @@ pub(crate) mod stems;
 pub(crate) mod tombstones;
 pub(crate) mod vault_files;
 
-/// The store schema version: the normalized resolution key columns (3) and
-/// the anchored-link index, `link_anchor_keys` (4).
-pub const STORE_SCHEMA_VERSION: i64 = 4;
+/// The store schema version: the normalized resolution key columns (3), the
+/// anchored-link index, `link_anchor_keys` (4), and the death prune's index of
+/// broken findings in the order they were filed, `findings_broken_filed` (5).
+pub const STORE_SCHEMA_VERSION: i64 = 5;
 
 /// The areas, in execution order. `meta` is first, and it is the substrate's
 /// table rather than this tree's, because it is what an open reads to decide

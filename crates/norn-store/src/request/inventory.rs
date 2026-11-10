@@ -18,9 +18,10 @@ impl Request<'_> {
 
     pub fn prepare_inventory(&mut self) -> Result<(), StoreError> {
         let connection = self.store.connection();
-        connection.execute_batch("PRAGMA temp_store = FILE;
-            PRAGMA temp.cache_size = -256;
-            CREATE TEMP TABLE IF NOT EXISTS rolling_inventory (
+        connection
+            .execute_batch(crate::death_prune::TEMPORARY_STORAGE)
+            .map_err(|error| error::sql("preparing the rolling inventory", error))?;
+        connection.execute_batch("CREATE TEMP TABLE IF NOT EXISTS rolling_inventory (
                 key BLOB PRIMARY KEY NOT NULL, value BLOB NOT NULL
             ) WITHOUT ROWID;
             CREATE TEMP TABLE IF NOT EXISTS rolling_account (path TEXT PRIMARY KEY NOT NULL, flags INTEGER NOT NULL) WITHOUT ROWID;")

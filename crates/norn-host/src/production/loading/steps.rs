@@ -299,7 +299,7 @@ pub(super) fn documents(
 /// their owed steps, commit, then publish their derivation. Nothing calls this
 /// from FullText on.
 ///
-/// Each call takes at most once (ADR 0050), so a writer faster than a take
+/// Each call takes at most once (ADR 0052), so a writer faster than a take
 /// never holds a step open: a root accepted during this take waits for the
 /// next call, and one accepted after Relations' closing take waits for the
 /// reconcile before `Ready`. `None` takes nothing, as it does whenever nothing

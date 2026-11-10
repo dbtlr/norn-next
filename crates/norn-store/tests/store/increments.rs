@@ -1075,10 +1075,10 @@ fn a_path_named_three_times_ends_where_its_last_entry_left_it() {
 }
 
 /// **A re-death inside one changeset keeps the hash already recorded.** The hash
-/// is the comparison basis a tombstone exists to carry, and a death learned from
-/// a path that is already absent has nothing to hash — so the retention rule has
-/// to hold between two entries of one changeset exactly as it holds between two
-/// changesets.
+/// is what move-following matches a live holder by, and a death learned from a
+/// path that is already absent has nothing to hash — so keeping the recorded
+/// hash has to hold between two entries of one changeset exactly as it holds
+/// between two changesets.
 #[test]
 fn a_re_death_within_one_changeset_keeps_the_hash_already_recorded() {
     let scratch = Scratch::new("changeset-retention");
@@ -1109,7 +1109,7 @@ fn a_re_death_within_one_changeset_keeps_the_hash_already_recorded() {
     assert_eq!(
         tombstone.last_content_hash.as_deref(),
         Some("hash-1"),
-        "the re-death overwrote the comparison basis the tombstone carried"
+        "the re-death overwrote the hash move-following matches a holder by"
     );
     // Everything the second death did know is the most recent answer.
     assert_eq!(tombstone.provenance, Provenance::HealPrune);

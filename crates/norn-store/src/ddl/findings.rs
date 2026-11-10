@@ -159,6 +159,37 @@
 //! reads the live ambiguity class and re-decides, so the generation is evidence
 //! about the plan's age rather than an input to its outcome.
 //!
+//! # The death prune reads the broken findings in the order they were filed
+//!
+//! The death prune ([ADR 0052]) keeps the at most two deaths the
+//! move-following reads return for each link holding a current `link/broken`
+//! finding. It marks them from the broken findings under the pinned
+//! fingerprint in `(generation, path, position)` order, and before every unit
+//! that removes deaths it marks the broken findings filed since its cursor, so
+//! the order it needs is the order findings were filed in. None of the indexes
+//! above holds it: the fingerprint-led ones are in path order, and the
+//! class, path-key and one-per-link indexes reach findings by key or by link,
+//! not by kind.
+//!
+//! `findings_broken_filed` is that order, partial over `link/broken` findings
+//! alone: `(vault_schema_fingerprint, generation, path, position)`. It keys
+//! `position` rather than `ordinal`, as every index here does, and for a
+//! finding about a link the two are equal. A changeset writes one entry for
+//! each broken finding it files and removes one for each it discards, so its
+//! write cost follows the broken findings a changeset touches, never the
+//! vault; a bulk re-judgment, such as the re-decision of every link a schema
+//! pin owes, pays one entry per broken finding it files or discards. A
+//! statement reaches the index only where it names the kind as the literal
+//! [`BROKEN_FILED_KIND`] the predicate is built from.
+//!
+//! Measured on a release build (2026-11-10, shared host): a whole-vault
+//! re-judgment of 10,000 documents that discards and files 1,000 broken
+//! findings, so 2,000 entries in this index, took a median of 53 ms with the
+//! index and 48 ms with it dropped, over six alternating rounds whose
+//! samples spread from 43 to 64 ms either way.
+//!
+//! [ADR 0052]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0052-a-death-is-kept-only-while-lane-2-or-a-broken-link-needs-it.md
+//!
 //! # The bounded head of five, at rest as on the wire
 //!
 //! `finding_candidates` holds a finding's candidates in deterministic
@@ -271,11 +302,10 @@
 //! re-decides when a changeset writes or kills one of them. Every finding the
 //! host files carries no path key.
 //!
-//! A tombstone keeps the same class computable for the same reason: a deletion
-//! changes a class, and the class has to stay derivable after the document row
-//! is gone. It carries the `path` and nothing derived from it — the class is
-//! recomputed from the path, which is how the tombstone is read in the first
-//! place.
+//! A deletion changes a class too. Its own transaction derives the class from
+//! the path it deletes and re-decides the findings filed under it, so nothing
+//! reads a tombstone for the class afterwards. The suffix and path keys a
+//! tombstone stores are for move-following's seeks, not for this discard.
 //!
 //! A finding's class set may be **empty**, because not every finding is about
 //! resolution. A finding about a frontmatter field violating the vault schema has
@@ -339,6 +369,7 @@ pub(crate) fn statements() -> Vec<String> {
     let mut all = super::fixed(RULE_SET_STATEMENTS);
     all.push(findings());
     all.extend(super::fixed(STATEMENTS));
+    all.push(broken_filed());
     all.push(collect_rule_set());
     all.push(finding_candidates());
     all
@@ -350,6 +381,21 @@ pub(crate) fn statements() -> Vec<String> {
 /// the document resumes after, and as the least position a first page opens
 /// at.
 pub(crate) const DOCUMENT_POSITION: i64 = -1;
+
+/// The kind `findings_broken_filed` is partial over, which a statement
+/// seeking it names as this literal.
+pub(crate) const BROKEN_FILED_KIND: norn_wire::FindingKind = norn_wire::FindingKind::Broken;
+
+/// The death prune's index of broken findings in the order they were filed,
+/// its predicate built from [`BROKEN_FILED_KIND`].
+fn broken_filed() -> String {
+    format!(
+        "CREATE INDEX findings_broken_filed ON findings(
+    vault_schema_fingerprint, generation, path, position
+) WHERE kind = '{}'",
+        BROKEN_FILED_KIND.as_str()
+    )
+}
 
 /// The hexadecimal digits a SHA-256 is spelled in, after its `sha256:` prefix.
 const SHA256_HEX_DIGITS: usize = 64;

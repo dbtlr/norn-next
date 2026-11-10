@@ -251,6 +251,22 @@ _Avoid_: Cursor (unqualified) — elsewhere in this glossary "cursor" names a ch
 How far an engine has drained one feed: how many writes the store had committed when the engine last read that feed to its end, qualified by the store epoch that count was taken in. Freshness is how many committed writes a reader's view of the store holds past the watermark.
 _Avoid_: Cursor (a cursor is a feed position, not a store generation)
 
+**Death**:
+The record a document's removal leaves in the derived store: the removed path, the hash of the content it last held, how the removal was learned, and where in the store's write order it was learned. A death stands only while its path holds no document, and only while lane 2 has not read it, up to one unread death per live document, or while a broken link would read it. A tombstone is the same record, named as the store keeps it.
+_Avoid_: Deletion record
+
+**Death prune**:
+The claim-bound maintenance work that removes the deaths no reader needs any longer and raises the death floor.
+_Avoid_: Prune (unqualified) — a heal's prune removes the documents a walk no longer finds and records their deaths
+
+**Death floor**:
+The highest point in the store's write order at which the death prune has removed a death. A change-feed consumer that has not read through it cannot resume where it stopped, and reconciles against current state instead.
+_Avoid_: Watermark (a watermark says how far a consumer has read; the floor says how far the store has forgotten)
+
+**Read-through generation**:
+The point in the store's write order at or below which lane 2 has read every death in the change feed, or accounted for it by a reconcile. The death prune keeps the deaths past it, up to a bound the vault's size sets.
+_Avoid_: Position, cursor (a cursor is where a consumer resumes; this is what it has read), watermark
+
 **Sidecar revision**:
 Which sidecar state an answer came from: a count of committed sidecar mutations, qualified by the sidecar's own epoch. It identifies state; it says nothing about freshness.
 

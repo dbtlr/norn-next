@@ -698,7 +698,7 @@ const HUB_WRITE_DIR: &str = "memory-gate-hub-links";
 /// How many documents already hold a bare-stem link to the hub the memory
 /// bar's write resolves, fixed at both per-PR scales: the claim under test is
 /// that a hub's write costs its own in-links, never the vault around it
-/// (ADR 0047's bounded-working-memory obligation).
+/// (ADR 0052's bounded-working-memory obligation).
 const HUB_WRITE_IN_LINKS: usize = 200;
 
 /// The case a hub-writing child re-executes, which is the one that reads this
@@ -719,7 +719,7 @@ fn plant_hub_in_links(vault: &attach::Vault) {
 }
 
 /// **What a hub write adds to a process that already attached, as a
-/// difference in heap bytes across the two per-PR scales (ADR 0047's
+/// difference in heap bytes across the two per-PR scales (ADR 0052's
 /// bounded-working-memory obligation).**
 ///
 /// With [`HARNESS_ENV`] and its token set this process is the child: it
@@ -727,7 +727,7 @@ fn plant_hub_in_links(vault: &attach::Vault) {
 /// [`HUB_WRITE_IN_LINKS`] documents linking a hub nothing has written yet, so
 /// the attach heal derives every one of them as broken — marks the heap once
 /// the attachment is ready, and then writes the hub itself directly through
-/// the store, the same write ADR 0047's re-decision runs inside, instead of
+/// the store, the same write ADR 0052's re-decision runs inside, instead of
 /// measuring anything. What is reported is the most that write raised the
 /// heap above the mark, so the reading is the write's own and not the
 /// attach's.
@@ -818,7 +818,7 @@ fn hub_write_heap_growth(label: &str, profile: &str) -> u64 {
 /// The harness: adopt the tree at `root`, attach it, mark the heap once the
 /// attachment is ready, then write the hub [`HUB_WRITE_IN_LINKS`] planted
 /// documents already link by its bare stem — directly through the store,
-/// which is the write ADR 0047's re-decision runs inside — and report what
+/// which is the write ADR 0052's re-decision runs inside — and report what
 /// the vault now derives and the most that write raised the heap above the
 /// mark.
 ///

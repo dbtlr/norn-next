@@ -577,14 +577,23 @@ fn establish_on(
         last_write_generation(database.connection())?;
     }
     // This is still the one establishing read. The presence bit belongs to
-    // this snapshot, so link rows need no extra statement when no marks stand.
-    let (write_generation, directory_marks_present) = database
+    // this snapshot, so link rows need no extra statement when no marks stand,
+    // and the death floor is read in it so the reading agrees with the deaths
+    // the snapshot holds.
+    let (write_generation, directory_marks_present, death_floor) = database
         .connection()
         .query_row(
-            "SELECT value, EXISTS(SELECT 1 FROM directory_marks WHERE path_key >= '')
+            "SELECT value, EXISTS(SELECT 1 FROM directory_marks WHERE path_key >= ''),
+                (SELECT value FROM meta WHERE key = ?2)
          FROM meta WHERE key = ?1",
-            params![meta::WRITE_GENERATION],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?)),
+            params![meta::WRITE_GENERATION, ddl::meta::DEATH_FLOOR],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, bool>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                ))
+            },
         )
         .optional()
         .map_err(|error| crate::error::sql("establishing a read snapshot", error))?
@@ -597,6 +606,7 @@ fn establish_on(
         StoreReading {
             epoch: reader.epoch.clone(),
             write_generation,
+            death_floor,
         },
         directory_marks_present,
     ))
@@ -611,6 +621,31 @@ pub(crate) fn last_write_generation(connection: &Connection) -> Result<i64, Stor
         what: "the database records no write generation, so no read can say what it read"
             .to_string(),
     })
+}
+
+/// The death floor recorded on `connection`, or `None` where the death prune
+/// has removed nothing.
+pub(crate) fn death_floor(connection: &Connection) -> Result<Option<i64>, StoreError> {
+    Ok(meta::get_meta::<i64>(connection, ddl::meta::DEATH_FLOOR)?)
+}
+
+/// The last write generation and the death floor on `connection`, read in one
+/// statement so both describe one instant.
+pub(crate) fn generation_and_floor(
+    connection: &Connection,
+) -> Result<(i64, Option<i64>), StoreError> {
+    connection
+        .query_row(
+            "SELECT value, (SELECT value FROM meta WHERE key = ?2) FROM meta WHERE key = ?1",
+            params![meta::WRITE_GENERATION, ddl::meta::DEATH_FLOOR],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?)),
+        )
+        .optional()
+        .map_err(|error| crate::error::sql("reading the store reading", error))?
+        .ok_or_else(|| StoreError::Damaged {
+            what: "the database records no write generation, so no read can say what it read"
+                .to_string(),
+        })
 }
 
 /// One read's snapshot: the connection it answers on, the reading it was
@@ -959,23 +994,48 @@ impl Drop for Snapshot {
 /// names a position in a database that no longer exists. Every answer carries
 /// this, because what a read saw is a fact about the state it read rather than
 /// one a later call can be asked for.
+///
+/// **The death floor is read beside them, in the same snapshot** ([ADR
+/// 0052]): the highest generation of any death the death prune has removed,
+/// or `None` where it has removed none. A lane-2 judgment taken against this
+/// reading compares a reader's read-through generation with this floor, so
+/// the floor has to describe the instant the generation does.
+///
+/// [ADR 0052]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0052-a-death-is-kept-only-while-lane-2-or-a-broken-link-needs-it.md
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoreReading {
     epoch: String,
     write_generation: i64,
+    death_floor: Option<i64>,
 }
 
 impl StoreReading {
-    /// The reading a snapshot established at `write_generation` in `epoch`.
+    /// The reading a snapshot established at `write_generation` in `epoch`,
+    /// over a store whose death prune has removed nothing.
     ///
     /// The establishment mints its own, and this is the spelling a caller
     /// standing in for one uses: a test double for a reader answers under a
     /// reading the same shape a store's own answers under.
+    /// [`StoreReading::with_death_floor`] adds the floor such a reading read.
     pub fn of(epoch: impl Into<String>, write_generation: i64) -> Self {
         StoreReading {
             epoch: epoch.into(),
             write_generation,
+            death_floor: None,
         }
+    }
+
+    /// This reading with the death floor read in its snapshot.
+    #[must_use]
+    pub fn with_death_floor(mut self, death_floor: Option<i64>) -> Self {
+        self.death_floor = death_floor;
+        self
+    }
+
+    /// The highest generation of any death the death prune had removed when
+    /// the snapshot was established, or `None` where it had removed none.
+    pub fn death_floor(&self) -> Option<i64> {
+        self.death_floor
     }
 
     /// The database this reading names.

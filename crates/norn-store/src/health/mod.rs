@@ -1,6 +1,6 @@
 //! Link health: the findings the store judges about a selection of links —
 //! **broken**, **ambiguous**, **missing anchor** and **vault-scheme**, each a finding about
-//! exactly one link, at warning severity ([ADR 0047]).
+//! exactly one link, at warning severity ([ADR 0052]).
 //!
 //! # The rules are the ones every surface reads a link's health by
 //!
@@ -83,7 +83,7 @@
 //!
 //! After every entry of a changeset is written, the store judges the links
 //! the changeset reaches and files these findings in the same transaction
-//! ([`redecide`], [ADR 0047]): the links its written documents hold, read a
+//! ([`redecide`], [ADR 0052]): the links its written documents hold, read a
 //! chunk at a time off the generation the write stamped them with; then, for
 //! each class it changed — every class but an in-place rewrite's that moved
 //! no anchor value — the findings standing under the class, discarded a
@@ -102,7 +102,7 @@
 //! a selection and files nothing, and the plan seam bars each statement
 //! either runs.
 //!
-//! [ADR 0047]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0047-a-write-re-decides-only-the-links-whose-inputs-it-moved.md
+//! [ADR 0052]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0052-a-death-is-kept-only-while-lane-2-or-a-broken-link-needs-it.md
 
 pub(crate) mod resolution;
 pub(crate) mod run;
@@ -165,7 +165,7 @@ const VAULT_SCHEME: &str = "the link resolves through `vault://`, a scheme Obsid
 /// ([`crate::IncrementOutcome::affected_classes`],
 /// [`crate::IncrementOutcome::affected_paths`]).
 ///
-/// [ADR 0047]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0047-a-write-re-decides-only-the-links-whose-inputs-it-moved.md
+/// [ADR 0052]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0052-a-death-is-kept-only-while-lane-2-or-a-broken-link-needs-it.md
 #[derive(Clone, Copy, Debug)]
 pub enum LinkSelection<'a> {
     /// Every link the documents at these paths hold. A path named twice holds
@@ -227,7 +227,7 @@ struct Summary {
 
 /// What each key a judgment has resolved names, so a judgment taken in chunks
 /// resolves a key once across a run of consecutive chunks that hold it, and
-/// counts a filled key's total once however many runs hold it ([ADR 0047]'s
+/// counts a filled key's total once however many runs hold it ([ADR 0052]'s
 /// fifth condition) — and how each candidate its findings carried is named,
 /// so a candidate is named once while its key is held. A set nothing evicts
 /// from, as the public judgment door's, resolves each distinct key once.
@@ -250,7 +250,7 @@ struct Summary {
 /// whose head filled, one key and one count each, so a key resolved again
 /// reads its bounded head and never counts what it names twice.
 ///
-/// [ADR 0047]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0047-a-write-re-decides-only-the-links-whose-inputs-it-moved.md
+/// [ADR 0052]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0052-a-death-is-kept-only-while-lane-2-or-a-broken-link-needs-it.md
 #[derive(Debug, Default)]
 pub struct KeySummaries {
     summaries: BTreeMap<Key, Summary>,
@@ -627,7 +627,7 @@ pub(crate) struct Redecided {
 
 /// Re-decide the link health of every link the changeset that stamped
 /// `generation` reaches, inside its `transaction`, and file the findings:
-/// [ADR 0047]'s re-decided set, which is
+/// [ADR 0052]'s re-decided set, which is
 ///
 /// 1. every link a document the changeset wrote holds — those stamped with
 ///    `generation`;
@@ -707,7 +707,7 @@ pub(crate) struct Redecided {
 /// changeset and the work stays the links plus the candidates: the totals
 /// kept are one per distinct filled key the re-decided links hold.
 ///
-/// [ADR 0047]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0047-a-write-re-decides-only-the-links-whose-inputs-it-moved.md
+/// [ADR 0052]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0052-a-death-is-kept-only-while-lane-2-or-a-broken-link-needs-it.md
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn redecide(
     transaction: &Transaction<'_>,

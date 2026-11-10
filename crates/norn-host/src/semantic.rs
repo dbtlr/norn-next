@@ -97,10 +97,10 @@ use norn_config::ConfigDirs;
 use norn_config::vault::EngineConfig;
 use norn_embed::{Model, StubEmbedder};
 use norn_semantic::{
-    Coverage, DrainStep, Engine, EngineError, NearestWork, Neighbor, Settings, SidecarRevision,
-    Watermark, Watermarks,
+    Coverage, DrainStep, Engine, EngineError, NearestWork, Neighbor, ReadThroughs, Settings,
+    SidecarRevision, Watermark, Watermarks,
 };
-use norn_store::{FeedSource, StoreReading};
+use norn_store::{FeedSource, ReadThrough, StoreReading};
 use norn_wire::{
     EmbeddingCoverage, EngineSection, EngineStatus, ErrorDetail, ErrorEnvelope, Freshness, Rung,
     RungSkipReason, VaultName,
@@ -164,6 +164,10 @@ pub enum SemanticStatus {
         /// How far each feed was drained; judged against a store reading by
         /// [`freshness`].
         watermarks: Watermarks,
+        /// How far the engine's two readers of the death feed have read it:
+        /// what the death prune is handed, and what [`freshness`] judges
+        /// against a reading's death floor.
+        read_through: ReadThroughs,
         /// How many of the documents the engine would embed have embeddings,
         /// counted at the store state the last unit read, or the one it last
         /// counted whole while a count catches up; `None` until a unit has
@@ -187,6 +191,9 @@ pub struct SemanticAnswer {
     pub sidecar: SidecarRevision,
     /// How far each feed had been drained when the rows were read.
     pub watermarks: Watermarks,
+    /// How far the engine's readers of the death feed had read it when the
+    /// rows were read, which [`freshness`] judges against the death floor.
+    pub read_through: ReadThroughs,
     /// What the scan read, scored and held.
     pub work: NearestWork,
 }
@@ -202,11 +209,27 @@ pub struct SemanticAnswer {
 /// is worse than any count. A watermark past the reading, recorded by a drain
 /// that completed after the hold was established, trails by nothing.
 ///
+/// **An engine that has not read through the reading's death floor is
+/// rescanning** ([ADR 0052]), whatever its watermarks say: the death prune
+/// removed deaths it had not read, so it reconciles before it reads on. The
+/// judgment reads the engine's own read-through generation in the reading's
+/// store epoch, never its death watermark alone, which a drain part way
+/// through a long backlog leaves below a floor it has read past.
+///
 /// The `search` handler composes it with the store reading of the hold its
 /// answer is taken under; the report `vault status` and `doctor` give a
 /// vault's engine is its other caller, with the store reading
 /// the vault's entry recorded where its last leg's lane-1 work committed.
-pub fn freshness(watermarks: &Watermarks, store: &StoreReading) -> Freshness {
+///
+/// [ADR 0052]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0052-a-death-is-kept-only-while-lane-2-or-a-broken-link-needs-it.md
+pub fn freshness(
+    watermarks: &Watermarks,
+    read_through: &ReadThroughs,
+    store: &StoreReading,
+) -> Freshness {
+    if read_through.engine_below_floor(store) {
+        return Freshness::rescanning();
+    }
     let lag = |watermark: &Option<Watermark>| match watermark {
         Some(watermark) if watermark.store_epoch == store.epoch() => {
             let behind = store
@@ -942,6 +965,7 @@ fn answer_nearest(
         model: engine.model().clone(),
         sidecar: engine.revision(),
         watermarks: engine.watermarks().clone(),
+        read_through: engine.read_through().clone(),
         work: nearest.work,
     })
 }
@@ -957,6 +981,7 @@ fn read_slot(slot: &Slot) -> SemanticStatus {
             last_drain_error: last_drain_error.clone(),
             sidecar: engine.revision(),
             watermarks: engine.watermarks().clone(),
+            read_through: engine.read_through().clone(),
             coverage: engine.coverage(),
         },
         Slot::Running { engine: None, .. } => SemanticStatus::SelfDisabled {
@@ -990,13 +1015,14 @@ pub(crate) fn engine_status(status: SemanticStatus, store: Option<&StoreReading>
         SemanticStatus::On {
             last_drain_error,
             watermarks,
+            read_through,
             coverage,
             sidecar: _,
         } => {
             let recorded = watermarks.documents.is_some() || watermarks.tombstones.is_some();
             let freshness = store
                 .filter(|_| recorded)
-                .map(|store| freshness(&watermarks, store));
+                .map(|store| freshness(&watermarks, &read_through, store));
             let coverage =
                 coverage.map(|counted| EmbeddingCoverage::new(counted.embedded, counted.total));
             EngineStatus::on(last_drain_error, freshness, coverage)
@@ -1153,7 +1179,8 @@ impl SemanticEngines {
     }
 
     /// The nearest paths to `text` in `vault`, restricted as `restrict`
-    /// decides from the engine's own watermarks, with the restriction and the
+    /// decides from the engine's own watermarks and read-through generations,
+    /// with the restriction and the
     /// reading they were taken under; or `restrict`'s own refusal, or the
     /// typed refusal that no engine answers.
     ///
@@ -1167,11 +1194,11 @@ impl SemanticEngines {
         &self,
         vault: &VaultName,
         text: &str,
-        restrict: impl FnOnce(&Watermarks) -> Result<(usize, R), E>,
+        restrict: impl FnOnce(&Watermarks, &ReadThroughs) -> Result<(usize, R), E>,
         admits: impl Fn(&R, &str) -> bool,
     ) -> Result<Result<(SemanticAnswer, R), E>, SemanticRefusal> {
         self.with_engine(vault, |engine| {
-            let (limit, restriction) = match restrict(engine.watermarks()) {
+            let (limit, restriction) = match restrict(engine.watermarks(), engine.read_through()) {
                 Ok(restricted) => restricted,
                 Err(refused) => return Ok(Err(refused)),
             };
@@ -1257,6 +1284,51 @@ impl SemanticEngines {
                 .slot
                 .as_ref()
                 .is_some_and(|slot| slot.owed.owes() && slot.current().is_some())
+        })
+    }
+
+    /// How far `vault`'s engine has read the death feed of the store epoch
+    /// `store_epoch`, as one death-prune unit is handed it ([ADR 0052]): the
+    /// lower of its two readers' read-through generations, read from the
+    /// report the slot's last hold left, never from the sidecar.
+    ///
+    /// `None` only where the vault's configuration turns the engine off — its
+    /// section is absent or states it off — so no reader of the death feed
+    /// stands for the vault. Every other engine counts as a reader, and one
+    /// that has recorded nothing in the epoch has read nothing in it: an
+    /// engine still preparing, self-disabled, or whose section could not be
+    /// read, and a vault whose delivery is missing for a moment, each answer
+    /// [`ReadThrough::Nothing`]. A report one hold old usually answers lower
+    /// than the engine stands, which only keeps more deaths. It can answer
+    /// higher while a hold that rebuilds the sidecar runs, until the hold's
+    /// `Held::drop` publishes the fresh report. That is harmless: a fresh
+    /// sidecar needs no death committed before its first page, and a death
+    /// past the bound raises the floor, which the rebuilt engine then reads
+    /// against its own first page.
+    ///
+    /// The map lock, then the report's leaf lock: the order a publication
+    /// takes them in under the entry gate, so this is read under the gate
+    /// too, and never waits behind a unit.
+    ///
+    /// [ADR 0052]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0052-a-death-is-kept-only-while-lane-2-or-a-broken-link-needs-it.md
+    pub(crate) fn read_through(&self, vault: &VaultName, store_epoch: &str) -> Option<ReadThrough> {
+        let vaults = tolerant(&self.vaults);
+        let Some(delivery) = vaults.get(vault) else {
+            return Some(ReadThrough::Nothing);
+        };
+        match &delivery.section {
+            EngineSection::Absent {} | EngineSection::Disabled {} => return None,
+            _ => {}
+        }
+        let report = delivery.slot.as_ref().map(|slot| slot.report());
+        Some(match report {
+            Some(SemanticStatus::On { read_through, .. }) => {
+                match read_through.lower_in(store_epoch) {
+                    Some(generation) => ReadThrough::Through(generation),
+                    None => ReadThrough::Nothing,
+                }
+            }
+            _ => ReadThrough::Nothing,
         })
     }
 
@@ -1874,6 +1946,14 @@ pub(crate) mod tests {
                 .store(true, std::sync::atomic::Ordering::SeqCst);
         }
 
+        /// Answer owed work again after [`Self::hold_owed_work`]: the next
+        /// wake runs the units the hold kept back.
+        pub(crate) fn release_owed_work(&self) {
+            self.hooks
+                .owed_work_held
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+
         /// Whether the lane, from here on, takes a slot lock without yielding
         /// to the searches already waiting for it.
         pub(crate) fn lane_skips_its_yields(&self, skips: bool) {
@@ -2150,7 +2230,9 @@ mod composition_tests {
 
 #[cfg(test)]
 mod freshness_tests {
-    use norn_semantic::{SidecarRevision, Watermark, Watermarks};
+    use norn_semantic::{
+        ReadThroughGeneration, ReadThroughs, SidecarRevision, Watermark, Watermarks,
+    };
     use norn_store::StoreReading;
     use norn_wire::{EngineStatus, Freshness};
 
@@ -2175,17 +2257,29 @@ mod freshness_tests {
     fn freshness_is_the_worse_of_the_two_feeds() {
         let store = StoreReading::of("store", 10);
         assert_eq!(
-            freshness(&marks(at("store", 7), at("store", 9)), &store),
+            freshness(
+                &marks(at("store", 7), at("store", 9)),
+                &ReadThroughs::default(),
+                &store
+            ),
             Freshness::trailing(3),
             "the document feed is the stalest"
         );
         assert_eq!(
-            freshness(&marks(at("store", 9), at("store", 6)), &store),
+            freshness(
+                &marks(at("store", 9), at("store", 6)),
+                &ReadThroughs::default(),
+                &store
+            ),
             Freshness::trailing(4),
             "the tombstone feed is the stalest"
         );
         assert_eq!(
-            freshness(&marks(at("store", 10), at("store", 10)), &store),
+            freshness(
+                &marks(at("store", 10), at("store", 10)),
+                &ReadThroughs::default(),
+                &store
+            ),
             Freshness::trailing(0)
         );
     }
@@ -2203,7 +2297,7 @@ mod freshness_tests {
             Watermarks::default(),
         ] {
             assert_eq!(
-                freshness(&watermarks, &store),
+                freshness(&watermarks, &ReadThroughs::default(), &store),
                 Freshness::rescanning(),
                 "{watermarks:?}"
             );
@@ -2216,8 +2310,83 @@ mod freshness_tests {
     fn a_watermark_past_the_reading_trails_by_nothing() {
         let store = StoreReading::of("store", 10);
         assert_eq!(
-            freshness(&marks(at("store", 12), at("store", 11)), &store),
+            freshness(
+                &marks(at("store", 12), at("store", 11)),
+                &ReadThroughs::default(),
+                &store
+            ),
             Freshness::trailing(0)
+        );
+    }
+
+    /// Both readers' read-through generations at `generation` in `store_epoch`.
+    fn read_through_at(store_epoch: &str, generation: i64) -> ReadThroughs {
+        let at = || {
+            Some(ReadThroughGeneration {
+                store_epoch: store_epoch.to_string(),
+                generation,
+            })
+        };
+        ReadThroughs {
+            engine: at(),
+            census: at(),
+        }
+    }
+
+    /// **An engine that has not read through the death floor is rescanning,
+    /// and one that has reads its lag from the watermarks** (ADR 0052). The
+    /// judgment is the engine's own read-through generation in the reading's
+    /// epoch against the reading's floor: a death watermark below the floor
+    /// alone is not rescanning, and a read-through generation in another
+    /// epoch, or none, is below any floor.
+    #[test]
+    fn an_engine_below_the_death_floor_reads_rescanning_and_one_at_or_above_does_not() {
+        let floored = StoreReading::of("store", 10).with_death_floor(Some(6));
+        let watermarks = marks(at("store", 9), at("store", 4));
+        assert_eq!(
+            freshness(&watermarks, &read_through_at("store", 5), &floored),
+            Freshness::rescanning(),
+            "below the floor"
+        );
+        assert_eq!(
+            freshness(&watermarks, &ReadThroughs::default(), &floored),
+            Freshness::rescanning(),
+            "a reader that recorded nothing is below any floor"
+        );
+        assert_eq!(
+            freshness(&watermarks, &read_through_at("old", 9), &floored),
+            Freshness::rescanning(),
+            "a read-through generation of another epoch reads nothing of this one"
+        );
+        for read in [6, 8] {
+            assert_eq!(
+                freshness(&watermarks, &read_through_at("store", read), &floored),
+                Freshness::trailing(6),
+                "at or above the floor, the watermarks judge, the death watermark below \
+                 the floor included"
+            );
+        }
+        assert_eq!(
+            freshness(
+                &watermarks,
+                &ReadThroughs::default(),
+                &StoreReading::of("store", 10)
+            ),
+            Freshness::trailing(6),
+            "a store with no floor is read through by every reader"
+        );
+        let mut status = on(watermarks.clone());
+        if let SemanticStatus::On { read_through, .. } = &mut status {
+            *read_through = read_through_at("store", 5);
+        }
+        assert_eq!(
+            engine_status(status, Some(&floored)),
+            EngineStatus::on(
+                Some("the last drain refused".to_string()),
+                Some(Freshness::rescanning()),
+                Some(norn_wire::EmbeddingCoverage::new(2, 3)),
+            ),
+            "the status judges the reading the entry recorded, floor and all"
         );
     }
 
@@ -2230,6 +2399,7 @@ mod freshness_tests {
                 revision: 3,
             },
             watermarks,
+            read_through: ReadThroughs::default(),
             coverage: Some(norn_semantic::Coverage {
                 embedded: 2,
                 total: 3,
@@ -2273,7 +2443,7 @@ mod freshness_tests {
             );
             assert_eq!(
                 freshness,
-                super::freshness(&watermarks, &store),
+                super::freshness(&watermarks, &ReadThroughs::default(), &store),
                 "a status reports what a search reports"
             );
         }

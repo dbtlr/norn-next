@@ -90,21 +90,27 @@ pub enum Change {
     ///
     /// The hash is not supplied: it is the one the store last derived the path
     /// at, read out of the row this entry removes. **A path that dies twice
-    /// keeps the hash already recorded** — that hash is the comparison basis a
-    /// tombstone exists to carry, and a death learned from an absent file has
-    /// nothing better to put in its place. A re-death is the only way to reach
-    /// a standing tombstone, and it never carries a hash: a tombstone standing
-    /// means no document row stands (an insert clears it), so the delete this
-    /// entry runs finds nothing to hash. The write's replace-with-newer arm is
-    /// therefore vacuous, kept as a defensive contract.
+    /// keeps the hash already recorded** — that hash is what move-following
+    /// matches a live holder by, and a death learned from an absent file has
+    /// nothing better to put in its place. A re-death is the only entry that
+    /// reaches a standing tombstone, and it never carries a hash: a tombstone
+    /// standing means no document row stands (an insert clears it), so the
+    /// delete this entry runs finds nothing to hash. The write's
+    /// replace-with-newer arm is therefore vacuous, kept as a defensive
+    /// contract. The death prune ([ADR 0052]) also removes standing tombstones,
+    /// in a transaction of its own, never between two entries of a changeset.
     ///
-    /// A path nothing had derived still gets a tombstone. The ordering it
-    /// carries is the point, and it is worth most exactly when a derivation
-    /// never happened: a late event then has something to compare against
-    /// instead of guessing. The one place no death is entered for is a place no
-    /// row ever stood at, whose bytes never decoded: the heal never tombstones
-    /// one, and [`Change::Vacated`] ends its quarantine. A row whose bytes stop
-    /// decoding does die, as a [`Provenance::Quarantine`].
+    /// A death is news about a row, so every producer — a watcher removal, a
+    /// heal's prune, a plan's delete, a quarantine — enters one only for a
+    /// path it found a stored document row at. This entry does not check, and
+    /// given a path no row stands at it records a tombstone without a hash. No
+    /// producer does that, because a tombstone there would state the removal of
+    /// a document the vault never held. A place no row ever stood
+    /// at, whose bytes never decoded, is left by [`Change::Vacated`], which
+    /// ends its quarantine. A row whose bytes stop decoding does die, as a
+    /// [`Provenance::Quarantine`].
+    ///
+    /// [ADR 0052]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0052-a-death-is-kept-only-while-lane-2-or-a-broken-link-needs-it.md
     Death {
         path: DocumentPath,
         provenance: Provenance,
@@ -113,9 +119,8 @@ pub enum Change {
     /// finding its undecodable bytes left goes, in this transaction, and nothing
     /// else is written.
     ///
-    /// **It is not a death.** A death tombstones a path, and the ordering a
-    /// tombstone carries is wanted wherever a late event could otherwise guess.
-    /// A place whose bytes never decoded is one the heal deliberately never
+    /// **It is not a death.** A death tombstones a path a document row stood
+    /// at. A place whose bytes never decoded is one the heal deliberately never
     /// tombstones, so a build from zero over the emptied tree holds no tombstone
     /// there, and a death would leave a state that build does not produce. What
     /// the place holds is a quarantine finding — its bytes are not a document —
@@ -232,7 +237,7 @@ pub struct IncrementOutcome {
     /// was about.
     ///
     /// **Every entry names its class but an in-place rewrite that moves no
-    /// anchor value** ([ADR 0047]): a readable document written over a
+    /// anchor value** ([ADR 0052]): a readable document written over a
     /// readable row it matches in its path, kind, keys and admitting count,
     /// holding the same heading readings, heading slugs and block ids. No
     /// link another document holds reads anything such a rewrite moved, so
@@ -246,7 +251,7 @@ pub struct IncrementOutcome {
     /// went are the changeset's own entries, which the caller processed one by
     /// one to build it, an in-place rewrite included.
     ///
-    /// [ADR 0047]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0047-a-write-re-decides-only-the-links-whose-inputs-it-moved.md
+    /// [ADR 0052]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0052-a-death-is-kept-only-while-lane-2-or-a-broken-link-needs-it.md
     pub affected_classes: BTreeSet<ClassKey>,
     /// Every path whose names the changeset moved, as the path key it is,
     /// spelled in the same key space as
@@ -952,9 +957,9 @@ fn upsert(
 }
 
 /// What a link another document holds may read of one entry's write, and so
-/// which links the changeset re-decides for it ([ADR 0047]).
+/// which links the changeset re-decides for it ([ADR 0052]).
 ///
-/// [ADR 0047]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0047-a-write-re-decides-only-the-links-whose-inputs-it-moved.md
+/// [ADR 0052]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0052-a-death-is-kept-only-while-lane-2-or-a-broken-link-needs-it.md
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Reach {
     /// The entry moved the names at its path, or cannot tell: the changeset

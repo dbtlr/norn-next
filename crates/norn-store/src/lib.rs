@@ -14,7 +14,7 @@
 //! rows mean.
 //!
 //! Its verbs translate cleanly to SQL and carry no business logic beyond how a
-//! query is composed, save two exceptions. One is the rule [ADR 0047] rules
+//! query is composed, save two exceptions. One is the rule [ADR 0052] rules
 //! into it: link health, judged in SQL and filed inside every changeset
 //! ([`Request::apply_increment`]), save a from-zero build's, which judges every
 //! stored link once after its facts have landed. The other is the similarity measure
@@ -26,7 +26,7 @@
 //! trigram is. The store takes **typed facts rather than documents**: parsing
 //! is orchestration's job, so nothing here reads document text.
 //!
-//! [ADR 0047]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0047-a-write-re-decides-only-the-links-whose-inputs-it-moved.md
+//! [ADR 0052]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0052-a-death-is-kept-only-while-lane-2-or-a-broken-link-needs-it.md
 //!
 //! # Where to start
 //!
@@ -91,6 +91,15 @@
 //!   comparison key, bounded to two at a matching place, and
 //!   [`Snapshot::live_holders`] reads at most two live documents holding a
 //!   content hash. Their `*_plans` methods explain what ran.
+//!   [`Snapshot::followed_tombstones`] is the one routine that turns a stored
+//!   link into those reads, which repair and the death prune both run.
+//! - [`Request::death_prune_unit`] — one unit of the death prune ADR 0052
+//!   rules: a death is kept only while lane 2 has not read it, up to one
+//!   unread death per live document, or while the move-following reads return
+//!   it for a link that is broken now. A [`DeathPrunePass`] holds a pass's
+//!   cursors between units, and [`Request::death_floor`] the highest
+//!   generation any unit has removed, which [`StoreReading::death_floor`] and
+//!   [`FeedRead::death_floor`] carry to lane 2.
 //! - [`ddl`] — the store schema, designed whole, and its fingerprint.
 //! - [`DocumentPath`] — the segment-aware path representation the suffix
 //!   resolution ladder is indexed by.
@@ -117,9 +126,6 @@
 //!   is handed; deciding what belongs in one — what the watcher's facts imply,
 //!   what a plan's blast radius is — is orchestration's, and so is re-recording
 //!   the findings the increment discarded by class.
-//! - **Tombstone retention.** When a death has outlived the disorder it was
-//!   recorded to survive is a policy over generations, and nothing here decides
-//!   it: a tombstone is kept until something says otherwise.
 //! - **Anything that reads a document.** One parser, and it is not this crate.
 
 pub mod ddl;
@@ -132,6 +138,7 @@ mod anchor;
 mod construction;
 mod count;
 mod counters;
+mod death_prune;
 mod describe;
 pub mod early;
 mod error;
@@ -177,6 +184,11 @@ pub use count::{
     CountRetentionPolicy, CountStatement, CountWork, Counted, GroupMember,
 };
 pub use counters::{DerivationCounters, SnapshotCounters};
+pub use death_prune::{
+    DEATH_PRUNE_LEAST_ROWS, DEATH_PRUNE_STATEMENTS, DEATH_PRUNE_UNIT_REMOVALS,
+    DEATH_PRUNE_UNIT_ROWS, DeathPruneMarks, DeathPrunePass, DeathPrunePhase, DeathPruneStatement,
+    DeathPruneUnit, DeathPruneWork, ReadThrough,
+};
 pub use describe::{DESCRIBE_STATEMENTS, DescribePlan, DescribeStatement, DescribeWork, Described};
 pub use error::StoreError;
 pub use facts::{

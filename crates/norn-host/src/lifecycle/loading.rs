@@ -548,7 +548,7 @@ impl<A: SnapshotSource> EntryState<A> {
     }
 
     /// Publish warming over the damage verdict of a rebuild whose construction
-    /// has just begun, so its reads follow first-build admission (ADR 0050).
+    /// has just begun, so its reads follow first-build admission (ADR 0052).
     ///
     /// The rebuild is still owed until it lands, so ordinary reads and applies
     /// keep refusing or waiting; only early admission changes. From here the

@@ -321,3 +321,41 @@ pub fn record_unreadable(store: &mut Store, at: &str) {
         )
         .expect("recording an unreadable document");
 }
+
+/// Apply `changes` as one changeset, and hand back the generation it took.
+pub fn apply_changes(store: &mut Store, changes: Vec<Change>) -> i64 {
+    let mut request = store.begin_request();
+    let declared = pinned_declaration(&request);
+    request
+        .apply_increment(IncrementProvenance::Derived, changes, &[], &declared)
+        .expect("applying a changeset")
+        .generation
+        .expect("a changeset that names an entry takes a generation")
+}
+
+/// Write a document at each of `paths` in one changeset, each body naming
+/// its path. Answers the changeset's generation.
+pub fn write_all(store: &mut Store, paths: &[String]) -> i64 {
+    apply_changes(
+        store,
+        paths
+            .iter()
+            .map(|at| Change::Upsert(document(at, &format!("hash-{at}"), &format!("{at}\n"))))
+            .collect(),
+    )
+}
+
+/// Record the death of each of `paths` in one changeset, so every death
+/// carries one generation. Answers it.
+pub fn delete_all(store: &mut Store, paths: &[String]) -> i64 {
+    apply_changes(
+        store,
+        paths
+            .iter()
+            .map(|at| Change::Death {
+                path: path(at),
+                provenance: Provenance::PlanDelete,
+            })
+            .collect(),
+    )
+}

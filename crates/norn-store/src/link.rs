@@ -195,7 +195,7 @@ pub(crate) fn keys_naming(document: &DocumentPath, key: SuffixKey) -> Vec<String
 /// path climbs above the root or names no document path, and none where its
 /// last segment is empty, `.` or `..`, which names a folder rather than a
 /// file.
-fn path_names(from: Vec<String>, path: &str) -> Vec<String> {
+pub(crate) fn path_names(from: Vec<String>, path: &str) -> Vec<String> {
     let last = path.rsplit(SEPARATOR).next().unwrap_or(path);
     if matches!(last, "" | "." | "..") {
         return Vec::new();
@@ -484,7 +484,7 @@ fn spelled(segment: &str, escaped: bool) -> String {
 }
 
 /// The segments of the directory holding the document at `holder`.
-fn directory_of(holder: &DocumentPath) -> Vec<String> {
+pub(crate) fn directory_of(holder: &DocumentPath) -> Vec<String> {
     holder
         .as_str()
         .rsplit_once(SEPARATOR)

@@ -643,15 +643,20 @@ pub trait EntryOps: Send + Sync + 'static {
     ///
     /// Read under the entry gate, by the background scheduler's ask and where
     /// `install_coverage`, `park_coverage` or `remint_coverage` runs, so it
-    /// is cheap and nonblocking and takes no lock. The scheduler sleeps until
-    /// the earliest of these across the host, so a clock this does not report
-    /// is maintenance no deadline starts.
+    /// is cheap and nonblocking. It may take leaf locks, in the order a
+    /// publication takes them, and does no I/O: the production
+    /// implementation reads the engine's report under the semantic map lock,
+    /// then the report's lock. The scheduler sleeps until the earliest of
+    /// these across the host, so a clock this does not report is maintenance
+    /// no deadline starts.
     ///
-    /// **A leg only ever moves a clock later.** The entry keeps the last
+    /// **A leg normally moves a clock later.** The entry keeps the last
     /// reading while a leg holds the coverage, and most legs park it back
-    /// without reading again; that reading is
-    /// safe only because it can be early and never late. A leg that brought a
-    /// clock earlier would leave a deadline no ask sees until the next wake.
+    /// without reading again; that reading is safe because it can be early
+    /// and never late. A leg that brings a clock earlier must send a wake, or
+    /// leave a deadline no ask sees until the next wake. The one such case is
+    /// the death-prune deadline's first appearance, which the leg that brings
+    /// it announces.
     ///
     /// The default keeps no clock.
     fn maintenance_deadline(&self, _: &Self::Attachment) -> Option<Instant> {
@@ -6296,7 +6301,7 @@ impl<O: EntryOps> Host<O> {
     /// publishes once it stands at anything else with no work under way.
     ///
     /// This is the foreground first build initializing a vault runs (ADR
-    /// 0050): a vault nothing has attached runs its from-zero build under the
+    /// 0052): a vault nothing has attached runs its from-zero build under the
     /// demand made here, for as long as that build takes, where a read would
     /// be refused as still indexing. An entry working — a claim held, its job
     /// scheduled or running, or a release in flight that the lease re-arms —
@@ -21873,7 +21878,7 @@ mod tests {
     /// **A construction that begins over a damage verdict publishes warming,
     /// and over any other untrusted reason leaves it standing.** Only a
     /// rebuild owed under the store-damaged-rebuilding verdict admits early
-    /// reads by beginning its construction (ADR 0050); another reason stays
+    /// reads by beginning its construction (ADR 0052); another reason stays
     /// the entry's answer, even beside an owed rebuild.
     #[cfg(unix)]
     #[test]
