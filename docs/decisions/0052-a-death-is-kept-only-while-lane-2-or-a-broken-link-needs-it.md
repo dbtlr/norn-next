@@ -333,15 +333,17 @@ current store epoch, and never runs above it.** It is the highest of:
 A reader that has recorded none of these in the current store epoch has read no death in it.
 While a reconcile or a census recount runs, the reader's death cursor counts toward none of
 these: its read-through generation stays what its records said when the reconcile or recount
-began, until it completes. A recount reads the death feed again from the start, and a death
+began, until it completes; the reader stores that value with the reconcile or recount, so a
+restart resumes with it (a value lost to a restart only falls, which is safe). A recount reads the death feed again from the start, and a death
 its cursor passes mid-recount is not yet one it has accounted for, since a death recorded
 after the recount's first page may have been removed before the cursor reached it.
 
 **The census records a completion, as the engine records a watermark.** When a count reaches
 the end of both feeds, the census records, beside the store epoch it observed, the write
 generation it read before that final page. Every death at or below that generation was
-committed before the page. Outside a recount, the census checks the floor before each page
-it reads, so where the final page's floor stands at or below its read-through generation no
+committed before the page. Outside a recount, the census checks, before each page it reads,
+the floor read in that page's own snapshot against the read-through generation it held before
+the page, so where the final page's floor stands at or below its read-through generation no
 death it had not read was removed, and it records the completion. A recount records it only
 where the final page's floor stands at or below the recount's G0: no death above G0 can have
 been removed without the floor passing G0, because the census's read-through stays below G0
