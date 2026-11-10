@@ -86,7 +86,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
 use std::ops::ControlFlow;
 
-use norn_semantic::{NearestWork, Neighbor, Watermark, Watermarks};
+use norn_semantic::{NearestWork, Neighbor, ReadThroughs, Watermark, Watermarks};
 use norn_store::{
     Candidate, Candidates, ContentModel, LexicalQuery, MAX_PAGE, PageRefusal, SearchWork, Snapshot,
     page_limit,
@@ -473,12 +473,23 @@ fn admitted(
 /// A feed whose watermark was taken in another store lifetime, past the
 /// snapshot's write generation — a drain that finished after the snapshot was
 /// taken, over rows the snapshot cannot count — or that has completed no
-/// drain, trails by a count nothing can read, so the margin is the cap. The
-/// count is bounded at one past the cap, so it costs at most that many rows
-/// of each feed.
-fn margin(snapshot: &Snapshot, watermarks: &Watermarks) -> Result<usize, PageRefusal> {
+/// drain, trails by a count nothing can read, so the margin is the cap. So
+/// does an engine that has not read through the snapshot's death floor
+/// ([ADR 0052]): the death prune removed deaths it had not read, which no feed
+/// row counts. The count is bounded at one past the cap, so it costs at most
+/// that many rows of each feed.
+///
+/// [ADR 0052]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0052-a-death-is-kept-only-while-lane-2-or-a-broken-link-needs-it.md
+fn margin(
+    snapshot: &Snapshot,
+    watermarks: &Watermarks,
+    read_through: &ReadThroughs,
+) -> Result<usize, PageRefusal> {
     let cap = VECTOR_MARGIN_CAP as usize;
     let reading = snapshot.reading();
+    if read_through.engine_below_floor(reading) {
+        return Ok(cap);
+    }
     let past = |watermark: &Option<Watermark>| match watermark {
         Some(watermark)
             if watermark.store_epoch == reading.epoch()
@@ -601,9 +612,11 @@ where
             return Ok(VectorSample::Refused(VectorRefusal::not_composed()));
         };
         let depth = RUNG_DEPTH as usize;
-        let restrict = |watermarks: &Watermarks| -> Result<(usize, Restriction), PageRefusal> {
+        let restrict = |watermarks: &Watermarks,
+                        read_through: &ReadThroughs|
+         -> Result<(usize, Restriction), PageRefusal> {
             if params.predicates.is_empty() {
-                let margin = margin(snapshot, watermarks)?;
+                let margin = margin(snapshot, watermarks, read_through)?;
                 cost.margin = margin as u64;
                 Ok((depth + margin, Restriction::Unfiltered { margin }))
             } else {
@@ -665,7 +678,7 @@ fn declaration(
 ) -> Result<LadderDeclaration, BuildRefused> {
     let vector = RungReport::vector(
         ModelIdentity::new(answer.model.id(), answer.model.version()),
-        freshness(&answer.watermarks, snapshot.reading()),
+        freshness(&answer.watermarks, &answer.read_through, snapshot.reading()),
     );
     let rungs = if lexical_ran {
         vec![RungReport::lexical(), vector]
@@ -1056,8 +1069,18 @@ mod tests {
         let snapshot = lagging.snapshot();
         let now = snapshot.reading().write_generation();
         assert_eq!(now, lagging.before + 2, "the writes took other generations");
-        assert_eq!(margin(&snapshot, &lagging.marks(lagging.before)), Ok(40));
-        assert_eq!(margin(&snapshot, &lagging.marks(now)), Ok(0));
+        assert_eq!(
+            margin(
+                &snapshot,
+                &lagging.marks(lagging.before),
+                &ReadThroughs::default()
+            ),
+            Ok(40)
+        );
+        assert_eq!(
+            margin(&snapshot, &lagging.marks(now), &ReadThroughs::default()),
+            Ok(0)
+        );
     }
 
     /// **The margin is capped, and a lag nothing can read is the cap.** More
@@ -1070,18 +1093,31 @@ mod tests {
         let cap = VECTOR_MARGIN_CAP as usize;
         let lagging = Lagging::new("search-margin-cap", cap + 8, 0);
         let snapshot = lagging.snapshot();
-        assert_eq!(margin(&snapshot, &lagging.marks(lagging.before)), Ok(cap));
+        assert_eq!(
+            margin(
+                &snapshot,
+                &lagging.marks(lagging.before),
+                &ReadThroughs::default()
+            ),
+            Ok(cap)
+        );
 
         let now = snapshot.reading().write_generation();
         let mut undrained = lagging.marks(now);
         undrained.tombstones = None;
-        assert_eq!(margin(&snapshot, &undrained), Ok(cap));
+        assert_eq!(
+            margin(&snapshot, &undrained, &ReadThroughs::default()),
+            Ok(cap)
+        );
         let mut elsewhere = lagging.marks(now);
         elsewhere.documents = Some(Watermark {
             store_epoch: "another lifetime".to_string(),
             generation: now,
         });
-        assert_eq!(margin(&snapshot, &elsewhere), Ok(cap));
+        assert_eq!(
+            margin(&snapshot, &elsewhere, &ReadThroughs::default()),
+            Ok(cap)
+        );
     }
 
     /// **A watermark past the snapshot is a lag nothing can read.** A drain
@@ -1095,13 +1131,62 @@ mod tests {
         let lagging = Lagging::new("search-margin-ahead", 40, 30);
         let snapshot = lagging.snapshot();
         let now = snapshot.reading().write_generation();
-        assert_eq!(margin(&snapshot, &lagging.marks(now + 1)), Ok(cap));
+        assert_eq!(
+            margin(&snapshot, &lagging.marks(now + 1), &ReadThroughs::default()),
+            Ok(cap)
+        );
         let mut documents_ahead = lagging.marks(now);
         documents_ahead.documents = lagging.marks(now + 1).documents;
-        assert_eq!(margin(&snapshot, &documents_ahead), Ok(cap));
+        assert_eq!(
+            margin(&snapshot, &documents_ahead, &ReadThroughs::default()),
+            Ok(cap)
+        );
         let mut tombstones_ahead = lagging.marks(now);
         tombstones_ahead.tombstones = lagging.marks(now + 1).tombstones;
-        assert_eq!(margin(&snapshot, &tombstones_ahead), Ok(cap));
+        assert_eq!(
+            margin(&snapshot, &tombstones_ahead, &ReadThroughs::default()),
+            Ok(cap)
+        );
+    }
+
+    /// **An engine below the death floor makes the margin its cap** (ADR
+    /// 0052): the deaths the prune removed are not feed rows any count could
+    /// read. The judgment is the engine's read-through generation against the
+    /// snapshot's floor; at or above the floor, the watermarks count as
+    /// before.
+    #[test]
+    fn an_engine_below_the_death_floor_takes_the_cap() {
+        let cap = VECTOR_MARGIN_CAP as usize;
+        let mut lagging = Lagging::new("search-margin-floor", 40, 30);
+        let mut pass = norn_store::DeathPrunePass::new();
+        loop {
+            let unit = lagging
+                .store
+                .begin_request()
+                .death_prune_unit(&mut pass, None, norn_store::DEATH_PRUNE_UNIT_ROWS)
+                .expect("a death-prune unit");
+            if unit.finished {
+                break;
+            }
+        }
+        let snapshot = lagging.snapshot();
+        let reading = snapshot.reading().clone();
+        let floor = reading.death_floor().expect("the pass removed the deaths");
+        let now = reading.write_generation();
+        let read_through = |generation: i64| {
+            let at = Some(norn_semantic::ReadThroughGeneration {
+                store_epoch: reading.epoch().to_string(),
+                generation,
+            });
+            ReadThroughs {
+                engine: at.clone(),
+                census: at,
+            }
+        };
+        let marks = lagging.marks(now);
+        assert_eq!(margin(&snapshot, &marks, &read_through(floor - 1)), Ok(cap));
+        assert_eq!(margin(&snapshot, &marks, &ReadThroughs::default()), Ok(cap));
+        assert_eq!(margin(&snapshot, &marks, &read_through(floor)), Ok(0));
     }
 
     fn paths(ranked: &[Ranked]) -> Vec<&str> {

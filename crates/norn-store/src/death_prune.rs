@@ -355,6 +355,35 @@ pub struct DeathPruneUnit {
     pub work: DeathPruneWork,
 }
 
+/// What the host reads off the store to decide whether a death-prune pass is
+/// owed ([ADR 0052]'s due cases): where the store's writes stand, how new its
+/// newest death is, and how the broken-link set under the pinned fingerprint
+/// stands.
+///
+/// A death recorded above a pass's upper bound shows as a newer
+/// [`DeathPruneMarks::newest_death`]. A broken finding filed since a pass
+/// began shows as a newer [`DeathPruneMarks::newest_broken`]; one discarded
+/// with none filed leaves fewer [`DeathPruneMarks::broken_findings`], since
+/// with no filing the set can only shrink. Each is one statement, and only the
+/// count's cost follows anything: the broken findings, which a pass marks
+/// anyway.
+///
+/// [ADR 0052]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0052-a-death-is-kept-only-while-lane-2-or-a-broken-link-needs-it.md
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DeathPruneMarks {
+    /// The store's write generation: a pass begun now fixes this as its
+    /// upper bound, since a unit takes no generation of its own.
+    pub write_generation: i64,
+    /// The generation of the newest death the store holds, `None` where it
+    /// holds none.
+    pub newest_death: Option<i64>,
+    /// The generation of the newest `link/broken` finding under the pinned
+    /// fingerprint, `None` where none stands.
+    pub newest_broken: Option<i64>,
+    /// The `link/broken` findings under the pinned fingerprint.
+    pub broken_findings: u64,
+}
+
 /// Every statement shape a death-prune unit runs beyond the move-following
 /// reads, which [`crate::MovedStatement`] names and bars.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -376,10 +405,18 @@ pub enum DeathPruneStatement {
     KeepDeath,
     /// A bounded page of the kept set cleared.
     ClearKept,
+    /// The generation of the newest death the store holds, for a due check.
+    NewestDeath,
+    /// The generation of the newest broken finding filed under a
+    /// fingerprint, for a due check.
+    NewestBroken,
+    /// The broken findings filed under a fingerprint, counted, for a due
+    /// check.
+    BrokenCount,
 }
 
 /// How many statement shapes [`DeathPruneStatement::all`] holds.
-pub const DEATH_PRUNE_STATEMENTS: usize = 8;
+pub const DEATH_PRUNE_STATEMENTS: usize = 11;
 
 impl DeathPruneStatement {
     /// Every statement shape, in slot order.
@@ -393,6 +430,9 @@ impl DeathPruneStatement {
             Self::RaiseFloor,
             Self::KeepDeath,
             Self::ClearKept,
+            Self::NewestDeath,
+            Self::NewestBroken,
+            Self::BrokenCount,
         ]
     }
 
@@ -407,6 +447,9 @@ impl DeathPruneStatement {
             Self::RaiseFloor => 5,
             Self::KeepDeath => 6,
             Self::ClearKept => 7,
+            Self::NewestDeath => 8,
+            Self::NewestBroken => 9,
+            Self::BrokenCount => 10,
         }
     }
 
@@ -450,6 +493,19 @@ impl DeathPruneStatement {
                      SELECT path FROM temp.death_prune_kept ORDER BY path LIMIT ?1
                  )"
             .to_string(),
+            // SQLite answers a `max` over an index's next column from one
+            // seek of that index.
+            Self::NewestDeath => "SELECT max(generation) FROM tombstones".to_string(),
+            Self::NewestBroken => format!(
+                "SELECT max(generation) FROM findings
+                 WHERE kind = '{}' AND vault_schema_fingerprint = ?1",
+                BROKEN_FILED_KIND.as_str()
+            ),
+            Self::BrokenCount => format!(
+                "SELECT count(*) FROM findings
+                 WHERE kind = '{}' AND vault_schema_fingerprint = ?1",
+                BROKEN_FILED_KIND.as_str()
+            ),
         }
     }
 
@@ -477,6 +533,8 @@ impl DeathPruneStatement {
             Self::RemoveDeath | Self::KeepDeath => vec![text("explained.md")],
             Self::RaiseFloor => vec![text(ddl::meta::DEATH_FLOOR), Value::Integer(1)],
             Self::ClearKept => vec![page],
+            Self::NewestDeath => Vec::new(),
+            Self::NewestBroken | Self::BrokenCount => vec![text("explained-schema")],
         }
     }
 }
@@ -779,6 +837,49 @@ impl Request<'_> {
             &statement.sql(),
             params_from_iter(statement.explained_parameters()),
         )?)
+    }
+}
+
+impl Request<'_> {
+    /// What a death-prune pass's due cases read off the store — see
+    /// [`DeathPruneMarks`]. Read on the writer, which no other writer moves
+    /// while the caller holds it, in one read transaction.
+    pub fn death_prune_marks(&mut self) -> Result<DeathPruneMarks, StoreError> {
+        let transaction = self
+            .store
+            .database
+            .deferred_transaction("reading the death prune's marks")?;
+        let fingerprint: String =
+            norn_db::meta::get_meta(&transaction, ddl::meta::VAULT_SCHEMA_FINGERPRINT)?
+                .unwrap_or_default();
+        let write_generation = crate::store::last_write_generation(&transaction)?;
+        let one = |statement: DeathPruneStatement,
+                   values: Vec<Value>|
+         -> Result<Option<i64>, StoreError> {
+            transaction
+                .prepare_cached(&statement.sql())
+                .and_then(|mut prepared| {
+                    prepared.query_row(params_from_iter(values), |row| row.get::<_, Option<i64>>(0))
+                })
+                .map_err(|problem| error::sql("reading the death prune's marks", problem))
+        };
+        let newest_death = one(DeathPruneStatement::NewestDeath, Vec::new())?;
+        let newest_broken = one(
+            DeathPruneStatement::NewestBroken,
+            vec![Value::Text(fingerprint.clone())],
+        )?;
+        let broken_findings = one(
+            DeathPruneStatement::BrokenCount,
+            vec![Value::Text(fingerprint)],
+        )?
+        .unwrap_or(0) as u64;
+        drop(transaction);
+        Ok(DeathPruneMarks {
+            write_generation,
+            newest_death,
+            newest_broken,
+            broken_findings,
+        })
     }
 }
 

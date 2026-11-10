@@ -899,6 +899,66 @@ fn a_unit_is_refused_below_its_least_bound() {
     );
 }
 
+// ---- the due marks ----
+
+/// **The marks move with exactly what makes a pass due.** A death moves the
+/// newest death, a broken finding filed moves the newest broken finding, one
+/// discarded with none filed lowers the count, and a write that does neither
+/// moves only the write generation; a pass moves none of them.
+#[test]
+fn the_due_marks_move_with_deaths_and_broken_findings_alone() {
+    let scratch = Scratch::new("prune-marks");
+    let mut store = scratch.open();
+    let empty = store.begin_request().death_prune_marks().expect("marks");
+    assert_eq!(empty.newest_death, None);
+    assert_eq!(empty.newest_broken, None);
+    assert_eq!(empty.broken_findings, 0);
+
+    let broke = apply(&mut store, vec![holder("h.md", "[[gone]]\n")]);
+    let marks = store.begin_request().death_prune_marks().expect("marks");
+    let filed = marks
+        .newest_broken
+        .expect("the broken finding's generation");
+    assert!(filed >= broke && filed <= marks.write_generation);
+    assert_eq!(marks.broken_findings, 1);
+    assert_eq!(marks.newest_death, None);
+
+    let died_at = died(&mut store, "x/other.md");
+    let marks = store.begin_request().death_prune_marks().expect("marks");
+    assert_eq!(marks.newest_death, Some(died_at));
+    assert_eq!(marks.newest_broken, Some(filed), "a death broke no link");
+    assert_eq!(marks.broken_findings, 1);
+
+    let edit = apply(&mut store, vec![plain("unrelated.md")]);
+    let edited = store.begin_request().death_prune_marks().expect("marks");
+    assert_eq!(edited.write_generation, edit);
+    assert_eq!(
+        (
+            edited.newest_death,
+            edited.newest_broken,
+            edited.broken_findings
+        ),
+        (
+            marks.newest_death,
+            marks.newest_broken,
+            marks.broken_findings
+        ),
+        "a write that neither records a death nor moves a broken finding moves no mark"
+    );
+
+    prune(&mut store, None);
+    let pruned = store.begin_request().death_prune_marks().expect("marks");
+    assert_eq!(
+        pruned.write_generation, edited.write_generation,
+        "a pass takes no generation"
+    );
+
+    apply(&mut store, vec![holder("h.md", "nothing linked\n")]);
+    let healed = store.begin_request().death_prune_marks().expect("marks");
+    assert_eq!(healed.broken_findings, 0, "the discard lowers the count");
+    assert_eq!(healed.newest_broken, None);
+}
+
 // ---- plan bars ----
 
 fn plan(emitted: norn_store::EmittedPlan) -> QueryPlan {
@@ -1004,6 +1064,27 @@ fn every_death_prune_statement_seeks_its_index_and_sorts_nothing() {
                 plan.assert_searches_through("tombstones", Access::Index("tombstones_path"));
             }
             DeathPruneStatement::KeepDeath => {}
+            // A due check's `max` is answered by one seek of the index's
+            // next column, and its count steps the broken findings alone.
+            DeathPruneStatement::NewestDeath => {
+                plan.assert_searches_through("tombstones", Access::Index("tombstones_change_feed"));
+            }
+            DeathPruneStatement::NewestBroken => {
+                plan.assert_searches_through("findings", Access::Index("findings_broken_filed"));
+                plan.assert_search_constraint("findings", "(vault_schema_fingerprint=?)");
+            }
+            // Either index over the fingerprint and the kind steps the broken
+            // findings alone; the planner takes the wider one.
+            DeathPruneStatement::BrokenCount => {
+                plan.assert_searches_through(
+                    "findings",
+                    Access::Index("findings_fingerprint_kind_nocase"),
+                );
+                plan.assert_search_constraint(
+                    "findings",
+                    "(vault_schema_fingerprint=? AND kind=?)",
+                );
+            }
             DeathPruneStatement::LiveDocuments
             | DeathPruneStatement::RaiseFloor
             | DeathPruneStatement::ClearKept => unreachable!(),
