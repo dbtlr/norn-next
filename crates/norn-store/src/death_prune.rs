@@ -55,13 +55,16 @@
 //! by the token the pass recorded beside it, and the pass starts over; a pass
 //! never deletes against a kept set it did not fill.
 //!
-//! # A unit is one transaction, bounded by the rows it reads, and takes no generation
+//! # A unit is one transaction, bounded by the rows it reads and the deaths it removes, and takes no generation
 //!
 //! Findings, deaths, kept-set rows and index steps count toward the unit's row
 //! bound together, so a page of kept deaths cannot hold the writer longer than
-//! a page of deleted ones. The unit moves the death floor and never the write
-//! generation: it changes nothing a lane-1 read answers, since move-following
-//! answers the same for every link broken when it commits.
+//! a page of deleted ones. A removing unit also deletes at most
+//! [`DEATH_PRUNE_UNIT_REMOVALS`] deaths, since a deletion writes a page of each
+//! path-ordered index over the deaths and costs far more than a read. The unit
+//! moves the death floor and never the write generation: it changes nothing a
+//! lane-1 read answers, since move-following answers the same for every link
+//! broken when it commits.
 //!
 //! # What is the host's
 //!
@@ -88,8 +91,9 @@ use crate::path::DocumentPath;
 use crate::request::{FeedCursor, MAX_PAGE, ReadWork, Reading, Request};
 use crate::store::StoreReading;
 
-/// The rows one unit reads by default, sized so that a unit costs no more than
-/// a rolling-heal slice, about 13 ms at 10,000 documents.
+/// The rows one unit reads by default, sized so that a unit that reads, rather
+/// than removes, costs no more than a rolling-heal slice, about 13 ms at 10,000
+/// documents. A removing unit is held to [`DEATH_PRUNE_UNIT_REMOVALS`] as well.
 ///
 /// **Measured on a release build** (2026-11-10, shared host), over 10,000 live
 /// documents, 1,000 of them holding a broken link, and 13,500 deaths, 1,500 of
@@ -97,9 +101,11 @@ use crate::store::StoreReading;
 /// row, marking cost about 2.4–3.6 µs, the walk 1.1–2.5 µs and the removal
 /// 0.8–1.8 µs. At 2,048 rows the slowest unit of a pass took 6.2 ms in one run
 /// and 11.6 ms in another (a removing unit); at 4,096 rows marking alone took
-/// 9.5 ms. The live-document count took 0.15–0.22 ms over the 10,000
-/// documents, so one count fits a unit's allowance with two orders of
-/// magnitude to spare.
+/// 9.5 ms. That store was small enough to stay in cache, so its removal cost
+/// did not carry to a large deletion history: see
+/// [`DEATH_PRUNE_UNIT_REMOVALS`]. The live-document count took 0.15–0.22 ms
+/// over the 10,000 documents, so one count fits a unit's allowance with two
+/// orders of magnitude to spare.
 pub const DEATH_PRUNE_UNIT_ROWS: usize = 2_048;
 
 /// The most rows marking one broken finding reads: the finding, and for each
@@ -110,6 +116,34 @@ const FINDING_MOST_ROWS: usize = 1 + MOST_FOLLOWED_READS * (1 + MOST_FOLLOWED_DE
 /// The least row bound a unit takes: one broken finding's whole marking, so
 /// every unit can make progress.
 pub const DEATH_PRUNE_LEAST_ROWS: usize = FINDING_MOST_ROWS;
+
+/// The most deaths one removing unit deletes, beside its row bound: a
+/// deletion costs far more than a read, so the rows a unit reads cannot bound
+/// what its removals write. Sized so that a removing unit's own work costs
+/// about half a rolling-heal slice at a million deaths.
+///
+/// **Measured on a release build** (2026-11-10, shared host), over 10,000 live
+/// documents and 100,000 or 1,000,000 deaths, with and without broken links,
+/// handed no read-through and `ReadThrough::Nothing`. Each removed death
+/// dirties about 2.5–3.6 pages in the write-ahead log, mostly one page of each
+/// path-ordered index over the deaths (`tombstones_path`,
+/// `tombstones_path_key`, `tombstones_suffix_key`), since the feed order a unit
+/// removes in scatters across them. Removing 1,024 deaths a unit, as the row
+/// bound alone allowed, wrote about 2,600 frames and took a median 82–124 ms,
+/// slowest 125–576 ms. With the write-ahead log's checkpoint taken outside the
+/// unit, a unit's own work at a million deaths took a median 2.6 ms and p99
+/// 6.3 ms at 64 removals, 5.3 ms and 9.9 ms at 128, and 12.4 ms and 26.6 ms at
+/// 256. At 64, with the store's own checkpointing, a unit took a median
+/// 2.1–2.7 ms; units no checkpoint landed in took p99 4.6–8.8 ms.
+///
+/// The bound does not cover the write-ahead log's automatic checkpoint, which
+/// the commit that takes the log past 1,000 pages runs, whichever writer that
+/// is. About a fifth of removing units at 64 land one: it costs about 27 ms
+/// here, about 24 ms of it the two syncs, and up to 0.75 s at a million deaths
+/// when a sync stalls. Those units set the pass's p99, 31–76 ms, and its
+/// slowest unit, 0.1–0.75 s. A pass of a million deaths took 135–143 s over
+/// about 15,600 units.
+pub const DEATH_PRUNE_UNIT_REMOVALS: usize = 64;
 
 /// The rows one death a removing unit reads costs: the death off the feed
 /// index, and its probe of the kept set.
@@ -571,8 +605,9 @@ impl Budget {
 
 impl Request<'_> {
     /// Run one death-prune unit of `pass`, reading at most `row_bound` logical
-    /// rows, with condition 1 judged against `read_through` — `None` where no
-    /// reader of the death feed stands for the vault.
+    /// rows and removing at most [`DEATH_PRUNE_UNIT_REMOVALS`] deaths, with
+    /// condition 1 judged against `read_through` — `None` where no reader of
+    /// the death feed stands for the vault.
     ///
     /// The unit is one `IMMEDIATE` transaction on the writer. It takes no
     /// write generation; where it removes deaths, it raises the death floor to
@@ -641,6 +676,7 @@ impl Request<'_> {
             connection: &transaction,
             read_work,
             budget: Budget { left: row_bound },
+            removals_left: DEATH_PRUNE_UNIT_REMOVALS,
             work: DeathPruneWork::default(),
             highest_removed: None,
         };
@@ -900,6 +936,7 @@ struct Unit<'a> {
     connection: &'a Connection,
     read_work: &'a ReadWork,
     budget: Budget,
+    removals_left: usize,
     work: DeathPruneWork,
     highest_removed: Option<i64>,
 }
@@ -1084,7 +1121,11 @@ impl Unit<'_> {
     ) -> Result<Removed, StoreError> {
         let upper_bound = pass.upper_bound.expect("a begun pass has a bound");
         loop {
-            let limit = (self.budget.left / REMOVAL_ROWS).min(MAX_PAGE);
+            // A page never holds more deaths than the unit may still remove,
+            // so no death is read that the unit could not judge.
+            let limit = (self.budget.left / REMOVAL_ROWS)
+                .min(self.removals_left)
+                .min(MAX_PAGE);
             if limit == 0 {
                 return Ok(Removed::Partway(after));
             }
@@ -1126,6 +1167,7 @@ impl Unit<'_> {
                         .execute(params![death.path().as_str()])
                         .map_err(|problem| error::sql("removing a death", problem))?;
                     self.work.deaths_removed += 1;
+                    self.removals_left -= 1;
                     self.highest_removed =
                         Some(self.highest_removed.map_or(death.generation(), |highest| {
                             highest.max(death.generation())

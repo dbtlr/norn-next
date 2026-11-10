@@ -185,9 +185,9 @@ pub use count::{
 };
 pub use counters::{DerivationCounters, SnapshotCounters};
 pub use death_prune::{
-    DEATH_PRUNE_LEAST_ROWS, DEATH_PRUNE_STATEMENTS, DEATH_PRUNE_UNIT_ROWS, DeathPruneMarks,
-    DeathPrunePass, DeathPrunePhase, DeathPruneStatement, DeathPruneUnit, DeathPruneWork,
-    ReadThrough,
+    DEATH_PRUNE_LEAST_ROWS, DEATH_PRUNE_STATEMENTS, DEATH_PRUNE_UNIT_REMOVALS,
+    DEATH_PRUNE_UNIT_ROWS, DeathPruneMarks, DeathPrunePass, DeathPrunePhase, DeathPruneStatement,
+    DeathPruneUnit, DeathPruneWork, ReadThrough,
 };
 pub use describe::{DESCRIBE_STATEMENTS, DescribePlan, DescribeStatement, DescribeWork, Described};
 pub use error::StoreError;

@@ -497,11 +497,12 @@ maintenance leg on the shared worker pool, beside the shadow sweep and the rolli
   logical rows it reads, findings, deaths, kept-set rows and index steps together, and not
   only by the rows it deletes, so a page of kept deaths cannot hold the writer longer than a
   page of deleted ones. The kept-set rows a unit clears, at a pass's end or at a fingerprint
-  restart, count toward the same bound, so clearing a large kept set takes several units. The
-  implementation sizes the bound by measurement so that one unit costs no more than a
-  rolling-heal slice, about 13 ms at 10,000 documents, and records the measurement beside the
-  value. A unit whose catch-up fills its bound deletes nothing, and the next unit continues
-  the catch-up.
+  restart, count toward the same bound, so clearing a large kept set takes several units. A
+  removing unit is also bounded by the deaths it deletes, because a deletion writes a page of
+  each path-ordered index over the deaths and costs far more than a read. The implementation
+  sizes both bounds by measurement so that one unit costs no more than a rolling-heal slice,
+  about 13 ms at 10,000 documents, and records the measurement beside the values. A unit
+  whose catch-up fills its bound deletes nothing, and the next unit continues the catch-up.
 
   **The live-document count is the one read a row bound cannot cut.** It is one statement,
   run once per pass at the start of the bound phase, and it counts the document rows whole,
@@ -2568,7 +2569,7 @@ attachment. Each runs as a **claim-bound slice** in a maintenance leg on the sha
 pool. A slice of the shadow sweep is one sweep of the shadow home, which reads one
 directory. A slice of the rolling heal keeps its existing work bounds: 64 enumeration acts,
 64 checked entries and 1 MiB of hashed content. A slice of the death prune is one
-death-prune unit, bounded by the logical rows it reads
+death-prune unit, bounded by the logical rows it reads and the deaths it deletes
 ([When a death prune runs](#when-a-death-prune-runs)). A leg runs them in this order: the
 sweep, then one rolling-heal slice, then death-prune units. The rolling-heal slice comes
 before the death prune, so a leg whose budget the death prune would fill still runs the
@@ -2593,8 +2594,8 @@ bounds; a leg takes at most one rolling-heal slice. A maintenance leg's units th
 hold the claim and one worker slot for at most its budget plus one unit; the leg holds
 them beyond that only to drain the watcher batches observed meanwhile, as every leg does
 before it releases the claim. The longest unit is a rolling-heal slice, about 13 ms at
-10,000 documents, and a death-prune unit's row bound is sized by measurement so that it
-costs no more. The leg counts its units beside its clock, as a background turn
+10,000 documents, and a death-prune unit's row and removal bounds are sized by measurement
+so that it costs no more. The leg counts its units beside its clock, as a background turn
 does. A leg that ends with maintenance still due schedules another, as [Work starts at a
 wake or a deadline](#work-starts-at-a-wake-or-a-deadline-with-no-poll-backstop) rules.
 

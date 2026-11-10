@@ -5,10 +5,10 @@
 use std::collections::BTreeSet;
 
 use norn_store::{
-    Change, ContentModel, DEATH_PRUNE_LEAST_ROWS, DEATH_PRUNE_STATEMENTS, DEATH_PRUNE_UNIT_ROWS,
-    DeathPrunePass, DeathPrunePhase, DeathPruneStatement, DeathPruneUnit, DocumentFacts,
-    IncrementProvenance, LinkFamily, MovedTombstone, Provenance, ReadThrough, Snapshot, Store,
-    StoredPathOrder,
+    Change, ContentModel, DEATH_PRUNE_LEAST_ROWS, DEATH_PRUNE_STATEMENTS,
+    DEATH_PRUNE_UNIT_REMOVALS, DEATH_PRUNE_UNIT_ROWS, DeathPrunePass, DeathPrunePhase,
+    DeathPruneStatement, DeathPruneUnit, DocumentFacts, IncrementProvenance, LinkFamily,
+    MovedTombstone, Provenance, ReadThrough, Snapshot, Store, StoredPathOrder,
 };
 use norn_testkit::explain::{Access, PlanRow, QueryPlan};
 
@@ -766,6 +766,54 @@ fn a_pass_across_small_units_reaches_what_one_large_unit_does() {
     // The walk passes the sixteen newest deaths and meets the cutoff.
     assert_eq!(sum(|unit| unit.work.deaths_walked), 17);
     assert_eq!(small_pass.kept_rows(), 0);
+}
+
+/// **A removing unit deletes at most [`DEATH_PRUNE_UNIT_REMOVALS`] deaths**,
+/// however far its row bound reaches, and the next unit continues from the
+/// last death it judged. A death a broken link keeps spends none of that
+/// bound.
+#[test]
+fn a_removing_unit_deletes_at_most_its_removal_bound() {
+    let scratch = Scratch::new("prune-removal-bound");
+    let mut store = scratch.open();
+    apply(&mut store, vec![holder("h.md", "[[kept]]\n")]);
+    let total = 2 * DEATH_PRUNE_UNIT_REMOVALS + 3;
+    let at = |n: usize| format!("dead/{n:04}.md");
+    apply(&mut store, (0..total).map(|n| plain(&at(n))).collect());
+    apply(&mut store, (0..total).map(|n| death(&at(n))).collect());
+    died(&mut store, "x/kept.md");
+    // The row bound alone would let one unit remove every death here.
+    const { assert!(2 * DEATH_PRUNE_UNIT_REMOVALS < DEATH_PRUNE_UNIT_ROWS) };
+
+    let units = prune(&mut store, None);
+
+    assert_eq!(deaths(&mut store), names(&["x/kept.md"]));
+    let removing: Vec<&DeathPruneUnit> = units
+        .iter()
+        .filter(|unit| unit.ran == DeathPrunePhase::Removing)
+        .collect();
+    for unit in &removing {
+        assert!(
+            unit.work.deaths_removed <= DEATH_PRUNE_UNIT_REMOVALS as u64,
+            "a removing unit deleted {} deaths",
+            unit.work.deaths_removed
+        );
+    }
+    let removed: Vec<u64> = removing
+        .iter()
+        .map(|unit| unit.work.deaths_removed)
+        .collect();
+    let full = DEATH_PRUNE_UNIT_REMOVALS as u64;
+    assert_eq!(removed, vec![full, full, 3]);
+    assert_eq!(
+        removing
+            .iter()
+            .map(|unit| unit.work.deaths_examined)
+            .sum::<u64>(),
+        total as u64 + 1,
+        "a death was judged twice or never"
+    );
+    assert_eq!(removing.last().unwrap().work.deaths_kept_by_link, 1);
 }
 
 /// **A removing unit first marks the broken findings filed since the
