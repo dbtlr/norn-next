@@ -80,9 +80,21 @@ fn the_engines_source_names_no_store_surface_beyond_the_feed_read_handle() {
 
 /// The whole set of `norn-store` items the source may import. Everything
 /// else the engine touches comes back from a feed-read method.
+///
+/// Two values carry no store surface at all: `StoreReading`, which
+/// `FeedRead::store_reading` answers, and `ReadThrough`, the plain value the
+/// engine's read-through generations map to for the host to hand the death
+/// prune (ADR 0052). Neither has a method that reads or writes the store.
 #[test]
 fn the_engines_store_imports_are_the_feed_read_set() {
-    let allowed = ["DocumentPath", "FeedCursor", "FeedRead", "StoreError"];
+    let allowed = [
+        "DocumentPath",
+        "FeedCursor",
+        "FeedRead",
+        "ReadThrough",
+        "StoreError",
+        "StoreReading",
+    ];
     for (file, source) in SOURCES {
         for line in source.lines() {
             let trimmed = line.trim();

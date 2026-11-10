@@ -121,6 +121,21 @@ pub(crate) mod meta {
     /// [`RECONCILE_STORE_EPOCH`] and moved in the same transaction as the
     /// page that checked it.
     pub(crate) const RECONCILE_CURSOR: &str = "reconcile_cursor";
+    /// The write generation a paged reconcile's first page read, its **G0**,
+    /// beside [`RECONCILE_STORE_EPOCH`] and present exactly while a reconcile
+    /// is part way through. A pass recorded without it is not resumed: it
+    /// starts over, so its first page reads a G0 of its own.
+    pub(crate) const RECONCILE_G0: &str = "reconcile_g0";
+    /// The engine's read-through generation as its records stood when the
+    /// paged reconcile began, `{generation}:{store epoch}`, or the empty
+    /// string where they recorded none. Present with [`RECONCILE_G0`]: while
+    /// a reconcile runs, its death cursor raises no read-through generation,
+    /// and a restart resumes with this value.
+    pub(crate) const RECONCILE_READ_THROUGH: &str = "reconcile_read_through";
+    /// The G0 the engine's last completed reconcile read on its first page,
+    /// `{generation}:{store epoch}`: every death committed at or below it is
+    /// accounted for. Absent until a reconcile completes.
+    pub(crate) const RECONCILED_THROUGH: &str = "reconciled_through";
     /// The store epoch the census was taken in, absent until its first step.
     /// A store whose epoch differs empties the census and reads both feeds
     /// again from their starts.
@@ -152,4 +167,20 @@ pub(crate) mod meta {
     /// The `embedded` count beside [`CENSUS_LAST_WHOLE_TOTAL`], recorded and
     /// removed with it.
     pub(crate) const CENSUS_LAST_WHOLE_EMBEDDED: &str = "census_last_whole_embedded";
+    /// The write generation a census recount's first page read, its G0,
+    /// present exactly while a recount below the death floor runs. The
+    /// recount is in [`CENSUS_STORE_EPOCH`]: a new store epoch ends it.
+    pub(crate) const CENSUS_RECOUNT_G0: &str = "census_recount_g0";
+    /// The census's read-through generation as its records stood when the
+    /// recount began, spelled as [`RECONCILE_READ_THROUGH`] is and present
+    /// with [`CENSUS_RECOUNT_G0`].
+    pub(crate) const CENSUS_RECOUNT_READ_THROUGH: &str = "census_recount_read_through";
+    /// The census's **completion**: the write generation it read before the
+    /// final page of its last count that reached the end of both feeds,
+    /// `{generation}:{store epoch}`. Absent until a count first completes.
+    pub(crate) const CENSUS_COMPLETION: &str = "census_completion";
+    /// The G0 of the census's last recount that reached the end of both
+    /// feeds, `{generation}:{store epoch}`, recorded whether or not the
+    /// recount's final page read a floor at or below it.
+    pub(crate) const CENSUS_RECOUNTED: &str = "census_recounted";
 }

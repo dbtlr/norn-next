@@ -8,6 +8,7 @@ mod coverage;
 mod drain;
 mod errors;
 mod firewall;
+mod floor;
 mod lifecycle;
 mod model;
 mod nearest;

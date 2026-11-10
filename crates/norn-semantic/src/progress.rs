@@ -15,6 +15,7 @@
 //! samples them in the same critical section as the answer they describe.
 
 use norn_db::rusqlite::Connection;
+use norn_store::{ReadThrough, StoreReading};
 
 use crate::census::{Counts, Coverage};
 use crate::ddl;
@@ -61,6 +62,103 @@ pub struct SidecarRevision {
     pub revision: i64,
 }
 
+/// A write generation at or below which one reader of the death feed has read
+/// every death of one store epoch, or accounted for it by a reconcile, with
+/// the store epoch it is a position in ([ADR 0052]).
+///
+/// It is the highest of what the reader has recorded in that epoch: the
+/// generation before its death cursor's own, its last completed drain of the
+/// death feed (the engine's tombstone watermark) or count of both feeds (the
+/// census's completion), and the G0 its last completed reconcile or recount
+/// read on its first page. While a reconcile or recount runs, its death cursor
+/// counts toward none of these, and the value is the one its records gave
+/// when it began.
+///
+/// [ADR 0052]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0052-a-death-is-kept-only-while-lane-2-or-a-broken-link-needs-it.md
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReadThroughGeneration {
+    /// The store epoch the generation is a position in.
+    pub store_epoch: String,
+    /// Every death at or below this generation was read or accounted for.
+    pub generation: i64,
+}
+
+/// The read-through generations of the engine's two readers of the death
+/// feed: the drain and the census. Each is `None` where that reader has
+/// recorded nothing, which reads as having read no death.
+///
+/// The death prune is handed the lower of the two
+/// ([`ReadThroughs::lower_in`]), and a judgment of the engine's freshness
+/// against a store reading asks whether the engine has read through that
+/// reading's floor ([`ReadThroughs::engine_below_floor`]).
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ReadThroughs {
+    /// The drain's: how far the engine's retractions have read.
+    pub engine: Option<ReadThroughGeneration>,
+    /// The census's: how far the coverage counts have read.
+    pub census: Option<ReadThroughGeneration>,
+}
+
+impl ReadThroughs {
+    /// The engine's read-through generation in `store_epoch`: nothing where
+    /// it recorded none there.
+    pub fn engine_in(&self, store_epoch: &str) -> ReadThrough {
+        in_epoch(self.engine.as_ref(), store_epoch)
+    }
+
+    /// The census's read-through generation in `store_epoch`.
+    pub fn census_in(&self, store_epoch: &str) -> ReadThrough {
+        in_epoch(self.census.as_ref(), store_epoch)
+    }
+
+    /// The lower of the two readers' read-through generations in
+    /// `store_epoch`, which is what the death prune is handed: nothing where
+    /// either has read nothing there.
+    pub fn lower_in(&self, store_epoch: &str) -> ReadThrough {
+        self.engine_in(store_epoch).min(self.census_in(store_epoch))
+    }
+
+    /// Whether the engine has not read through the death floor `reading`
+    /// carries: its read-through generation in the reading's store epoch
+    /// stands below the floor. A store with no floor is read through by
+    /// every reader.
+    pub fn engine_below_floor(&self, reading: &StoreReading) -> bool {
+        below(self.engine_in(reading.epoch()), reading.death_floor())
+    }
+}
+
+/// `recorded` as a generation of `store_epoch`: nothing where it is absent or
+/// a position in another epoch.
+pub(crate) fn in_epoch(recorded: Option<&ReadThroughGeneration>, store_epoch: &str) -> ReadThrough {
+    match recorded {
+        Some(recorded) if recorded.store_epoch == store_epoch => {
+            ReadThrough::Through(recorded.generation)
+        }
+        _ => ReadThrough::Nothing,
+    }
+}
+
+/// Whether a reader at `read_through` has not read through `floor`. One
+/// judgment, so the drain, the census and the host ask it the same way.
+pub(crate) fn below(read_through: ReadThrough, floor: Option<i64>) -> bool {
+    floor.is_some_and(|floor| read_through < ReadThrough::Through(floor))
+}
+
+/// A reader's read-through generation as the sidecar records it beside a
+/// reconcile or a recount: `{generation}:{store epoch}`, or the empty string
+/// where it is none.
+pub(crate) fn encode_read_through(read_through: Option<&ReadThroughGeneration>) -> String {
+    read_through.map_or_else(String::new, |read_through| {
+        encode_position(read_through.generation, &read_through.store_epoch)
+    })
+}
+
+/// A generation recorded beside the store epoch it is a position in, as the
+/// sidecar records a completed reconcile, a recount or a census completion.
+pub(crate) fn encode_generation_in(generation: i64, store_epoch: &str) -> String {
+    encode_position(generation, store_epoch)
+}
+
 /// Which of the two feeds a watermark belongs to.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Feed {
@@ -100,7 +198,12 @@ impl Watermarks {
 /// epoch atomically. The generation half cannot hold `:`, so the first `:` is
 /// always the seam, and the epoch keeps whatever it holds.
 pub(crate) fn encode_watermark(watermark: &Watermark) -> String {
-    format!("{}:{}", watermark.generation, watermark.store_epoch)
+    encode_position(watermark.generation, &watermark.store_epoch)
+}
+
+/// A generation and the store epoch it is a position in, as one scalar.
+fn encode_position(generation: i64, store_epoch: &str) -> String {
+    format!("{generation}:{store_epoch}")
 }
 
 /// The recorded watermark back into its halves, or the reason it is not one
@@ -134,6 +237,9 @@ pub(crate) struct Recorded {
     /// The census counts, and whether they are whole, as the last commit left
     /// them.
     pub(crate) counts: Counts,
+    /// The two readers' read-through generations, as the last commit left
+    /// their records.
+    pub(crate) read_through: ReadThroughs,
 }
 
 /// Why the recorded progress could not be read.
@@ -217,7 +323,119 @@ pub(crate) fn read(connection: &Connection) -> Result<Recorded, Unread> {
         revision,
         watermarks,
         counts,
+        read_through: read_throughs(connection)?,
     })
+}
+
+/// The meta keys one reader of the death feed records its read-through
+/// generation's parts under.
+struct ReaderKeys {
+    /// The store epoch the reader's death cursor is a position in.
+    epoch: &'static str,
+    /// The reader's death cursor, `{generation}:{path}` or empty.
+    death_cursor: &'static str,
+    /// The reader's last completed read of the death feed, as a position.
+    completed: &'static str,
+    /// The G0 of the reader's last completed reconcile or recount.
+    reconciled: &'static str,
+    /// The running reconcile's or recount's G0, an integer present exactly
+    /// while one runs.
+    running: &'static str,
+    /// The read-through generation stored with the running reconcile.
+    frozen: &'static str,
+}
+
+const ENGINE_KEYS: ReaderKeys = ReaderKeys {
+    epoch: ddl::meta::OBSERVED_STORE_EPOCH,
+    death_cursor: ddl::meta::TOMBSTONE_CURSOR,
+    completed: ddl::meta::TOMBSTONE_WATERMARK,
+    reconciled: ddl::meta::RECONCILED_THROUGH,
+    running: ddl::meta::RECONCILE_G0,
+    frozen: ddl::meta::RECONCILE_READ_THROUGH,
+};
+
+const CENSUS_KEYS: ReaderKeys = ReaderKeys {
+    epoch: ddl::meta::CENSUS_STORE_EPOCH,
+    death_cursor: ddl::meta::CENSUS_TOMBSTONE_CURSOR,
+    completed: ddl::meta::CENSUS_COMPLETION,
+    reconciled: ddl::meta::CENSUS_RECOUNTED,
+    running: ddl::meta::CENSUS_RECOUNT_G0,
+    frozen: ddl::meta::CENSUS_RECOUNT_READ_THROUGH,
+};
+
+/// The two readers' read-through generations, as the sidecar records them.
+///
+/// Read inside every transaction that moves a reader's records, before it
+/// commits, so the engine's reading moves with what it describes.
+pub(crate) fn read_throughs(connection: &Connection) -> Result<ReadThroughs, Unread> {
+    Ok(ReadThroughs {
+        engine: reader_read_through(connection, &ENGINE_KEYS)?,
+        census: reader_read_through(connection, &CENSUS_KEYS)?,
+    })
+}
+
+/// One reader's read-through generation: the value stored with its running
+/// reconcile, or else the highest of its recorded parts that are positions in
+/// the store epoch its death cursor is valid in.
+fn reader_read_through(
+    connection: &Connection,
+    keys: &ReaderKeys,
+) -> Result<Option<ReadThroughGeneration>, Unread> {
+    let running = norn_db::meta::read_meta::<i64>(connection, keys.running).map_err(classify)?;
+    if running.is_some() {
+        let frozen = read_text(connection, keys.frozen)?.unwrap_or_default();
+        if frozen.is_empty() {
+            return Ok(None);
+        }
+        return decode_read_through(keys.frozen, &frozen).map(Some);
+    }
+    let Some(epoch) = read_text(connection, keys.epoch)?.filter(|epoch| !epoch.is_empty()) else {
+        return Ok(None);
+    };
+    let mut highest: Option<i64> = None;
+    if let Some(cursor) = read_text(connection, keys.death_cursor)?.filter(|c| !c.is_empty()) {
+        // The generation before the cursor's own: deaths of the cursor's
+        // generation past its path are still unread.
+        highest = Some(cursor_generation(keys.death_cursor, &cursor)? - 1);
+    }
+    for key in [keys.completed, keys.reconciled] {
+        if let Some(recorded) = read_text(connection, key)? {
+            let recorded = decode_read_through(key, &recorded)?;
+            if recorded.store_epoch == epoch {
+                highest = highest.max(Some(recorded.generation));
+            }
+        }
+    }
+    Ok(highest.map(|generation| ReadThroughGeneration {
+        store_epoch: epoch,
+        generation,
+    }))
+}
+
+/// A recorded `{generation}:{store epoch}` read-through part.
+fn decode_read_through(key: &str, recorded: &str) -> Result<ReadThroughGeneration, Unread> {
+    let watermark = decode_watermark(key, recorded).map_err(Unread::Damaged)?;
+    Ok(ReadThroughGeneration {
+        store_epoch: watermark.store_epoch,
+        generation: watermark.generation,
+    })
+}
+
+/// The generation half of a recorded `{generation}:{path}` feed position.
+fn cursor_generation(key: &str, recorded: &str) -> Result<i64, Unread> {
+    recorded
+        .split_once(':')
+        .and_then(|(generation, _)| generation.parse().ok())
+        .ok_or_else(|| {
+            Unread::Damaged(format!(
+                "the recorded `{key}` position `{recorded}` has no generation"
+            ))
+        })
+}
+
+/// One of the sidecar's text scalars.
+fn read_text(connection: &Connection, key: &str) -> Result<Option<String>, Unread> {
+    norn_db::meta::read_meta::<String>(connection, key).map_err(classify)
 }
 
 /// The last whole count, recorded as both of its counts or neither.

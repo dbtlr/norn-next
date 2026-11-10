@@ -8,12 +8,12 @@ use std::sync::Arc;
 use norn_db::Database;
 use norn_db::rusqlite::{OptionalExtension, params};
 use norn_embed::{Embedder, Model};
-use norn_store::{DocumentPath, FeedCursor, FeedRead};
+use norn_store::{DocumentPath, FeedCursor, FeedRead, StoreReading};
 
 use crate::census::{self, Coverage};
 use crate::ddl;
 use crate::error::{self, EngineError};
-use crate::progress::{self, Feed, Recorded, SidecarRevision, Watermark, Watermarks};
+use crate::progress::{self, Feed, ReadThroughs, Recorded, SidecarRevision, Watermark, Watermarks};
 use crate::sidecar;
 use norn_db::{OpenOutcome as SidecarOutcome, RebuildReason};
 
@@ -89,9 +89,18 @@ pub struct Engine {
 /// work the same way.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct DrainReport {
-    /// The recorded store epoch did not match at entry, so the cursors were
-    /// reset and the feed rescanned from the start.
+    /// The recorded store epoch did not match at entry, or the engine had not
+    /// read through the store's death floor, so the drain reconciled the
+    /// sidecar against current state and reset the cursors to rescan the
+    /// feed from the start.
     pub rescan: bool,
+    /// Reconciles the drain began: each one a pass that read its first page,
+    /// whether it reconciled toward a new store epoch or below the death
+    /// floor. A pass a drain resumes is not counted again.
+    pub reconciles: u64,
+    /// Census recounts the drain began below the death floor, counted as
+    /// [`DrainReport::reconciles`] are.
+    pub recounts: u64,
     /// Paths the rescan's reconcile removed: they no longer stand in the
     /// store, and the store's own tombstones did not survive into its new
     /// epoch to say so.
@@ -137,6 +146,8 @@ impl DrainReport {
     /// rescanned. Whether work is still owed is the caller's to say.
     fn absorb(&mut self, step: &DrainReport) {
         self.rescan |= step.rescan;
+        self.reconciles += step.reconciles;
+        self.recounts += step.recounts;
         self.reconciled_away += step.reconciled_away;
         self.embedded += step.embedded;
         self.skipped_current += step.skipped_current;
@@ -377,6 +388,18 @@ impl Engine {
         &self.recorded.watermarks
     }
 
+    /// How far each of the engine's two readers of the death feed, the drain
+    /// and the census, has read it — see [`ReadThroughs`]. Read the way
+    /// [`Engine::revision`] is, from what the last commit left.
+    ///
+    /// The host hands the death prune the lower of the two in the store's
+    /// epoch ([`ReadThroughs::lower_in`]), and judges the engine's freshness
+    /// rescanning where it has not read through a reading's floor
+    /// ([`ReadThroughs::engine_below_floor`]).
+    pub fn read_through(&self) -> &ReadThroughs {
+        &self.recorded.read_through
+    }
+
     /// How many of the documents the store holds readable have embeddings
     /// over their current content, counted at the snapshot in which the
     /// census last read both feeds to their ends; `None` until both counts
@@ -450,16 +473,20 @@ impl Engine {
     ///
     /// # The protocol
     ///
-    /// 1. **Epoch first.** A store epoch that differs from the observed one
-    ///    means the cursors name positions in a database that no longer
-    ///    exists: reconcile away rows whose paths the store no longer holds
-    ///    (its tombstones did not survive into the new epoch), a page of
-    ///    held paths at a time, each page committing its removals and its
-    ///    position together. Only the page that completes the pass resets
-    ///    both cursors and records the new epoch as observed, so a slice or
-    ///    a crash that stops part way leaves the old epoch observed and the
-    ///    next slice resumes the pass. A pass recorded for another epoch
-    ///    than the store's starts over.
+    /// 1. **Epoch and floor first.** A store epoch that differs from the
+    ///    observed one means the cursors name positions in a database that
+    ///    no longer exists, and a death floor above the engine's
+    ///    read-through generation means deaths it never read may be gone:
+    ///    either way, reconcile away rows whose paths the store no longer
+    ///    holds, a page of held paths at a time, each page committing its
+    ///    removals and its position together. The pass's first page records
+    ///    its G0, the write generation it read; only the page that completes
+    ///    the pass resets both cursors, records the epoch as observed and G0
+    ///    as read through, so a slice or a crash that stops part way leaves
+    ///    the earlier records and the next slice resumes the pass with its
+    ///    G0. A pass recorded for another epoch than the store's starts over;
+    ///    a pass is never started over because of the floor, and one that
+    ///    completes with the floor above its G0 is followed by another.
     /// 2. **Documents, triaged before fetched.** A feed row whose `body_hash`
     ///    is absent has no content to embed: every held vector at its path is
     ///    retracted with this page's progress, without fetching a body. A hash
@@ -571,11 +598,16 @@ impl Engine {
         documents_complete: bool,
     ) -> Result<(DrainStep, bool, bool), EngineError> {
         let mut report = DrainReport::default();
-        let store_epoch = feed.epoch().to_string();
-        let census = self.advance_census(feed, &store_epoch)?;
+        // The epoch, the write generation and the death floor of the step's
+        // own snapshot: what the census and the drain each judge the floor
+        // against before reading their pages, and the G0 a reconcile or a
+        // recount beginning on this step records.
+        let reading = feed.store_reading()?;
+        let census = self.advance_census(feed, &reading)?;
         report.censused = census.rows;
+        report.recounts = u64::from(census.recount_begun);
         let (step, counted, completed) =
-            self.drain_step_counted(feed, &store_epoch, report, documents_complete)?;
+            self.drain_step_counted(feed, &reading, report, documents_complete)?;
         // A census still catching up owes another step, and a step that read
         // census rows did work a budget counts.
         let step = match step {
@@ -594,53 +626,66 @@ impl Engine {
     fn advance_census(
         &mut self,
         feed: &mut FeedRead<'_>,
-        store_epoch: &str,
+        reading: &StoreReading,
     ) -> Result<census::Advance, EngineError> {
-        let recorded_epoch: Option<String> = self.get_meta(ddl::meta::CENSUS_STORE_EPOCH)?;
-        let documents_after = self.read_cursor(ddl::meta::CENSUS_DOCUMENT_CURSOR)?;
-        let tombstones_after = self.read_cursor(ddl::meta::CENSUS_TOMBSTONE_CURSOR)?;
+        let position = census::Position {
+            epoch: self.get_meta(ddl::meta::CENSUS_STORE_EPOCH)?,
+            documents_after: self.read_cursor(ddl::meta::CENSUS_DOCUMENT_CURSOR)?,
+            tombstones_after: self.read_cursor(ddl::meta::CENSUS_TOMBSTONE_CURSOR)?,
+            recount: self.get_meta(ddl::meta::CENSUS_RECOUNT_G0)?,
+            completion: self.get_meta(ddl::meta::CENSUS_COMPLETION)?,
+        };
         let pages = census::Pages::read(
             feed,
-            recorded_epoch.as_deref(),
-            documents_after,
-            tombstones_after,
+            reading,
+            position,
+            self.recorded.read_through.census.as_ref(),
         )?;
         let advance = pages.advance();
         // A step that reads nothing past counts left part way, by a page
         // that ended exactly at a feed's end, still records them whole.
-        if !pages.is_empty() || advance.complete != self.recorded.counts.whole {
+        if pages.changes_anything(&self.recorded.counts) {
             let model = self.embedder.model().clone();
             let mut counts = self.recorded.counts;
             let transaction = self
                 .database
                 .immediate_transaction("advancing the census")?;
-            pages.apply(&transaction, &model, store_epoch, &mut counts)?;
-            let revision = norn_db::meta::next_generation(&transaction)?;
-            transaction
-                .commit()
-                .map_err(|error| error::sql("committing the census", error))?;
+            pages.apply(&transaction, &model, &mut counts)?;
+            let (revision, read_through) = seal(transaction, "committing the census")?;
             self.recorded.revision = revision;
             self.recorded.counts = counts;
+            self.recorded.read_through = read_through;
         }
         Ok(advance)
     }
 
     /// The drain's own half of a step, after the census has read its pages.
+    ///
+    /// The drain reconciles before it reads the feed where the store epoch
+    /// is not the one it observed, where a reconcile toward this epoch is part
+    /// way through, or where it has not read through the floor read in the
+    /// step's snapshot: deaths it never read may be gone, so it does not seek
+    /// forward. A running reconcile is never started over because of the
+    /// floor.
     fn drain_step_counted(
         &mut self,
         feed: &mut FeedRead<'_>,
-        store_epoch: &str,
+        reading: &StoreReading,
         mut report: DrainReport,
         documents_complete: bool,
     ) -> Result<(DrainStep, bool, bool), EngineError> {
-        let store_epoch = store_epoch.to_string();
+        let store_epoch = reading.epoch().to_string();
         let observed: Option<String> = self.get_meta(ddl::meta::OBSERVED_STORE_EPOCH)?;
-        if observed.as_deref() != Some(store_epoch.as_str()) {
+        let running = self.running_reconcile(&store_epoch)?;
+        if observed.as_deref() != Some(store_epoch.as_str())
+            || running.is_some()
+            || self.recorded.read_through.engine_below_floor(reading)
+        {
             report.rescan = true;
             // The rescan resets both cursors, and the document feed reads
             // from its start again before the tombstones take their turn.
             self.tombstones_turn = false;
-            let (complete, counted) = self.reconcile_page(feed, &store_epoch, &mut report)?;
+            let (complete, counted) = self.reconcile_page(feed, reading, running, &mut report)?;
             if counted || !complete {
                 report.owed = true;
                 return Ok((DrainStep::Done(report), true, false));
@@ -916,32 +961,68 @@ impl Engine {
         })
     }
 
-    /// Reconcile the sidecar toward `store_epoch` by one page of held paths,
-    /// answering whether the pass completed and whether the page held any
-    /// path, which is what counts it.
+    /// The reconcile part way through toward `store_epoch`, where one is
+    /// recorded with its G0. A pass recorded for another epoch names a
+    /// database that no longer exists, and one recorded without a G0 cannot
+    /// say which deaths it accounts for; neither is resumed.
+    fn running_reconcile(&self, store_epoch: &str) -> Result<Option<Running>, EngineError> {
+        let target: Option<String> = self.get_meta(ddl::meta::RECONCILE_STORE_EPOCH)?;
+        if target.as_deref() != Some(store_epoch) {
+            return Ok(None);
+        }
+        let Some(g0) = self.get_meta::<i64>(ddl::meta::RECONCILE_G0)? else {
+            return Ok(None);
+        };
+        Ok(Some(Running {
+            after: self
+                .get_meta::<String>(ddl::meta::RECONCILE_CURSOR)?
+                .filter(|cursor| !cursor.is_empty()),
+            g0,
+            read_through: self
+                .get_meta(ddl::meta::RECONCILE_READ_THROUGH)?
+                .unwrap_or_default(),
+        }))
+    }
+
+    /// Reconcile the sidecar toward `reading`'s store epoch by one page of
+    /// held paths, resuming `running` where it is part way, answering whether
+    /// the pass completed and whether the page held any path, which is what
+    /// counts it.
     ///
     /// The page checks the next held paths in path order against the store
     /// and commits the removal of those it no longer holds together with the
-    /// pass's position. The page that comes back short completes the pass: in
-    /// the same transaction it resets both cursors, records `store_epoch` as
-    /// observed and clears the position, so the observed epoch never moves
-    /// ahead of a whole pass. A recorded position is resumed only for the
-    /// epoch it was recorded in. A reconcile page embeds nothing, so it
-    /// runs whole inside its step.
+    /// pass's position. **A pass's first page reads its G0**, the write
+    /// generation of `reading`, and every page stores it beside the position
+    /// with the engine's read-through generation as its records stood when
+    /// the pass began ([ADR 0052]): every death at or below G0 was committed
+    /// before that page, so the pass meets its path as no document or as one
+    /// derived again, whether or not the death still stands. The page that
+    /// comes back short completes the pass: in the same transaction it resets
+    /// both cursors, records the epoch as observed and G0 itself as read
+    /// through, and clears the position, so the observed epoch never moves
+    /// ahead of a whole pass. A reconcile page embeds nothing, so it runs
+    /// whole inside its step.
+    ///
+    /// [ADR 0052]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0052-a-death-is-kept-only-while-lane-2-or-a-broken-link-needs-it.md
     fn reconcile_page(
         &mut self,
         feed: &mut FeedRead<'_>,
-        store_epoch: &str,
+        reading: &StoreReading,
+        running: Option<Running>,
         report: &mut DrainReport,
     ) -> Result<(bool, bool), EngineError> {
-        let target: Option<String> = self.get_meta(ddl::meta::RECONCILE_STORE_EPOCH)?;
-        let after: Option<String> = if target.as_deref() == Some(store_epoch) {
-            self.get_meta::<String>(ddl::meta::RECONCILE_CURSOR)?
-                .filter(|cursor| !cursor.is_empty())
-        } else {
-            None
-        };
-        let held = self.held_paths_after(after.as_deref())?;
+        let store_epoch = reading.epoch();
+        let running = running.unwrap_or_else(|| {
+            report.reconciles += 1;
+            Running {
+                after: None,
+                g0: reading.write_generation(),
+                read_through: progress::encode_read_through(
+                    self.recorded.read_through.engine.as_ref(),
+                ),
+            }
+        });
+        let held = self.held_paths_after(running.after.as_deref())?;
         let full = held.len() == RECONCILE_PAGE;
         let mut dead: Vec<&str> = Vec::new();
         for path in &held {
@@ -976,6 +1057,12 @@ impl Engine {
                     store_epoch,
                 )?;
                 norn_db::meta::put_meta(&transaction, ddl::meta::RECONCILE_CURSOR, last)?;
+                norn_db::meta::put_meta(&transaction, ddl::meta::RECONCILE_G0, running.g0)?;
+                norn_db::meta::put_meta(
+                    &transaction,
+                    ddl::meta::RECONCILE_READ_THROUGH,
+                    &running.read_through,
+                )?;
             }
             None => {
                 norn_db::meta::put_meta(&transaction, ddl::meta::DOCUMENT_CURSOR, "")?;
@@ -985,17 +1072,22 @@ impl Engine {
                     ddl::meta::OBSERVED_STORE_EPOCH,
                     store_epoch,
                 )?;
+                norn_db::meta::put_meta(
+                    &transaction,
+                    ddl::meta::RECONCILED_THROUGH,
+                    progress::encode_generation_in(running.g0, store_epoch),
+                )?;
                 norn_db::meta::put_meta(&transaction, ddl::meta::RECONCILE_STORE_EPOCH, "")?;
                 norn_db::meta::put_meta(&transaction, ddl::meta::RECONCILE_CURSOR, "")?;
+                norn_db::meta::delete_meta(&transaction, ddl::meta::RECONCILE_G0)?;
+                norn_db::meta::delete_meta(&transaction, ddl::meta::RECONCILE_READ_THROUGH)?;
             }
         }
         counts.put(&transaction)?;
-        let revision = norn_db::meta::next_generation(&transaction)?;
-        transaction
-            .commit()
-            .map_err(|error| error::sql("committing the reconcile", error))?;
+        let (revision, read_through) = seal(transaction, "committing the reconcile")?;
         self.recorded.revision = revision;
         self.recorded.counts = counts;
+        self.recorded.read_through = read_through;
         report.reconciled_away += dead.len() as u64;
         Ok((!full, !held.is_empty()))
     }
@@ -1080,13 +1172,14 @@ impl Engine {
             encode_cursor(advanced),
         )?;
         counts.put(&transaction)?;
-        let committed = commit_progress(
+        let (committed, read_through) = commit_progress(
             transaction,
             "committing a drained page",
             Feed::Documents,
             completed.as_ref(),
         )?;
         self.recorded.revision = committed;
+        self.recorded.read_through = read_through;
         self.recorded.counts = counts;
         if let Some(watermark) = completed {
             self.recorded.watermarks.set(Feed::Documents, watermark);
@@ -1128,13 +1221,14 @@ impl Engine {
             encode_cursor(advanced),
         )?;
         counts.put(&transaction)?;
-        let committed = commit_progress(
+        let (committed, read_through) = commit_progress(
             transaction,
             "committing retractions",
             Feed::Tombstones,
             completed.as_ref(),
         )?;
         self.recorded.revision = committed;
+        self.recorded.read_through = read_through;
         self.recorded.counts = counts;
         if let Some(watermark) = completed {
             self.recorded.watermarks.set(Feed::Tombstones, watermark);
@@ -1162,9 +1256,10 @@ impl Engine {
         let transaction = self
             .database
             .immediate_transaction("advancing a watermark")?;
-        let committed =
+        let (committed, read_through) =
             commit_progress(transaction, "advancing a watermark", feed, Some(&watermark))?;
         self.recorded.revision = committed;
+        self.recorded.read_through = read_through;
         self.recorded.watermarks.set(feed, watermark);
         Ok(())
     }
@@ -1225,7 +1320,7 @@ fn commit_progress(
     operation: &'static str,
     feed: Feed,
     watermark: Option<&Watermark>,
-) -> Result<i64, EngineError> {
+) -> Result<(i64, ReadThroughs), EngineError> {
     if let Some(watermark) = watermark {
         norn_db::meta::put_meta(
             &transaction,
@@ -1233,11 +1328,33 @@ fn commit_progress(
             progress::encode_watermark(watermark),
         )?;
     }
+    seal(transaction, operation)
+}
+
+/// Take the next sidecar revision, read the two readers' read-through
+/// generations as the transaction leaves their records, and commit as
+/// `operation`. Answers the revision and the read-through generations the
+/// commit recorded, which the engine holds only once it has committed.
+fn seal(
+    transaction: norn_db::rusqlite::Transaction<'_>,
+    operation: &'static str,
+) -> Result<(i64, ReadThroughs), EngineError> {
+    let read_through =
+        progress::read_throughs(&transaction).map_err(progress::Unread::into_engine_error)?;
     let revision = norn_db::meta::next_generation(&transaction)?;
     transaction
         .commit()
         .map_err(|error| error::sql(operation, error))?;
-    Ok(revision)
+    Ok((revision, read_through))
+}
+
+/// A reconcile part way through: the held path its last page checked, the
+/// G0 its first page read, and the engine's read-through generation as its
+/// records stood when it began, spelled as the sidecar records it.
+struct Running {
+    after: Option<String>,
+    g0: i64,
+    read_through: String,
 }
 
 /// `{generation}:{path}` — one scalar, so a position moves atomically. The

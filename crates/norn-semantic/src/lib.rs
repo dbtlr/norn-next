@@ -64,6 +64,9 @@
 //! - [`SliceBudget`] — how much one bounded drain may do, in pages.
 //! - [`Watermarks`] and [`SidecarRevision`] — how far the engine has drained
 //!   against the store, and which sidecar state it answers from.
+//! - [`ReadThroughs`] — how far the engine's two readers of the death feed
+//!   have read it, which the death prune and the engine's freshness judge
+//!   against the store's death floor.
 //! - [`Coverage`] — how many of the documents the engine would embed have
 //!   embeddings over their current content.
 //! - [`DrainReport`] — what one drain did, and [`DrainReport::is_settled`].
@@ -83,7 +86,7 @@ pub use engine::{
     SliceBudget, VectorRow,
 };
 pub use error::EngineError;
-pub use progress::{SidecarRevision, Watermark, Watermarks};
+pub use progress::{ReadThroughGeneration, ReadThroughs, SidecarRevision, Watermark, Watermarks};
 pub use settings::{SectionError, Settings};
 // How an open ended up with its database, and why a rebuild happened, are the
 // open ceremony's own vocabulary: the engine is one client of that ceremony,
