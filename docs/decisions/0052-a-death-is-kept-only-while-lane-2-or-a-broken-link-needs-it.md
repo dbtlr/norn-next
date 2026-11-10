@@ -500,8 +500,14 @@ maintenance leg on the shared worker pool, beside the shadow sweep and the rolli
   restart, count toward the same bound, so clearing a large kept set takes several units. A
   removing unit is also bounded by the deaths it deletes, because a deletion writes a page of
   each path-ordered index over the deaths and costs far more than a read. The implementation
-  sizes both bounds by measurement so that one unit costs no more than a rolling-heal slice,
-  about 13 ms at 10,000 documents, and records the measurement beside the values. A unit
+  sizes both bounds by measurement so that one unit's own work costs no more than a
+  rolling-heal slice, about 13 ms at 10,000 documents, and records the measurement beside
+  the values. A write-ahead-log checkpoint is not part of that cost: SQLite runs one inside whichever
+  writer's commit takes the log past its threshold, a watcher write, a plan apply or a
+  rolling-heal slice as much as a death-prune unit, and a pass that removes many deaths
+  crosses it more often than an ordinary writer does. That cost, and the sync stalls it can
+  meet on a large store, belong to the store's checkpoint policy, which this decision does
+  not change. A unit
   whose catch-up fills its bound deletes nothing, and the next unit continues the catch-up.
 
   **The live-document count is the one read a row bound cannot cut.** It is one statement,
@@ -2595,7 +2601,8 @@ hold the claim and one worker slot for at most its budget plus one unit; the leg
 them beyond that only to drain the watcher batches observed meanwhile, as every leg does
 before it releases the claim. The longest unit is a rolling-heal slice, about 13 ms at
 10,000 documents, and a death-prune unit's row and removal bounds are sized by measurement
-so that it costs no more. The leg counts its units beside its clock, as a background turn
+so that its own work costs no more; a write-ahead-log checkpoint can land in any writer's
+commit, a unit's included, and is not counted in a unit's cost. The leg counts its units beside its clock, as a background turn
 does. A leg that ends with maintenance still due schedules another, as [Work starts at a
 wake or a deadline](#work-starts-at-a-wake-or-a-deadline-with-no-poll-backstop) rules.
 
@@ -2799,7 +2806,8 @@ These costs are accepted:
 - Each enabled engine holds one feed connection outside the request read budget.
 - A maintenance leg holds the claim and one worker slot for at most the background turn
   budget plus one unit. A rolling-heal slice is the longest such unit, and a death-prune unit
-  is sized to cost no more.
+  is sized so that its own work costs no more; a write-ahead-log checkpoint that lands in a
+  unit's commit is not counted, as it is not for any other writer.
 - A semantic background turn's overrun is one page and the census pages read beside it.
   The real-model runtime will have to size the page so that one page stays within human
   scale.

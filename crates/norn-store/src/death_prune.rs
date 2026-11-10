@@ -91,9 +91,12 @@ use crate::path::DocumentPath;
 use crate::request::{FeedCursor, MAX_PAGE, ReadWork, Reading, Request};
 use crate::store::StoreReading;
 
-/// The rows one unit reads by default, sized so that a unit that reads, rather
-/// than removes, costs no more than a rolling-heal slice, about 13 ms at 10,000
-/// documents. A removing unit is held to [`DEATH_PRUNE_UNIT_REMOVALS`] as well.
+/// The rows one unit reads by default, sized so that the own work of a unit that
+/// reads, rather than removes, costs no more than a rolling-heal slice, about
+/// 13 ms at 10,000 documents. A removing unit is held to
+/// [`DEATH_PRUNE_UNIT_REMOVALS`] as well. A write-ahead-log checkpoint that
+/// SQLite runs inside a unit's commit is not counted: it lands in whichever
+/// writer's commit crosses the log's threshold (ADR 0052).
 ///
 /// **Measured on a release build** (2026-11-10, shared host), over 10,000 live
 /// documents, 1,000 of them holding a broken link, and 13,500 deaths, 1,500 of
