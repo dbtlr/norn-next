@@ -18,6 +18,7 @@ mod common;
 mod construction;
 mod count;
 mod counters;
+mod death_prune;
 mod describe;
 mod drive;
 mod equivalence;

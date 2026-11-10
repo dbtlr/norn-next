@@ -27,9 +27,9 @@
 //! rather than replaced, so deleting a `documents` row keeps exactly one
 //! meaning — the document died — and the cascade fires only for a death.
 //!
-//! What is *not* here yet is the death prune ADR 0052 rules: the unit that
-//! removes a death once neither lane 2 nor a broken link needs it. Until it is
-//! built, a tombstone stands until its path derives again.
+//! A death leaves the store two ways: its path derives again, which clears it
+//! inside the changeset, or the death prune ADR 0052 rules removes it once
+//! neither lane 2 nor a broken link needs it ([`Request::death_prune_unit`]).
 //!
 //! From-zero construction fills provisional names through separate content and
 //! structure writers inside [`crate::StepGroup`]. Ordinary increments refuse
@@ -1583,6 +1583,27 @@ impl<'a> Request<'a> {
     /// it read.
     pub fn write_generation(&self) -> Result<i64, StoreError> {
         crate::store::last_write_generation(self.store.connection())
+    }
+
+    /// The death floor: the highest generation of any death the death prune
+    /// has removed, or `None` where it has removed none ([ADR 0052]). It only
+    /// rises, it is written in the transaction that deletes, and a store
+    /// created from zero carries none.
+    ///
+    /// [ADR 0052]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0052-a-death-is-kept-only-while-lane-2-or-a-broken-link-needs-it.md
+    pub fn death_floor(&self) -> Result<Option<i64>, StoreError> {
+        crate::store::death_floor(self.store.connection())
+    }
+
+    /// The store reading this request's writer stands at: the epoch, and the
+    /// write generation and the death floor read in one statement.
+    pub fn store_reading(&self) -> Result<crate::StoreReading, StoreError> {
+        let (write_generation, death_floor) =
+            crate::store::generation_and_floor(self.store.connection())?;
+        Ok(
+            crate::StoreReading::of(self.store.epoch().to_string(), write_generation)
+                .with_death_floor(death_floor),
+        )
     }
 
     /// The pinned vault-schema projection, if a schema has been pinned.

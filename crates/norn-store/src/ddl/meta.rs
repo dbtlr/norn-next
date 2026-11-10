@@ -25,8 +25,10 @@
 //! `store_mode`, which is a fact about this crate's own two ways of opening
 //! rather than about running a database, `path_order`, the case behaviour
 //! every row was derived under, `derivation_version`, the derivation every
-//! row was written by, and `under_construction`, the mark a store carries from
-//! the transaction that creates it until the build that fills it ends.
+//! row was written by, `under_construction`, the mark a store carries from
+//! the transaction that creates it until the build that fills it ends, and
+//! `death_floor`, the highest generation of any death the death prune has
+//! removed.
 //!
 //! # The vault-schema projection is derived state
 //!
@@ -89,3 +91,19 @@ pub(crate) const DERIVATION_VERSION: &str = "derivation_version";
 /// carries none is a finished one, so a build that was interrupted is never
 /// resumed over what it left.
 pub(crate) const UNDER_CONSTRUCTION: &str = "under_construction";
+
+/// The death floor: the highest generation of any death the death prune has
+/// removed ([ADR 0052]).
+///
+/// **Absent until the first death prune removes a death, and it only rises.**
+/// A death-prune unit writes the higher of the recorded floor and the highest
+/// generation it removed, in the transaction that deletes, so every snapshot
+/// reads a floor that agrees with the deaths it holds. A store created from
+/// zero carries a new epoch and no floor. A death-feed consumer whose
+/// read-through generation stands below it reconciles against current state
+/// instead of seeking forward, because deaths it never read may be gone; it is
+/// read beside the epoch and the write generation into every
+/// [`crate::StoreReading`], and into each page of a [`crate::FeedRead`].
+///
+/// [ADR 0052]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0052-a-death-is-kept-only-while-lane-2-or-a-broken-link-needs-it.md
+pub(crate) const DEATH_FLOOR: &str = "death_floor";

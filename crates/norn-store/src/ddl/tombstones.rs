@@ -62,8 +62,7 @@
 //! prune, a claim-bound maintenance unit, removes it, and store meta records
 //! the highest generation removed as the death floor in the same transaction.
 //! A healthy or ambiguous link keeps no death, and no link keeps a quarantine
-//! death, which move-following never reads. The death prune is not built yet,
-//! so until it is a tombstone stands until its path derives again.
+//! death, which move-following never reads. See [`crate::Request::death_prune_unit`].
 //!
 //! [ADR 0052]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0052-a-death-is-kept-only-while-lane-2-or-a-broken-link-needs-it.md
 //!
@@ -104,6 +103,10 @@
 //! The tie-break is what makes a position a position: one changeset stamps every
 //! death it records with one generation, so a cursor holding a generation alone
 //! would either repeat the changeset it stopped inside or skip the rest of it.
+//!
+//! The death prune reads the same index both ways: its bound walk seeks it
+//! descending from the pass's upper bound, and its removal ascending past its
+//! cursor, so neither reads a row or sorts.
 //!
 //! What it costs is the same shape the document side pays, one column narrower:
 //! the path and the last content hash duplicated per tombstone, and a key led by

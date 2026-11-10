@@ -91,6 +91,15 @@
 //!   comparison key, bounded to two at a matching place, and
 //!   [`Snapshot::live_holders`] reads at most two live documents holding a
 //!   content hash. Their `*_plans` methods explain what ran.
+//!   [`Snapshot::followed_tombstones`] is the one routine that turns a stored
+//!   link into those reads, which repair and the death prune both run.
+//! - [`Request::death_prune_unit`] — one unit of the death prune ADR 0052
+//!   rules: a death is kept only while lane 2 has not read it, up to one
+//!   unread death per live document, or while the move-following reads return
+//!   it for a link that is broken now. A [`DeathPrunePass`] holds a pass's
+//!   cursors between units, and [`Request::death_floor`] the highest
+//!   generation any unit has removed, which [`StoreReading::death_floor`] and
+//!   [`FeedRead::death_floor`] carry to lane 2.
 //! - [`ddl`] — the store schema, designed whole, and its fingerprint.
 //! - [`DocumentPath`] — the segment-aware path representation the suffix
 //!   resolution ladder is indexed by.
@@ -117,13 +126,6 @@
 //!   is handed; deciding what belongs in one — what the watcher's facts imply,
 //!   what a plan's blast radius is — is orchestration's, and so is re-recording
 //!   the findings the increment discarded by class.
-//! - **The death prune.** ADR 0052 keeps a death only while lane 2 has not
-//!   read it, up to one unread death per live document, or while the
-//!   move-following reads return it for a link that is broken now, and rules
-//!   a claim-bound unit that removes every other death and raises the death
-//!   floor. That unit, the floor and the read-through generation the host
-//!   hands it are not built yet, so a tombstone stands until its path derives
-//!   again.
 //! - **Anything that reads a document.** One parser, and it is not this crate.
 
 pub mod ddl;
@@ -136,6 +138,7 @@ mod anchor;
 mod construction;
 mod count;
 mod counters;
+mod death_prune;
 mod describe;
 pub mod early;
 mod error;
@@ -181,6 +184,10 @@ pub use count::{
     CountRetentionPolicy, CountStatement, CountWork, Counted, GroupMember,
 };
 pub use counters::{DerivationCounters, SnapshotCounters};
+pub use death_prune::{
+    DEATH_PRUNE_LEAST_ROWS, DEATH_PRUNE_STATEMENTS, DEATH_PRUNE_UNIT_ROWS, DeathPrunePass,
+    DeathPrunePhase, DeathPruneStatement, DeathPruneUnit, DeathPruneWork, ReadThrough,
+};
 pub use describe::{DESCRIBE_STATEMENTS, DescribePlan, DescribeStatement, DescribeWork, Described};
 pub use error::StoreError;
 pub use facts::{

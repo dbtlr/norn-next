@@ -666,3 +666,74 @@ fn live_holder_plans_seek_the_hash_index_without_sorting() {
     let plan = plan_of(&plans, norn_store::MovedStatement::LiveHolders);
     judge_seek(&plan, "documents", "documents_content_hash");
 }
+
+/// **One routine turns a stored link into its move-following reads.** A
+/// suffix address reads its suffix; a path form reads each path it names
+/// from its holder, pooled distinct by path, in path order, stopping at two;
+/// an address that names elsewhere, nothing, or the holding document reads
+/// nothing. Repair and the death prune both run it, so what a broken link
+/// keeps is what repair reads for it.
+#[test]
+fn followed_reads_split_a_stored_link_by_its_address() {
+    use norn_wire::LinkFamily;
+    let scratch = Scratch::new("moved-followed");
+    let mut store = scratch.open();
+    write_documents(
+        &mut store.begin_request(),
+        &[
+            document("x/target.md", "hash-x", "body\n"),
+            document("y/target.md", "hash-y", "body\n"),
+            document("z/target.md", "hash-z", "body\n"),
+            document("notes/moved.md", "hash-m", "body\n"),
+            document("notes/moved.md.md", "hash-mm", "body\n"),
+            document("notes/h.md", "hash-h", "body\n"),
+        ],
+    );
+    deaths(
+        &mut store,
+        &[
+            ("z/target.md", Provenance::WatcherRemoval),
+            ("y/target.md", Provenance::WatcherRemoval),
+            ("x/target.md", Provenance::WatcherRemoval),
+            ("notes/moved.md", Provenance::PlanDelete),
+            ("notes/moved.md.md", Provenance::HealPrune),
+            ("notes/h.md", Provenance::HealPrune),
+        ],
+    );
+    let read = snapshot(&store);
+    let holder = path("notes/h.md");
+    let paths = |deaths: Vec<norn_store::MovedTombstone>| {
+        deaths
+            .into_iter()
+            .map(|death| death.path.as_str().to_string())
+            .collect::<Vec<_>>()
+    };
+    let followed = |family, protocol: Option<&str>, target: &str| {
+        paths(
+            read.followed_tombstones(family, protocol, target, &holder)
+                .expect("the move-following reads"),
+        )
+    };
+    assert_eq!(
+        followed(LinkFamily::Wikilink, None, "target"),
+        paths(read.tombstones_by_suffix("target").unwrap())
+    );
+    assert_eq!(followed(LinkFamily::Wikilink, None, "target").len(), 2);
+    // A `.md` leaf names two paths, pooled in path order.
+    assert_eq!(
+        followed(LinkFamily::Markdown, None, "./moved.md"),
+        ["notes/moved.md", "notes/moved.md.md"]
+    );
+    assert_eq!(
+        followed(LinkFamily::Markdown, None, "/notes/moved.md"),
+        ["notes/moved.md", "notes/moved.md.md"]
+    );
+    assert_eq!(
+        followed(LinkFamily::Wikilink, Some("vault"), "notes/moved"),
+        ["notes/moved.md"]
+    );
+    // Elsewhere, the holding document, and a suffix the probe refuses.
+    assert!(followed(LinkFamily::Markdown, Some("https"), "example.com/target").is_empty());
+    assert!(followed(LinkFamily::Wikilink, None, "").is_empty());
+    assert!(followed(LinkFamily::Markdown, None, "").is_empty());
+}

@@ -90,8 +90,8 @@ const FINDING_CHILDREN: &[&str] = &[
     "directory_marks",
     "finding_rules",
 ];
-const META_FILTER: &str =
-    " WHERE key NOT IN ('store_epoch','write_generation','vault_schema_generation')";
+const META_FILTER: &str = " WHERE key NOT IN \
+    ('store_epoch','write_generation','vault_schema_generation','death_floor')";
 
 /// Audit a cleanly closed worker's store outside measurement clocks.
 ///
@@ -701,7 +701,7 @@ mod tests {
         for sql in [
             "CREATE TABLE future_facts(fact TEXT)",
             "ALTER TABLE links ADD COLUMN future_fact TEXT",
-            "UPDATE meta SET value=5 WHERE key='store_schema_version'",
+            "UPDATE meta SET value=value+1 WHERE key='store_schema_version'",
             "PRAGMA foreign_keys=OFF; UPDATE blocks SET document=999",
             "PRAGMA foreign_keys=OFF; UPDATE link_keys SET document=2",
             "PRAGMA foreign_keys=OFF; UPDATE link_anchor_keys SET link=999",
