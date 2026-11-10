@@ -9,10 +9,10 @@ Supersedes [ADR 0047](0047-a-write-re-decides-only-the-links-whose-inputs-it-mov
 [ADR 0051](0051-a-schema-reload-serves-reads-again-when-its-activation-ends.md) and restates
 both whole. ADR 0047 restated ADR 0044 whole and narrowed which links a write re-decides.
 ADR 0051 restated ADR 0050 whole and amended its schema reload rule, and ADR 0050, ADR 0049
-and ADR 0048 before it each restated their predecessor whole and amended the sections ADR
-0051's opening names. The two decisions rule two parts of the system that a death crosses:
-ADR 0047 rules the derivation lanes, link health and the change feed, and ADR 0051 rules
-reads, from-zero builds and background work. This decision adds the section
+and ADR 0048 before it each restated their predecessor whole and amended some of its
+sections, as ADR 0051's own opening listed. The two decisions ruled two parts of the system
+that a death crosses: ADR 0047 ruled the derivation lanes, link health and the change feed,
+and ADR 0051 ruled reads, from-zero builds and background work. This decision adds the section
 [A death is kept only while lane 2 or a broken link needs it](#a-death-is-kept-only-while-lane-2-or-a-broken-link-needs-it),
 amends six sections, and copies every other section as ADR 0047 or ADR 0051 wrote it. The
 sections from [The two lanes](#the-two-lanes) to the *Consequences* that follows their
@@ -27,15 +27,20 @@ these:
   lies past that bound into a reconcile rather than lost data.
 - **ADR 0051's [Semantic work leaves the claim](#semantic-work-leaves-the-claim).** The
   drain reconciles when the engine has not read through the floor, as it does when the store
-  epoch differs, and every reconcile records the floor it reconciled against.
+  epoch differs. Every reconcile records the write generation its first page read, starts
+  over only where a later page reads a floor at or above it, and on completing records the
+  generation below it as read through.
 - **ADR 0051's [Work starts at a wake or a deadline, with no poll backstop](#work-starts-at-a-wake-or-a-deadline-with-no-poll-backstop).**
   The death prune's clock is a third claim-bound deadline.
 - **ADR 0051's [Claim-bound slices stay maintenance legs on the worker pool](#claim-bound-slices-stay-maintenance-legs-on-the-worker-pool).**
   A death-prune unit is a third unit kind of a maintenance leg. The leg's order and the claim
-  about its longest unit are restated.
+  about its longest unit are restated, and a rule is inserted beside the shadow sweep's: the
+  death prune does not wait for a quiet entry either, and runs only where the store's link
+  health is admitted.
 - **ADR 0051's [Status reports embedding coverage](#status-reports-embedding-coverage).** A
   census that has not read through the floor counts again and keeps its last whole counts
-  meanwhile. A new store epoch still clears them.
+  meanwhile, and it starts that count over only as a reconcile starts over. A new store
+  epoch still clears them.
 - **The *Consequences* of ADR 0051's
   [Background work runs on its own lane](#background-work-runs-on-its-own-lane).** The costs it
   accepts name the death-prune unit beside the rolling-heal slice, and the census's whole
@@ -69,8 +74,9 @@ a wake or a deadline says they are owed, and no poll tick starts either. The sec
 change.
 
 A **from-zero build** — a vault's first build and every rebuild from zero — is the
-construction [ADR 0047](0047-a-write-re-decides-only-the-links-whose-inputs-it-moved.md)
-judges link health once over, under the same term. Whole-vault readiness retains its
+construction over which link health is judged once, as
+[A from-zero build judges link health once](#a-from-zero-build-judges-link-health-once)
+rules, under the same term. Whole-vault readiness retains its
 existing meaning.
 
 ## A death is kept only while lane 2 or a broken link needs it
@@ -134,8 +140,9 @@ does:
    generation (see [The read-through generation](#the-read-through-generation)), the death's
    generation is above it, and the death is one of the newest deaths the bound admits. The
    bound is the vault's live-document count, the number of document rows the store holds: no
-   more unread deaths are kept by this condition than that. Past the bound, the oldest unread
-   deaths in feed order are not kept by it.
+   more unread deaths are kept by this condition than that. Every unread death counts toward
+   the bound, one a broken link also keeps and a quarantine death included. Past the bound,
+   the oldest unread deaths in feed order are not kept by it.
 2. **Move-following would read it for a broken link.** Some link holds a current
    `link/broken` finding under the pinned vault schema fingerprint, and the death is one of
    the at most two deaths the move-following reads return for that link, in the order they
@@ -170,11 +177,17 @@ before and after each unit.
 and at most one unread death per live document. Its size follows the vault's present, its
 documents and its broken links, never its history of deletions.
 
-**The bound is the live-document count because past it a reconcile is cheaper.** A reader
-that falls past the bound reconciles once, when it next advances. A reconcile checks about
-one held path per document the reader holds, and the engine holds at most one row per live
-document. A backlog of more unread deaths than live documents therefore costs more to drain
-than a reconcile costs, so keeping deaths beyond the bound buys a reader nothing.
+**The bound is the live-document count because past it a reconcile costs about what the
+drain it replaces costs.** A reader that falls past the bound reconciles once, when it next
+advances. The reconcile checks each path the reader holds once against the store's document
+rows, and then rescans the document feed, re-embedding nothing whose content the sidecar
+already holds. A stalled sidecar still holds a path for each death it has not read, so it
+can hold more paths than the vault now has documents, and its checks of those paths cost
+what retracting those deaths through the feed would. What the reconcile adds to the drain
+is the rescan, whose cost follows the vault's live documents. Past the bound the unread
+deaths outnumber the live documents, so the reconcile costs within a small factor of
+draining them, and keeping those deaths would charge every pass, every verification and the
+store's size for the deaths only a stalled reader would read.
 
 ### The death floor
 
@@ -191,41 +204,91 @@ not read through the floor does not seek forward, because deaths it never read m
 It reconciles against current state instead, exactly as it does after a store epoch change,
 and then reads the feed again from the start.
 
-**A reconcile records the floor it started against.** On its first page a reconcile reads
-the floor and records it beside the store epoch and cursor the reconcile already records.
-Every later page reads the floor again. A page that reads a higher floor starts the
-reconcile over from its first page, because a death recorded after the reconcile checked its
-path may have been removed before the consumer could read it. When the reconcile completes,
-the consumer records the floor it started against beside the epoch it observed. A reconcile
-stopped part way leaves the earlier records, so the next unit resumes it, as an epoch
-reconcile resumes. Without the recorded floor, a consumer that restarts from the start of
-the feed would stand below the floor again and would reconcile without end. A reconcile over
-a new store epoch records the floor in the same way: a new store's death prune can run before
-the epoch reconcile completes, and without the record the consumer would reconcile a second
-time.
+**A reconcile accounts for every death recorded before it began.** On its first page a
+reconcile reads the store's write generation, here called G0, and records it beside the
+store epoch and cursor the reconcile already records. Every death below G0 was committed
+before that page, so the reconcile meets its path either as no document or as a document
+derived again, whether or not the death still stands: a reconcile against current state
+accounts for it. Every later page reads the floor again. A page that reads a floor at or
+above G0 starts the reconcile over from its first page, because a death recorded after the
+reconcile began may have been removed after the reconcile checked its path and before the
+consumer could read it. A floor below G0 does not restart it. When the reconcile completes,
+the consumer records G0 − 1 beside the epoch it observed, as the generation it has read
+through. The floor then stands below that record, so the rescan after the reconcile does not
+reconcile again. A reconcile stopped part way leaves the earlier records, so the next unit
+resumes it with its G0, as an epoch reconcile resumes. A reconcile over a new store epoch
+records G0 in the same way: a new store's death prune can run before the epoch reconcile
+completes, and without the record the consumer would reconcile a second time.
+
+**A restart is rare, because the bound evicts the oldest unread deaths first.** The death
+prune removes an unread death only past the bound, oldest first in feed order, and the
+cutoff is the death after the newest L. The floor therefore reaches G0 only once more deaths
+than the vault's live-document count stand at or above G0, deaths recorded, in effect, while
+the reconcile runs. Recording G0 rather than the floor is what lets a lagging reader leave
+the floor behind. Had the reconcile recorded the floor it read, an engine whose backlog
+stands past the bound would sit at that floor, the next eviction would raise the floor past
+it, and it would reconcile again at every pass, while its census, which counts one page of
+each feed per unit, never finished a count. G0 lies above the whole backlog the reconcile
+accounted for, so the next eviction stays below it.
 
 What each consumer does below the floor:
 
-- **The semantic engine** runs its held-path reconcile: it removes held rows whose paths the
-  store no longer holds as documents, a page of held paths at a time, and then rescans both
-  feeds from the start. Content-addressed sidecar rows keep the rescan to the rows that
-  changed.
+- **The semantic engine** runs its held-path reconcile. A page of held paths at a time, it
+  checks each path it holds against the store's document rows and removes the rows whose
+  paths the store no longer holds as documents. It then rescans both feeds from the start.
+  Content-addressed sidecar rows keep the rescan from re-embedding anything whose content the
+  sidecar already holds. The reconcile therefore costs one check per held path and a read of
+  the document feed and of the deaths the store keeps. A stalled sidecar holds a path for
+  each death it has not read, so it can hold more paths than the vault now has documents.
 - **The census** counts again. It empties its rows and reads both feeds from the start,
-  recording the floor it started against as a reconcile does and starting over where a later
-  page reads a higher floor. A floor reset is not an epoch reset: the database is the same,
-  so the census keeps its last whole counts, and status answers them until the new count is
-  whole. A new store epoch still clears them, because no count is carried from one database
-  to another.
-- **Freshness and the search margin** read a death watermark below the floor as they read a
-  watermark from another store epoch: freshness reports the engine as rescanning, and the
-  unfiltered vector rung's margin is its cap. The store reading each judges against carries
-  the death floor beside the store epoch and the write generation, read in the same
-  snapshot, whether it is the reading of a search's own hold or the reading a vault's entry
-  recorded where its last leg's lane-1 work committed.
+  recording G0 as a reconcile does and starting over only where a later page reads a floor at
+  or above G0. A floor reset is not an epoch reset: the database is the same, so the census
+  keeps its last whole counts, and status answers them until the new count is whole. A
+  restart keeps those last whole counts and nothing of the count in progress: it empties the
+  rows it has counted again and reads a new G0 on its new first page. A new store epoch still
+  clears the last whole counts, because no count is carried from one database to another.
+- **Freshness and the search margin** judge the engine's own read-through generation against
+  the floor, never its death watermark alone. A watermark is set only when a drain of the
+  death feed completes, so an engine part way through a long backlog, whose death cursor has
+  read past the floor, holds a watermark below it although the death prune removed only
+  deaths it had read. Where the engine's read-through generation in the reading's store
+  epoch stands below the reading's floor, freshness reports the engine as rescanning and the
+  unfiltered vector rung's margin is its cap, as they do for a watermark from another store
+  epoch. Otherwise
+  each reads its lag from the watermarks as before. Every death the prune removed stands at
+  or below the floor, which the engine has then read through, so the feed rows standing past
+  the watermarks still bound what the engine has not read.
 
-The floor is part of the lane-2 read surface. The feed-read handle reports it beside the
-store epoch, read in each page's snapshot, so the engine learns it without naming a wider
-store surface. Boundary invariant 12 stays intact.
+**The readings the host judges carry what the judgment reads.** The engine's report, and the
+sample of the engine a search takes under its slot lock, carry the engine's read-through
+generation and the store epoch it was recorded in, beside the watermarks. The store reading
+each judges against carries the death floor beside the store epoch and the write generation,
+read in the same snapshot, whether it is the reading of a search's own hold or the reading a
+vault's entry recorded.
+
+**A floor raise reaches the host as a lane-1 commit does.** A death-prune unit that raises
+the floor records the store reading the host's status judges against, as a leg records it
+where its lane-1 work commits. Where the new floor stands above the read-through generation
+the unit was handed, the raise removed deaths a reader had not read, so the unit is a commit
+that leaves the engine owing work and sends that wake. A status taken after the raise
+therefore judges against the new floor, and where the engine has not read through it,
+reports the engine rescanning until it reconciles. It never reports `trailing(0)` against an
+older reading while the sidecar holds rows for deaths the raise removed unread. A unit that
+raises no floor records nothing and sends no wake.
+
+**A death-prune unit takes no write generation.** The write generation orders the writes a
+read can observe, and every reading, cursor and watermark is a position in that order. A
+death-prune unit changes nothing a lane-1 read answers: move-following answers the same
+before and after it, and no other read reads a death. Its one effect a reader can see is on
+the death feed, and the floor states that effect. A generation would make every reading
+taken across the unit report a write that changed no answer, and freshness report a lag that
+no drain has work for. A unit therefore moves the store reading's floor and never its write
+generation, and a pass's upper bound is always the generation of a write.
+
+The floor is part of the lane-2 read surface. The feed-read handle reports the floor read in
+each page's snapshot, beside the store epoch its source was minted for, which the source
+checks once, when its connection opens. The engine learns the floor without naming a wider
+store surface, and boundary invariant 12 stays intact.
 
 ### The read-through generation
 
@@ -240,7 +303,8 @@ current store epoch, and never runs above it.** It is the highest of:
 - the generation before its death cursor's own;
 - the watermark of its last completed drain of the death feed, for the engine, which records
   one; and
-- the floor its last completed reconcile recorded.
+- the generation its last completed reconcile recorded, G0 − 1 for the G0 that reconcile's
+  first page read.
 
 A reader that has recorded none of these in the current store epoch has read no death in it.
 The host supplies the lower of the two readers' read-through generations, and where either
@@ -283,13 +347,17 @@ maintenance leg on the shared worker pool, beside the shadow sweep and the rolli
   - a death has been recorded above the last pass's bound;
   - a `link/broken` finding has been filed or discarded since the last pass began, which the
     attachment counts from each changeset's outcome; or
-  - the last pass kept a death for lane 2 alone, which lane 2 may have read since.
+  - the last pass kept a death for lane 2 alone, and the read-through generation the host
+    supplies has risen since that pass, so lane 2 may have read it.
 
   A death past the bound of condition 1 can arise only from a newly recorded death, so the
-  first case covers the bound. A pass in progress keeps the death prune due. A store where
-  none of these holds owes no pass, and its clock contributes no deadline until one does.
-  The attachment holds what the cases read, so a restart or a new attach owes one pass at its
-  first period.
+  first case covers the bound. A configured engine that never advances leaves its
+  read-through generation where it stood, so it makes no pass due by the third case, and a
+  stalled engine does not have every broken link marked again each period. A pass in
+  progress keeps the death prune due. A store where none of these holds owes no pass, and its
+  clock contributes no deadline until one does. The attachment holds what the cases read,
+  the read-through generation the last pass used among them, so a restart or a new attach
+  owes one pass at its first period.
 - **A pass.** A pass fixes its upper bound, the store's write generation, at its first unit.
   Deaths recorded after it are left to a later pass. It runs in three phases, each resuming
   from an exclusive cursor the attachment holds:
@@ -298,14 +366,44 @@ maintenance leg on the shared worker pool, beside the shadow sweep and the rolli
      each one's link, and records the deaths they return in a **kept set**: a table in the
      temporary database of the store's writer connection, as the rolling heal keeps its
      inventory.
-  2. **The bound.** It reads the live-document count, as one count of the document rows, and
-     then walks back from the newest death in feed order until it has passed that many deaths
-     or has reached the read-through generation, whichever comes first. Where it passes the
-     count first, the death it stopped at is the cutoff: unread deaths at or before it in feed
-     order are past the bound.
+  2. **The bound.** It counts the live documents, L. It then walks the deaths at or below the
+     pass's upper bound in descending feed order, `(generation, path)`, starting from the
+     newest of them. It counts every death it passes, one a broken link keeps and a
+     quarantine death included. It stops once it has passed L deaths, or once it reaches a
+     death at or below the read-through generation or the start of the feed, whichever comes
+     first. Where it stops short of L deaths, condition 1 keeps every unread death and the
+     pass has no cutoff. Where it passes L deaths first, the next death it meets, the
+     (L + 1)th newest at or below the upper bound, is the **cutoff**, if it stands above the
+     read-through generation: the cutoff and every unread death before it in feed order are
+     past the bound. The cutoff is fixed for the rest of the pass, and no removing unit
+     computes it again.
   3. **Removing.** It reads the deaths in feed order, `(generation, path)`, up to the pass's
      bound, and deletes each death that the kept set does not hold and condition 1 does not
-     keep, raising the floor in the same transaction.
+     keep, raising the floor in the same transaction. Condition 1 keeps a death above the
+     read-through generation the unit was handed and after the cutoff in feed order.
+
+  **The bound walk is pinned so that the table stays bound by the vault's present and the
+  removal is deterministic.** The walk starts at the newest death at or below the pass's
+  upper bound rather than the newest in the store, so the cutoff follows the deaths the pass
+  covers and not how far writes got before the walk ran; deaths recorded after the upper
+  bound are left to the next pass, which counts them. Every death counts, whatever else keeps
+  it, so condition 1 keeps at most L deaths, and the table at rest holds at most L deaths for
+  lane 2 and two for each broken link; each step of the walk is then one index step, with no
+  lookup into the kept set. The cutoff is fixed for the pass because computing it again would
+  repeat the walk's L steps in every removing unit, and a cutoff that moved between units
+  would make which deaths a pass removes depend on when its units ran. The deaths before the
+  cutoff are the oldest unread deaths, so the first death the bound evicts is the oldest
+  unread death no broken link keeps, and the newest it can evict is the cutoff itself. A death
+  the walk counted that a changeset then clears, because its path derived again, leaves fewer
+  than L deaths kept for lane 2 until the next pass, never more.
+
+  **Every phase continues by an exclusive keyset seek.** Marking seeks the partial findings
+  index below past the last `(generation, path, ordinal)` it marked under the pinned
+  fingerprint. The bound walk and the removal seek `tombstones_change_feed` past the last
+  `(generation, path)` they read, the walk descending and the removal ascending. No page
+  steps over rows an earlier page consumed, and none sorts. Each statement carries plan bars,
+  as the change-feed drains do: a search of its index bounded by its cursor, no scan of the
+  table, and no temporary b-tree for its order.
 
   **Every removing unit first marks the broken findings filed since the marking cursor.** The
   kept set it deletes against therefore covers every link broken in that unit's own
@@ -322,20 +420,33 @@ maintenance leg on the shared worker pool, beside the shadow sweep and the rolli
   find the findings filed since a cursor. `finding_classes_class_key`,
   `finding_paths_path_key` and `findings_one_per_link` reach findings by key or by link, not
   by kind. The death prune adds one partial index over `link/broken` findings, keyed by
-  `(vault_schema_fingerprint, generation, path, ordinal)`. It costs one more index entry for
-  each broken finding a changeset files.
+  `(vault_schema_fingerprint, generation, path, ordinal)`. A changeset writes one entry in it
+  for each broken finding it files and removes one for each it discards, so its write cost
+  follows the broken findings a changeset touches, never the vault. A bulk re-judgment, such
+  as the re-decision of every link a schema pin owes, pays one entry for each broken finding
+  it files or discards. The implementation measures that cost on a bulk re-judgment and
+  records it beside the write-work bar.
 
   A pass that finds a pinned fingerprint other than the one it began under starts over,
-  because the findings it marked from are gone. A host restart, a detach or a rebuild loses
-  the pass's cursors and its kept set, and the next pass starts over.
+  because the findings it marked from are gone, and it clears its kept set first. A pass that
+  ends clears its kept set too. A host restart, a detach or a rebuild loses the pass's
+  cursors and its kept set, and the next pass starts over.
 - **Units.** A death-prune unit is one transaction on the store's writer. It is bounded by the
   logical rows it reads, findings, deaths, kept-set rows and index steps together, and not
   only by the rows it deletes, so a page of kept deaths cannot hold the writer longer than a
-  page of deleted ones. The implementation sizes the bound by measurement so that one unit
-  costs no more than a rolling-heal slice, about 13 ms at 10,000 documents, and records the
-  measurement beside the value. A unit whose catch-up fills its bound deletes nothing, and
-  the next unit continues the catch-up. The count of the document rows is one statement, and
-  the implementation measures it with the unit.
+  page of deleted ones. The kept-set rows a unit clears, at a pass's end or at a fingerprint
+  restart, count toward the same bound, so clearing a large kept set takes several units. The
+  implementation sizes the bound by measurement so that one unit costs no more than a
+  rolling-heal slice, about 13 ms at 10,000 documents, and records the measurement beside the
+  value. A unit whose catch-up fills its bound deletes nothing, and the next unit continues
+  the catch-up.
+
+  **The live-document count is the one read a row bound cannot cut.** It is one statement,
+  run once per pass at the start of the bound phase, and it counts the document rows whole,
+  stepping every entry of an index over `documents`, so its cost follows the vault's live
+  documents. The unit that runs it runs nothing else. The implementation measures the count
+  at the largest vault it supports and records that one count costs no more than a unit is
+  allowed; a count that does not fit is a defect to diagnose, not a bound to raise.
 - **Leg order.** A leg runs the sweep, then the rolling-heal slice, then death-prune units.
   The slice runs at most once in a leg and comes before the death prune, so the death prune
   cannot starve it. A leg checks the background turn budget between units, as it does between
@@ -343,8 +454,9 @@ maintenance leg on the shared worker pool, beside the shadow sweep and the rolli
   leaves maintenance due, so another leg follows, as a rolling-heal pass does.
 
 **A pass costs in proportion to what it keeps and examines.** Its work is one move-following
-read per broken link, one more per broken finding filed while it runs, the walk that reads
-the bound, and one step per death up to its bound. The deaths up to its bound are the ones it
+read per broken link, one more per broken finding filed while it runs, one count of the live
+documents and a walk of at most L + 1 deaths for the bound, one step per death up to its
+bound, and the clearing of its kept set. The deaths up to its bound are the ones it
 kept last time, at most two per broken link and one unread death per live document, plus the
 deaths recorded since. A healthy link costs a pass nothing, and neither does the vault's
 history of deletions.
@@ -353,9 +465,11 @@ history of deletions.
 
 A death that lane 2 has not read stands until lane 2 reads it or until the bound passes it.
 From then, a death no broken link keeps stands until the next pass reaches it: at most one
-period of the death prune's clock, plus the length of that pass, because a pass that kept a
-death for lane 2 alone leaves the next pass due. A death a broken link keeps stands while that
-link stays broken and the death is one of the two the link's reads return.
+period of the death prune's clock, plus the length of that pass, because lane 2's reading
+it raises the read-through generation, which leaves the next pass due. A death a broken link
+keeps stands while that link stays broken and the death is one of the two the link's reads
+return. Under sustained bulk refiling of broken findings, removal can wait longer, as the
+known limits below state.
 
 The death prune adds no window in which repair answers differently. For a link that stays
 broken, the move-following reads return the same deaths whether or not a death prune ran,
@@ -365,15 +479,34 @@ again. A link whose deaths a pass removed while it was healthy, ambiguous or hel
 and which then breaks, finds fewer deaths than it would have, as the consequences below
 state.
 
-### Known limit
+### Known limits
 
-A link whose holder is withdrawn for a time keeps no death while it is withdrawn. A holder
-that becomes unreadable keeps its names alone
+**A link whose holder is withdrawn for a time keeps no death while it is withdrawn.** A
+holder that becomes unreadable keeps its names alone
 ([ADR 0046](0046-one-unreadable-path-never-breaks-the-vault.md)), a quarantined holder has no
 row, and an ignored holder is not in the store, so none of them holds a stored link or a
 `link/broken` finding. A pass in that time may remove a death the link would keep. When the
 holder returns, its link may find that its move's death is gone. The worst outcome is that a
 move cannot be followed, and repair falls back to a similarity suggestion.
+
+**A link whose target lies beneath an unreadable-directory mark keeps no death while the
+mark stands.** A path-addressed link beneath a directory marked unreadable that resolves to
+no held name is not judged
+([Link health is re-decided inside the changeset](#link-health-is-re-decided-inside-the-changeset)),
+so its `link/broken` finding is set aside while the mark stands, and a pass in that time may
+remove the deaths its reads would return. When the directory lists again and the mark ends,
+the link is judged broken again with nothing to follow. The worst outcome is the same: a
+move cannot be followed, and repair falls back to a similarity suggestion.
+
+**Under sustained bulk refiling of broken findings, removal waits.** A changeset that
+rewrites a document holding many broken links files all their findings again, and every
+removing unit first marks the findings filed since its marking cursor. Where holders with
+many broken links are rewritten again and again, faster than units mark their findings, the
+catch-up can take each unit's whole allowance, and those units remove nothing. Deaths then
+accumulate only while those writes continue, and the units after them drain the backlog.
+Removal never skips the catch-up to make progress: a unit that deleted against a kept set
+missing a link broken in its own transaction could remove a death that link's reads return,
+and move-following would no longer answer the same before and after the unit.
 
 ### Considered options
 
@@ -395,17 +528,24 @@ move cannot be followed, and repair falls back to a similarity suggestion.
   read per broken link.
 - **Unbounded retention for lane 2.** An engine that is configured but never advances, such
   as one whose section cannot be read or whose model will not load, would keep every death
-  the vault records, for as long as it stays so. Past the live-document count, draining costs
-  more than the reconcile the bound turns it into.
+  the vault records, for as long as it stays so. Past the live-document count, the reconcile
+  the bound turns the backlog into costs within a small factor of draining it, and the store
+  would keep, for that engine alone, deaths that every pass and verification pays for.
 - **Remove deaths without the read-through generation.** A lagging engine, or one held back
   by real-model embedding, would fall below the floor at every pass and pay a whole-vault
   reconcile each time.
 - **Restart a pass whenever the broken-link set changes.** Every write to a document holding
   a broken link files its findings again, so under steady edits a pass would never finish.
   The catch-up keeps each unit exact at the cost of the findings filed meanwhile.
-- **Wake the death prune when lane 2 advances.** This needs a new scheduler wake path. A pass
-  that kept a death for lane 2 alone leaves the next period due instead, which bounds the
-  wait by one period.
+- **Wake the death prune when lane 2 advances.** This needs a new scheduler wake path. A rise
+  in the read-through generation after a pass that kept a death for lane 2 alone leaves the
+  next period due instead, which bounds the wait by one period.
+- **Make a pass due whenever the last one kept a death for lane 2 alone.** A configured
+  engine that never advances would then make every period owe a pass, which marks every
+  broken link again and removes nothing.
+- **Record the floor a reconcile started against as its read-through generation.** An engine
+  whose backlog stands past the bound would sit at that floor, the next eviction would pass
+  it, and it would reconcile at every pass while its census never finished a count.
 
 ### Consequences
 
@@ -417,9 +557,14 @@ move cannot be followed, and repair falls back to a similarity suggestion.
   fewer deaths than it would have, or none, and falls back to a similarity suggestion where
   it finds none. A build from zero holds no deaths at all, so it gives the same answer.
 - **A reader past the bound pays once.** An engine that was turned off when a pass ran, or
-  that fell further behind than the vault's live-document count, pays one whole-sidecar
-  reconcile when it next advances, and its census counts again. A reader within the bound
-  never falls below the floor, because condition 1 keeps every death it has not read.
+  that fell further behind than the vault's live-document count, pays one reconcile when it
+  next advances, and its census counts again. The reconcile costs one check per path the
+  sidecar holds, which for a stalled sidecar can exceed the vault's documents, and a rescan
+  of the document feed that re-embeds nothing whose content the sidecar holds. It accounts for
+  every death recorded before it began, so it restarts only where more deaths than the
+  vault's live-document count are recorded while it runs, and once complete it does not
+  reconcile again for the backlog it accounted for. A reader within the bound never falls
+  below the floor, because condition 1 keeps every death it has not read.
 - **The feed's cursor validity gains a second condition.** A cursor is valid within one store
   epoch and only while its consumer has read through the death floor, and the response to
   either failure is the same reconcile and rescan. The section
@@ -430,11 +575,15 @@ move cannot be followed, and repair falls back to a similarity suggestion.
 - **Repair answers can depend on when a pass ran, but only for a link that was not broken
   throughout.** The read-through generation is a reading of how far a reader has read, not
   inferred state, and it decides only whether a death stands, never what a death or a
-  finding says, so inference still never reaches findings or plans. Under a real model the
-  engine's pace sets how long lane 2 keeps a death, so the model paces the window in which a
-  link that breaks late can still find a death to follow. The bound caps that window at one
-  unread death per live document, and in no case does the model decide what repair reads
-  from a death.
+  finding says, so inference still never reaches findings or plans.
+- **The engine's progress can lengthen how long an unread death stays, and this is
+  accepted.** Under a real model the engine's pace sets how long lane 2 keeps a death, and so
+  whether repair can follow a move for a link written after the death, or one that breaks
+  late. Repair's answer for such a link already depends on timing, through the death prune's
+  clock. The live-document bound caps the stretch the engine adds, at one unread death per
+  live document. Repair never receives a wrong fix from it: it follows a move only while the
+  death that records the move exists, and that death records a real move. In no case does
+  the model decide what repair reads from a death.
 - **The store's documentation changes with this decision.** A death no longer stands exactly
   while its path is dead. It stands only while its path is dead, and only while this rule
   keeps it. Disjointness from document rows is unchanged.
@@ -451,18 +600,31 @@ These consequences are testable:
   keeps none, and no link keeps a quarantine death.
 - Condition 1 keeps every death above the read-through generation, up to the live-document
   count, and past that count the death prune removes the oldest unread deaths first and
-  raises the floor.
+  raises the floor. Every unread death counts toward the bound, link-kept and quarantine
+  deaths included; the cutoff is the (L + 1)th newest death at or below the pass's upper
+  bound, and it stays fixed for the pass.
 - A vault whose engine is turned off keeps no death for lane 2. A configured engine that has
   recorded nothing in the store epoch keeps every unread death, up to the bound.
-- A reconcile that reads a higher floor on a later page starts over, and one that completes
-  records the floor it started against, so the rescan after it does not reconcile again.
-- A census below the floor reports its last whole counts until its recount is whole. A
-  census over a new store epoch reports none.
-- Freshness reports rescanning, and the search margin its cap, where the death watermark
-  stands below the floor of the reading they judge against.
+- A reconcile, an epoch reconcile and a census recount each record the write generation G0
+  their first page reads. A later page that reads a floor at or above G0 starts it over, and
+  a floor below G0 does not. One that completes records G0 − 1 as read through, so the rescan
+  after it does not reconcile again. An engine whose backlog stands past the bound, with
+  fewer deaths than the live-document count recorded while it reconciles, reconciles once,
+  and its census finishes its count.
+- A census below the floor reports its last whole counts until its recount is whole, a
+  restart included. A census over a new store epoch reports none.
+- Freshness reports rescanning, and the search margin its cap, where the engine's
+  read-through generation stands below the floor of the reading they judge against, and not
+  where only its death watermark does.
+- A death-prune unit that raises the floor records the store reading status judges against,
+  and wakes the engine where the floor passed the read-through generation it was handed. It
+  takes no write generation.
 - A death-prune pass comes due only where a death was recorded, a broken finding filed or
-  discarded, or a death kept for lane 2 alone since the last pass, and never during a
-  from-zero build or while link health is loading.
+  discarded, or the read-through generation rose after a pass that kept a death for lane 2
+  alone, and never during a from-zero build or while link health is loading. A configured
+  engine that never advances makes no pass due through the read-through generation.
+- Every phase of a pass continues by an exclusive keyset seek with no sort, and the
+  live-document count fits one unit.
 - A death-prune unit reads no more logical rows than its bound, and a leg with a rolling-heal
   slice due runs the slice before any death-prune unit.
 
@@ -829,7 +991,7 @@ of retention: the store keeps a death that lane 2 has not read. But lane 2 pins 
 a bound the vault sets, one unread death per live document, and the store registers no
 subscriber: the host hands the death prune how far lane 2 has read as an argument to one
 unit. Past the bound the death prune removes the oldest unread deaths and raises the floor,
-so the eviction there is becomes a reconcile from current state rather than lost data.
+so the eviction it does make becomes a reconcile from current state rather than lost data.
 Cross-file transactional atomicity is not required, because eventual consistency is lane 2's
 stated contract.
 
@@ -1327,8 +1489,9 @@ A **from-zero build** constructs a canonical store from empty, and every one is 
 this section rules: a vault's first build, and every rebuild of an existing store from
 zero — over a DDL fingerprint, derivation version or path order the store does not match,
 over damage, or by any other rung that discards the database and derives the vault again.
-It is the construction [ADR 0047](0047-a-write-re-decides-only-the-links-whose-inputs-it-moved.md) judges link
-health once over, under the same term. There is one construction path from empty to
+It is the construction over which link health is judged once, as
+[A from-zero build judges link health once](#a-from-zero-build-judges-link-health-once)
+rules, under the same term. There is one construction path from empty to
 complete; the ordinary per-changeset heal only maintains a store that already exists. A
 full tree heal of an existing store, a recovery that does not rebuild from zero, a schema
 reload, a park and a release gain nothing from this section and keep their existing read
@@ -1381,7 +1544,8 @@ order:
 3. **Structure.** Each stored body is parsed. No file is read again: every fact comes from
    the bytes step 2 hashed. Headings, blocks, body links and inline tags are written. The
    indexes their readers seek are created at the end of this step.
-4. **Relations.** Link health is judged once, over every eligible link, as ADR 0047 rules.
+4. **Relations.** Link health is judged once, over every eligible link, as
+   [A from-zero build judges link health once](#a-from-zero-build-judges-link-health-once) rules.
 5. **Full-text.** The full-text index is built from the stored bodies in bounded batches.
    The transaction that ends the step installs the full-text triggers and clears the
    under-construction mark.
@@ -1397,8 +1561,9 @@ accepted after step 4's closing take waits for the reconcile that precedes `Read
 
 **Construction ends at step 5, and `Ready` follows in one order.** Step 5 installs the
 triggers and runs the construction checkpoint; the facts accepted since step 4's closing
-take are then reconciled as ordinary changesets, under ADR 0047's per-changeset rule and the
-restored autocheckpoint; and `Ready` is published.
+take are then reconciled as ordinary changesets, under the per-changeset rule of
+[Link health is re-decided inside the changeset](#link-health-is-re-decided-inside-the-changeset)
+and the restored autocheckpoint; and `Ready` is published.
 
 Each step has one routine. The normal passes run it over the vault in batches; a requested
 document, and a path a filesystem fact requeues, run the same routine on their own. There
@@ -1491,8 +1656,10 @@ touches, until its path is derived again:
 - **Its path is derived again.** During steps 1–4 the next take requeues the path at the
   front of the queue, and it runs again through the same step routines, up to the step
   the build has reached; a path taken while step 4 runs has the links it reaches judged
-  again before step 4 ends, as ADR 0047 rules. After step 4's closing take nothing is
-  requeued: the fact waits for the reconcile that precedes `Ready`.
+  again before step 4 ends, as
+  [A from-zero build judges link health once](#a-from-zero-build-judges-link-health-once) rules.
+  After step 4's closing take nothing is requeued: the fact waits for the reconcile that
+  precedes `Ready`.
 - **A Get of that document waits** until its path is derived again. Other Gets are
   unaffected. After Relations, an unaffected Get answers with link resolution, link
   health and findings rendered loading while any fact is outstanding at its admission.
@@ -1520,9 +1687,10 @@ touches, until its path is derived again:
   listing is a clean enumeration of that directory, so its unreadable-directory finding ends
   before any reader or step 4 can see the names beneath it, and step 4 judges over the restored
   names; where a take lists it while step 4 runs, the finding ends before step 4 ends and
-  the links beneath it are judged again, as ADR 0047 rules. After step 4's closing take the
-  fact waits for the reconcile that precedes `Ready`, whose job-end prune ends the finding and re-decides those
-  links.
+  the links beneath it are judged again, as
+  [A from-zero build judges link health once](#a-from-zero-build-judges-link-health-once) rules.
+  After step 4's closing take the fact waits for the reconcile that precedes `Ready`, whose
+  job-end prune ends the finding and re-decides those links.
 
 The authority includes every relevant fact the subscription accepts after capture, wherever
 it is held: the coalescer's pending or unplaced batch, an open heal window, collected heal
@@ -1667,10 +1835,10 @@ mark beside the fingerprint, derivation and path-order mismatches. The failure t
 process-killed row gains a from-zero-build clause: a process killed during construction
 before step 5's transaction commits leaves the mark and is rebuilt from zero, link health is
 judged once rather than re-decided per changeset during that build
-([ADR 0047](0047-a-write-re-decides-only-the-links-whose-inputs-it-moved.md)), and a process killed after
-that commit leaves a finished store the attach heal converges. The statement that the
-full-text triggers are the only writer of the full-text index gains the construction
-exception above. The permission-loss row changes as
+([A from-zero build judges link health once](#a-from-zero-build-judges-link-health-once)),
+and a process killed after that commit leaves a finished store the attach heal converges.
+The statement that the full-text triggers are the only writer of the full-text index gains
+the construction exception above. The permission-loss row changes as
 [ADR 0046](0046-one-unreadable-path-never-breaks-the-vault.md) rules: an unopenable document
 or unlistable directory no longer refuses the heal or fails a first index.
 
@@ -2025,7 +2193,7 @@ No poll tick starts background work, on the lane or in a maintenance leg. The wa
 host-internal and never travels on the filesystem event bus (invariant 9). A wake sets a
 flag under the scheduler's lock, so a wake sent while the scheduler is busy is kept. The
 owed flags and due clocks stay authoritative, so a lost wake costs latency and never
-correctness, as [ADR 0047](0047-a-write-re-decides-only-the-links-whose-inputs-it-moved.md)
+correctness, as [Lane 2 reads change through a feed](#lane-2-reads-change-through-a-feed)
 rules for the feed. A wake is lost only where a site that owes one does not send it. The
 latency then lasts until the next wake from any site, the next deadline, or, for a
 maintenance leg, the entry's next leg end that asks `maintenance_due`. A marked entry has
@@ -2040,8 +2208,9 @@ configuration and store.
 ### Semantic work leaves the claim
 
 This section is amended. A drain also reconciles where the engine has not read through the
-death floor, and every reconcile records the floor it reconciled against. Its other rules
-stand as ADR 0051 wrote them.
+death floor, and every reconcile records the write generation its first page read and, on
+completing, the generation below it as read through. Its other rules stand as ADR 0051
+wrote them.
 
 A semantic background turn reads the change feed through its own read connection, never
 through the attachment's `Store`. It embeds while holding no store and no lock, and it
@@ -2053,14 +2222,15 @@ Correctness rests on mechanisms that already exist, and on the death floor. Curs
 consumer-owned feed positions, each a `generation:path` pair, valid within one store epoch
 and only while the engine has read through the death floor. The sidecar records the store
 epoch it observed beside its cursors (`OBSERVED_STORE_EPOCH`), and beside that epoch the
-floor its last completed reconcile started against. A feed whose epoch differs from that
-record, or whose floor the engine has not read through, makes the drain reconcile the
-sidecar against the store before it reads the feed: the rescan
+generation its last completed reconcile read through, one below the write generation that
+reconcile's first page read. A feed whose epoch differs from that record, or whose floor the
+engine has not read through, makes the drain reconcile the sidecar against the store before
+it reads the feed: the rescan
 [Lane 2 reads change through a feed](#lane-2-reads-change-through-a-feed) rules for either
-failure. A reconcile records the floor it starts against and starts over where a later page
-reads a higher one, as [The death floor](#the-death-floor) rules. The drain's
-generation check already keeps a hash from being written beside values it does not
-describe, even against a writer interleaving through another store handle. The feed-read
+failure. A reconcile records the write generation its first page reads and starts over only
+where a later page reads a floor at or above it, as [The death floor](#the-death-floor)
+rules. The drain's generation check already keeps a hash from being written beside values
+it does not describe, even against a writer interleaving through another store handle. The feed-read
 handle keeps its surface. Only its source changes, so `norn-semantic` still reads lane-1
 state through that handle alone (invariant 12).
 
@@ -2322,10 +2492,10 @@ The shadow sweep does not wait for a quiet entry, because a vault under continuo
 never quiet and the sweep would never run. A maintenance leg runs it whenever its clock is
 due, quiet or not. The death prune does not wait for a quiet entry either, for the same
 reason, and runs only where the store's link health is admitted. The architecture promises
-that shadow cleanup and store verification keep their fairness under sustained watcher traffic. The reconcile leg's hand-on to due
-maintenance, ahead of another reconcile turn, keeps that promise for shadow cleanup, as it
-does today. The verification keeps it by running on the lane, which reconciles do not
-hold back.
+that shadow cleanup and store verification keep their fairness under sustained watcher
+traffic. The reconcile leg's hand-on to due maintenance, ahead of another reconcile turn,
+keeps that promise for shadow cleanup, as it does today. The verification keeps it by
+running on the lane, which reconciles do not hold back.
 
 **A maintenance leg takes the background turn budget.** The leg checks the budget between
 units and always runs at least one. A unit of a maintenance leg is one sweep, one
@@ -2347,7 +2517,8 @@ verification never take a slot.
 ### Status reports embedding coverage
 
 This section is amended. A census below the death floor keeps its last whole counts while it
-counts again. Its other rules stand as ADR 0051 wrote them.
+counts again, and starts that count over only as a reconcile starts over. Its other rules
+stand as ADR 0051 wrote them.
 
 `EngineStatus::On` gains `coverage: { embedded, total }` beside `freshness`. Both counts
 are taken at one store state, the one the unit's page was read from or, while a count is
@@ -2379,7 +2550,9 @@ count has no whole count to report, and neither does a count over a new store ep
 census empties when the store epoch changes, so no count is carried from one database to
 another. A census that has not read through the death floor empties and counts again too,
 but over the same database, so it keeps its last whole counts, and the status reports them
-until the new count is whole ([The death floor](#the-death-floor)). `EngineStatus::On` is
+until the new count is whole. It records the write generation its first page reads, starts
+over only where a later page reads a floor at or above it, and keeps its last whole counts
+across a restart ([The death floor](#the-death-floor)). `EngineStatus::On` is
 `#[non_exhaustive]`, so the new field is an additive `norn-wire` change.
 
 ### Non-goals
@@ -2536,8 +2709,9 @@ These costs are accepted:
   scale.
 - The census keeps one sidecar row for each readable document.
 - The census reads both feeds whole, without embedding, at a vault's first drain, after
-  every new store epoch, such as a store rebuild, and after it falls below the death floor. Measured on the first full drain, that pass
-  adds about 20 ms at 2,000 documents and about 200 ms at 10,000.
+  every new store epoch, such as a store rebuild, and after it falls below the death floor.
+  Measured on the first full drain, that pass adds about 20 ms at 2,000 documents and about
+  200 ms at 10,000.
 - The census's work for one settled edit is one row. Measured, the unit that drains one
   settled edit grows from about 0.27 ms to about 0.55 ms.
 
