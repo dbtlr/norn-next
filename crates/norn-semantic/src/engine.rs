@@ -686,9 +686,14 @@ impl Engine {
             // from its start again before the tombstones take their turn.
             self.tombstones_turn = false;
             let (complete, counted) = self.reconcile_page(feed, reading, running, &mut report)?;
-            if counted || !complete {
+            // A pass that completes with the floor above its G0 is followed
+            // by another (ADR 0052), even where its completing page held
+            // nothing: reading the feeds from their starts now would record a
+            // watermark over deaths the prune removed unread.
+            let again = complete && self.recorded.read_through.engine_below_floor(reading);
+            if counted || !complete || again {
                 report.owed = true;
-                return Ok((DrainStep::Done(report), true, false));
+                return Ok((DrainStep::Done(report), counted, false));
             }
         }
         if !documents_complete

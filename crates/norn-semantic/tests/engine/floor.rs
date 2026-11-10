@@ -11,11 +11,15 @@
 
 use std::sync::Arc;
 
-use crate::common::{CountingEmbedder, Scratch, delete_all, recompute, write_all};
+use crate::common::{
+    CountingEmbedder, Scratch, apply_changes, delete_all, document, path, recompute, write_all,
+};
 use norn_semantic::{
     Coverage, DrainReport, DrainStep, Engine, ReadThroughGeneration, ReadThroughs,
 };
-use norn_store::{DEATH_PRUNE_UNIT_ROWS, DeathPrunePass, MAX_PAGE, ReadThrough, Store};
+use norn_store::{
+    Change, DEATH_PRUNE_UNIT_ROWS, DeathPrunePass, MAX_PAGE, Provenance, ReadThrough, Store,
+};
 
 // ---- fixtures ----
 
@@ -443,6 +447,83 @@ fn deletions_during_a_reconcile_converge_without_starting_it_over() {
     assert_eq!(embedder.calls(), 600);
 }
 
+/// The held paths one reconcile page checks: the engine's own page, which a
+/// case whose held-path count must be an exact multiple of it sizes by.
+const RECONCILE_PAGE: usize = 256;
+
+/// **A reconcile whose held paths fill its pages exactly completes on an
+/// empty page, and where the floor passed its G0 meanwhile, that step owes
+/// the next reconcile.** The sidecar holds three pages of paths. The first
+/// page checks `a/` live; then every document dies and the prune removes
+/// those deaths unread, so neither feed presents anything a drain would read.
+/// The page that completes the pass holds nothing, and the step that reads it
+/// still owes the reconcile that removes `a/`'s vectors, rather than settling
+/// on the empty feeds and leaving them for a wake nothing sends.
+#[test]
+fn a_reconcile_completing_on_an_empty_page_below_the_floor_owes_another() {
+    let scratch = Scratch::new("floor-empty-final-page");
+    let mut store = scratch.store();
+    let checked = numbered("a", 0, RECONCILE_PAGE);
+    let doomed = numbered("z", 0, 2 * RECONCILE_PAGE);
+    write_all(&mut store, &checked);
+    write_all(&mut store, &doomed);
+    let embedder = CountingEmbedder::new();
+    let mut engine = scratch.engine(embedder.clone());
+    settle(&mut engine, &mut store);
+    assert_eq!(embedder.calls(), 3 * RECONCILE_PAGE as u64);
+
+    let deleted = delete_all(&mut store, &doomed);
+    assert_eq!(prune_for(&mut store, &engine), Some(deleted));
+    assert!(below_floor(&engine, &mut store));
+
+    // The pass's first page checks every `a/` path live.
+    let first = step(&mut engine, &mut store);
+    assert_eq!(
+        (first.reconciles, first.reconciled_away),
+        (1, 0),
+        "{first:?}"
+    );
+    assert!(first.owed, "{first:?}");
+
+    // Every document dies, and the prune removes the deaths unread: no live
+    // document bounds what lane 2 keeps.
+    let died = delete_all(&mut store, &checked);
+    assert_eq!(prune_for(&mut store, &engine), Some(died));
+    assert!(deaths(&mut store).is_empty());
+
+    // The second and third pages remove the `z/` vectors; the fourth holds
+    // nothing and completes the pass with its G0, below the floor.
+    for _ in 0..2 {
+        let report = step(&mut engine, &mut store);
+        assert_eq!(report.reconciled_away, RECONCILE_PAGE as u64, "{report:?}");
+        assert!(report.owed, "{report:?}");
+    }
+    let completing = step(&mut engine, &mut store);
+    assert_eq!(
+        (completing.reconciles, completing.reconciled_away),
+        (0, 0),
+        "{completing:?}"
+    );
+    assert_eq!(
+        engine.read_through().engine_in(store.epoch()),
+        Some(deleted),
+        "the completed pass records its own G0"
+    );
+    assert!(below_floor(&engine, &mut store));
+    assert!(
+        completing.owed,
+        "a pass completing below the floor owes the next: {completing:?}"
+    );
+
+    let report = settle(&mut engine, &mut store);
+    assert_eq!(report.reconciles, 1, "{report:?}");
+    assert_eq!(report.reconciled_away, RECONCILE_PAGE as u64, "{report:?}");
+    assert!(engine.projection().expect("a projection").is_empty());
+    assert!(!below_floor(&engine, &mut store));
+    assert!(settle(&mut engine, &mut store).is_settled());
+    assert_eq!(embedder.calls(), 3 * RECONCILE_PAGE as u64);
+}
+
 /// **A reconcile stopped by a restart resumes with its stored G0 and its
 /// frozen read-through generation.** An engine opened afresh part way
 /// through reports the read-through the reconcile began with, resumes the
@@ -627,6 +708,99 @@ fn a_recount_that_meets_a_pruned_death_past_its_cursor_counts_again() {
         "P's row did not survive"
     );
     assert_eq!(coverage, recounted(&mut store, &engine));
+}
+
+/// **A recount that completes below the floor owes the count it starts
+/// again, even where the drain has nothing left to read.** The census falls
+/// below a floor the drain has read through: one changeset writes a full
+/// census page of documents and records a death, on a step that gives the
+/// drain the deaths' turn, so the drain reads the death through its
+/// generation while the census, its document page full, reads it only
+/// through the generation before. A prune run while the vault's engine is
+/// turned off raises the floor to that death. The census recounts from G0 =
+/// that generation over more pages than the drain needs to embed the burst
+/// and settle; a second death the drain reads, pruned the same way, passes
+/// that G0, and the recount reaches the end of both feeds below the floor
+/// with the drain settled. That step still owes the next count, so a drain
+/// stops only once the counts are whole.
+#[test]
+fn a_recount_completing_below_the_floor_owes_its_next_count_with_the_drain_settled() {
+    // More documents than the recount reads in the steps the drain spends
+    // embedding the burst and reading the second death.
+    const OLD: usize = 4 * MAX_PAGE + 200;
+    let scratch = Scratch::new("floor-census-owes");
+    let mut store = scratch.store();
+    let old = numbered("c", 0, OLD);
+    write_all(&mut store, &old);
+    let embedder = CountingEmbedder::new();
+    let mut engine = scratch.engine(embedder.clone());
+    settle(&mut engine, &mut store);
+
+    // A document page that completes the document feed hands the next step
+    // to the deaths.
+    write_all(&mut store, &numbered("s", 0, 1));
+    assert!(step(&mut engine, &mut store).owed);
+
+    let burst = numbered("b", 0, MAX_PAGE);
+    let mut changes: Vec<Change> = burst
+        .iter()
+        .map(|at| Change::Upsert(document(at, &format!("hash-{at}"), &format!("{at}\n"))))
+        .collect();
+    changes.push(Change::Death {
+        path: path(&old[0]),
+        provenance: Provenance::PlanDelete,
+    });
+    let mixed = apply_changes(&mut store, changes);
+    step(&mut engine, &mut store);
+    assert_eq!(engine.read_through().engine_in(store.epoch()), Some(mixed));
+    assert_eq!(
+        engine.read_through().census_in(store.epoch()),
+        Some(mixed - 1),
+        "the census's death cursor stands inside the changeset's generation"
+    );
+
+    assert_eq!(prune_with(&mut store, None), Some(mixed));
+    assert!(!below_floor(&engine, &mut store));
+
+    // The census recounts from G0 = `mixed`; the drain embeds the burst.
+    let first = step(&mut engine, &mut store);
+    assert_eq!(first.recounts, 1, "{first:?}");
+    let embeds = (OLD + 1 + MAX_PAGE) as u64;
+    let mut steps = 0;
+    while embedder.calls() < embeds {
+        step(&mut engine, &mut store);
+        steps += 1;
+        assert!(steps < 10, "the burst was never embedded");
+    }
+
+    // The drain reads a second death past G0 while the recount runs.
+    let second = delete_all(&mut store, &old[1..2]);
+    while engine.read_through().engine_in(store.epoch()) < Some(second) {
+        step(&mut engine, &mut store);
+        steps += 1;
+        assert!(steps < 10, "the drain never read the second death");
+    }
+    assert_eq!(
+        engine.read_through().census_in(store.epoch()),
+        Some(mixed - 1),
+        "the recount still runs, its read-through frozen"
+    );
+    assert_eq!(prune_with(&mut store, None), Some(second));
+    assert!(!below_floor(&engine, &mut store));
+
+    let report = settle(&mut engine, &mut store);
+    assert_eq!(report.recounts, 1, "the recount counts again: {report:?}");
+    assert_eq!(
+        engine.read_through().census_in(store.epoch()),
+        Some(second),
+        "the census reads through the floor before a drain stops"
+    );
+    assert_eq!(engine.coverage(), Some(recounted(&mut store, &engine)));
+    assert_eq!(
+        engine.coverage().map(|coverage| coverage.total),
+        Some((OLD - 2 + 1 + MAX_PAGE) as u64)
+    );
+    assert!(settle(&mut engine, &mut store).is_settled());
 }
 
 // ---- the read-through generations exposed ----

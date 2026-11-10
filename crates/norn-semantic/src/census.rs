@@ -207,7 +207,9 @@ fn clamp(count: u64) -> i64 {
 /// What one census step read.
 pub(crate) struct Advance {
     /// Both feeds came back short in the snapshot the step read, so the
-    /// counts are exact at that snapshot.
+    /// counts are exact at that snapshot, and the count completed there: a
+    /// recount that reached the end below the floor counts again, which is
+    /// not complete and owes another step.
     pub(crate) complete: bool,
     /// Feed rows the step read and applied: the census's own work, which
     /// follows the rows that moved in the store and never the vault's size.
@@ -372,10 +374,25 @@ impl Pages {
     /// What the step read, without applying it.
     pub(crate) fn advance(&self) -> Advance {
         Advance {
-            complete: self.documents.len() < CENSUS_PAGE && self.tombstones.len() < CENSUS_PAGE,
+            complete: self.reads_to_end() && !self.counts_again(),
             rows: (self.documents.len() + self.tombstones.len()) as u64,
             recount_begun: self.begin != Begin::Continue && self.recount.is_some(),
         }
+    }
+
+    /// Both feeds came back short in the step's snapshot.
+    fn reads_to_end(&self) -> bool {
+        self.documents.len() < CENSUS_PAGE && self.tombstones.len() < CENSUS_PAGE
+    }
+
+    /// The step reaches the end of a recount whose G0 the floor has passed:
+    /// a death recorded after its first page may be gone unread, so applying
+    /// it empties the counts to count again, which owes another step.
+    fn counts_again(&self) -> bool {
+        self.reads_to_end()
+            && self
+                .recount
+                .is_some_and(|g0| progress::below(Some(g0), self.reading.death_floor()))
     }
 
     /// The completion this step records where it completes a count.
@@ -386,7 +403,7 @@ impl Pages {
     /// Whether applying the step would change anything the sidecar holds:
     /// a step over a quiescent store whose counts are whole commits nothing.
     pub(crate) fn changes_anything(&self, counts: &Counts) -> bool {
-        let complete = self.advance().complete;
+        let complete = self.reads_to_end();
         self.begin != Begin::Continue
             || !self.documents.is_empty()
             || !self.tombstones.is_empty()
@@ -410,7 +427,7 @@ impl Pages {
         model: &Model,
         counts: &mut Counts,
     ) -> Result<(), EngineError> {
-        let complete = self.advance().complete;
+        let complete = self.reads_to_end();
         let begins = self.begin != Begin::Continue;
         let last_whole = match self.begin {
             Begin::Epoch => None,
@@ -474,7 +491,7 @@ impl Pages {
                 // The floor passed G0 while the recount ran: a death recorded
                 // after its first page may be gone unread, so it counts again,
                 // keeping the last whole counts and nothing of this count.
-                if progress::below(Some(g0), self.reading.death_floor()) {
+                if self.counts_again() {
                     empty(transaction, counts)?;
                     completes = false;
                     whole = false;
