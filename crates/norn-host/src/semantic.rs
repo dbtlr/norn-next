@@ -1298,8 +1298,13 @@ impl SemanticEngines {
     /// that has recorded nothing in the epoch has read nothing in it: an
     /// engine still preparing, self-disabled, or whose section could not be
     /// read, and a vault whose delivery is missing for a moment, each answer
-    /// [`ReadThrough::Nothing`]. A report one hold old answers lower than the
-    /// engine stands, never higher, which only keeps more deaths.
+    /// [`ReadThrough::Nothing`]. A report one hold old usually answers lower
+    /// than the engine stands, which only keeps more deaths. It can answer
+    /// higher while a hold that rebuilds the sidecar runs, until the hold's
+    /// `Held::drop` publishes the fresh report. That is harmless: a fresh
+    /// sidecar needs no death committed before its first page, and a death
+    /// past the bound raises the floor, which the rebuilt engine then reads
+    /// against its own first page.
     ///
     /// The map lock, then the report's leaf lock: the order a publication
     /// takes them in under the entry gate, so this is read under the gate
@@ -1317,7 +1322,12 @@ impl SemanticEngines {
         }
         let report = delivery.slot.as_ref().map(|slot| slot.report());
         Some(match report {
-            Some(SemanticStatus::On { read_through, .. }) => read_through.lower_in(store_epoch),
+            Some(SemanticStatus::On { read_through, .. }) => {
+                match read_through.lower_in(store_epoch) {
+                    Some(generation) => ReadThrough::Through(generation),
+                    None => ReadThrough::Nothing,
+                }
+            }
             _ => ReadThrough::Nothing,
         })
     }

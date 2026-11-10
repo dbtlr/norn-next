@@ -45,7 +45,12 @@ fn prune_with(store: &mut Store, read_through: Option<ReadThrough>) -> Option<i6
 /// One pass handed what the host hands it for `engine`: the lower of its two
 /// readers' read-through generations in the store's epoch.
 fn prune_for(store: &mut Store, engine: &Engine) -> Option<i64> {
-    let read_through = engine.read_through().lower_in(store.epoch());
+    // The mapping the host makes: a reader that stands hands its lower
+    // generation, or nothing read where it recorded none in this epoch.
+    let read_through = match engine.read_through().lower_in(store.epoch()) {
+        Some(generation) => ReadThrough::Through(generation),
+        None => ReadThrough::Nothing,
+    };
     prune_with(store, Some(read_through))
 }
 
@@ -152,7 +157,7 @@ fn lagging(label: &str) -> Lagging {
     assert_eq!(embedder.calls(), 600);
     assert_eq!(
         engine.read_through().engine_in(store.epoch()),
-        ReadThrough::Through(drained)
+        Some(drained)
     );
 
     let deleted = delete_all(&mut store, &numbered("z", 0, 500));
@@ -261,14 +266,8 @@ fn a_quiet_store_whose_floor_is_the_write_generation_reconciles_once() {
     let report = settle(&mut engine, &mut store);
     assert_eq!((report.reconciles, report.recounts), (1, 1), "{report:?}");
     let read_through = engine.read_through();
-    assert_eq!(
-        read_through.engine_in(store.epoch()),
-        ReadThrough::Through(deleted)
-    );
-    assert_eq!(
-        read_through.census_in(store.epoch()),
-        ReadThrough::Through(deleted)
-    );
+    assert_eq!(read_through.engine_in(store.epoch()), Some(deleted));
+    assert_eq!(read_through.census_in(store.epoch()), Some(deleted));
 
     for _ in 0..3 {
         let report = settle(&mut engine, &mut store);
@@ -342,7 +341,7 @@ fn a_path_checked_live_and_pruned_before_completion_is_removed_by_the_next_recon
     let later = delete_all(&mut store, &numbered("m", 0, 200));
     assert_eq!(
         engine.read_through().engine_in(store.epoch()),
-        ReadThrough::Through(drained),
+        Some(drained),
         "a running reconcile's death cursor raises nothing"
     );
     assert_eq!(prune_for(&mut store, &engine), Some(later));
@@ -355,7 +354,7 @@ fn a_path_checked_live_and_pruned_before_completion_is_removed_by_the_next_recon
     // The reconcile completes without starting over and records its G0,
     // which the floor now stands above.
     let mut steps = 0;
-    while engine.read_through().engine_in(store.epoch()) == ReadThrough::Through(drained) {
+    while engine.read_through().engine_in(store.epoch()) == Some(drained) {
         let report = step(&mut engine, &mut store);
         assert_eq!(
             report.reconciles, 0,
@@ -366,7 +365,7 @@ fn a_path_checked_live_and_pruned_before_completion_is_removed_by_the_next_recon
     }
     assert_eq!(
         engine.read_through().engine_in(store.epoch()),
-        ReadThrough::Through(deleted),
+        Some(deleted),
         "the completed reconcile records G0 itself"
     );
     assert!(
@@ -428,7 +427,7 @@ fn deletions_during_a_reconcile_converge_without_starting_it_over() {
     );
     assert_eq!(
         engine.read_through().engine_in(store.epoch()),
-        ReadThrough::Through(deleted),
+        Some(deleted),
         "the first reconcile completed and recorded its own G0"
     );
 
@@ -488,10 +487,7 @@ fn a_reconcile_interrupted_by_a_restart_resumes_with_its_g0() {
     assert_eq!(engine.read_through().engine, through(&store, deleted));
     let report = settle(&mut engine, &mut store);
     assert_eq!(report.reconciles, 0, "{report:?}");
-    assert_eq!(
-        engine.read_through().engine_in(store.epoch()),
-        ReadThrough::Through(moved)
-    );
+    assert_eq!(engine.read_through().engine_in(store.epoch()), Some(moved));
 }
 
 // ---- the census below the floor ----
@@ -550,7 +546,7 @@ fn a_census_below_the_floor_keeps_its_last_whole_counts_until_whole() {
     assert_eq!(engine.coverage(), Some(recounted(&mut store, &engine)));
     assert_eq!(
         engine.read_through().census_in(store.epoch()),
-        ReadThrough::Through(second_floor)
+        Some(second_floor)
     );
 
     // A new store epoch clears them: no count is carried across databases.
@@ -644,10 +640,7 @@ fn the_read_through_generations_come_from_what_each_reader_recorded() {
     let mut store = scratch.store();
     let mut engine = scratch.engine(CountingEmbedder::new());
     assert_eq!(engine.read_through(), &ReadThroughs::default());
-    assert_eq!(
-        engine.read_through().lower_in(store.epoch()),
-        ReadThrough::Nothing
-    );
+    assert_eq!(engine.read_through().lower_in(store.epoch()), None);
 
     let paths = numbered("docs", 0, 300);
     let written = write_all(&mut store, &paths);
@@ -655,7 +648,7 @@ fn the_read_through_generations_come_from_what_each_reader_recorded() {
     let read_through = engine.read_through();
     assert_eq!(read_through.engine, through(&store, written));
     assert_eq!(read_through.census, through(&store, written));
-    assert_eq!(read_through.lower_in("another-epoch"), ReadThrough::Nothing);
+    assert_eq!(read_through.lower_in("another-epoch"), None);
 
     // Mid-backlog: one tombstone page stops inside the second changeset's
     // deaths, so the drain has read through the generation before its
@@ -674,24 +667,15 @@ fn the_read_through_generations_come_from_what_each_reader_recorded() {
     );
     assert_eq!(engine.read_through().engine, through(&store, older));
     assert_eq!(engine.read_through().census, through(&store, newer));
-    assert_eq!(
-        engine.read_through().lower_in(store.epoch()),
-        ReadThrough::Through(older)
-    );
+    assert_eq!(engine.read_through().lower_in(store.epoch()), Some(older));
 
     settle(&mut engine, &mut store);
     assert_eq!(engine.read_through().engine, through(&store, newer));
-    assert_eq!(
-        engine.read_through().lower_in(store.epoch()),
-        ReadThrough::Through(newer)
-    );
+    assert_eq!(engine.read_through().lower_in(store.epoch()), Some(newer));
 
     // A new store epoch is one in which neither has read anything.
     let store = store
         .discard_and_reopen(norn_store::StoredPathOrder::Sensitive)
         .expect("a store rebuilt from zero");
-    assert_eq!(
-        engine.read_through().lower_in(store.epoch()),
-        ReadThrough::Nothing
-    );
+    assert_eq!(engine.read_through().lower_in(store.epoch()), None);
 }

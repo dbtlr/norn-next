@@ -252,7 +252,7 @@ How far an engine has drained one feed: how many writes the store had committed 
 _Avoid_: Cursor (a cursor is a feed position, not a store generation)
 
 **Death**:
-The record a document's removal leaves in the derived store: the removed path, the hash of the content it last held, how the removal was learned, and where in the store's write order it was learned. A death stands only while its path holds no document, and only while lane 2 has not read it or a broken link could still be followed through it. A tombstone is the same record, named as the store keeps it.
+The record a document's removal leaves in the derived store: the removed path, the hash of the content it last held, how the removal was learned, and where in the store's write order it was learned. A death stands only while its path holds no document, and only while lane 2 has not read it, up to one unread death per live document, or while a broken link would read it. A tombstone is the same record, named as the store keeps it.
 _Avoid_: Deletion record
 
 **Death prune**:

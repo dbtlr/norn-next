@@ -153,7 +153,8 @@ pub enum DeathPrunePhase {
     Clearing,
     /// Marking the deaths broken links keep.
     Marking,
-    /// Counting the live documents.
+    /// Counting the live documents. A pass whose marking ended while handed no
+    /// read-through skips this and the walk.
     Counting,
     /// Walking the deaths newest first for the cutoff.
     Walking,
@@ -736,7 +737,18 @@ impl Request<'_> {
                 }
                 Step::Marking => {
                     if unit.mark(pass, false)? {
-                        pass.step = Step::Counting;
+                        // Handed no reader, condition 1 keeps nothing, so the
+                        // bound walk would find no cutoff worth having: go
+                        // straight to removing. Should a later unit of this
+                        // pass be handed a read-through, the pass has no
+                        // cutoff and keeps every death above it, which
+                        // removes less than the bound allows and never more;
+                        // the rise in the read-through owes the next pass.
+                        pass.step = if read_through.is_none() {
+                            Step::Removing { after: None }
+                        } else {
+                            Step::Counting
+                        };
                     }
                     break DeathPrunePhase::Marking;
                 }

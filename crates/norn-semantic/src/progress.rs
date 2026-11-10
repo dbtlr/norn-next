@@ -15,7 +15,7 @@
 //! samples them in the same critical section as the answer they describe.
 
 use norn_db::rusqlite::Connection;
-use norn_store::{ReadThrough, StoreReading};
+use norn_store::StoreReading;
 
 use crate::census::{Counts, Coverage};
 use crate::ddl;
@@ -100,21 +100,21 @@ pub struct ReadThroughs {
 }
 
 impl ReadThroughs {
-    /// The engine's read-through generation in `store_epoch`: nothing where
-    /// it recorded none there.
-    pub fn engine_in(&self, store_epoch: &str) -> ReadThrough {
+    /// The engine's read-through generation in `store_epoch`: `None` where
+    /// it recorded none there, which orders below every generation.
+    pub fn engine_in(&self, store_epoch: &str) -> Option<i64> {
         in_epoch(self.engine.as_ref(), store_epoch)
     }
 
     /// The census's read-through generation in `store_epoch`.
-    pub fn census_in(&self, store_epoch: &str) -> ReadThrough {
+    pub fn census_in(&self, store_epoch: &str) -> Option<i64> {
         in_epoch(self.census.as_ref(), store_epoch)
     }
 
     /// The lower of the two readers' read-through generations in
-    /// `store_epoch`, which is what the death prune is handed: nothing where
-    /// either has read nothing there.
-    pub fn lower_in(&self, store_epoch: &str) -> ReadThrough {
+    /// `store_epoch`, which is what the death prune is handed once the host
+    /// maps it: `None` where either has read nothing there.
+    pub fn lower_in(&self, store_epoch: &str) -> Option<i64> {
         self.engine_in(store_epoch).min(self.census_in(store_epoch))
     }
 
@@ -127,21 +127,18 @@ impl ReadThroughs {
     }
 }
 
-/// `recorded` as a generation of `store_epoch`: nothing where it is absent or
+/// `recorded` as a generation of `store_epoch`: `None` where it is absent or
 /// a position in another epoch.
-pub(crate) fn in_epoch(recorded: Option<&ReadThroughGeneration>, store_epoch: &str) -> ReadThrough {
-    match recorded {
-        Some(recorded) if recorded.store_epoch == store_epoch => {
-            ReadThrough::Through(recorded.generation)
-        }
-        _ => ReadThrough::Nothing,
-    }
+pub(crate) fn in_epoch(recorded: Option<&ReadThroughGeneration>, store_epoch: &str) -> Option<i64> {
+    recorded
+        .filter(|recorded| recorded.store_epoch == store_epoch)
+        .map(|recorded| recorded.generation)
 }
 
 /// Whether a reader at `read_through` has not read through `floor`. One
 /// judgment, so the drain, the census and the host ask it the same way.
-pub(crate) fn below(read_through: ReadThrough, floor: Option<i64>) -> bool {
-    floor.is_some_and(|floor| read_through < ReadThrough::Through(floor))
+pub(crate) fn below(read_through: Option<i64>, floor: Option<i64>) -> bool {
+    floor.is_some_and(|floor| read_through < Some(floor))
 }
 
 /// A reader's read-through generation as the sidecar records it beside a

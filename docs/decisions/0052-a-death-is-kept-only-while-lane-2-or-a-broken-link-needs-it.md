@@ -362,9 +362,11 @@ Where the vault's engine section is absent or states the engine off, no reader o
 feed stands for the vault, and condition 1 keeps nothing. A host that composes no engine at
 all stands no reader for any vault, and is treated the same way. Every other vault's engine
 counts as a reader, whether it is running, preparing, detached from its slot for a moment, or
-self-disabled, and so does an engine whose section could not be read. Such an engine has read
-what it last recorded in the current epoch, and nothing where it has recorded nothing there,
-so it keeps its unread deaths, up to the bound. An engine turned on later with a sidecar's old
+self-disabled, and so does an engine whose section could not be read. Such an engine is
+handed as having read nothing, since the host reads the report its slot's last hold left and
+that report is not the engine's sidecar. This is conservative: a pass handed less than the
+engine has read removes a subset of what it could, and keeps the unread deaths, up to the
+bound. An engine turned on later with a sidecar's old
 cursors meets the floor and reconciles once.
 
 `norn-store` never depends on `norn-semantic`. The store accepts the read-through generation
@@ -392,7 +394,9 @@ maintenance leg on the shared worker pool, beside the shadow sweep and the rolli
   is due only where new work could exist:
   - a death has been recorded above the last pass's bound;
   - a `link/broken` finding has been filed or discarded since the last pass began, which the
-    attachment counts from each changeset's outcome; or
+    host reads off the store's marks at a due check: the newest death, the newest broken
+    finding and the count of broken findings under the pinned fingerprint. Its cost follows
+    the vault's broken findings, and it runs only at a due check; or
   - the last pass kept a death for lane 2 alone, and the read-through generation the host
     supplies has risen above the lowest one any of that pass's removing units was handed,
     so lane 2 may have read it.
@@ -404,6 +408,10 @@ maintenance leg on the shared worker pool, beside the shadow sweep and the rolli
   read-through generation rises above the lowest of those. A configured engine that never
   advances leaves its read-through generation where it stood, so it makes no pass due by the
   third case, and a stalled engine does not have every broken link marked again each period.
+  An engine turned off after a pass makes the third case hold, since the host then hands no
+  read-through generation and a pass keeps nothing for lane 2. The third case has no wake of
+  its own: a rise in the read-through generation is picked up at the next deadline the
+  scheduler holds, at most about one period later.
   A pass in progress keeps the death prune due. A store where none of these holds owes no
   pass, and its clock contributes no deadline until one does. The attachment holds what the
   cases read, among them the lowest read-through generation any removing unit of the last
@@ -412,7 +420,8 @@ maintenance leg on the shared worker pool, beside the shadow sweep and the rolli
   Deaths recorded after it are left to a later pass. It runs in three phases, each resuming
   from an exclusive cursor the attachment holds:
   1. **Marking.** It reads the `link/broken` findings under the pinned fingerprint in the
-     order they were filed, `(generation, path, ordinal)`, runs the move-following reads for
+     order they were filed, `(generation, path, position)`, where a finding's position is its
+     link's ordinal in the holding document, runs the move-following reads for
      each one's link, and records the deaths they return in a **kept set**: a table in the
      temporary database of the store's writer connection, as the rolling heal keeps its
      inventory.
@@ -427,6 +436,9 @@ maintenance leg on the shared worker pool, beside the shadow sweep and the rolli
      read-through generation: the cutoff and every unread death before it in feed order are
      past the bound. The cutoff is fixed for the rest of the pass, and no removing unit
      computes it again.
+     A pass whose marking ends while its unit is handed no read-through generation skips the
+     count and the walk, since condition 1 keeps nothing; should a later unit of that pass be
+     handed one, the pass has no cutoff and keeps every death above it.
   3. **Removing.** It reads the deaths in feed order, `(generation, path)`, up to the pass's
      bound, and deletes each death that the kept set does not hold and condition 1 does not
      keep, raising the floor in the same transaction. Condition 1 keeps a death above the
@@ -448,7 +460,7 @@ maintenance leg on the shared worker pool, beside the shadow sweep and the rolli
   than L deaths kept for lane 2 until the next pass, never more.
 
   **Every phase continues by an exclusive keyset seek.** Marking seeks the partial findings
-  index below past the last `(generation, path, ordinal)` it marked under the pinned
+  index below past the last `(generation, path, position)` it marked under the pinned
   fingerprint. The bound walk and the removal seek `tombstones_change_feed` past the last
   `(generation, path)` they read, the walk descending and the removal ascending. No page
   steps over rows an earlier page consumed, and none sorts. Each statement carries plan bars,
@@ -470,12 +482,12 @@ maintenance leg on the shared worker pool, beside the shadow sweep and the rolli
   find the findings filed since a cursor. `finding_classes_class_key`,
   `finding_paths_path_key` and `findings_one_per_link` reach findings by key or by link, not
   by kind. The death prune adds one partial index over `link/broken` findings, keyed by
-  `(vault_schema_fingerprint, generation, path, ordinal)`. A changeset writes one entry in it
+  `(vault_schema_fingerprint, generation, path, position)`. A changeset writes one entry in it
   for each broken finding it files and removes one for each it discards, so its write cost
   follows the broken findings a changeset touches, never the vault. A bulk re-judgment, such
   as the re-decision of every link a schema pin owes, pays one entry for each broken finding
   it files or discards. The implementation measures that cost on a bulk re-judgment and
-  records it beside the write-work bar.
+  records it beside the index in `ddl/findings.rs`.
 
   A pass that finds a pinned fingerprint other than the one it began under starts over,
   because the findings it marked from are gone, and it clears its kept set first. A pass that
@@ -562,6 +574,13 @@ accumulate only while those writes continue, and the units after them drain the 
 Removal never skips the catch-up to make progress: a unit that deleted against a kept set
 missing a link broken in its own transaction could remove a death that link's reads return,
 and move-following would no longer answer the same before and after the unit.
+
+**A pass whose read-through falls mid-pass can keep more than the bound for that pass.** The
+read-through generation a unit is handed can fall within a pass, as when the engine's slot is
+replaced and its report reads nothing. A removing unit handed the lower value keeps every
+death above it, though the pass's cutoff was fixed against the higher one. The floor is
+unaffected, since it rises only to a death a unit removed, and the next pass is owed once the
+read-through generation rises again.
 
 ### Considered options
 
@@ -680,7 +699,8 @@ These consequences are testable:
   read-through generation, so a recount that counts a document live and then meets its
   pruned death past its cursor still counts again.
 - A census below the floor reports its last whole counts until its recount is whole, a
-  second recount included. A census over a new store epoch reports none.
+  second recount included. A census over a new store epoch reports none; where a floor
+  already stands in that epoch, it starts as a recount.
 - Freshness reports rescanning, and the search margin its cap, where the engine's
   read-through generation stands below the floor of the reading they judge against, and not
   where only its death watermark does.

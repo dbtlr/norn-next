@@ -38,7 +38,7 @@
 
 use norn_db::rusqlite::{Connection, OptionalExtension, params};
 use norn_embed::Model;
-use norn_store::{FeedCursor, FeedRead, ReadThrough, StoreReading};
+use norn_store::{FeedCursor, FeedRead, StoreReading};
 
 use crate::ddl;
 use crate::error::{self, EngineError};
@@ -474,7 +474,7 @@ impl Pages {
                 // The floor passed G0 while the recount ran: a death recorded
                 // after its first page may be gone unread, so it counts again,
                 // keeping the last whole counts and nothing of this count.
-                if progress::below(ReadThrough::Through(g0), self.reading.death_floor()) {
+                if progress::below(Some(g0), self.reading.death_floor()) {
                     empty(transaction, counts)?;
                     completes = false;
                     whole = false;

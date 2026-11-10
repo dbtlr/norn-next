@@ -428,12 +428,62 @@ fn no_reader_keeps_nothing_and_readers_that_read_nothing_keep_the_bound() {
         store.begin_request().death_floor().unwrap(),
         Some(generations[2])
     );
-    prune(&mut store, None);
+    let units = prune(&mut store, None);
     assert!(deaths(&mut store).is_empty());
     assert_eq!(
         store.begin_request().death_floor().unwrap(),
         Some(generations[5])
     );
+    // Condition 1 keeps nothing, so the pass reads no walk rows and never
+    // counts the live documents.
+    assert_eq!(
+        units
+            .iter()
+            .map(|unit| unit.work.deaths_walked)
+            .sum::<u64>(),
+        0
+    );
+    assert!(units.iter().all(|unit| {
+        !matches!(
+            unit.ran,
+            DeathPrunePhase::Counting | DeathPrunePhase::Walking
+        ) && unit.work.live_documents.is_none()
+    }));
+}
+
+/// **A pass begun with no reader that is later handed one keeps every death
+/// above that read-through for the pass**: it has no cutoff, so it removes
+/// less than the bound allows and never more.
+#[test]
+fn a_pass_that_skipped_the_walk_and_is_later_handed_a_reader_keeps_what_it_has_not_read() {
+    let scratch = Scratch::new("prune-skipped-walk");
+    let mut store = scratch.open();
+    let generations = six_deaths_over_three_documents(&mut store);
+
+    let mut pass = DeathPrunePass::new();
+    // Units until the marking ends and the pass reaches removing, handed none.
+    while pass.phase() != DeathPrunePhase::Removing {
+        store
+            .begin_request()
+            .death_prune_unit(&mut pass, None, DEATH_PRUNE_UNIT_ROWS)
+            .expect("a death-prune unit");
+    }
+    assert_eq!(pass.cutoff(), None);
+    while !pass.is_finished() {
+        store
+            .begin_request()
+            .death_prune_unit(
+                &mut pass,
+                Some(ReadThrough::Through(generations[1])),
+                DEATH_PRUNE_UNIT_ROWS,
+            )
+            .expect("a death-prune unit");
+    }
+    assert_eq!(
+        deaths(&mut store),
+        names(&["dead/3.md", "dead/4.md", "dead/5.md", "dead/6.md"])
+    );
+    assert!(pass.kept_for_lane_two_alone());
 }
 
 /// **Every unread death counts toward the bound, one a broken link keeps

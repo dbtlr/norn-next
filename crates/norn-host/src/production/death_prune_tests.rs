@@ -508,8 +508,9 @@ fn no_unit_runs_during_a_build_or_while_link_health_loads() {
 
 /// **A pass's work follows the deaths it examines and the broken links it
 /// marks, not the vault.** The same deletions and broken links over 300 and
-/// 2,000 documents cost the same rows, save the live-document count, the one
-/// read the contract lets follow the vault.
+/// 2,000 documents cost the same rows. No engine stands for this vault, so
+/// the pass is handed no read-through generation and skips the live-document
+/// count and the bound walk, the reads that would follow the vault.
 #[test]
 fn a_pass_costs_what_it_examines_at_both_scales() {
     let pass_at = |documents: usize| {
@@ -535,12 +536,13 @@ fn a_pass_costs_what_it_examines_at_both_scales() {
     };
     let small = pass_at(300);
     let large = pass_at(2_000);
-    let live = |work: &norn_store::DeathPruneWork| work.live_documents.expect("a count");
-    assert_eq!(live(&small), 300 - 20 + 5);
-    assert_eq!(live(&large), 2_000 - 20 + 5);
+    for work in [&small, &large] {
+        assert_eq!(work.live_documents, None);
+        assert_eq!(work.deaths_walked, 0);
+    }
     let examined = |work: &norn_store::DeathPruneWork| {
         (
-            work.rows_read - live(work),
+            work.rows_read,
             work.findings_marked,
             work.broken_links_marked,
             work.followed_reads,
