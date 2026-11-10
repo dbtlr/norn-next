@@ -859,8 +859,8 @@ fn a_pass_whose_kept_set_is_gone_starts_over() {
     assert!(!again.restarted);
 }
 
-/// **A unit is refused below the least row bound**, and during a from-zero
-/// build.
+/// **A unit is refused below the least row bound, while link health is
+/// deferred, and during a from-zero build.**
 #[test]
 fn a_unit_is_refused_below_its_least_bound() {
     let scratch = Scratch::new("prune-refused");
@@ -873,6 +873,29 @@ fn a_unit_is_refused_below_its_least_bound() {
     assert!(
         matches!(refused, Err(norn_store::StoreError::Bound { .. })),
         "{refused:?}"
+    );
+
+    let scratch = Scratch::new("prune-refused-building");
+    let mut building = scratch.open();
+    building.defer_link_health().expect("deferring link health");
+    let refused = building.begin_request().death_prune_unit(
+        &mut DeathPrunePass::new(),
+        None,
+        DEATH_PRUNE_UNIT_ROWS,
+    );
+    assert!(
+        matches!(refused, Err(norn_store::StoreError::Lifecycle { .. })),
+        "a unit ran while link health was deferred: {refused:?}"
+    );
+    building.begin_steps().expect("beginning a from-zero build");
+    let refused = building.begin_request().death_prune_unit(
+        &mut DeathPrunePass::new(),
+        None,
+        DEATH_PRUNE_UNIT_ROWS,
+    );
+    assert!(
+        matches!(refused, Err(norn_store::StoreError::Lifecycle { .. })),
+        "a unit ran during a from-zero build: {refused:?}"
     );
 }
 
