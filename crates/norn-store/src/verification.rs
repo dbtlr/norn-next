@@ -94,6 +94,19 @@ use crate::store::Store;
 /// the reading costs nothing a scan would notice.
 const STOP_MARK_INTERVAL: i32 = 1_000;
 
+/// The disjointness check: tombstones standing at a path that holds a
+/// document row.
+///
+/// **It is driven from `documents`.** `CROSS JOIN` fixes the join order in
+/// SQLite, so the check steps the live documents once and seeks
+/// `tombstones_path` for each, and its cost follows the vault's live
+/// documents rather than the deaths the store holds. Left to the planner
+/// with no `ANALYZE` data, the join is driven from `tombstones` and probes
+/// `documents_path` per death, which measured fourteen times slower on a
+/// store holding many more deaths than documents.
+pub(crate) const DISJOINTNESS_SQL: &str =
+    "SELECT count(*) FROM documents CROSS JOIN tombstones ON tombstones.path = documents.path";
+
 /// What a [`VerificationSource`]'s verification came to.
 #[derive(Debug)]
 pub enum Verification {
@@ -339,10 +352,7 @@ impl Checks<'_> {
         }
         self.rule_sets()?;
 
-        let undead = self.count(
-            "SELECT count(*) FROM tombstones JOIN documents USING (path)",
-            "checking the pillars are disjoint",
-        )?;
+        let undead = self.count(DISJOINTNESS_SQL, "checking the pillars are disjoint")?;
         if undead != 0 {
             return Err(StoreError::Damaged {
                 what: format!("{undead} tombstones stand at a path that holds a document row"),
@@ -898,6 +908,35 @@ impl VerificationSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The disjointness check steps the documents and seeks the deaths.**
+    /// A store holding many more deaths than documents is what the death
+    /// prune exists to stop growing, so the check's cost has to follow the
+    /// documents: the outer loop reads `documents` through an index, and each
+    /// document seeks `tombstones_path` by its path. Neither table is read
+    /// row by row and nothing sorts.
+    #[test]
+    fn the_disjointness_check_is_driven_from_the_documents() {
+        use crate::{DerivationVersion, StoredPathOrder};
+        let scratch = norn_testkit::scratch::Scratch::new("disjointness-plan");
+        let store = Store::open_throwaway(
+            scratch.join("store.sqlite3"),
+            StoredPathOrder::Sensitive,
+            DerivationVersion::new(1),
+        )
+        .unwrap();
+        let plan = store.database.emitted_plan(DISJOINTNESS_SQL, []).unwrap();
+        let details: Vec<&str> = plan.steps.iter().map(|step| step.detail.as_str()).collect();
+        assert_eq!(details.len(), 2, "{details:?}");
+        assert!(
+            details[0].starts_with("SCAN documents USING COVERING INDEX "),
+            "the check is not driven from the documents' index: {details:?}"
+        );
+        assert_eq!(
+            details[1], "SEARCH tombstones USING COVERING INDEX tombstones_path (path=?)",
+            "each document does not seek its death by path: {details:?}"
+        );
+    }
 
     /// **The connection reads the mark itself.** A statement that starts
     /// after the mark is set, past every point the verification reads it at,
