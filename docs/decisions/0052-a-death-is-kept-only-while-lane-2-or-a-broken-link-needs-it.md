@@ -27,9 +27,9 @@ these:
   lies past that bound into a reconcile rather than lost data.
 - **ADR 0051's [Semantic work leaves the claim](#semantic-work-leaves-the-claim).** The
   drain reconciles when the engine has not read through the floor, as it does when the store
-  epoch differs. Every reconcile records the write generation its first page read, starts
-  over only where a later page reads a floor at or above it, and on completing records the
-  generation below it as read through.
+  epoch differs. Every reconcile records the write generation its first page read, never
+  starts over because of the floor, and on completing records that generation itself as
+  read through.
 - **ADR 0051's [Work starts at a wake or a deadline, with no poll backstop](#work-starts-at-a-wake-or-a-deadline-with-no-poll-backstop).**
   The death prune's clock is a third claim-bound deadline.
 - **ADR 0051's [Claim-bound slices stay maintenance legs on the worker pool](#claim-bound-slices-stay-maintenance-legs-on-the-worker-pool).**
@@ -40,8 +40,10 @@ these:
   death-prune unit as a unit that may be in flight.
 - **ADR 0051's [Status reports embedding coverage](#status-reports-embedding-coverage).** A
   census that has not read through the floor counts again and keeps its last whole counts
-  meanwhile, and it starts that count over only as a reconcile starts over. A new store
-  epoch still clears them.
+  meanwhile, which a new store epoch still clears, and it never starts that count over
+  because of the floor, as a reconcile never does. A count that reaches the end of both
+  feeds records the write generation it read before that final page, as a completed drain
+  records its watermark.
 - **The *Consequences* of ADR 0051's
   [Background work runs on its own lane](#background-work-runs-on-its-own-lane).** The costs it
   accepts name the death-prune unit beside the rolling-heal slice, and the census's whole
@@ -205,32 +207,49 @@ not read through the floor does not seek forward, because deaths it never read m
 It reconciles against current state instead, exactly as it does after a store epoch change,
 and then reads the feed again from the start.
 
-**A reconcile accounts for every death recorded before it began.** On its first page a
+**A reconcile accounts for every death committed before it began.** On its first page a
 reconcile reads the store's write generation, here called G0, and records it beside the
-store epoch and cursor the reconcile already records. Every death below G0 was committed
-before that page, so the reconcile meets its path either as no document or as a document
-derived again, whether or not the death still stands: a reconcile against current state
-accounts for it. Every later page reads the floor again. A page that reads a floor at or
-above G0 starts the reconcile over from its first page, because a death recorded after the
-reconcile began may have been removed after the reconcile checked its path and before the
-consumer could read it. A floor below G0 does not restart it. When the reconcile completes,
-the consumer records G0 − 1 beside the epoch it observed, as the generation it has read
-through. The floor then stands below that record, so the rescan after the reconcile does not
-reconcile again. A reconcile stopped part way leaves the earlier records, so the next unit
-resumes it with its G0, as an epoch reconcile resumes. A reconcile over a new store epoch
-records G0 in the same way: a new store's death prune can run before the epoch reconcile
-completes, and without the record the consumer would reconcile a second time.
+store epoch and cursor the reconcile already records. The write generation is the last
+committed generation, so every death at or below G0 was committed before that page, and the
+reconcile meets its path either as no document or as a document derived again, whether or
+not the death still stands: a reconcile against current state accounts for it. When the
+reconcile completes, the consumer records G0 itself beside the epoch it observed, as the
+generation it has read through. A reconcile never starts over because of the floor. Where
+the floor stands at or below G0 when it completes, the consumer has read through it, and the
+rescan after the reconcile does not reconcile again. Where the death prune raised the floor
+past G0 while the reconcile ran, the consumer is still below the floor when it completes,
+and it reconciles again, from a new first page, when it next advances. A reconcile stopped
+part way leaves the earlier records, so the next unit resumes it with its G0, as an epoch
+reconcile resumes. A reconcile over a new store epoch records G0 in the same way: a new
+store's death prune can run before the epoch reconcile completes, and without the record the
+consumer would reconcile a second time.
 
-**A restart is rare, because the bound evicts the oldest unread deaths first.** The death
-prune removes an unread death only past the bound, oldest first in feed order, and the
-cutoff is the death after the newest L. The floor therefore reaches G0 only once more deaths
-than the vault's live-document count stand at or above G0, deaths recorded, in effect, while
-the reconcile runs. Recording G0 rather than the floor is what lets a lagging reader leave
-the floor behind. Had the reconcile recorded the floor it read, an engine whose backlog
-stands past the bound would sit at that floor, the next eviction would raise the floor past
-it, and it would reconcile again at every pass, while its census, which counts one page of
-each feed per unit, never finished a count. G0 lies above the whole backlog the reconcile
-accounted for, so the next eviction stays below it.
+**A reconcile completes, and a quiet store needs exactly one.** One changeset stamps every
+death it records with one generation, and a death-prune unit takes no generation of its own,
+so the death prune can raise the floor to exactly the write generation a reconcile's first
+page reads. A changeset that deletes 4,000 of 6,000 documents leaves 2,000 live documents,
+and the cutoff lands inside that changeset's generation; with no live documents left, any
+single deletion does the same. A reconcile that started over wherever a page read a floor at
+or above G0, or that recorded G0 − 1, would then never leave the floor in a quiet store:
+every first page would read that G0, every later page that floor, and a reconcile of one page
+would record a generation still below it. Recording G0 claims nothing the reconcile did not
+account for, so a floor at G0 is one the consumer has read through. The floor passes G0 only
+where the death prune removed a death recorded after the first page, and it removes such a
+death, which the reconciling reader has not read, only past the bound, oldest first in feed
+order, so only where more deaths than the vault's live-document count were recorded while
+the reconcile ran. The consumer then reconciles again. No reconcile is abandoned part way, and each one
+that completes removes the rows it found stale, so repeated reconciles converge under any
+rate of deletion. A held path checked live on an early page, then deleted and its death
+removed before the reconcile completes, stays accounted for: that death's generation is
+above G0, so the floor ends above the recorded G0, and the next reconcile removes the path's
+rows.
+
+Recording G0 rather than the floor is what lets a lagging reader leave the floor behind.
+Had the reconcile recorded the floor it read, an engine whose backlog stands past the bound
+would sit at that floor, the next eviction would raise the floor past it, and it would
+reconcile again at every pass, while its census, which counts one page of each feed per
+unit, never finished a count. G0 lies at or above the whole backlog the reconcile accounted
+for, so the next eviction stays at or below it.
 
 What each consumer does below the floor:
 
@@ -242,12 +261,15 @@ What each consumer does below the floor:
   the document feed and of the deaths the store keeps. A stalled sidecar holds a path for
   each death it has not read, so it can hold more paths than the vault now has documents.
 - **The census** counts again. It empties its rows and reads both feeds from the start,
-  recording G0 as a reconcile does and starting over only where a later page reads a floor at
-  or above G0. A floor reset is not an epoch reset: the database is the same, so the census
-  keeps its last whole counts, and status answers them until the new count is whole. A
-  restart keeps those last whole counts and nothing of the count in progress: it empties the
-  rows it has counted again and reads a new G0 on its new first page. A new store epoch still
-  clears the last whole counts, because no count is carried from one database to another.
+  recording G0 on its first page and G0 itself as read through on completing, as a
+  reconcile does, and never starting the count over because of the floor. A floor reset is
+  not an epoch reset: the database is the same, so the census keeps its last whole counts,
+  and status answers them until the new count is whole. A recount that completes while the
+  floor stands above its G0 counts again, as a reconcile reconciles again, and keeps those
+  last whole counts across it and nothing of the count before: it empties the rows it has
+  counted and reads a new G0 on its new first page. A new store epoch still clears the last
+  whole counts and restarts the count, because no count is carried from one database to
+  another.
 - **Freshness and the search margin** judge the engine's own read-through generation against
   the floor, never its death watermark alone. A watermark is set only when a drain of the
   death feed completes, so an engine part way through a long backlog, whose death cursor has
@@ -302,12 +324,25 @@ supplies it to each death-prune unit.
 current store epoch, and never runs above it.** It is the highest of:
 
 - the generation before its death cursor's own;
-- the watermark of its last completed drain of the death feed, for the engine, which records
-  one; and
-- the generation its last completed reconcile recorded, G0 − 1 for the G0 that reconcile's
-  first page read.
+- the watermark of its last completed drain of the death feed, for the engine, or the
+  completion record of its last count that reached the end of both feeds, for the census;
+  and
+- the generation its last completed reconcile recorded, the G0 that reconcile's first page
+  read.
 
 A reader that has recorded none of these in the current store epoch has read no death in it.
+
+**The census records a completion, as the engine records a watermark.** When a count reaches
+the end of both feeds, the census records, beside the store epoch it observed, the write
+generation it read before that final page. Every death at or below that generation was
+committed before the page, and where the census has read through the floor the page reads,
+no death it had not read was removed, so the census has read each one. It records the
+completion only there, counting a recount's own G0 among what it has read through: a recount
+that ends below the floor records its G0 alone and counts again, because a death recorded
+after its first page may have been removed before its death cursor reached it. Without the
+record, the census's read-through generation would rest on its death cursor and stop one
+below the newest death's generation, so the deaths of the newest generation would stand
+until some later death was recorded.
 The host supplies the lower of the two readers' read-through generations, and where either
 reader has read nothing, the lower is nothing: condition 1 then keeps every death, up to the
 bound.
@@ -349,16 +384,20 @@ maintenance leg on the shared worker pool, beside the shadow sweep and the rolli
   - a `link/broken` finding has been filed or discarded since the last pass began, which the
     attachment counts from each changeset's outcome; or
   - the last pass kept a death for lane 2 alone, and the read-through generation the host
-    supplies has risen since that pass, so lane 2 may have read it.
+    supplies has risen above the lowest one any of that pass's removing units was handed,
+    so lane 2 may have read it.
 
   A death past the bound of condition 1 can arise only from a newly recorded death, so the
-  first case covers the bound. A configured engine that never advances leaves its
-  read-through generation where it stood, so it makes no pass due by the third case, and a
-  stalled engine does not have every broken link marked again each period. A pass in
-  progress keeps the death prune due. A store where none of these holds owes no pass, and its
-  clock contributes no deadline until one does. The attachment holds what the cases read,
-  the read-through generation the last pass used among them, so a restart or a new attach
-  owes one pass at its first period.
+  first case covers the bound. The third case compares against the lowest generation the
+  pass's removing units were handed because every death a unit kept for lane 2 stands above
+  the generation that unit was handed, so lane 2 can have read none of them until the
+  read-through generation rises above the lowest of those. A configured engine that never
+  advances leaves its read-through generation where it stood, so it makes no pass due by the
+  third case, and a stalled engine does not have every broken link marked again each period.
+  A pass in progress keeps the death prune due. A store where none of these holds owes no
+  pass, and its clock contributes no deadline until one does. The attachment holds what the
+  cases read, among them the lowest read-through generation any removing unit of the last
+  completed pass was handed, so a restart or a new attach owes one pass at its first period.
 - **A pass.** A pass fixes its upper bound, the store's write generation, at its first unit.
   Deaths recorded after it are left to a later pass. It runs in three phases, each resuming
   from an exclusive cursor the attachment holds:
@@ -467,7 +506,12 @@ history of deletions.
 A death that lane 2 has not read stands until lane 2 reads it or until the bound passes it.
 From then, a death no broken link keeps stands until the next pass reaches it: at most one
 period of the death prune's clock, plus the length of that pass, because lane 2's reading
-it raises the read-through generation, which leaves the next pass due. A death a broken link
+it raises the read-through generation, which leaves the next pass due. Lane 2 has read a
+death of the newest generation once the engine's drain of the death feed has completed past
+it and the census's count has reached the end of both feeds past it: a death cursor alone
+reads through only the generation before its own, so the engine's watermark and the census's
+completion record are what carry the read-through generation over the newest generation's
+deaths. A death a broken link
 keeps stands while that link stays broken and the death is one of the two the link's reads
 return. Under sustained bulk refiling of broken findings, removal can wait longer, as the
 known limits below state.
@@ -562,9 +606,9 @@ and move-following would no longer answer the same before and after the unit.
   next advances, and its census counts again. The reconcile costs one check per path the
   sidecar holds, which for a stalled sidecar can exceed the vault's documents, and a rescan
   of the document feed that re-embeds nothing whose content the sidecar holds. It accounts for
-  every death recorded before it began, so it restarts only where more deaths than the
-  vault's live-document count are recorded while it runs, and once complete it does not
-  reconcile again for the backlog it accounted for. A reader within the bound never falls
+  every death committed before it began and never starts over, so it reconciles again only
+  where more deaths than the vault's live-document count are recorded while it runs, and
+  once complete it does not reconcile again for the backlog it accounted for. A reader within the bound never falls
   below the floor, because condition 1 keeps every death it has not read.
 - **The feed's cursor validity gains a second condition.** A cursor is valid within one store
   epoch and only while its consumer has read through the death floor, and the response to
@@ -607,13 +651,23 @@ These consequences are testable:
 - A vault whose engine is turned off keeps no death for lane 2. A configured engine that has
   recorded nothing in the store epoch keeps every unread death, up to the bound.
 - A reconcile, an epoch reconcile and a census recount each record the write generation G0
-  their first page reads. A later page that reads a floor at or above G0 starts it over, and
-  a floor below G0 does not. One that completes records G0 − 1 as read through, so the rescan
-  after it does not reconcile again. An engine whose backlog stands past the bound, with
-  fewer deaths than the live-document count recorded while it reconciles, reconciles once,
-  and its census finishes its count.
+  their first page reads, never start over because of the floor, and on completing record G0
+  itself as read through, so where the floor stands at or below G0 the rescan after it does
+  not reconcile again, and where the floor passed G0 while it ran the reader reconciles
+  again. In a quiet store whose floor stands at exactly the current write generation, as
+  after one changeset deletes most of the vault or, with no live documents, after any one
+  deletion, a reconcile and a census recount each complete once, and the reader has then
+  read through the floor. An engine whose
+  backlog stands past the bound, with fewer deaths than the live-document count recorded
+  while it reconciles, reconciles once, and its census finishes its count. A held path
+  checked live on an early page, then deleted and its death removed before the reconcile
+  completes, leaves the reader below the floor, and the next reconcile removes it.
+- A census count that reaches the end of both feeds records the write generation it read
+  before that final page, where that page's floor stands at or below what the census has
+  read through, and its read-through generation then covers the newest generation's deaths.
+  A recount that ends below the floor records its G0 alone and counts again.
 - A census below the floor reports its last whole counts until its recount is whole, a
-  restart included. A census over a new store epoch reports none.
+  second recount included. A census over a new store epoch reports none.
 - Freshness reports rescanning, and the search margin its cap, where the engine's
   read-through generation stands below the floor of the reading they judge against, and not
   where only its death watermark does.
@@ -621,8 +675,8 @@ These consequences are testable:
   and wakes the engine where the floor passed the read-through generation it was handed. It
   takes no write generation.
 - A death-prune pass comes due only where a death was recorded, a broken finding filed or
-  discarded, or the read-through generation rose after a pass that kept a death for lane 2
-  alone, and never during a from-zero build or while link health is loading. A configured
+  discarded, or the read-through generation rose above the lowest one the removing units of
+  a pass that kept a death for lane 2 alone were handed, and never during a from-zero build or while link health is loading. A configured
   engine that never advances makes no pass due through the read-through generation.
 - Every phase of a pass continues by an exclusive keyset seek with no sort, and the
   live-document count fits one unit.
@@ -2211,8 +2265,8 @@ configuration and store.
 
 This section is amended. A drain also reconciles where the engine has not read through the
 death floor, and every reconcile records the write generation its first page read and, on
-completing, the generation below it as read through. Its other rules stand as ADR 0051
-wrote them.
+completing, that generation itself as read through. Its other rules stand as ADR 0051 wrote
+them.
 
 A semantic background turn reads the change feed through its own read connection, never
 through the attachment's `Store`. It embeds while holding no store and no lock, and it
@@ -2224,14 +2278,14 @@ Correctness rests on mechanisms that already exist, and on the death floor. Curs
 consumer-owned feed positions, each a `generation:path` pair, valid within one store epoch
 and only while the engine has read through the death floor. The sidecar records the store
 epoch it observed beside its cursors (`OBSERVED_STORE_EPOCH`), and beside that epoch the
-generation its last completed reconcile read through, one below the write generation that
-reconcile's first page read. A feed whose epoch differs from that record, or whose floor the
-engine has not read through, makes the drain reconcile the sidecar against the store before
-it reads the feed: the rescan
+generation its last completed reconcile read through, the write generation that reconcile's
+first page read. A feed whose epoch differs from that record, or whose floor the engine has
+not read through, makes the drain reconcile the sidecar against the store before it reads
+the feed: the rescan
 [Lane 2 reads change through a feed](#lane-2-reads-change-through-a-feed) rules for either
-failure. A reconcile records the write generation its first page reads and starts over only
-where a later page reads a floor at or above it, as [The death floor](#the-death-floor)
-rules. The drain's generation check already keeps a hash from being written beside values
+failure. A reconcile records the write generation its first page reads, never starts over
+because of the floor, and reconciles again where it completes with the floor above that
+generation, as [The death floor](#the-death-floor) rules. The drain's generation check already keeps a hash from being written beside values
 it does not describe, even against a writer interleaving through another store handle. The feed-read
 handle keeps its surface. Only its source changes, so `norn-semantic` still reads lane-1
 state through that handle alone (invariant 12).
@@ -2519,8 +2573,9 @@ verification never take a slot.
 ### Status reports embedding coverage
 
 This section is amended. A census below the death floor keeps its last whole counts while it
-counts again, and starts that count over only as a reconcile starts over. Its other rules
-stand as ADR 0051 wrote them.
+counts again, and never starts that count over because of the floor, as a reconcile never
+does. A count that reaches the end of both feeds records the write generation it read before
+that final page. Its other rules stand as ADR 0051 wrote them.
 
 `EngineStatus::On` gains `coverage: { embedded, total }` beside `freshness`. Both counts
 are taken at one store state, the one the unit's page was read from or, while a count is
@@ -2552,9 +2607,14 @@ count has no whole count to report, and neither does a count over a new store ep
 census empties when the store epoch changes, so no count is carried from one database to
 another. A census that has not read through the death floor empties and counts again too,
 but over the same database, so it keeps its last whole counts, and the status reports them
-until the new count is whole. It records the write generation its first page reads, starts
-over only where a later page reads a floor at or above it, and keeps its last whole counts
-across a restart ([The death floor](#the-death-floor)). `EngineStatus::On` is
+until the new count is whole. It records the write generation its first page reads and, on
+completing, that generation itself as read through, never starts the count over because of
+the floor, and counts again where it completes with the floor above that generation,
+keeping its last whole counts across the second count. A count that reaches the end of both
+feeds, where that final page reads a floor the census has read through, records the write
+generation it read before that page, as a completed drain records its watermark, and the
+census's read-through generation counts that record
+([The death floor](#the-death-floor)). `EngineStatus::On` is
 `#[non_exhaustive]`, so the new field is an additive `norn-wire` change.
 
 ### Non-goals
