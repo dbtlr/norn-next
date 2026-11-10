@@ -36,7 +36,8 @@ these:
   A death-prune unit is a third unit kind of a maintenance leg. The leg's order and the claim
   about its longest unit are restated, and a rule is inserted beside the shadow sweep's: the
   death prune does not wait for a quiet entry either, and runs only where the store's link
-  health is admitted.
+  health is admitted. The known limit on what a settling read waits behind counts a
+  death-prune unit as a unit that may be in flight.
 - **ADR 0051's [Status reports embedding coverage](#status-reports-embedding-coverage).** A
   census that has not read through the floor counts again and keeps its last whole counts
   meanwhile, and it starts that count over only as a reconcile starts over. A new store
@@ -904,7 +905,7 @@ fingerprint, derivation version or path order the store does not match, over dam
 any other rung that discards the database and derives the vault again. No reader can adopt
 the store as complete until its construction ends: the store carries an under-construction
 mark until then, and an open that finds the mark rebuilds from zero rather than resuming
-over what a crash left, as ADR 0045 rules. A full tree heal of an existing store, a recovery
+over what a crash left, as ADR 0045 ruled. A full tree heal of an existing store, a recovery
 that does not rebuild from zero and every write after the build ends maintain an existing
 store; each keeps the per-changeset re-decision above unchanged. A schema pin keeps the
 obligation ruled above, whose mechanism stays open; that mechanism may reuse the single
@@ -914,7 +915,7 @@ judgment's routine.
 of every document — its headings, blocks and links — have landed, the store judges every
 eligible link once, plus the links a requeued path reaches, in path order, in bounded
 chunks; a requeued directory that lists again reaches the links beneath it, and its
-unreadable-directory finding ends before they are judged, as ADR 0045 rules. The judgment is the one above:
+unreadable-directory finding ends before they are judged, as ADR 0045 ruled. The judgment is the one above:
 the same SQL predicate, over the same summaries of the keys each link is read through,
 filing the same kinds with the same invalidation keys, in the same deterministic order. A
 path a filesystem fact requeues while the judgment runs is derived again first, and the
@@ -957,7 +958,7 @@ query's answer reads them, and no write's safety does. A write other than a repa
 the health of the links it changes itself while it plans, and resolution reads names and
 stored link rows, never a finding. A reader that meets a from-zero build before its judgment
 has run sees link health as still loading, never as absent, and a `HasFinding` part is
-refused as not ready, as ADR 0045 rules.
+refused as not ready, as ADR 0045 ruled.
 
 **What it buys.** Measured on a lab prototype in release builds, on a 10,014-document
 fixture, per-changeset re-decision during a from-zero build made 89,186 link judgments for
@@ -1089,7 +1090,7 @@ when the heal reaches most of the vault.
 **Link health reads as still loading until a from-zero build's judgment has run.** Its
 findings exist only once the single judgment has run, so every surface that reports them
 answers "still loading" until then, for a rebuild of an existing store as for a vault's
-first build, as ADR 0045 rules.
+first build, as ADR 0045 ruled.
 
 **An ordinary edit to a hub costs the hub's own links.** A write that changes a widely linked
 document's body — an index, a map of content, a daily note — and leaves its names and anchor
@@ -1416,7 +1417,8 @@ The maintenance leg is what a settling read can now wait behind. A read waiting 
 met may wait behind one maintenance leg, whether a reconcile leg handed the claim to it or
 a deadline started it. The read waits for the rest of that leg: at most the rest of one
 rolling-heal slice, which ends at its existing work bounds or the budget, whichever it
-reaches first, and one sweep step. That wait is shorter than the
+reaches first, one sweep step, and one death-prune unit, which is bounded to cost no more
+than a slice. That wait is shorter than the
 maintenance leg a read could wait behind under ADR 0048, which ran the whole verification
 under the claim. The wait stays inside the read's bound.
 
