@@ -2805,8 +2805,8 @@ These costs are accepted:
   as the store, which stands from its write to the end of the copy's full-text check.
 - Each enabled engine holds one feed connection outside the request read budget.
 - A maintenance leg holds the claim and one worker slot for at most the background turn
-  budget plus one unit. A rolling-heal slice is the longest such unit, and a death-prune unit
-  is sized so that its own work costs no more; a write-ahead-log checkpoint that lands in a
+  budget plus one unit. By its own work a rolling-heal slice is the longest such unit, and a
+  death-prune unit is sized so that its own work costs no more; a write-ahead-log checkpoint that lands in a
   unit's commit is not counted, as it is not for any other writer.
 - A semantic background turn's overrun is one page and the census pages read beside it.
   The real-model runtime will have to size the page so that one page stays within human

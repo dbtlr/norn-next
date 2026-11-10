@@ -777,11 +777,14 @@ fn a_removing_unit_deletes_at_most_its_removal_bound() {
     let scratch = Scratch::new("prune-removal-bound");
     let mut store = scratch.open();
     apply(&mut store, vec![holder("h.md", "[[kept]]\n")]);
+    // The kept death comes first in feed order, so it is judged in the first
+    // removing unit: were it to spend the bound, that unit would remove one
+    // death fewer and every later split would move.
+    died(&mut store, "x/kept.md");
     let total = 2 * DEATH_PRUNE_UNIT_REMOVALS + 3;
     let at = |n: usize| format!("dead/{n:04}.md");
     apply(&mut store, (0..total).map(|n| plain(&at(n))).collect());
     apply(&mut store, (0..total).map(|n| death(&at(n))).collect());
-    died(&mut store, "x/kept.md");
     // The row bound alone would let one unit remove every death here.
     const { assert!(2 * DEATH_PRUNE_UNIT_REMOVALS < DEATH_PRUNE_UNIT_ROWS) };
 
@@ -813,7 +816,7 @@ fn a_removing_unit_deletes_at_most_its_removal_bound() {
         total as u64 + 1,
         "a death was judged twice or never"
     );
-    assert_eq!(removing.last().unwrap().work.deaths_kept_by_link, 1);
+    assert_eq!(removing.first().unwrap().work.deaths_kept_by_link, 1);
 }
 
 /// **A removing unit first marks the broken findings filed since the
