@@ -1121,6 +1121,14 @@ impl ListedRanges {
 /// their original path spellings break ties, independently of filesystem
 /// case behavior.
 ///
+/// **A key's class is read once.** [`resolve::link_key_rows`] already merges
+/// `documents` and `vault_files` under one cut, so a suffix key's class is
+/// gathered into one JSON array of its rows (`json_group_array` inside the
+/// `json_each` argument, which may name the key's row) and expanded; an outer
+/// `UNION ALL` over the two tables would evaluate the class once per table.
+/// The rows carry their own id, path and rung, so no table is joined back. A
+/// path key reads each table's documents at its path, and no class.
+///
 /// **The exact path comes first** ([`resolve::exact_first`]): a class row is
 /// exact where its suffix key is the key that reached it, and where any of a
 /// link's rows is exact, the link keeps those alone, its total their count
@@ -1148,25 +1156,32 @@ pub(crate) fn compose_link_targets(links: &[i64], head: usize) -> (String, Vec<V
             format!("(SELECT COUNT(*) FROM {table} AS {dp} WHERE {path})")
         })
         .join(" + ");
-    let reached = resolve::CANDIDATES
+    let rung = key.column();
+    let paths = resolve::CANDIDATES
         .map(|candidates| {
             let table = candidates.table;
             let dc = candidates.alias("c");
             let dp = candidates.alias("p");
             let path = resolve::link_key_path(&dp, key, "keyed.key");
-            let rung = format!("{dc}.{}", key.column());
             format!(
-                "SELECT keyed.key, keyed.files, {dc}.id, {dc}.path, {rung}, {rung} = keyed.key
-         FROM keyed CROSS JOIN {table} AS {dc}
-         WHERE keyed.segments IS NOT NULL AND {dc}.id IN (SELECT id FROM ({class}))
-         UNION ALL
-         SELECT keyed.key, keyed.files, {dc}.id, {dc}.path, keyed.key, 0
+                "SELECT keyed.key, keyed.files, {dc}.id, {dc}.path, keyed.key, 0
          FROM keyed CROSS JOIN {table} AS {dc}
          WHERE keyed.segments IS NULL AND {dc}.id IN (
              SELECT {dp}.id FROM {table} AS {dp} WHERE {path} ORDER BY {dp}.path LIMIT ?2)"
             )
         })
         .join(" UNION ALL ");
+    // A suffix key's merged class is read once into one array of its rows,
+    // which the key's row expands; a path key reads no class.
+    let reached = format!(
+        "SELECT keyed.key, keyed.files, json_extract(m.value, '$[0]'),
+                json_extract(m.value, '$[1]'), json_extract(m.value, '$[2]'),
+                json_extract(m.value, '$[2]') = keyed.key
+         FROM keyed CROSS JOIN json_each(CASE WHEN keyed.segments IS NOT NULL THEN (
+             SELECT json_group_array(json_array(c.id, c.path, c.{rung})) FROM ({class}) AS c
+         ) END) AS m
+         UNION ALL {paths}"
+    );
     (
         format!(
             "WITH page(link) AS (SELECT value FROM json_each(?1)),

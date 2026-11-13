@@ -2100,3 +2100,77 @@ fn a_vault_files_written_name_resolves_with_contextual_lowercasing() {
             .is_empty()
     );
 }
+
+/// **A link's head and total are the same whichever table holds the class's
+/// members.** `[[note.png]]` names four documents and four name-only files, so
+/// its class spans `documents` and `vault_files`: the head is the first
+/// [`CANDIDATE_HEAD`] in ladder order across both and the total counts all
+/// eight. `[[pic.png]]` has an exact member, a file at the root, which it keeps
+/// alone beside two deeper documents. The statement reads each key's class
+/// once, so it takes fewer steps than reading every class twice did.
+#[test]
+fn a_class_spanning_documents_and_files_is_read_once() {
+    use norn_store::{Change, DocumentPath, IncrementProvenance};
+    let mut all: Vec<DocumentFacts> = (1..=4)
+        .map(|at| holding(&format!("d{at}/note.png.md"), Vec::new()))
+        .collect();
+    all.extend(["x/pic.png.md", "y/pic.png.md"].map(|at| holding(at, Vec::new())));
+    all.push(holding(
+        "src.md",
+        vec![wikilink("note.png"), wikilink("pic.png")],
+    ));
+    let mut linked = Linked::holding_under("class-spans-files", Sensitive, &all, &bare());
+    linked
+        .store
+        .begin_request()
+        .apply_increment(
+            IncrementProvenance::Derived,
+            [
+                "f1/note.png",
+                "f2/note.png",
+                "f3/note.png",
+                "f4/note.png",
+                "pic.png",
+            ]
+            .map(|at| Change::FileBirth {
+                path: DocumentPath::new(at).expect("a path"),
+            }),
+            &[],
+            &bare(),
+        )
+        .expect("name-only files");
+    let links = linked.links_under("src.md", &bare());
+    let note = reading(&links[0]);
+    let pic = reading(&links[1]);
+    assert_eq!(
+        note,
+        (
+            LinkHealth::Ambiguous,
+            ["d1", "d2", "d3", "d4"]
+                .map(|at| format!("{at}/note.png.md"))
+                .into_iter()
+                .chain(["f1/note.png".to_string()])
+                .collect(),
+            8
+        )
+    );
+    assert_eq!(pic, names(LinkHealth::Healthy, &["pic.png"]));
+    let params = request()
+        .with_predicates([Predicate::path("src.md")])
+        .with_columns([Column::links()]);
+    let plans = linked.plans(&params);
+    let [targets] = &plans_of_steps(&plans, FindStatement::LinkTargets)[..] else {
+        panic!("one statement reads the links' targets");
+    };
+    // Before each class was read once, this statement took 3357 steps, and now 2787.
+    assert!(*targets < 3000, "the statement took {targets} steps");
+}
+
+/// The virtual-machine steps each run of `statement` took in `plans`.
+fn plans_of_steps(plans: &[norn_store::FindPlan], statement: FindStatement) -> Vec<u64> {
+    plans
+        .iter()
+        .filter(|plan| plan.statement == ReadStatement::Find(statement))
+        .map(|plan| plan.vm_steps)
+        .collect()
+}
