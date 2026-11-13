@@ -1,6 +1,9 @@
 use super::*;
 use norn_testkit::scratch::Scratch;
 
+// The startup cases run the sweep a host runs as it is built, with no vault
+// registered, so every derived directory they arrange is unregistered.
+
 #[cfg(unix)]
 #[test]
 #[allow(clippy::disallowed_methods)] // Private derived-state access failure.
@@ -26,6 +29,7 @@ fn one_inaccessible_startup_store_does_not_skip_other_stores() {
         return;
     }
     let ops = ProductionEntryOps::new(dirs.clone(), ProductionPolicy::new(64, 64).unwrap());
+    ops.sweep_unregistered(&[]);
     std::fs::set_permissions(&inaccessible, std::fs::Permissions::from_mode(0o700)).unwrap();
     assert!(ops.last_reader_cleanup_error().is_some());
     let good = dirs
@@ -59,6 +63,7 @@ fn one_failed_startup_sweep_does_not_skip_other_stores() {
         }
     }
     let ops = ProductionEntryOps::new(dirs.clone(), ProductionPolicy::new(64, 64).unwrap());
+    ops.sweep_unregistered(&[]);
     assert!(ops.last_reader_cleanup_error().is_some());
     let good = dirs
         .derived_dir(&VaultName::new("zzz-success").unwrap())
@@ -90,6 +95,7 @@ fn startup_reclaims_count_orphans_only_after_acquiring_maintainership() {
         panic!("fixture lock");
     };
     let ops = ProductionEntryOps::new(dirs.clone(), ProductionPolicy::new(64, 64).unwrap());
+    ops.sweep_unregistered(&[]);
     assert!(
         orphan.exists(),
         "startup must leave another maintainer's files alone"
@@ -97,6 +103,7 @@ fn startup_reclaims_count_orphans_only_after_acquiring_maintainership() {
     assert!(ops.last_reader_cleanup_error().is_none());
     drop(held);
     let ops = ProductionEntryOps::new(dirs, ProductionPolicy::new(64, 64).unwrap());
+    ops.sweep_unregistered(&[]);
     assert!(!orphan.exists(), "startup reclaims an abandoned result");
     assert!(
         unrelated.exists(),
@@ -116,6 +123,7 @@ fn startup_sweeps_retain_every_actual_failure() {
         std::fs::create_dir(derived.join(MAINTAINER_LOCK_FILE)).unwrap();
     }
     let ops = ProductionEntryOps::new(dirs, ProductionPolicy::new(2, 2).unwrap());
+    ops.sweep_unregistered(&[]);
     let failures = ops
         .last_reader_cleanup_error()
         .expect("both failed lock acquisitions");

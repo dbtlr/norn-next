@@ -776,7 +776,7 @@ fn reader_unavailable(error: &StoreError) -> ReaderUnavailable {
 
 impl ProductionEntryOps {
     pub fn new(dirs: ConfigDirs, policy: ProductionPolicy) -> Self {
-        let ops = Self {
+        Self {
             cleanup_error: Arc::new(Mutex::new(FailureHistory::default())),
             #[cfg(feature = "induced-failure")]
             loading_probe: None,
@@ -790,11 +790,7 @@ impl ProductionEntryOps {
                 STORE_VERIFICATION_INTERVAL,
             )),
             death_prunes: Arc::default(),
-        };
-        if let Err(error) = ops.sweep_count_orphans() {
-            ops.record_cleanup_failure(error);
         }
-        ops
     }
 
     /// Verify every store this host attaches each `interval` rather than
@@ -836,11 +832,24 @@ impl ProductionEntryOps {
         self.readers.census()
     }
 
-    fn sweep_count_orphans(&self) -> Result<(), String> {
+    /// Sweep count residue from every derived store directory no vault in
+    /// `registered` owns: an unregistered, retired or removed vault's, which
+    /// no attach will come round to. Each is swept only under its maintainer
+    /// lock, and one another maintainer holds is left alone. A registered
+    /// vault's directory is skipped, lock and all, because its attach sweeps
+    /// it under the lock the attach holds.
+    fn sweep_count_orphans(&self, registered: &[VaultName]) -> Result<(), String> {
+        let owned: BTreeSet<PathBuf> = registered
+            .iter()
+            .map(|name| self.dirs.derived_dir(name))
+            .collect();
         let stores = Store::count_residue_stores(&self.dirs.vaults_dir())
             .map_err(|error| error.to_string())?;
         let mut last_error = None;
-        for directory in stores {
+        for directory in stores
+            .into_iter()
+            .filter(|directory| !owned.contains(directory))
+        {
             let swept = (|| {
                 let source = directory.join(STORE_FILE);
                 match try_acquire(&directory.join(MAINTAINER_LOCK_FILE))
@@ -2321,6 +2330,12 @@ impl EntryOps for ProductionEntryOps {
         } else {
             loading::LoadingBoundary::QueryEstablished
         });
+    }
+
+    fn sweep_unregistered(&self, registered: &[VaultName]) {
+        if let Err(error) = self.sweep_count_orphans(registered) {
+            self.record_cleanup_failure(error);
+        }
     }
 
     #[allow(clippy::disallowed_methods)] // Observes only the derived store, never vault inputs.
@@ -7367,6 +7382,66 @@ mod tests {
         assert_eq!(error.stage(), crate::ReloadStage::Parse);
     }
 
+    /// Starting a host sweeps count residue only from derived directories no
+    /// registered vault owns, and never takes a registered vault's maintainer
+    /// lock: a lock taken and released there just before the attach takes it
+    /// again leaves a window in which a forked child's copy of the descriptor
+    /// refuses that attach. The registered vault's residue waits for its
+    /// attach, which sweeps it under the lock it holds.
+    #[test]
+    fn startup_sweeps_only_unregistered_residue_and_leaves_registered_locks_untaken() {
+        let f = Fixture::new("startup-sweep-skips-registered");
+        let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
+        let registration = f.registration();
+        let name = registration.name.clone();
+        let residue_in = |vault: &VaultName| {
+            let results = dirs
+                .derived_dir(vault)
+                .join(STORE_FILE)
+                .with_extension("count-results");
+            fs::create_dir_all(&results).unwrap();
+            let residue = results.join("result-0123456789abcdef0123456789abcdef.sqlite3");
+            fs::write(&residue, b"unfinished private result").unwrap();
+            residue
+        };
+        let registered = residue_in(&name);
+        let unregistered = residue_in(&VaultName::new("retired").unwrap());
+        let registered_lock = dirs.derived_dir(&name).join(MAINTAINER_LOCK_FILE);
+        let ops = ProductionEntryOps::new(dirs.clone(), ProductionPolicy::new(2, 2).unwrap());
+        let host = crate::Host::new(
+            crate::RegistryRead::from_entries([registration]),
+            ops,
+            crate::LifecyclePolicy {
+                idle_after: Duration::from_secs(60),
+                worker_slots: 1,
+                watch_poll_interval: Duration::from_millis(25),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_threads: crate::BACKGROUND_THREADS,
+                background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
+            },
+        )
+        .unwrap();
+        assert!(
+            !unregistered.exists(),
+            "an unregistered vault's residue is swept at startup"
+        );
+        assert!(
+            !registered_lock.exists(),
+            "the startup sweep took a registered vault's maintainer lock"
+        );
+        assert!(
+            registered.exists(),
+            "a registered vault's residue is left to its attach"
+        );
+        let _lease = host.demand(&name).unwrap();
+        wait_state(&host, &name, norn_wire::TrustState::Ready);
+        assert!(
+            !registered.exists(),
+            "the attach sweeps a registered vault's residue"
+        );
+        assert!(host.ops().last_reader_cleanup_error().is_none());
+    }
+
     /// A count-residue sweep an attach fails is recorded after the cause an
     /// earlier startup sweep recorded, never in its place.
     #[test]
@@ -7377,10 +7452,6 @@ mod tests {
         fs::create_dir_all(earlier.join("store.count-results")).unwrap();
         fs::create_dir(earlier.join(MAINTAINER_LOCK_FILE)).unwrap();
         let ops = ProductionEntryOps::new(dirs.clone(), ProductionPolicy::new(2, 2).unwrap());
-        let prior = ops
-            .last_reader_cleanup_error()
-            .expect("the startup sweep's lock failure");
-        assert!(prior.contains("earlier"), "{prior}");
         let registration = f.registration();
         let name = registration.name.clone();
         let residue = dirs
@@ -7402,6 +7473,11 @@ mod tests {
             },
         )
         .unwrap();
+        let prior = host
+            .ops()
+            .last_reader_cleanup_error()
+            .expect("the startup sweep's lock failure");
+        assert!(prior.contains("earlier"), "{prior}");
         let _lease = host.demand(&name).unwrap();
         wait_state(&host, &name, norn_wire::TrustState::Ready);
         let diagnostic = host
@@ -8760,6 +8836,7 @@ mod tests {
         }
         forward_to_inner! {
             fn first_index_candidate(&self, registration: &Registration) -> bool;
+            fn sweep_unregistered(&self, registered: &[VaultName]);
             fn trim_readers(&self, now: Instant);
             fn attach(&self, registration: &Registration, progress: &ProgressReporter<Self::Attachment>) -> Result<Self::Attachment, JobFailure>;
             fn recover(&self, name: &VaultName, attachment: &mut Self::Attachment, progress: &ProgressReporter<Self::Attachment>) -> Result<(), JobFailure>;

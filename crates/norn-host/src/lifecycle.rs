@@ -328,6 +328,16 @@ pub trait EntryOps: Send + Sync + 'static {
     #[cfg(any(test, feature = "induced-failure"))]
     fn loading_reconcile_boundary(&self) {}
 
+    /// Startup housekeeping over derived state no registered vault owns, run
+    /// once by [`Host::new`] before it serves any entry, with every name the
+    /// host serves at startup. An implementation leaves a registered vault's
+    /// derived state, and its maintainer lock, to that vault's attach, which
+    /// sweeps it under the lock it holds: taking that lock here and releasing
+    /// it just before the attach takes it again would let a child forked in
+    /// between keep a copy of its descriptor and refuse the attach.
+    /// Adapters wrapping production operations must forward this method too.
+    fn sweep_unregistered(&self, _registered: &[VaultName]) {}
+
     /// Background release of idle read resources, outside every entry gate.
     fn trim_readers(&self, _now: Instant) {}
     type Attachment: SnapshotSource;
@@ -5605,7 +5615,9 @@ impl<O: EntryOps> Host<O> {
         // host runs is served exactly as a vault read at startup is.
         let scheduler = Arc::new(Scheduler::default());
         let entries = ServingSet::new(BackgroundWake::to(&scheduler));
+        let mut registered = Vec::new();
         for registration in registry.into_entries() {
+            registered.push(registration.name.clone());
             let storage = if ops.first_index_candidate(&registration) {
                 CanonicalStoreObservation::Absent
             } else {
@@ -5615,6 +5627,13 @@ impl<O: EntryOps> Host<O> {
                 .insert(registration, storage)
                 .expect("the registrations are keyed by name, so no two of them name one entry");
         }
+        // Judged against the set this host serves, and run before the host
+        // exists, so no registration made through it can join meanwhile. A
+        // vault registered in the registry file after it was read and before
+        // this sweep is swept as unregistered: its lock is taken and released
+        // once, while no attach of this host can want it. That window is
+        // accepted rather than closed.
+        ops.sweep_unregistered(&registered);
         let (jobs, receiver) = mpsc::sync_channel(policy.worker_slots);
         let receiver = Arc::new(Mutex::new(receiver));
         let shared = Arc::new(Shared {
