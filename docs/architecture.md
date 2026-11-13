@@ -1236,7 +1236,10 @@ survives a request. Inspection publishes no result whose report is discarded.
 
 `norn-db` exclusively creates named files with private directory and file modes and
 checks identity when reopening or removing them. Normal last-reader release removes
-storage. Host construction finishes its startup sweep before attaching stores. Startup,
+storage. Host construction finishes its startup sweep before attaching stores. The
+startup sweep covers only derived directories that no vault in the serving set owns; a
+registered vault's results, and its maintainer lock, are left to its attach, so that lock
+is never released just before the attach takes it again. Startup,
 attach and rebuild sweeps hold the derived store's maintainer lock and remove only
 recognized result names; another active maintainer's files are untouched. A newly
 acquired maintainer may unlink files of a retired store instance even if old reads

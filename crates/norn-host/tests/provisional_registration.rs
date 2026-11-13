@@ -62,6 +62,7 @@ impl EntryOps for PreHeld {
 
     delegate! {
         fn first_index_candidate(&self, registration: &Registration) -> bool;
+        fn sweep_unregistered(&self, registered: &[VaultName]);
         fn trim_readers(&self, now: Instant);
         fn reconcile(&self, name: &VaultName, attachment: &mut Self::Attachment, work: ReconcileWork, progress: &ProgressReporter<Self::Attachment>) -> Result<(), JobFailure>;
         fn recover(&self, name: &VaultName, attachment: &mut Self::Attachment, progress: &ProgressReporter<Self::Attachment>) -> Result<(), JobFailure>;

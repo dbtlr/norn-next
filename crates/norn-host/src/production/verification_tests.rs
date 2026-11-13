@@ -480,6 +480,9 @@ struct OverflowHeldOpen {
 
 impl EntryOps for OverflowHeldOpen {
     type Attachment = ProductionAttachment;
+    fn sweep_unregistered(&self, registered: &[VaultName]) {
+        self.inner.sweep_unregistered(registered);
+    }
 
     fn attach(
         &self,
