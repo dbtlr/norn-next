@@ -1685,6 +1685,13 @@ impl ProductionEntryOps {
                     return Err(JobFailure::MaintainerContended(map_incumbent(incumbent)));
                 }
             };
+        // The startup sweep leaves a registered vault's count residue to this
+        // attach, so it is swept here, the moment the lock is held and before
+        // any step that can fail (a missing root, a watcher, a store open)
+        // would return with the lock taken and the residue still there.
+        if let Err(error) = Store::sweep_count_residue(&derived.join(STORE_FILE)) {
+            self.record_cleanup_failure(error.to_string());
+        }
         if !admit(&derived.join(STORE_FILE))? {
             return Ok(None);
         }
@@ -1740,9 +1747,6 @@ impl ProductionEntryOps {
         store
             .set_count_retention(self.policy.count_retention)
             .map_err(store_effect)?;
-        if let Err(error) = store.sweep_count_results() {
-            self.record_cleanup_failure(error.to_string());
-        }
         {
             #[cfg(feature = "induced-failure")]
             let _timing = norn_store::profiling::span("host.watch_sync_wait");
@@ -7440,6 +7444,71 @@ mod tests {
             "the attach sweeps a registered vault's residue"
         );
         assert!(host.ops().last_reader_cleanup_error().is_none());
+    }
+
+    /// An attach that fails after taking the maintainer lock, here because the
+    /// vault root is gone, has still swept the registered vault's count
+    /// residue: the startup sweep leaves it to the attach, so the attach sweeps
+    /// it before anything that can fail.
+    #[test]
+    fn a_failed_attach_still_sweeps_its_registered_vaults_count_residue() {
+        let f = Fixture::new("failed-attach-sweeps-residue");
+        let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
+        let registration = f.registration();
+        let name = registration.name.clone();
+        let results = dirs
+            .derived_dir(&name)
+            .join(STORE_FILE)
+            .with_extension("count-results");
+        fs::create_dir_all(&results).unwrap();
+        let residue = results.join("result-0123456789abcdef0123456789abcdef.sqlite3");
+        fs::write(&residue, b"unfinished private result").unwrap();
+        fs::remove_dir_all(f.vault()).unwrap();
+        let ops = ProductionEntryOps::new(dirs, ProductionPolicy::new(2, 2).unwrap());
+        let host = crate::Host::new(
+            crate::RegistryRead::from_entries([registration]),
+            ops,
+            crate::LifecyclePolicy {
+                idle_after: Duration::from_secs(60),
+                worker_slots: 1,
+                watch_poll_interval: Duration::from_millis(25),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
+                background_threads: crate::BACKGROUND_THREADS,
+                background_turn_budget: crate::BACKGROUND_TURN_BUDGET,
+            },
+        )
+        .unwrap();
+        let _lease = host.demand(&name).unwrap();
+        let reason = wait_untrusted(&host, &name);
+        assert!(
+            matches!(reason, norn_wire::UntrustedReason::WatcherLost { .. }),
+            "{reason:?}"
+        );
+        assert!(!residue.exists(), "the failed attach left the residue");
+    }
+
+    /// A recovery sweeps count residue that appeared after the attach, under
+    /// the maintainer lock the attachment still holds.
+    #[test]
+    fn a_recovery_sweeps_count_residue_that_appeared_since_the_attach() {
+        let f = Fixture::new("recovery-sweeps-residue");
+        let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
+        let ops = ProductionEntryOps::new(dirs.clone(), ProductionPolicy::new(2, 2).unwrap());
+        let registration = f.registration();
+        let name = registration.name.clone();
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&registration, &progress).unwrap();
+        let results = dirs
+            .derived_dir(&name)
+            .join(STORE_FILE)
+            .with_extension("count-results");
+        fs::create_dir_all(&results).unwrap();
+        let residue = results.join("result-0123456789abcdef0123456789abcdef.sqlite3");
+        fs::write(&residue, b"unfinished private result").unwrap();
+        ops.recover(&name, &mut attachment, &progress)
+            .expect("a recovery over a healthy store");
+        assert!(!residue.exists(), "the recovery left the residue");
+        ops.detach(&name, attachment);
     }
 
     /// A count-residue sweep an attach fails is recorded after the cause an
