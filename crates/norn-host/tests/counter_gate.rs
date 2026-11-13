@@ -4820,13 +4820,13 @@ const ROUTE_LINKS: usize = 10;
 /// link after them: its `LEFT JOIN link_keys` probe of `link_keys_link` at the
 /// last holder's link, the greatest link id, runs off the end of the index
 /// instead of reading the next link's first key and stopping there. That is
-/// one step per statement whatever the vault and the links: 3,589 judgment
-/// steps at L = 10 over `small` (120 documents) and `ambiguous`, 3,594 over
-/// `realistic` and `soak` (6000), whose `über-notiz-1311.md` sorts after
-/// `zz-route/`, a difference of 5 at L = 20 as well; one row added to
+/// one step per statement whatever the vault and the links: at L = 10 and at
+/// L = 20, `realistic` and `soak` (6000 documents), whose
+/// `über-notiz-1311.md` sorts after `zz-route/`, read five judgment steps more
+/// than `small` (120 documents) and `ambiguous`; one row added to
 /// `link_keys_link` past the holder's link in the `ambiguous` store takes the
-/// statement from 512 steps to 513. `aaa-route/` reads 3,594 at all three of
-/// `small`, `ambiguous` and `realistic`.
+/// statement one step further. `aaa-route/` reads the same judgment steps at
+/// all three of `small`, `ambiguous` and `realistic`.
 ///
 /// **Linear in L, not the vault:** over `realistic`, at L / 2, L and 2L, every
 /// counter's growth from L to 2L is twice its growth from L / 2 to L. The

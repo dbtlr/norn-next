@@ -17,7 +17,7 @@ use crate::error::StoreError;
 use crate::find::path_list;
 use crate::health::LinkSelection;
 use crate::json::{FrontmatterValue, canonical_json};
-use crate::path::{ClassKey, DocumentPath, PathKey, SuffixKey};
+use crate::path::{ClassKey, DocumentPath, PathKey, SuffixKey, prefix_successor};
 use crate::resolve;
 
 /// Which arm of [`heads_sql`] and [`totals_sql`] a row came from: a suffix
@@ -457,19 +457,21 @@ pub(crate) fn discard_sql() -> String {
 }
 
 /// [`crate::ExplainedStatement::LinkHealthHeads`]: the head of what each
-/// distinct key names, at most `?3` candidates per kind in the resolution ladder's
-/// order, each row the arm, the key's index in its list, and the candidate's
-/// id, path and rung.
+/// distinct key names, at most `?4` candidates per kind and admitting count in
+/// the resolution ladder's order, each row the arm, the key's index in its
+/// list, and the candidate's id, path and rung.
 ///
 /// Two arms, one per key space a link is addressed in. The class arm walks
-/// the suffix keys `?1` lists, each a `[key, segments, files]` entry, and reads the
-/// members each key's class admits through [`resolve::candidate_range_rows`],
-/// its rung the candidate's suffix key. The path arm walks the path keys `?2`
-/// lists and reads the candidates at each through [`resolve::link_key_path`],
-/// its rung the key itself, so a path key's rows rank by the path alone. Each
-/// kind's head is cut in the statement, so a key hands back at most twice `?3`
-/// rows, however large its class. Consumers merge and cut to `?3` before
-/// deciding whether the head fills or contains only exact members.
+/// one entry per key and admitting count, which [`heads_parameters`] lists
+/// for each candidate kind: `?1` for documents and `?2` for vault files, each
+/// entry `[index, count, lower, upper]`. It seeks that count's run of the
+/// admitted-key index between the key and its successor, cut at `?4`, its rung
+/// the candidate's suffix key. The path arm walks the path keys `?3` lists and
+/// reads the candidates at each through [`resolve::link_key_path`], its rung
+/// the key itself, so a path key's rows rank by the path alone. A key hands
+/// back at most `?4` rows per kind and count, however large its class.
+/// Consumers merge and cut to `?4` before deciding whether the head fills or
+/// contains only exact members.
 ///
 /// # A class's head is read past none of the members it keeps out
 ///
@@ -477,12 +479,17 @@ pub(crate) fn discard_sql() -> String {
 /// stored admitting count is at most `segments`
 /// ([`crate::AmbiguityIgnore::admitting_segments`]). The members of one
 /// count stand together in that count's run of the admitted-key index, in
-/// ladder order, so the class arm enumerates each count from one to
-/// `segments` through [`resolve::admitting_counts`]. It seeks each run cut at
-/// `?3` rows, then cuts their union per kind at `?3` in ladder order. Each sort
-/// holds at most `segments` heads, never the class. A key costs its segments'
-/// worth of bounded seeks, and the members its class keeps out, however many
-/// sort ahead of its head, are never read.
+/// ladder order, so the class arm is listed one entry for each count from one
+/// to `segments`, as [`resolve::admitting_counts`] enumerates them. Each entry
+/// seeks its run cut at `?4` rows, in the index's own order. A key costs its
+/// segments' worth of bounded seeks, and the members its class keeps out,
+/// however many sort ahead of its head, are never read.
+///
+/// **The entries are spelled before the statement runs.** The counts, the
+/// key's successor and which keys a vault file can answer are all fixed by
+/// the key, so the driver carries them rather than the statement deriving
+/// them per key: a key's cost is its seeks, and a page of keys pays the
+/// statement's setup once.
 ///
 /// **The count is read as the row was derived.** A changeset computes it
 /// under the declaration it is judged under, so where a pin moves the
@@ -500,45 +507,71 @@ pub(crate) fn discard_sql() -> String {
 /// the cuts here spell in SQL.
 pub(crate) fn heads_sql(key: SuffixKey) -> String {
     let rung = key.column();
-    let lower = "json_extract(j.value, '$[0]')";
-    let upper = format!("{}({lower})", resolve::SUCCESSOR_FUNCTION);
+    let entry = |at: usize| format!("json_extract(j.value, '$[{at}]')");
+    let (index, count, lower, upper) = (entry(0), entry(1), entry(2), entry(3));
     resolve::CANDIDATES
-        .map(|candidates| {
-            let class = resolve::candidate_range_rows(
-                &candidates,
-                key,
-                (lower, &upper),
-                "json_extract(j.value, '$[1]')",
-                Some("?3"),
-                "json_extract(j.value, '$[2]')",
-            );
+        .into_iter()
+        .zip(["?1", "?2"])
+        .map(|(candidates, driver)| {
             let table = candidates.table;
+            let da = candidates.alias("a");
+            let dl = candidates.alias("l");
             let dc = candidates.alias("c");
             let dp = candidates.alias("p");
+            let admitted = resolve::range_admitted(&dl, key, (&lower, &upper), &count);
+            let order = resolve::ladder(&format!("{dl}.{rung}"), &format!("{dl}.path"));
             let path = resolve::link_key_path(&dp, key, "j.value");
             format!(
-                "SELECT {CLASS_ARM}, j.key, {dc}.id, {dc}.path, {dc}.{rung}
-         FROM json_each(?1) AS j CROSS JOIN {table} AS {dc}
-         WHERE {dc}.id IN (SELECT id FROM ({class}))
+                "SELECT {CLASS_ARM}, {index}, {da}.id, {da}.path, {da}.{rung}
+         FROM json_each({driver}) AS j CROSS JOIN {table} AS {da}
+         WHERE {da}.id IN (SELECT {dl}.id FROM {table} AS {dl} WHERE {admitted}
+                         ORDER BY {order} LIMIT ?4)
          UNION ALL
          SELECT {PATH_ARM}, j.key, {dc}.id, {dc}.path, j.value
-         FROM json_each(?2) AS j CROSS JOIN {table} AS {dc}
+         FROM json_each(?3) AS j CROSS JOIN {table} AS {dc}
          WHERE {dc}.id IN (SELECT {dp}.id FROM {table} AS {dp} WHERE {path}
-                         ORDER BY {dp}.path LIMIT ?3)"
+                         ORDER BY {dp}.path LIMIT ?4)"
             )
         })
+        .collect::<Vec<_>>()
         .join(" UNION ALL ")
 }
 
-/// The values [`heads_sql`] binds: the suffix keys beside their segment
-/// counts, the path keys, and the head's bound.
+/// The values [`heads_sql`] binds: the class arm's entries for documents and
+/// for vault files, the path keys, and the head's bound.
+///
+/// A suffix key of `segments` segments is listed once per admitting count
+/// from one to `segments`, never past the elements its spelling splits into,
+/// as [`resolve::admitting_counts`] reads them. Its upper bound is
+/// [`prefix_successor`], or nothing where no key sorts above it, which reads
+/// no member. Only a key whose address did not spell `.md` is listed for the
+/// vault files, the only kind the optional `.md` keeps out.
 pub(crate) fn heads_parameters(
     classes: &[(&str, u64, bool)],
     paths: &[&str],
     head: usize,
 ) -> Result<Vec<Value>, StoreError> {
+    let mut documents = Vec::new();
+    let mut files = Vec::new();
+    for (index, (key, segments, admits_files)) in classes.iter().enumerate() {
+        let spelled = key.split(resolve::SEPARATOR).count() as u64;
+        let upper = prefix_successor(key).map_or(FrontmatterValue::Null, FrontmatterValue::String);
+        for count in 1..=(*segments).min(spelled) {
+            let entry = FrontmatterValue::Sequence(vec![
+                FrontmatterValue::Int(i64::try_from(index).expect("a key index fits i64")),
+                FrontmatterValue::Int(i64::try_from(count).expect("a segment count fits i64")),
+                FrontmatterValue::String((*key).to_string()),
+                upper.clone(),
+            ]);
+            if *admits_files {
+                files.push(entry.clone());
+            }
+            documents.push(entry);
+        }
+    }
     Ok(vec![
-        class_list(classes)?,
+        canonical_json(&FrontmatterValue::Sequence(documents)).map(Value::Text)?,
+        canonical_json(&FrontmatterValue::Sequence(files)).map(Value::Text)?,
         path_list(paths)?,
         Value::Integer(i64::try_from(head).expect("a head fits i64")),
     ])
@@ -594,7 +627,7 @@ pub(crate) fn totals_parameters(
 }
 
 /// The suffix keys beside their segment counts, as the list of `[key,
-/// segments, files]` entries the class arm of [`heads_sql`] and [`totals_sql`] walks.
+/// segments, files]` entries the class arm of [`totals_sql`] walks.
 fn class_list(classes: &[(&str, u64, bool)]) -> Result<Value, StoreError> {
     canonical_json(&FrontmatterValue::Sequence(
         classes

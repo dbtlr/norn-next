@@ -374,25 +374,53 @@ fn every_statement_a_repair_runs_is_planned_as_an_index_search() {
     );
     let mut store = vault.store();
     let plans = plans_of(&store, &statements);
+    let opening = |plan: &QueryPlan, select_list: &str| {
+        plan.sql()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .starts_with(select_list)
+    };
+    // The link-health heads statement cuts each admitting count's run alone,
+    // in the admitted index's order, and leaves the merge to the judgment, so
+    // it sorts nothing.
     let health_head = plans
         .iter()
         .find(|plan| {
-            plan.sql()
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ")
-                .starts_with("SELECT 0, j.key, dc.id, dc.path,")
+            opening(
+                plan,
+                "SELECT 0, json_extract(j.value, '$[0]'), da.id, da.path,",
+            )
         })
         .expect("a link-health head statement");
-    let head_sort = health_head
+    assert!(
+        !health_head
+            .rows()
+            .iter()
+            .any(|row| row.detail.contains("TEMP B-TREE")),
+        "the link-health heads statement sorts: {:?}",
+        health_head.rows()
+    );
+    // A suffix head merges its runs in the statement, a sort its admitted runs
+    // bound; the same plan with the runs' suffix bounds dropped is refused.
+    let suffix_head = plans
+        .iter()
+        .find(|plan| {
+            opening(
+                plan,
+                "SELECT j.key, m.value FROM json_each(?1) AS j CROSS JOIN json_each((",
+            )
+        })
+        .expect("a suffix head statement");
+    let head_sort = suffix_head
         .rows()
         .iter()
         .find(|row| row.detail == "USE TEMP B-TREE FOR ORDER BY")
         .expect("the bounded head merge sorts");
-    assert!(admitted_sort(health_head, &normalized(health_head.sql()), head_sort).is_some());
+    assert!(admitted_sort(suffix_head, &normalized(suffix_head.sql()), head_sort).is_some());
     let count_only = QueryPlan::new(
-        health_head.sql(),
-        health_head
+        suffix_head.sql(),
+        suffix_head
             .rows()
             .iter()
             .map(|row| {
@@ -410,7 +438,7 @@ fn every_statement_a_repair_runs_is_planned_as_an_index_search() {
     );
     assert!(
         admitted_sort(&count_only, &normalized(count_only.sql()), head_sort).is_none(),
-        "a health head's count-only seek was admitted without its suffix bounds"
+        "a suffix head's count-only seek was admitted without its suffix bounds"
     );
     // The set the census plans is every statement the store began while the
     // repairs ran and after the last answered, and nothing besides: one
@@ -1152,10 +1180,12 @@ fn census(plans: &[QueryPlan]) -> Vec<String> {
 /// drives them, so a sort in any other statement is found. The SQL is
 /// normalized once per call and reused for each select-list prefix check.
 ///
-/// - **A class's heads** (`ExplainedStatement::LinkHealthHeads`): each
+/// - **A suffix's heads** (`ExplainedStatement::LinkHealthSuffixes`): each
 ///   admitting count's run is read in ladder order off the admitted-key
 ///   index, and the runs' union — at most a head per count the key's
-///   segments reach — is sorted and cut again.
+///   segments reach — is sorted and cut again. The link-health heads
+///   statement cuts each run alone and sorts nothing, so no admission
+///   answers it.
 /// - **A page of a write's links** (`ExplainedStatement::LinkHealthWrittenLinks`):
 ///   read in path order off the change-feed index, which does not say a path
 ///   is one document's, so the links of one path, which the changeset wrote,
@@ -1231,11 +1261,10 @@ fn admitted_sort(plan: &QueryPlan, normalized_sql: &str, sort: &PlanRow) -> Opti
         || opens_with("SELECT fr.kind, fr.severity, COUNT(*)");
     let a_count = opens_with("SELECT count(*) <=");
     let a_class_head = opens_with("SELECT dr.id, dr.path FROM (");
-    let a_health_head = opens_with("SELECT 0, j.key, dc.id, dc.path,");
     let a_suffix_head =
         opens_with("SELECT j.key, m.value FROM json_each(?1) AS j CROSS JOIN json_each((");
     match sort.detail.as_str() {
-        "USE TEMP B-TREE FOR ORDER BY" if (a_health_head || a_suffix_head) && admitted_runs() => {
+        "USE TEMP B-TREE FOR ORDER BY" if a_suffix_head && admitted_runs() => {
             Some("bounded admitted-run heads")
         }
         "USE TEMP B-TREE FOR LAST TERM OF ORDER BY"
@@ -1273,7 +1302,6 @@ const LAST_TWO_TERMS: &str = "USE TEMP B-TREE FOR LAST 2 TERMS OF ORDER BY";
 const DISTINCT: &str = "USE TEMP B-TREE FOR DISTINCT";
 const GROUP_BY: &str = "USE TEMP B-TREE FOR GROUP BY";
 
-const HEALTH_HEAD: &str = "SELECT 0, j.key, dc.id, dc.path, dc.x FROM t";
 const SUFFIX_HEAD: &str = "SELECT j.key, m.value FROM json_each(?1) AS j CROSS JOIN json_each((x";
 const CLASS_HEAD: &str = "SELECT dr.id, dr.path FROM (x";
 const COUNT: &str = "SELECT count(*) <= ?1 FROM (x";
@@ -1296,9 +1324,8 @@ type SortCase = (
 /// neighbours: the other statements' select lists and the other sort details.
 /// The census only asserts that every observed sort is admitted, so a widened
 /// admission would pass it; these constructed inputs pin the refusals, and the
-/// exact admission each accepted row gets pins which arm took it (the head
-/// select lists share one arm, so widening one to the other changes nothing,
-/// but widening either to the class head's select list changes the answer).
+/// exact admission each accepted row gets pins which arm took it (widening the
+/// suffix head's arm to the class head's select list changes the answer).
 #[test]
 fn admitted_sort_refuses_the_shape_outside_each_admission() {
     const HEADS: Option<&str> = Some("bounded admitted-run heads");
@@ -1311,7 +1338,6 @@ fn admitted_sort_refuses_the_shape_outside_each_admission() {
     const NONE: &[&str] = &[];
     let cases: &[SortCase] = &[
         // Each admission answers its own shape.
-        ("health head", HEALTH_HEAD, RUNS, ORDER_BY, HEADS),
         ("suffix head", SUFFIX_HEAD, RUNS, ORDER_BY, HEADS),
         (
             "class head",
@@ -1350,34 +1376,26 @@ fn admitted_sort_refuses_the_shape_outside_each_admission() {
             Some("a summary a document part drives"),
         ),
         // The head admissions: their select lists, their runs, their sort.
-        (
-            "health head: sort detail",
-            HEALTH_HEAD,
-            RUNS,
-            DISTINCT,
-            None,
-        ),
-        (
-            "health head: sort detail",
-            HEALTH_HEAD,
-            RUNS,
-            GROUP_BY,
-            None,
-        ),
-        (
-            "health head: sort detail",
-            HEALTH_HEAD,
-            RUNS,
-            LAST_TWO_TERMS,
-            None,
-        ),
-        ("health head: runs", HEALTH_HEAD, NONE, ORDER_BY, None),
-        ("health head: bounds", HEALTH_HEAD, BARE_RUN, ORDER_BY, None),
+        ("suffix head: bounds", SUFFIX_HEAD, BARE_RUN, ORDER_BY, None),
         (
             "suffix head: sort detail",
             SUFFIX_HEAD,
             RUNS,
             DISTINCT,
+            None,
+        ),
+        (
+            "suffix head: sort detail",
+            SUFFIX_HEAD,
+            RUNS,
+            GROUP_BY,
+            None,
+        ),
+        (
+            "suffix head: sort detail",
+            SUFFIX_HEAD,
+            RUNS,
+            LAST_TWO_TERMS,
             None,
         ),
         ("suffix head: runs", SUFFIX_HEAD, NONE, ORDER_BY, None),
@@ -1391,7 +1409,6 @@ fn admitted_sort_refuses_the_shape_outside_each_admission() {
         ("count: sort detail", COUNT, RUNS, GROUP_BY, None),
         ("count: sort detail", COUNT, RUNS, LAST_TERM, None),
         ("count: class head", CLASS_HEAD, RUNS, DISTINCT, None),
-        ("count: health head", HEALTH_HEAD, RUNS, DISTINCT, None),
         ("count: suffix head", SUFFIX_HEAD, RUNS, DISTINCT, None),
         ("count: page", PAGE, MATCHED, DISTINCT, None),
         ("count: other select list", OTHER, RUNS, DISTINCT, None),

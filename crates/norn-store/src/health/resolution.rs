@@ -401,9 +401,11 @@ pub struct ResolutionWork {
     /// or a reached place, and once per run of consecutive chunks holding it
     /// for any other key.
     pub keys_resolved: u64,
-    /// Driver rows read for candidate heads, before the candidate kinds merge.
-    /// Each kind contributes at most the requested head bound per key, including
-    /// the extra slots reserved for targets the overlay may replace.
+    /// Driver rows read for candidate heads, before the candidate kinds and
+    /// admitting counts merge. Each kind contributes at most the requested
+    /// head bound per key and admitting count, including the extra slots
+    /// reserved for targets the overlay may replace; the merge cuts the head
+    /// to that bound.
     pub head_rows: u64,
     /// Resolved keys each chunk's end visited to drop those the next chunk
     /// will not reuse: the keys the chunk before it held and its own, never
