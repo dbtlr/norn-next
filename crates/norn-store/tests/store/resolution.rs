@@ -1203,9 +1203,10 @@ fn a_heads_work_does_not_follow_the_members_its_class_admits() {
 /// **A head merged across admitting counts is cut to its bound.**
 /// `[[archive/index]]` admits four documents `?/archive/index.md` under no
 /// ignored place, of count one, and the ignored `archive/index.md`, of count
-/// two. Each count's run is read up to the bound, so their union holds four
-/// rows; the head hands back the three its bound allows, two past the one
-/// target the plan creates. `archive/index.md` stands at the link's exact
+/// two. Each count's run is read up to the bound, three of count one and the
+/// one of count two, so the statement hands back four rows; the merged head
+/// keeps the three its bound allows, two past the one target the plan
+/// creates. `archive/index.md` stands at the link's exact
 /// path, so it leads the merged head and the link names it alone on both
 /// sides (ADR 0040).
 #[test]
@@ -1230,7 +1231,7 @@ fn a_head_merged_across_admitting_counts_is_cut_to_its_bound() {
             )]
         );
         assert_eq!(work.keys_resolved, 1);
-        assert_eq!(work.head_rows, 3);
+        assert_eq!(work.head_rows, 4);
     });
 }
 

@@ -1532,6 +1532,53 @@ fn judgment_work_is_links_plus_candidates() {
     assert_eq!(more_candidates_under(500), more_candidates_under(50));
 }
 
+/// The most steps a key naming one document may add to a judgment's
+/// resolution: its admitted run's seek for each candidate kind, the row it
+/// hands back, and the merge. The heads statement pays its setup once per
+/// page of keys, so a judgment over many distinct keys costs its keys' seeks,
+/// not a statement's worth of work for each. Such a key measured forty-nine;
+/// one whose counts and bounds the statement derived, and whose runs it
+/// merged and cut, measured a hundred and twenty-five.
+const STEPS_PER_RESOLVED_KEY: u64 = 70;
+
+/// **A distinct key costs its resolution a small constant.** Four hundred
+/// links that each name their own document are judged beside four hundred
+/// that all name the same one, over stores of the same shape: the links,
+/// their verdicts and their findings are alike, so what the first judgment
+/// steps beyond the second is the resolution of the three hundred and
+/// ninety-nine keys only it holds, which stays within
+/// [`STEPS_PER_RESOLVED_KEY`] each.
+#[test]
+fn a_distinct_key_costs_its_resolution_a_constant() {
+    const LINKS: usize = 400;
+    let judged = |distinct: bool| {
+        let mut documents: Vec<DocumentFacts> = (0..LINKS)
+            .map(|at| derived(&format!("t/t{at:04}.md"), "t\n"))
+            .collect();
+        documents.extend((0..LINKS).map(|at| {
+            let target = if distinct { at } else { 0 };
+            derived(&format!("h/{at:04}.md"), &format!("[[t{target:04}]]\n"))
+        }));
+        let mut judging = Judging::new(&format!("health-keys-{distinct}"), Sensitive, &documents);
+        let holders: Vec<String> = (0..LINKS).map(|at| format!("h/{at:04}.md")).collect();
+        let holders: Vec<&str> = holders.iter().map(String::as_str).collect();
+        let (findings, steps) = judging.judged(&holders);
+        assert_eq!(findings, Vec::new(), "every link names its one document");
+        steps
+    };
+    let (shared, distinct) = (judged(false), judged(true));
+    let keys = LINKS as u64 - 1;
+    let per_key = distinct.saturating_sub(shared) / keys;
+    eprintln!(
+        "{LINKS} links: one key {shared} steps, {LINKS} keys {distinct} steps, {per_key} a key"
+    );
+    assert!(
+        per_key <= STEPS_PER_RESOLVED_KEY,
+        "each of {keys} keys naming one document took {per_key} steps to resolve, more than \
+         {STEPS_PER_RESOLVED_KEY}: one key {shared} steps, {LINKS} keys {distinct}"
+    );
+}
+
 // ---- the plan bars ----
 
 /// The statements the judgment runs, each of which the bar below judges.
@@ -1744,19 +1791,17 @@ fn judge(store: &mut Store, statement: ExplainedStatement<'_>, order: StoredPath
     // A head is the ladder's first rows of a class, each admitting count's
     // run read in ladder order off the admitted-key index, which carries the
     // key and the path both, so a run sorts nothing and its limit stops the
-    // read; the runs' union, at most a head per count the key's segments
-    // reach, is sorted whole and cut again: a sort bounded by the key's
-    // segments, never the class. Candidate suffix probes use the same merge
-    // with a bound of two, each range's class read once. A page of a write's
+    // read; the judgment merges the runs and cuts them again, so the head
+    // statement sorts nothing. Candidate suffix probes merge their runs in
+    // the statement with a bound of two, a sort bounded by the key's
+    // segments, never the class, each range's class read once. A page of a write's
     // links is read in path order off the change-feed index, which does not
     // say a path is one document's, so SQLite sorts the links of one path by
     // ordinal — the one document's own links, which the changeset wrote —
     // and the page's limit stops the read. Every other statement sorts
     // nothing.
     let sorted = match statement {
-        ExplainedStatement::LinkHealthHeads | ExplainedStatement::LinkHealthSuffixes => {
-            Some("USE TEMP B-TREE FOR ORDER BY")
-        }
+        ExplainedStatement::LinkHealthSuffixes => Some("USE TEMP B-TREE FOR ORDER BY"),
         ExplainedStatement::LinkHealthWrittenLinks => {
             Some("USE TEMP B-TREE FOR LAST TERM OF ORDER BY")
         }
@@ -1773,9 +1818,7 @@ fn judge(store: &mut Store, statement: ExplainedStatement<'_>, order: StoredPath
             sorts,
             vec![
                 sorted;
-                if matches!(statement, ExplainedStatement::LinkHealthHeads) {
-                    2
-                } else if matches!(statement, ExplainedStatement::LinkHealthSuffixes) {
+                if matches!(statement, ExplainedStatement::LinkHealthSuffixes) {
                     4
                 } else {
                     1

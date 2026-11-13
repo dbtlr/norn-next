@@ -97,7 +97,7 @@ impl Candidates {
 }
 
 /// The separator between segments, in a target and in a path alike.
-const SEPARATOR: char = '/';
+pub(crate) const SEPARATOR: char = '/';
 
 /// The globs a vault's schema keeps out of ambiguity classes.
 ///
