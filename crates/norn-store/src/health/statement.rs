@@ -541,7 +541,7 @@ pub(crate) fn heads_sql(key: SuffixKey) -> String {
 /// for vault files, the path keys, and the head's bound.
 ///
 /// A suffix key of `segments` segments is listed once per admitting count
-/// from one to `segments`, never past the segments its own spelling holds,
+/// from one to `segments`, never past the elements its spelling splits into,
 /// as [`resolve::admitting_counts`] reads them. Its upper bound is
 /// [`prefix_successor`], or nothing where no key sorts above it, which reads
 /// no member. Only a key whose address did not spell `.md` is listed for the

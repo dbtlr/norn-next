@@ -1536,9 +1536,8 @@ fn judgment_work_is_links_plus_candidates() {
 /// resolution: its admitted run's seek for each candidate kind, the row it
 /// hands back, and the merge. The heads statement pays its setup once per
 /// page of keys, so a judgment over many distinct keys costs its keys' seeks,
-/// not a statement's worth of work for each. Such a key measured forty-nine;
-/// one whose counts and bounds the statement derived, and whose runs it
-/// merged and cut, measured a hundred and twenty-five.
+/// not a statement's worth of work for each. Such a key measured forty-nine
+/// when the bar was set.
 const STEPS_PER_RESOLVED_KEY: u64 = 70;
 
 /// **A distinct key costs its resolution a small constant.** Four hundred
