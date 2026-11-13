@@ -38,25 +38,27 @@ lock says that a host serves the channel, not where. A start learns the rest by 
 its channel's endpoint, a convention resolved from the channel's default port or the
 machine settings file, and verifying whatever answers there before it sends a credential.
 
-**An explicit start takes over an auto-launched host and never displaces an explicit
-one.** An explicit start that finds the lock held by an auto-launched host asks that host,
-over the authenticated wire route, to drain and exit, then takes the lock and the port
-once they are free. An explicit start that finds an explicit host refuses and exits
-nonzero. A launched start that finds a host answering exits at once with a status that
-says a host serves the channel, and the CLI that launched it dials again. Every wait on a
-held lock is bounded by a release bound that is a constant of the channel, independent of
-either process's settings, and every stopping host frees the lock within that same bound
-of closing its listener. A start that holds the lock and does not reach listening within a
-start bound gives the lock back.
+**An explicit start takes over an auto-launched host and never displaces an explicit one.**
+An explicit start that finds the lock held by an auto-launched host asks that host, over
+the authenticated wire route, to drain and exit, then takes the lock and the port once they
+are free. The hello and the drain request keep versioned shapes, stable across releases, so
+a newer build can verify and retire an older host. An explicit start that finds an explicit
+host refuses and exits nonzero. A launched start that finds a verified host answering exits
+at once with a status that says a host serves the channel, and the CLI that launched it
+dials again. Every wait on a held lock is bounded by a release bound that is a constant of
+the channel, independent of either process's settings, and every stopping host frees the
+lock within that same bound of closing its listener. A start that holds the lock and does
+not reach listening within a start bound gives the lock back.
 
 **The host mints its own bearer credential at first start.** Whenever `norn serve` starts
-and the channel's token file holds no token, it mints exactly one from the operating
-system's random source and writes it create-if-absent under the token file's lock, so two
-hosts starting at once mint one token. The host is the only mint site. Service install
-touches no token, because its unit's first start mints where the file is empty; the client
-mints nothing; and later token management is a request to the host, which mints the bytes
-and stores them. The configuration crate stores tokens and holds no randomness. Every
-stored token is valid, and a label names one token so it can be revoked.
+and the channel's token file holds no token, it mints exactly one, labelled `default`, of
+32 bytes from the operating system's random source, and writes it create-if-absent under
+the token file's lock, so two hosts starting at once mint one token. The host is the only
+mint site. Service install touches no token, because its unit's first start mints where the
+file is empty; the client mints nothing; and later token management is a request to the
+host, which mints the bytes and stores them. The configuration crate stores tokens and
+holds no randomness. Every stored token is valid, and a label names one token so it can be
+revoked.
 
 ## Consequences
 

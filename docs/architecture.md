@@ -777,7 +777,7 @@ Widening quarantine past the
 undecodable-document class would turn a broken environment into silent data loss, which is the hazard refusal exists to prevent.
 
 **Cold is a state of a vault entry, not a code path.** There is exactly one attach seam and
-both host lifecycles use it, so "cold" names rung 2 running on first touch — not a separate
+both kinds of host (explicit and auto-launched) use it, so "cold" names rung 2 running on first touch — not a separate
 code path with its own behavior.
 
 ### 3. Raw-SQL acceptance
@@ -1993,7 +1993,9 @@ authoritative mapping of invariant to mechanism is the harness's code, not this 
     default or `config.toml`'s `[endpoint]`, with no endpoint file and no discovery
     handshake; `config.toml` itself, whose `[endpoint]` and `[serve]` the host reads and
     whose `[endpoint]` and `[client]` the client reads, and which the host reads and never
-    writes; and the token read. Token *generation* is the host's: `norn serve` mints a token
+    writes; and the token read. The token write (`tokens::mutate`) and the channel lock are
+host-side, held by review until a symbol lint like the registry's carries them. Token
+*generation* is the host's: `norn serve` mints a token
     at first start where the file holds none, and every later mint is a request to the
     host. The host decides the write happens and draws the bytes, `norn-config` performs it
     and holds no randomness, and no second byte-writer appears; a client draws only a
@@ -2157,12 +2159,13 @@ Everything a person reads as *output* still goes through `norn-console`. The car
 cover machine-consumed byte streams and the dev crates' own command lines and harness
 protocols only, and the one interim row above.
 
-**Stderr** — the table above governs stdout only. Stderr carries one stream that is not
-rendered output:
+**Stderr** — the table above governs stdout only. Stderr carries two streams that are not
+rendered output, one of them interim:
 
 | Site | Why |
 |---|---|
 | `norn-serve` server log | *Reserved.* What a running host says about itself — one plain-text line per lifecycle event, request lines when `request_log` is set. It is a diagnostic stream, not rendered output, so it does not route through `norn-console`; progress and status text a command renders for a person is output and does |
+| `norn-client` stock clap errors for `norn serve` | *Reserved, and interim.* clap's stock argument errors for the one command `norn-client` carries before `norn-console` exists, beside the interim stdout row for its help; both are removed when `norn-console` lands and takes the error envelope |
 
 #### Two spellings of the file mechanics, and the discipline both keep
 
@@ -2396,8 +2399,9 @@ Placement notes:
   which is the failure this separation exists to prevent and the one place it depends on
   the build rather than on the code.
 - Auth binds loopback with a bearer token the host mints at its first start, verified by
-  middleware-shaped auth that a client meets only after the hello has verified the host
-  ([below](#the-endpoint-the-bearer-token-and-the-hello)). TLS, multi-user, and remote
+  middleware-shaped auth that the CLI and the stdio-MCP shim meet only after the hello has
+  verified the host; an external MCP client sends a plain bearer with no hello, a declared
+  limitation ([below](#the-endpoint-the-bearer-token-and-the-hello)). TLS, multi-user, and remote
   access are explicitly out of scope until a real remote consumer exists.
 
 ### The host process
@@ -2465,8 +2469,9 @@ host answers `host/entry-not-ready` because the entry is warming or its coverage
 way back does the route dispatch again, each retry a fresh demand, until the entry answers
 or `ready_wait` (default 30 seconds) has passed; past it the route returns that refusal. A
 request that met a detach in flight is attached by its retry's fresh demand. The host's
-read contract is unchanged: a read that meets a warming or unattached entry is still
-refused at once, and the retry is the route's.
+read contract is unchanged — a read that settles over a change still waits for the facts
+it met, and an early-admitted read during a build from zero still answers early — and the
+retry, over only those `host/entry-not-ready` refusals, is the route's.
 
 **Stopping and recovering.** SIGTERM or Ctrl-C drains: the host closes its listener, lets
 in-flight requests finish within `drain_bound` (default 10 seconds, capped below the
@@ -2492,7 +2497,7 @@ naming another file override it for one invocation, and agreeing then is the cal
 **The host mints the bearer token at its first start** ([ADR
 0053](decisions/0053-one-host-per-channel-started-only-by-norn-serve.md)). Whenever `norn
 serve` starts and the channel's token file holds no token, it mints exactly one, labelled
-`default`, from the operating system's random source, and writes it create-if-absent under
+`default`, of 32 bytes from the operating system's random source, and writes it create-if-absent under
 the token file's lock — `norn-config`'s `tokens::mutate` holds the lock across the read and
 the rename — so two hosts starting at once mint one token, not two. An unreadable token
 file refuses the start, with a log line naming the file and the fix. The host is the only
