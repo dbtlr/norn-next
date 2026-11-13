@@ -28487,6 +28487,9 @@ mod tests {
         struct DroppedEvents(ProductionEntryOps);
         impl EntryOps for DroppedEvents {
             type Attachment = ProductionAttachment;
+            fn sweep_unregistered(&self, registered: &[VaultName]) {
+                self.0.sweep_unregistered(registered);
+            }
             fn attach(
                 &self,
                 registration: &Registration,
