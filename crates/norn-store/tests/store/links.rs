@@ -2174,3 +2174,39 @@ fn plans_of_steps(plans: &[norn_store::FindPlan], statement: FindStatement) -> V
         .map(|plan| plan.vm_steps)
         .collect()
 }
+
+/// The link-target statement's steps for one `[[big.png]]` link whose class
+/// holds `members` documents.
+fn link_target_steps_over_a_class_of(members: usize) -> u64 {
+    let mut all: Vec<DocumentFacts> = (1..=members)
+        .map(|at| holding(&format!("d{at:03}/big.png.md"), Vec::new()))
+        .collect();
+    all.push(holding("src.md", vec![wikilink("big.png")]));
+    let linked = Linked::holding_under(&format!("class-of-{members}"), Sensitive, &all, &bare());
+    let params = request()
+        .with_predicates([Predicate::path("src.md")])
+        .with_columns([Column::links()]);
+    let plans = linked.plans(&params);
+    let [targets] = &plans_of_steps(&plans, FindStatement::LinkTargets)[..] else {
+        panic!("one statement reads the links' targets");
+    };
+    *targets
+}
+
+/// **A class larger than the head costs the statement only its count.** The
+/// head is cut inside the class before its rows are gathered into one JSON
+/// array, so a key whose class holds hundreds of members reads [`CANDIDATE_HEAD`]
+/// of them and counts the rest. Without that cut every member is gathered,
+/// expanded and laddered: about 200 steps each rather than about 3.
+#[test]
+fn a_class_beyond_the_head_costs_only_its_count() {
+    let (small, large) = (8, 256);
+    let growth =
+        link_target_steps_over_a_class_of(large) - link_target_steps_over_a_class_of(small);
+    let per_member = growth / u64::try_from(large - small).expect("a member count fits u64");
+    assert!(
+        per_member < 10,
+        "each member past the head cost {per_member} steps ({growth} over {} members)",
+        large - small
+    );
+}
