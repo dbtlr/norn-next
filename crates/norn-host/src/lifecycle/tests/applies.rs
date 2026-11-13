@@ -1739,6 +1739,9 @@ struct HeldAfterItsChangeset {
 
 impl EntryOps for Arc<HeldAfterItsChangeset> {
     type Attachment = crate::production::ProductionAttachment;
+    fn sweep_unregistered(&self, registered: &[VaultName]) {
+        self.inner.sweep_unregistered(registered);
+    }
     fn attach(
         &self,
         registration: &Registration,

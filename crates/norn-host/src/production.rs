@@ -8421,6 +8421,9 @@ mod tests {
 
     impl EntryOps for EditedBeforeApply {
         type Attachment = ProductionAttachment;
+        fn sweep_unregistered(&self, registered: &[VaultName]) {
+            self.inner.sweep_unregistered(registered);
+        }
         fn attach(
             &self,
             registration: &Registration,
@@ -11314,6 +11317,9 @@ mod tests {
 
         impl EntryOps for OverflowOnArm {
             type Attachment = ProductionAttachment;
+            fn sweep_unregistered(&self, registered: &[VaultName]) {
+                self.inner.sweep_unregistered(registered);
+            }
 
             fn attach(
                 &self,
@@ -22540,6 +22546,9 @@ mod tests {
 
     impl EntryOps for DueSoonAfterAttach {
         type Attachment = ProductionAttachment;
+        fn sweep_unregistered(&self, registered: &[VaultName]) {
+            self.inner.sweep_unregistered(registered);
+        }
 
         fn rebuild(
             &self,
@@ -22768,6 +22777,9 @@ mod tests {
 
     impl EntryOps for CountedAttach {
         type Attachment = ProductionAttachment;
+        fn sweep_unregistered(&self, registered: &[VaultName]) {
+            self.inner.sweep_unregistered(registered);
+        }
 
         fn rebuild(
             &self,
@@ -24031,6 +24043,9 @@ mod tests {
 
     impl EntryOps for HeldReconcile {
         type Attachment = ProductionAttachment;
+        fn sweep_unregistered(&self, registered: &[VaultName]) {
+            self.inner.sweep_unregistered(registered);
+        }
         fn rebuild(
             &self,
             name: &VaultName,
@@ -24108,6 +24123,9 @@ mod tests {
 
     impl EntryOps for OutlastingApply {
         type Attachment = ProductionAttachment;
+        fn sweep_unregistered(&self, registered: &[VaultName]) {
+            self.inner.sweep_unregistered(registered);
+        }
         fn attach(
             &self,
             registration: &Registration,
@@ -24188,6 +24206,9 @@ mod tests {
 
     impl EntryOps for LockReplacedBeforeApply {
         type Attachment = ProductionAttachment;
+        fn sweep_unregistered(&self, registered: &[VaultName]) {
+            self.inner.sweep_unregistered(registered);
+        }
         fn attach(
             &self,
             registration: &Registration,
@@ -24367,6 +24388,9 @@ mod tests {
 
     impl EntryOps for SchemaWrittenBeforeApply {
         type Attachment = ProductionAttachment;
+        fn sweep_unregistered(&self, registered: &[VaultName]) {
+            self.inner.sweep_unregistered(registered);
+        }
         fn attach(
             &self,
             registration: &Registration,
@@ -26135,6 +26159,9 @@ mod tests {
 
     impl EntryOps for BlockedRecovery {
         type Attachment = ProductionAttachment;
+        fn sweep_unregistered(&self, registered: &[VaultName]) {
+            self.inner.sweep_unregistered(registered);
+        }
 
         fn rebuild(
             &self,
