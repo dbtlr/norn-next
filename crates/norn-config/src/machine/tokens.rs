@@ -7,9 +7,11 @@
 //! there is one writer of the file rather than two.
 //!
 //! **No token is generated here.** There is no randomness in this crate: the
-//! client decides a token should exist and mints its bytes, and this API
-//! writes them down. A generator here would put the quality of a credential
-//! inside the crate that stores it, where nobody would look for it.
+//! host decides a token should exist and mints its bytes — at its first start
+//! where the file holds none, and on a token request after that — and this
+//! API writes them down. The host is the one mint site; a client only reads a
+//! token. A generator here would put the quality of a credential inside the
+//! crate that stores it, where nobody would look for it.
 //!
 //! # Permissions
 //!

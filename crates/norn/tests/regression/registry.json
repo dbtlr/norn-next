@@ -1050,7 +1050,7 @@
       "sources": ["NRN-234", "NRN-104", "NRN-148", "NRN-488", "NRN-479", "NRN-395", "norn-legacy engineering learnings", "NRN-138", "NRN-425", "NRN-101"],
       "binding": {
         "status": "dormant",
-        "reason": "nothing records a mutation to an audit sink: no write path carries a trace id, opens an audit span or writes a log line, so nothing can be asserted of records, sinks, spans, trace ids or time correlation. The Layer 4 charter defers audit to task NORN-301, which is parked with its layer still open; the venue states that it lands no earlier than the surfaces whose mutations it records."
+        "reason": "nothing records a mutation to an audit sink: no write path carries a trace id, opens an audit span or writes a log line, so nothing can be asserted of records, sinks, spans, trace ids or time correlation. No Layer 6 phase builds a mutation audit log, so no Layer 6 phase binds this case, and the surfaces ship without one. Its re-entry is the parked audit-log task NORN-301, which builds the sink; the venue states only that the case lands no earlier than the surfaces whose mutations it records."
       }
     },
     {
