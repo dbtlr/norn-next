@@ -2398,7 +2398,7 @@ Placement notes:
   released binary built without it serves the development tree under the development port,
   which is the failure this separation exists to prevent and the one place it depends on
   the build rather than on the code.
-- Auth binds loopback with a bearer token the host mints at its first start, verified by
+- Auth binds the exact resolved loopback address with a bearer token the host mints at its first start, verified by
   middleware-shaped auth that every norn dialer (the CLI, the stdio-MCP shim, a starting
   host's takeover dial and self-update's takeover) meets only after the hello has verified
   the host; an external MCP client sends a plain bearer with no hello, a declared
@@ -2529,13 +2529,14 @@ walk over the stored tokens.
 0054](decisions/0054-a-client-verifies-the-host-before-it-sends-a-bearer.md)). The hello is
 the one exchange the bearer middleware admits without a bearer; it carries no request and
 reveals nothing a local peer could use. The client sends the label of the token it holds
-and a random nonce. The host answers with its channel, build identity, launch kind and the
-port it is bound to and the client address it sees on this connection, and an HMAC keyed
-by that one labelled token — one lookup, whatever the number of tokens — over the nonce,
-the channel, that port and that client address. The client refuses unless the HMAC
-verifies, the reported port is the port it dialed and the reported client address is its
-own local address on this connection, and then reports that host
-verification failed, naming both possible causes without asserting either: the credential
+and a random nonce. The host answers with its channel, build identity and launch kind and
+both ends of this connection as it sees them — its own local socket address and the
+client's socket address, each an IP and a port, IPv4-mapped forms normalized — and an
+HMAC keyed by that one labelled token (one lookup, whatever the number of tokens) over the
+nonce, the channel and both socket addresses. The client refuses unless the HMAC verifies,
+the host's reported socket address is the address the client dialed, and the reported
+client socket address is the client's own local socket address on this connection; it then
+reports that host verification failed, naming both possible causes without asserting either: the credential
 may have changed since the client read it, or something other than a norn host holds the
 port. It never sends its bearer after a failed hello. **Every dialer runs the hello as the
 first exchange of every connection it opens** — the CLI, the stdio-MCP shim, the takeover
@@ -2543,9 +2544,11 @@ dial and the self-update takeover — and a reopened or pooled connection is no 
 no connection carries a bearer without its own verified hello. That defeats another local
 user who binds the port while no host holds it to collect the next bearer, including one
 who relays the hello to a real host serving the channel on another port, or to one that
-has since bound the same port: a relay's own connection to the host has a client address
-other than the dialer's, and the operating system lets no second connection share the
-dialer's address pair. A client whose
+has since bound the same port: the answer names the connection it was computed on, both
+ends, and the operating system lets no second connection share a connection's four-part
+address, so a relay's own connection to the host cannot report the dialer's. The host
+listens only on the exact resolved loopback address, never on a wildcard or a second
+address. A client whose
 hello reports a build other than its own refuses with a "restart the host" resolution,
 except that it replaces an auto-launched host through the takeover. The hello's shape and
 the drain request's are versioned and kept stable across releases, so a newer build can
