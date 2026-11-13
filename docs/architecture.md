@@ -1994,9 +1994,9 @@ authoritative mapping of invariant to mechanism is the harness's code, not this 
     handshake; `config.toml` itself, whose `[endpoint]` and `[serve]` the host reads and
     whose `[endpoint]` and `[client]` the client reads, and which the host reads and never
     writes; and the token read. The token write (`tokens::mutate`) and the channel lock are
-host-side, held by review until a symbol lint like the registry's carries them. Token
-*generation* is the host's: `norn serve` mints a token
-    at first start where the file holds none, and every later mint is a request to the
+    host-side, held by review until a symbol lint like the registry's carries them. Token
+    *generation* is the host's: `norn serve` mints a token at first start where the file
+    holds none, and every later mint is a request to the
     host. The host decides the write happens and draws the bytes, `norn-config` performs it
     and holds no randomness, and no second byte-writer appears; a client draws only a
     verification nonce. **The per-registration mechanism files
@@ -2159,8 +2159,8 @@ Everything a person reads as *output* still goes through `norn-console`. The car
 cover machine-consumed byte streams and the dev crates' own command lines and harness
 protocols only, and the one interim row above.
 
-**Stderr** — the table above governs stdout only. Stderr carries two streams that are not
-rendered output, one of them interim:
+**Stderr** — the table above governs stdout only. Stderr carries one stream that is not
+rendered output, the server log, and one interim carve-out, like the interim stdout row:
 
 | Site | Why |
 |---|---|
@@ -2399,8 +2399,9 @@ Placement notes:
   which is the failure this separation exists to prevent and the one place it depends on
   the build rather than on the code.
 - Auth binds loopback with a bearer token the host mints at its first start, verified by
-  middleware-shaped auth that the CLI and the stdio-MCP shim meet only after the hello has
-  verified the host; an external MCP client sends a plain bearer with no hello, a declared
+  middleware-shaped auth that every norn dialer (the CLI, the stdio-MCP shim, a starting
+  host's takeover dial and self-update's takeover) meets only after the hello has verified
+  the host; an external MCP client sends a plain bearer with no hello, a declared
   limitation ([below](#the-endpoint-the-bearer-token-and-the-hello)). TLS, multi-user, and remote
   access are explicitly out of scope until a real remote consumer exists.
 
