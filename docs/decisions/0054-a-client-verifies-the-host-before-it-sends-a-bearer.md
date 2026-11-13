@@ -21,9 +21,11 @@ port.
 
 **A client sends the hello before its bearer.** The hello carries the label of the token
 the client holds and a random nonce. The host answers with its channel, its build identity,
-its launch kind and the port it is bound to, and an HMAC keyed by that one labelled token
-over the nonce, the channel and that port. The client refuses unless the HMAC verifies and
-the reported port is the port it dialed. It never sends its bearer after a failed hello,
+its launch kind, the port it is bound to and the client address it sees on this
+connection, and an HMAC keyed by that one labelled token over the nonce, the channel, that
+port and that client address. The client refuses unless the HMAC verifies, the reported
+port is the port it dialed, and the reported client address is its own local address on
+this connection. It never sends its bearer after a failed hello,
 and its report names both possible causes without asserting either: the credential may
 have changed since the client read it, or something other than a norn host holds the port.
 
@@ -46,7 +48,11 @@ so the port stays held.
 ## Consequences
 
 - A squatter without the token cannot answer the hello. One that relays it to a real host on
-  another port returns an answer bound to that port, and the client refuses it.
+  another port returns an answer bound to that port, and the client refuses it. One that
+  holds an accepted connection while a real host later binds the same port relays over its
+  own connection to that host, whose client address differs from the dialer's, since the
+  operating system lets no second connection share the dialer's address pair; the client
+  refuses that answer too.
 - A token rotated between a client's read of the file and its hello fails verification and
   withholds the bearer; the client cannot tell that from a squatter, and says so.
 - Every connection pays one exchange before its first request, which a fresh-connection

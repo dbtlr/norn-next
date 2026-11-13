@@ -2431,7 +2431,8 @@ start decides by what it finds:
   launched, keeps dialing while it waits for the lock, up to the release bound, and decides
   as soon as the lock comes free (as for a free lock) or a verified host answers (as
   above). Past the bound with the lock still held and no host answering, a launched start
-  exits with the "a host serves this channel" status, and the CLI dials once more; if
+  exits with a distinct status that means only that the channel is held, and the CLI dials
+  once more; if
   nothing answers there it reports only what it knows — the channel lock is held and
   nothing answers at this endpoint, so a host may be starting, stopping or serving another
   endpoint — and does not launch again. An explicit start refuses with the same facts.
@@ -2529,9 +2530,11 @@ walk over the stored tokens.
 the one exchange the bearer middleware admits without a bearer; it carries no request and
 reveals nothing a local peer could use. The client sends the label of the token it holds
 and a random nonce. The host answers with its channel, build identity, launch kind and the
-port it is bound to, and an HMAC keyed by that one labelled token — one lookup, whatever
-the number of tokens — over the nonce, the channel and that port. The client refuses unless
-the HMAC verifies and the reported port is the port it dialed, and then reports that host
+port it is bound to and the client address it sees on this connection, and an HMAC keyed
+by that one labelled token — one lookup, whatever the number of tokens — over the nonce,
+the channel, that port and that client address. The client refuses unless the HMAC
+verifies, the reported port is the port it dialed and the reported client address is its
+own local address on this connection, and then reports that host
 verification failed, naming both possible causes without asserting either: the credential
 may have changed since the client read it, or something other than a norn host holds the
 port. It never sends its bearer after a failed hello. **Every dialer runs the hello as the
@@ -2539,7 +2542,10 @@ first exchange of every connection it opens** — the CLI, the stdio-MCP shim, t
 dial and the self-update takeover — and a reopened or pooled connection is no exception, so
 no connection carries a bearer without its own verified hello. That defeats another local
 user who binds the port while no host holds it to collect the next bearer, including one
-who relays the hello to a real host serving the channel on another port. A client whose
+who relays the hello to a real host serving the channel on another port, or to one that
+has since bound the same port: a relay's own connection to the host has a client address
+other than the dialer's, and the operating system lets no second connection share the
+dialer's address pair. A client whose
 hello reports a build other than its own refuses with a "restart the host" resolution,
 except that it replaces an auto-launched host through the takeover. The hello's shape and
 the drain request's are versioned and kept stable across releases, so a newer build can
