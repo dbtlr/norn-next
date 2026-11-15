@@ -364,8 +364,9 @@ impl HelloFacts {
 /// "state", "host", "client", "mac" }`.
 ///
 /// A reader ignores a field it does not know, which is what lets a later
-/// build add one without a new route.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+/// build add one without a new route, and refuses any key given twice, known
+/// or not: it reads through the one object-only reader the requests do.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
 pub struct HelloAnswer {
     /// The hello shape's version: 1.
     version: u32,
@@ -375,6 +376,30 @@ pub struct HelloAnswer {
     /// HMAC-SHA256 over [`HelloFacts::mac_input`], keyed by the labelled
     /// token's secret, as 64 lowercase hexadecimal digits.
     mac: String,
+}
+
+impl<'de> Deserialize<'de> for HelloAnswer {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        /// The answer's fields, read out of an object [`read_object`] took.
+        #[derive(Deserialize)]
+        struct Fields {
+            version: u32,
+            #[serde(flatten)]
+            facts: HelloFacts,
+            mac: String,
+        }
+        let object = read_object(deserializer)?;
+        let Fields {
+            version,
+            facts,
+            mac,
+        } = Fields::deserialize(serde_json::Value::Object(object)).map_err(D::Error::custom)?;
+        Ok(HelloAnswer {
+            version,
+            facts,
+            mac,
+        })
+    }
 }
 
 impl HelloAnswer {
@@ -749,10 +774,21 @@ mod tests {
             );
         }
         let answer = serde_json::to_string(&HelloAnswer::new(facts(), [1; 32])).expect("json");
-        let twice = answer.replacen(r#""mac":"#, r#""mac":"00","mac":"#, 1);
+        for twice in [
+            answer.replacen(r#""mac":"#, r#""mac":"00","mac":"#, 1),
+            // A key this build does not know is ignored, but not given twice:
+            // each key once is the grammar, known or not.
+            answer.replacen('{', r#"{"extra":0,"extra":{"a":[1,true]},"#, 1),
+        ] {
+            assert!(
+                serde_json::from_str::<HelloAnswer>(&twice).is_err(),
+                "{twice}"
+            );
+        }
+        let extra = answer.replacen('{', r#"{"extra":{"a":[1,true]},"#, 1);
         assert!(
-            serde_json::from_str::<HelloAnswer>(&twice).is_err(),
-            "{twice}"
+            serde_json::from_str::<HelloAnswer>(&extra).is_ok(),
+            "an unknown key given once is ignored: {extra}"
         );
     }
 
