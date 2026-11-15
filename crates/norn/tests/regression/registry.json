@@ -444,9 +444,10 @@
       "sources": ["norn-legacy engineering learnings"],
       "binding": {
         "status": "dormant",
-        "reason": "the serving socket exists and sets each option once: crates/norn-serve/src/lib.rs sets the listener's one option before it binds and sets none on an accepted connection, and no client socket is opened anywhere in the workspace. The per-connection options the property is stated over — the header-read, body-arrival and idle keep-alive bounds of a served connection — arrive with the served request path, and norn serve answers every request 404 and dispatches no verb until the wire route's dispatch, crates/norn-serve/src/wire.rs::dispatch, lands.",
+        "reason": "crates/norn-serve/src/lib.rs carries the serving entry. The dialer's per-connection options wait on its hello module, declared at crates/norn-client/src/lib.rs::hello when T2 lands it; that module is not declared yet. The per-connection server bounds wait on the served request path at crates/norn-serve/src/wire.rs::dispatch, which is not implemented.",
         "grounds": [
           { "present": "crates/norn-serve/src/lib.rs" },
+          { "symbol-absent": "crates/norn-client/src/lib.rs::hello" },
           { "symbol-absent": "crates/norn-serve/src/wire.rs::dispatch" }
         ]
       }
@@ -686,7 +687,7 @@
       "sources": ["NRN-s13", "NRN-467", "NRN-448", "NRN-509", "NRN-279", "NRN-504"],
       "binding": {
         "status": "dormant",
-        "reason": "the error types carry prose now: crates/norn-wire/src/error.rs spells the one refusal envelope and its code registry, and crates/norn-store/src/error.rs renders the store's own refusals beside the equivalents in the config and filesystem crates. The one operator-visible text that exists is the server log, and crates/norn-serve/src/lib.rs writes each refusal there through the typed error's own Display rather than a call-site literal. Every other clause of the guard is about a rendered surface, and there is none: crates/norn-console owns the render seam the CLI and every format render through, and it is not in the workspace — crates/norn-client carries only the serve grammar, with no projection onto it — so no rendered text exists to compare across direct and routed execution, across CLI and MCP or across formats.",
+        "reason": "crates/norn-wire/src/error.rs and crates/norn-store/src/error.rs carry their error definitions; crates/norn-serve/src/lib.rs carries the server log. Its lifecycle lines are call-site literals that duplicate no typed error's text. The property's workspace-wide guard and the rendered surfaces wait on crates/norn-console, which does not exist.",
         "grounds": [
           { "present": "crates/norn-wire/src/error.rs" },
           { "present": "crates/norn-store/src/error.rs" },

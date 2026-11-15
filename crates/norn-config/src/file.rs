@@ -257,7 +257,11 @@ fn open_existing(
         Err(error) => return Err(io("reading the type of", path, error)),
     }
 
-    let file = match std::fs::OpenOptions::new().read(true).open(path) {
+    let file = match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY)
+        .open(path)
+    {
         Ok(file) => file,
         // It was there a moment ago and is not now: a writer's rename or a
         // removal landed in between. At the instant of the open nothing was
@@ -265,6 +269,19 @@ fn open_existing(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(io("opening", path, error)),
     };
+    // Inspect the opened descriptor: a path check alone races replacement,
+    // and opening a FIFO must not wait for a writer.
+    if !file
+        .metadata()
+        .map_err(|error| io("reading the type of", path, error))?
+        .is_file()
+    {
+        return Err(io(
+            "reading",
+            path,
+            std::io::Error::other("not a regular file"),
+        ));
+    }
     if sensitivity.demands_privacy() {
         // Judged from the open handle rather than from the path, so what is
         // checked is what is read.

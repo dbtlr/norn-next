@@ -167,3 +167,23 @@ fn flag_port_is_resolved_before_ephemeral_warning() {
     assert_eq!(settings.endpoint.port(), 65535);
     assert!(warnings.len() <= 1);
 }
+
+#[test]
+fn registry_fifo_without_writer_is_refused_without_waiting() {
+    use std::os::unix::ffi::OsStrExt;
+    let (_scratch, dirs) = fixture();
+    let path = dirs.config_dir().join("registry.toml");
+    let cpath = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+    // SAFETY: a live NUL-terminated path; no pointers are retained.
+    assert_eq!(unsafe { libc::mkfifo(cpath.as_ptr(), 0o600) }, 0);
+    let (send, recv) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        send.send(norn_config::registry::read(&dirs).unwrap_err().to_string())
+            .unwrap();
+    });
+    let error = recv
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("a FIFO read must not wait for a writer");
+    assert!(error.contains("not a regular file"), "{error}");
+    assert!(error.contains(&path.display().to_string()), "{error}");
+}

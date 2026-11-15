@@ -12,4 +12,5 @@ publish.workspace = true
 # stock help that stand until the render seam lands.
 clap = { workspace = true }
 norn-config = { path = "../norn-config" }
+# Carries BuildIdentity and the hello v1 types once T2's dialer (crates/norn-client/src/hello.rs) lands.
 norn-wire = { path = "../norn-wire" }

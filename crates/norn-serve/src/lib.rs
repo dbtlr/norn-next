@@ -2,7 +2,8 @@
 //! The HTTP surface and the host process it runs in.
 //!
 //! `norn serve` is the one way a host process starts (ADR 0053), and [`run`]
-//! is its entry: the composition root hands it the parsed `serve` arguments
+//! is its entry: the composition root parses and hands it the `serve` arguments
+//! once its signal handlers are installed
 //! and runs it in its own process — a process entry, not a request.
 //!
 //! **What lands first is the start and a plain stop.** [`run`] reads the
@@ -104,9 +105,10 @@ impl fmt::Display for Stop {
 /// start: a bad settings file, a held or refused channel lock, an unreadable
 /// registry, a held port, or a signal before listening.
 ///
-/// `build` is the identity the bin's build script captured.
-pub fn run(build: &'static str, serve: Serve) -> ExitCode {
-    match serve_channel(BuildIdentity::new(build), &serve) {
+/// The build identity is captured by the bin. Argument parsing is deferred
+/// until signal handlers are installed.
+pub fn run(build: &'static str, arguments: impl FnOnce() -> Serve) -> ExitCode {
+    match serve_channel(BuildIdentity::new(build), arguments) {
         Ok(stop) => {
             log(format_args!("stopped: {stop}"));
             ExitCode::SUCCESS
@@ -118,19 +120,36 @@ pub fn run(build: &'static str, serve: Serve) -> ExitCode {
     }
 }
 
-fn serve_channel(build: BuildIdentity, serve: &Serve) -> Result<Stop, Refusal> {
-    let dirs = ConfigDirs::from_environment().map_err(|error| {
-        Refusal(format!(
-            "{error}; set HOME, or XDG_CONFIG_HOME and XDG_DATA_HOME, to absolute paths"
-        ))
-    })?;
-    let settings = settings(&dirs, serve)?;
+fn serve_channel(build: BuildIdentity, arguments: impl FnOnce() -> Serve) -> Result<Stop, Refusal> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
         .build()
         .map_err(|error| Refusal(format!("starting the I/O runtime failed: {error}")))?;
-    let stopped = runtime.block_on(serve_on_runtime(build, serve, dirs, settings));
+    let stopped = runtime.block_on(async {
+        // Install before argv parsing or any filesystem startup work.
+        let mut terminate = stop_signal(SignalKind::terminate())?;
+        let mut interrupt = stop_signal(SignalKind::interrupt())?;
+        let serve = arguments();
+        let settings_args = serve.clone();
+        let preparation = tokio::task::spawn_blocking(move || {
+            let dirs = ConfigDirs::from_environment().map_err(|error| {
+                Refusal(format!(
+                    "{error}; set HOME, or XDG_CONFIG_HOME and XDG_DATA_HOME, to absolute paths"
+                ))
+            })?;
+            let settings = settings(&dirs, &settings_args)?;
+            Ok::<_, Refusal>((dirs, settings))
+        });
+        let (dirs, settings) = tokio::select! {
+            biased;
+            _ = terminate.recv() => return Err(before_listening(Stop::Terminate)),
+            _ = interrupt.recv() => return Err(before_listening(Stop::Interrupt)),
+            prepared = preparation => prepared
+                .map_err(|error| Refusal(format!("reading settings failed: {error}")))??,
+        };
+        serve_on_runtime(build, &serve, dirs, settings, terminate, interrupt).await
+    });
     // A host construction a signal cut off is still running on its blocking
     // thread, holding the channel lock; it is not waited for. The process
     // exits next, and the kernel frees the lock.
@@ -161,68 +180,74 @@ async fn serve_on_runtime(
     serve: &Serve,
     dirs: ConfigDirs,
     settings: ServingSettings,
+    mut terminate: Signal,
+    mut interrupt: Signal,
 ) -> Result<Stop, Refusal> {
-    // Registered before the lock is tried, so from here on a signal is this
-    // process's to answer rather than the default disposition's: before
-    // listening it ends the start at once with status 1, freeing the lock if
-    // it was taken.
-    let mut terminate = stop_signal(SignalKind::terminate())?;
-    let mut interrupt = stop_signal(SignalKind::interrupt())?;
-
     let endpoint = settings.endpoint;
     let construction = {
         let dirs = dirs.clone();
         tokio::task::spawn_blocking(move || construct(dirs, &settings))
     };
     let (lock, host) = tokio::select! {
-        built = construction => built
-            .map_err(|error| Refusal(format!("constructing the host failed: {error}")))??,
+        biased;
         _ = terminate.recv() => return Err(before_listening(Stop::Terminate)),
         _ = interrupt.recv() => return Err(before_listening(Stop::Interrupt)),
+        built = construction => built
+            .map_err(|error| Refusal(format!("constructing the host failed: {error}")))??,
     };
 
-    let listener = bind(endpoint.address()).map_err(|error| {
-        if error.kind() == std::io::ErrorKind::AddrInUse {
-            Refusal(format!(
-                "port {} on {} is held by another process; choose another with `--port N`, or \
+    let result = async {
+        let listener = bind(endpoint.address()).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AddrInUse {
+                Refusal(format!(
+                    "port {} on {} is held by another process; choose another with `--port N`, or \
                  with `[endpoint] port` in {}",
-                endpoint.port(),
-                endpoint.address().ip(),
-                settings_file_named(serve, &dirs),
-            ))
-        } else {
-            Refusal(format!("binding {endpoint} failed: {error}"))
-        }
-    })?;
-    log(format_args!(
-        "listening: channel {}, port {}, {} start, build {build}",
-        Channel::COMPILED.app_directory(),
-        endpoint.port(),
-        serve.launch,
-    ));
+                    endpoint.port(),
+                    endpoint.address().ip(),
+                    settings_file_named(serve, &dirs),
+                ))
+            } else {
+                Refusal(format!("binding {endpoint} failed: {error}"))
+            }
+        })?;
+        log(format_args!(
+            "listening: channel {}, port {}, {} start, build {build}",
+            Channel::COMPILED.app_directory(),
+            endpoint.port(),
+            serve.launch,
+        ));
 
-    let stop = loop {
-        tokio::select! {
-            accepted = listener.accept() => match accepted {
-                Ok((stream, _)) => {
-                    tokio::spawn(http::answer(stream));
-                }
-                Err(error) => {
-                    log(format_args!("warning: accepting a connection failed: {error}"));
-                    tokio::time::sleep(ACCEPT_RETRY_PAUSE).await;
-                }
-            },
-            _ = terminate.recv() => break Stop::Terminate,
-            _ = interrupt.recv() => break Stop::Interrupt,
-        }
-    };
-    // A plain stop: the listener closes, and the host's own destruction joins
-    // its workers. The bounded drain that answers what is still in flight is
-    // a later task of this phase.
-    drop(listener);
-    drop(host);
-    drop(lock);
-    Ok(stop)
+        let stop = loop {
+            tokio::select! {
+                accepted = listener.accept() => match accepted {
+                    Ok((stream, _)) => {
+                        tokio::spawn(http::answer(stream));
+                    }
+                    Err(error) => {
+                        log(format_args!("warning: accepting a connection failed: {error}"));
+                        tokio::time::sleep(ACCEPT_RETRY_PAUSE).await;
+                    }
+                },
+                _ = terminate.recv() => break Stop::Terminate,
+                _ = interrupt.recv() => break Stop::Interrupt,
+            }
+        };
+        // A plain stop: the listener closes, and the host's own destruction joins
+        // its workers. The bounded drain that answers what is still in flight is
+        // a later task of this phase.
+        drop(listener);
+        Ok(stop)
+    }
+    .await;
+    // Destruction joins workers, including on a bind refusal. Keep the lock
+    // until the host has gone, and leave the I/O thread free for signals.
+    tokio::task::spawn_blocking(move || {
+        drop(host);
+        drop(lock);
+    })
+    .await
+    .map_err(|error| Refusal(format!("stopping the host failed: {error}")))?;
+    result
 }
 
 /// Step 2 and the first half of step 5: the channel lock, then the registry
@@ -251,7 +276,8 @@ fn construct(
     };
     let registry = RegistryRead::load(&dirs).map_err(|error| {
         Refusal(format!(
-            "{error}; repair the registry file, or move it aside to start with no vaults"
+            "{}: {error}; repair the registry file, or move it aside to start with no vaults",
+            dirs.config_dir().join("registry.toml").display()
         ))
     })?;
     let production = policy::production(settings)

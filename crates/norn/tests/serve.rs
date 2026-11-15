@@ -144,11 +144,15 @@ impl Served {
     }
 
     /// SIGTERM, then the status and every remaining log line.
-    fn terminate(mut self) -> (ExitStatus, Vec<String>) {
+    fn terminate(self) -> (ExitStatus, Vec<String>) {
+        self.signal(libc::SIGTERM)
+    }
+
+    fn signal(mut self, signal: libc::c_int) -> (ExitStatus, Vec<String>) {
         let pid = libc::pid_t::try_from(self.child.id()).unwrap();
         // SAFETY: a plain signal to the child this suite spawned and has not
         // reaped, so the pid still names it.
-        assert_eq!(unsafe { libc::kill(pid, libc::SIGTERM) }, 0);
+        assert_eq!(unsafe { libc::kill(pid, signal) }, 0);
         let deadline = Instant::now() + STOP_WITHIN;
         let status = loop {
             if let Some(status) = self.child.try_wait().unwrap() {
@@ -390,4 +394,70 @@ fn serve_help_names_the_port_and_config_and_hides_the_marker() {
         "{help}"
     );
     assert!(!help.contains("--auto-launched"), "{help}");
+}
+
+#[test]
+fn invalid_registry_entries_refuse_naming_the_file_and_the_fix() {
+    for (name, root) in [("notes", "relative"), ("Notes_1", "/vault")] {
+        let fixture = Fixture::new("serve-invalid-registry");
+        fixture.write_settings("");
+        let path = fixture.dirs().config_dir().join("registry.toml");
+        std::fs::write(
+            &path,
+            format!("version = 1\n[vaults.{name}]\nroot = {root:?}\n"),
+        )
+        .unwrap();
+        let (status, stderr) = fixture.run(&["serve"]);
+        assert_eq!(status, RunStatus::Exited(1), "{stderr}");
+        assert!(stderr.contains(&path.display().to_string()), "{stderr}");
+        assert!(stderr.contains("repair the registry file"), "{stderr}");
+    }
+}
+
+#[test]
+fn a_registry_fifo_refuses_naming_the_file() {
+    use std::os::unix::ffi::OsStrExt;
+    let fixture = Fixture::new("serve-registry-fifo");
+    fixture.write_settings("");
+    let path = fixture.dirs().config_dir().join("registry.toml");
+    let cpath = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+    // SAFETY: a live NUL-terminated path; no pointers are retained.
+    assert_eq!(unsafe { libc::mkfifo(cpath.as_ptr(), 0o600) }, 0);
+    let (status, stderr) = fixture.run(&["serve"]);
+    assert_eq!(status, RunStatus::Exited(1), "{stderr}");
+    assert!(stderr.contains(&path.display().to_string()), "{stderr}");
+    assert!(stderr.contains("not a regular file"), "{stderr}");
+}
+
+#[test]
+fn signals_during_start_refuse_with_a_log_line() {
+    for signal in [libc::SIGTERM, libc::SIGINT].into_iter().cycle().take(8) {
+        let fixture = Fixture::new("serve-early-signal");
+        // A long settings diagnostic stream keeps startup in the settings
+        // step. Its first line proves the child has executed, avoiding the
+        // unhandleable interval between spawn and the program entry.
+        let mut settings = String::new();
+        for n in 0..10_000 {
+            settings.push_str(&format!("unknown_{n} = true\n"));
+        }
+        fixture.write_settings(&settings);
+        let mut served = fixture.start(&["serve", "--port", &free_port().to_string()]);
+        served.line_starting("warning:");
+        let (status, lines) = served.signal(signal);
+        assert_eq!(status.code(), Some(1), "{status}: {lines:?}");
+        assert!(
+            lines.iter().any(|line| line
+                == &format!(
+                    "refused: {} arrived before the host was listening",
+                    if signal == libc::SIGTERM {
+                        "SIGTERM"
+                    } else {
+                        "SIGINT"
+                    }
+                )),
+            "no early-signal refusal in {} log lines",
+            lines.len()
+        );
+        assert!(!lines.iter().any(|line| line.starts_with("listening:")));
+    }
 }

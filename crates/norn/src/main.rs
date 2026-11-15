@@ -19,10 +19,9 @@ use norn_client::Invocation;
 const BUILD_IDENTITY: &str = env!("NORN_BUILD_IDENTITY");
 
 fn main() -> ExitCode {
-    match norn_client::parse(std::env::args_os()) {
-        Invocation::Serve(serve) => norn_serve::run(
-            BUILD_IDENTITY,
-            norn_serve::Serve {
+    norn_serve::run(BUILD_IDENTITY, || {
+        match norn_client::parse(std::env::args_os()) {
+            Invocation::Serve(serve) => norn_serve::Serve {
                 // Clap's range refuses 0, so every parsed port is non-zero.
                 port: serve.port.and_then(std::num::NonZeroU16::new),
                 config: serve.config,
@@ -32,6 +31,6 @@ fn main() -> ExitCode {
                     norn_serve::Launch::Explicit
                 },
             },
-        ),
-    }
+        }
+    })
 }
