@@ -37,6 +37,13 @@
 //! writer, and a read's cost is bounded whatever was put at the name: the
 //! serving side reads this file inline on its I/O thread when it changes.
 //!
+//! # What a refusal says
+//!
+//! A refusal of this file names a label, a key and a type, and never a
+//! secret. A file that is not TOML is refused with the parser's message and the
+//! line and column it stopped at, without the excerpt of the line that the
+//! parser's own account carries: that line is a secret's line as often as not.
+//!
 //! # The file
 //!
 //! ```toml
@@ -274,8 +281,12 @@ impl Tokens {
         self.tokens.values()
     }
 
-    fn load(path: &Path, bytes: Option<&[u8]>) -> Result<Self, ConfigError> {
-        let document = Document::read(path, bytes)?;
+    fn load(
+        path: &Path,
+        bytes: Option<&[u8]>,
+        sensitivity: Sensitivity,
+    ) -> Result<Self, ConfigError> {
+        let document = Document::read(path, bytes, sensitivity)?;
         let section = document.section(path, TOKENS_KEY)?;
 
         let mut raw = BTreeMap::new();

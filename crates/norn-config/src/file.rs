@@ -155,7 +155,9 @@ pub(crate) struct Stored<S> {
     sensitivity: Sensitivity,
     /// Whether every read of the file is refused past [`READ_CAP`] bytes.
     capped: bool,
-    load: fn(&Path, Option<&[u8]>) -> Result<S, ConfigError>,
+    /// Reads the bytes, handed the file's sensitivity so that a refusal of a
+    /// private file can leave out what the file holds.
+    load: fn(&Path, Option<&[u8]>, Sensitivity) -> Result<S, ConfigError>,
     render: fn(&mut S, &Path) -> Result<String, ConfigError>,
 }
 
@@ -163,7 +165,7 @@ impl<S> Stored<S> {
     pub(crate) fn new(
         path: PathBuf,
         sensitivity: Sensitivity,
-        load: fn(&Path, Option<&[u8]>) -> Result<S, ConfigError>,
+        load: fn(&Path, Option<&[u8]>, Sensitivity) -> Result<S, ConfigError>,
         render: fn(&mut S, &Path) -> Result<String, ConfigError>,
     ) -> Self {
         Stored {
@@ -187,7 +189,7 @@ impl<S> Stored<S> {
     /// The value the file holds. Never writes, whatever it finds.
     pub(crate) fn read(&self) -> Result<S, ConfigError> {
         let bytes = read(&self.path, self.sensitivity, self.capped)?;
-        (self.load)(&self.path, bytes.as_deref())
+        (self.load)(&self.path, bytes.as_deref(), self.sensitivity)
     }
 
     /// Read the file, hand the reading to `apply`, and write back what `apply`
@@ -218,7 +220,7 @@ impl<S> Stored<S> {
         sweep_temporaries(&self.path)?;
 
         let bytes = read(&self.path, self.sensitivity, self.capped)?;
-        let mut state = (self.load)(&self.path, bytes.as_deref())?;
+        let mut state = (self.load)(&self.path, bytes.as_deref(), self.sensitivity)?;
         let outcome = apply(&mut state)?;
         let rendered = (self.render)(&mut state, &self.path)?;
         if bytes.as_deref() == Some(rendered.as_bytes()) {
@@ -926,7 +928,7 @@ mod tests {
         let stored = Stored::new(
             path.clone(),
             Sensitivity::Shared,
-            |_, bytes| Ok(String::from_utf8(bytes.unwrap_or_default().to_vec()).expect("text")),
+            |_, bytes, _| Ok(String::from_utf8(bytes.unwrap_or_default().to_vec()).expect("text")),
             |state: &mut String, _| Ok(state.clone()),
         );
         stored

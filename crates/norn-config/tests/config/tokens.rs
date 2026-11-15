@@ -558,3 +558,53 @@ fn a_token_sets_debug_does_not_carry_its_secrets() {
     );
     assert!(!printed.contains("secret-bytes"), "{printed}");
 }
+
+/// A token file that does not parse says where and why, and never what the
+/// line held: the line is a secret's line, and a refusal reaches a log the
+/// moment anything holding it is formatted.
+#[test]
+fn a_token_file_that_does_not_read_never_quotes_its_secret() {
+    let secret = "5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e";
+    let head = "version = 1\n\n[tokens.laptop]\n";
+    for (case, body, needle) in [
+        (
+            "trailing text",
+            format!("{head}secret = \"{secret}\" oops\ncreated = 1\n"),
+            "line 4, column",
+        ),
+        (
+            "an unterminated string",
+            format!("{head}secret = \"{secret}\ncreated = 1\n"),
+            "line 4, column",
+        ),
+        (
+            "a duplicate key",
+            format!("{head}secret = \"{secret}\"\nsecret = \"{secret}\"\ncreated = 1\n"),
+            "line 5, column",
+        ),
+        (
+            "a secret of the wrong type",
+            format!("{head}secret = 12\ncreated = 1\n# {secret}\n"),
+            "`secret` is integer",
+        ),
+    ] {
+        let scratch = Scratch::new("tokens-no-echo");
+        let dirs = scratch.dirs();
+        scratch.place_private(&scratch.tokens_file(), &body);
+
+        let error = tokens::read(dirs).expect_err("a token file that does not read");
+        let watched = tokens::WatchedTokens::read(dirs);
+        for printed in [
+            error.to_string(),
+            format!("{error:?}"),
+            format!("{watched:?}"),
+        ] {
+            assert!(!printed.contains(secret), "{case}: {printed}");
+            assert!(!printed.contains("5e5e5e"), "{case}: {printed}");
+        }
+        assert!(
+            error.to_string().contains(needle),
+            "{case}: `{error}` does not say `{needle}`"
+        );
+    }
+}

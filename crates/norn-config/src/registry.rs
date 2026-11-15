@@ -163,8 +163,12 @@ impl Registry {
         self.entries.remove(name)
     }
 
-    fn load(path: &Path, bytes: Option<&[u8]>) -> Result<Self, ConfigError> {
-        let document = Document::read(path, bytes)?;
+    fn load(
+        path: &Path,
+        bytes: Option<&[u8]>,
+        sensitivity: Sensitivity,
+    ) -> Result<Self, ConfigError> {
+        let document = Document::read(path, bytes, sensitivity)?;
         let section = document.section(path, VAULTS_KEY)?;
 
         let mut raw = BTreeMap::new();
