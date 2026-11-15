@@ -156,6 +156,7 @@ fn an_unchanged_file_is_read_again_while_its_fingerprint_is_racy() {
 /// case's: it stands still, then moves past the window, and stepping it back
 /// makes a later edit young again.
 #[test]
+#[allow(clippy::disallowed_methods)] // Harness scaffolding: reading the token file's times to set the case's clock past them.
 fn a_holder_reads_again_until_the_file_has_settled_then_stops() {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -167,8 +168,9 @@ fn a_holder_reads_again_until_the_file_has_settled_then_stops() {
     // offset only the case moves, so real time passing never moves it: a
     // stalled runner cannot carry a racy step past the window. The file's
     // times are at or after that moment, so an offset short of the window is
-    // racy whatever the stall, and a settled step's offset of a minute
-    // leaves the writes, a few milliseconds apart, far behind it.
+    // racy whatever the stall, and a settled step sets its offset from the
+    // file's own latest time, a window and a margin past it, so no stall
+    // between a write and that step can leave the write inside the window.
     let base = SystemTime::now();
     scratch.place_private(&path, &text);
     let ahead = Arc::new(AtomicU64::new(0));
@@ -180,7 +182,16 @@ fn a_holder_reads_again_until_the_file_has_settled_then_stops() {
     // inside it; the window's own value is pinned to the nanosecond by the
     // crate's unit test of the rule.
     let short_of_the_window = || ahead.store(1, Ordering::SeqCst);
-    let past_the_window = || ahead.store(60, Ordering::SeqCst);
+    let past_the_window = || {
+        let metadata = std::fs::symlink_metadata(&path).expect("the token file");
+        let latest = metadata.mtime().max(metadata.ctime()) + 1;
+        let base_secs = base
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("a clock after the epoch")
+            .as_secs();
+        let since_base = u64::try_from(latest).expect("a time after the epoch") - base_secs;
+        ahead.store(since_base + 4, Ordering::SeqCst);
+    };
     let at_the_base = || ahead.store(0, Ordering::SeqCst);
 
     assert_reread(watched.check());
