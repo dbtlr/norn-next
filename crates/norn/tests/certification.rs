@@ -1299,9 +1299,11 @@ fn the_fast_gate_keeps_ordinary_functional_coverage() {
         gate.replace("--exclude norn-host", "--exclude norn-store"),
         gate.replace(" --exclude norn-host", ""),
         gate.replace(
-            "--locked -p norn-host -p norn-testkit\n",
+            "--locked -p norn-host -p norn-testkit -p norn-serve\n",
             "--locked -p norn-store\n",
         ),
+        gate.replace(" --exclude norn-serve", ""),
+        gate.replace(" -p norn-serve\n", "\n"),
         gate.replace("cargo fmt --all --check", "true"),
         gate.replace(
             "--features induced-failure\n",
@@ -1322,8 +1324,8 @@ fn the_fast_gate_keeps_ordinary_functional_coverage() {
         ),
     ];
     for command in [
-        "cargo test --locked --workspace --exclude norn-host --exclude norn-testkit",
-        "cargo test --locked -p norn-host -p norn-testkit",
+        "cargo test --locked --workspace --exclude norn-host --exclude norn-testkit --exclude norn-serve",
+        "cargo test --locked -p norn-host -p norn-testkit -p norn-serve",
     ] {
         for narrowing in [
             " ordinary",
@@ -1377,7 +1379,9 @@ fn assert_fast_gate(workflow: &str) {
     assert_matrix_step_values(
         workflow,
         "build-host",
-        &[".github/scripts/flake-tripwire.sh cargo test --locked -p norn-host -p norn-testkit"],
+        &[
+            ".github/scripts/flake-tripwire.sh cargo test --locked -p norn-host -p norn-testkit -p norn-serve",
+        ],
         false,
     );
 }
@@ -1825,7 +1829,7 @@ fn assert_complete_active_matrix(workflow: &str, full: bool) {
             assert_matrix_step_values(workflow, "lint", &lint_runs, false);
             runs = vec![
                 "cargo build --locked --workspace",
-                ".github/scripts/flake-tripwire.sh cargo test --locked --workspace --exclude norn-host --exclude norn-testkit",
+                ".github/scripts/flake-tripwire.sh cargo test --locked --workspace --exclude norn-host --exclude norn-testkit --exclude norn-serve",
             ];
         } else if key == "induced-failure" {
             key = "host-functional";

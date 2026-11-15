@@ -99,6 +99,17 @@ impl RegistryRead {
         Self::from_entries(registry.entries().cloned())
     }
 
+    /// Read the registry file a serving process starts its host from.
+    ///
+    /// The registry surface is this crate's (boundary invariant 11), so the
+    /// serving entry reads the file here rather than through `norn-config`
+    /// itself, and a refusal is the file's own: its path and what is wrong
+    /// with it.
+    #[allow(clippy::disallowed_methods)] // The registry surface is this crate's.
+    pub fn load(dirs: &norn_config::ConfigDirs) -> Result<Self, norn_config::ConfigError> {
+        Ok(Self::read(&norn_config::registry::read(dirs)?))
+    }
+
     /// Take the registrations from an already-read registry projection.
     pub fn from_entries(entries: impl IntoIterator<Item = Entry>) -> Self {
         Self {

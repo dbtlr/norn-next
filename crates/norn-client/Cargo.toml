@@ -1,0 +1,16 @@
+[package]
+name = "norn-client"
+description = "Everything outside the host — argv to wire params, loopback routing to the channel endpoint, and the machine-local verbs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+# The argument grammar: clap derives the parser, the usage errors and the
+# stock help that stand until the render seam lands.
+clap = { workspace = true }
+norn-config = { path = "../norn-config" }
+# Carries BuildIdentity and the hello v1 types once T2's dialer (crates/norn-client/src/hello.rs) lands.
+norn-wire = { path = "../norn-wire" }

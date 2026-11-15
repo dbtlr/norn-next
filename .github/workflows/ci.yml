@@ -89,11 +89,15 @@ jobs:
       - name: Build
         run: cargo build --locked --workspace
       - name: Test
-        run: .github/scripts/flake-tripwire.sh cargo test --locked --workspace --exclude norn-host --exclude norn-testkit
+        run: .github/scripts/flake-tripwire.sh cargo test --locked --workspace --exclude norn-host --exclude norn-testkit --exclude norn-serve
 
   # `build and test (norn-host and norn-testkit)` is a required check in the `main` ruleset.
   # The named packages and catch-all exclusions must match exactly. Each package's
   # ordinary tests and doctests run once; new crates join the catch-all automatically.
+  # norn-serve runs here too: its tokio and hyper switch features on in mio and
+  # smallvec, which norn-host's graph links, so the shard needs it to build those
+  # with the whole-workspace feature set (`norn-testkit --test shards`). The check
+  # keeps its required name.
   build-host:
     name: build and test (norn-host and norn-testkit)
     runs-on: ubuntu-latest
@@ -105,7 +109,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # cargo test builds every selected target before running tests and doctests.
       - name: Test
-        run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-host -p norn-testkit
+        run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-host -p norn-testkit -p norn-serve
 
   # `lint and document` is a required check in the `main` ruleset.
   # Its 30-minute timeout is a runaway guard, under the same doctrine above.

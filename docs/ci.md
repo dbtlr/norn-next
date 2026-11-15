@@ -9,8 +9,12 @@ Clocks and trends belong to the dormant soak tier under
 
 `ci.yml` runs six jobs on PRs, main pushes and manual runs. Ordinary default
 workspace tests and doctests split by package between `build and test` (everything
-except `norn-host` and `norn-testkit`) and
-`build and test (norn-host and norn-testkit)`. The named shard uses `-p norn-host -p norn-testkit`; the catch-all uses `--workspace --exclude norn-host --exclude norn-testkit`.
+except `norn-host`, `norn-testkit` and `norn-serve`) and
+`build and test (norn-host and norn-testkit)`, whose required name predates
+`norn-serve` joining it. The named shard uses `-p norn-host -p norn-testkit -p norn-serve`;
+the catch-all uses `--workspace --exclude norn-host --exclude norn-testkit --exclude norn-serve`.
+`norn-serve` sits in the named shard because its tokio and hyper switch features on in
+`mio` and `smallvec`, which `norn-host`'s graph links.
 Their package lists must match exactly, so new crates join the catch-all and
 every package's doctests run exactly once through ordinary `cargo test`.
 The shard pair preserves whole-workspace test membership, and each shard builds
