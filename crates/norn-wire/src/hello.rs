@@ -22,10 +22,12 @@
 //!
 //! **The dialer's check is spelled here too**, crypto-free: what a reply's
 //! status and body say ([`HelloReply::read`]), whether an address may be
-//! dialed at all ([`is_dialable`]), and the order an answer is checked in
-//! ([`HelloAnswer::verify`]), whose MAC test the dialer hands in. The two
+//! dialed at all ([`is_dialable`]), how large a hello body may be
+//! ([`HELLO_BODY_BYTES`]), and how a MAC-verified answer's facts are compared
+//! with the dialer's connection ([`HelloFacts::check_connection`]). The two
 //! dialers — `norn-client`'s and the serving crate's takeover dial — keep
-//! only their transport and their HMAC call, so their checks cannot drift.
+//! only their transport and their HMAC check, so their comparisons cannot
+//! drift.
 //!
 //! The serving layer's hello route reads and writes these types, and so do
 //! both dialers.
@@ -41,6 +43,13 @@ use crate::build::BuildIdentity;
 use crate::error::{ErrorEnvelope, ReasonCode};
 use crate::hex;
 use crate::object::read_object;
+
+/// The most bytes a hello body may be, in either direction: the host refuses
+/// a larger request with `serve/request-too-large` before reading it whole,
+/// and a dialer reads no more of an answer than this before parsing it. The
+/// MAC input's length prefixes are 4 bytes wide, so this is also what keeps a
+/// hostile listener's answer far from the field length they cannot carry.
+pub const HELLO_BODY_BYTES: usize = 4096;
 
 /// The ASCII domain separator the MAC input opens with, before its zero byte.
 const MAC_DOMAIN: &[u8] = b"norn-hello-v1";
@@ -358,12 +367,35 @@ impl HelloFacts {
         input.push(0);
         for field in fields {
             // A field is a short string or 32 bytes; none comes near `u32`'s
-            // range, and the 4 KiB hello body bounds what a peer can send.
+            // range, and `HELLO_BODY_BYTES` bounds what either peer reads.
             let prefix = u32::try_from(field.len()).expect("a hello field fits a u32 length");
             input.extend_from_slice(&prefix.to_be_bytes());
             input.extend_from_slice(field);
         }
         input
+    }
+}
+
+impl HelloFacts {
+    /// The dialer's comparison of these facts with its own connection: the
+    /// channel, then the host end against the address dialed, then the client
+    /// end against the dialer's own local address, each address normalized.
+    ///
+    /// Pure and crypto-free, so both dialers compare by one rule. **The MAC
+    /// is each dialer's to check first**, in constant time, with the HMAC
+    /// this crate does not depend on: until it verifies, these facts are the
+    /// word of whoever answered.
+    pub fn check_connection(&self, expected: &HelloExpectation) -> Result<(), HelloMismatch> {
+        if self.channel != expected.channel {
+            return Err(HelloMismatch::Channel);
+        }
+        if self.host() != normalize_socket_address(expected.dialed) {
+            return Err(HelloMismatch::Host);
+        }
+        if self.client() != normalize_socket_address(expected.local) {
+            return Err(HelloMismatch::Client);
+        }
+        Ok(())
     }
 }
 
@@ -437,37 +469,6 @@ impl HelloAnswer {
     /// digits — which a dialer treats as a MAC that does not verify.
     pub fn mac(&self) -> Option<[u8; 32]> {
         hex::decode_array(&self.mac)
-    }
-
-    /// The dialer's check of this answer, in the one order every dialer runs
-    /// it: the MAC first, then the channel, the host end and the client end.
-    ///
-    /// `mac_verifies` is handed the MAC input for `nonce` and the MAC that
-    /// arrived, and answers whether that MAC is the HMAC-SHA256 of the input
-    /// under the dialer's token, compared in constant time. It is the
-    /// dialer's because this crate takes no cryptographic dependency. The MAC
-    /// goes first because until it verifies, every other fact is the word of
-    /// whoever answered.
-    pub fn verify(
-        &self,
-        nonce: &Nonce,
-        expected: &HelloExpectation,
-        mac_verifies: impl FnOnce(&[u8], &[u8; 32]) -> bool,
-    ) -> Result<(), HelloMismatch> {
-        let mac = self.mac().ok_or(HelloMismatch::Mac)?;
-        if !mac_verifies(&self.facts.mac_input(nonce), &mac) {
-            return Err(HelloMismatch::Mac);
-        }
-        if self.facts.channel != expected.channel {
-            return Err(HelloMismatch::Channel);
-        }
-        if self.facts.host() != normalize_socket_address(expected.dialed) {
-            return Err(HelloMismatch::Host);
-        }
-        if self.facts.client() != normalize_socket_address(expected.local) {
-            return Err(HelloMismatch::Client);
-        }
-        Ok(())
     }
 }
 
@@ -892,78 +893,19 @@ mod tests {
         }
     }
 
-    /// A stand-in for the dialer's HMAC: the "MAC" of an input is its first
-    /// 32 bytes, which is enough to tell that the input handed over is the
-    /// answer's own for this nonce.
-    fn toy_mac(input: &[u8]) -> [u8; 32] {
-        let mut mac = [0u8; 32];
-        mac.copy_from_slice(&input[..32]);
-        mac
-    }
-
-    fn signed(facts: HelloFacts) -> HelloAnswer {
-        let mac = toy_mac(&facts.mac_input(&nonce()));
-        HelloAnswer::new(facts, mac)
+    #[test]
+    fn facts_that_state_this_connection_pass() {
+        assert_eq!(facts().check_connection(&expectation()), Ok(()));
     }
 
     #[test]
-    fn an_answer_that_states_this_connection_and_verifies_passes() {
-        let answer = signed(facts());
-        let mut handed = None;
-        let verdict = answer.verify(&nonce(), &expectation(), |input, mac| {
-            handed = Some(input.to_vec());
-            toy_mac(input) == *mac
-        });
-        assert_eq!(verdict, Ok(()));
-        assert_eq!(handed, Some(facts().mac_input(&nonce())));
-    }
-
-    /// The MAC is checked before any fact, so an answer from a peer without
-    /// the token is refused for its MAC whatever else it states.
-    #[test]
-    fn the_mac_is_checked_before_any_fact() {
-        let forged = HelloAnswer::new(
-            HelloFacts::new(
-                HelloChannel::Live,
-                BuildIdentity::new("b"),
-                HelloLaunch::Explicit,
-                HelloState::Serving,
-                address("127.0.0.1:1"),
-                address("127.0.0.1:2"),
-            ),
-            [0; 32],
-        );
-        assert_eq!(
-            forged.verify(&nonce(), &expectation(), |_, _| false),
-            Err(HelloMismatch::Mac)
-        );
-        let no_mac: HelloAnswer = serde_json::from_value(serde_json::json!({
-            "version": 1, "channel": "dev", "build": "b", "launch": "explicit",
-            "state": "serving", "host": "127.0.0.1:28472", "client": "127.0.0.1:54121",
-            "mac": "not hex",
-        }))
-        .expect("an answer with an unreadable MAC");
-        let mut asked = false;
-        assert_eq!(
-            no_mac.verify(&nonce(), &expectation(), |_, _| {
-                asked = true;
-                true
-            }),
-            Err(HelloMismatch::Mac)
-        );
-        assert!(!asked, "a MAC that does not read is never handed over");
-    }
-
-    #[test]
-    fn a_verified_answer_naming_another_channel_or_either_other_end_is_refused() {
-        let ok = |input: &[u8], mac: &[u8; 32]| toy_mac(input) == *mac;
-        let other_channel = expectation();
+    fn facts_naming_another_channel_or_either_other_end_are_refused() {
         let other_channel = HelloExpectation {
             channel: HelloChannel::Live,
-            ..other_channel
+            ..expectation()
         };
         assert_eq!(
-            signed(facts()).verify(&nonce(), &other_channel, ok),
+            facts().check_connection(&other_channel),
             Err(HelloMismatch::Channel)
         );
         let other_port = HelloExpectation {
@@ -971,7 +913,7 @@ mod tests {
             ..expectation()
         };
         assert_eq!(
-            signed(facts()).verify(&nonce(), &other_port, ok),
+            facts().check_connection(&other_port),
             Err(HelloMismatch::Host)
         );
         // The client's own port on a second loopback address: only the IP
@@ -981,7 +923,15 @@ mod tests {
             ..expectation()
         };
         assert_eq!(
-            signed(facts()).verify(&nonce(), &other_address, ok),
+            facts().check_connection(&other_address),
+            Err(HelloMismatch::Client)
+        );
+        let other_source_port = HelloExpectation {
+            local: address("127.0.0.1:54122"),
+            ..expectation()
+        };
+        assert_eq!(
+            facts().check_connection(&other_source_port),
             Err(HelloMismatch::Client)
         );
     }
@@ -1003,10 +953,16 @@ mod tests {
             dialed: mapped(28472),
             local: mapped(54121),
         };
-        assert_eq!(
-            signed(facts()).verify(&nonce(), &expected, |input, mac| toy_mac(input) == *mac),
-            Ok(())
-        );
+        assert_eq!(facts().check_connection(&expected), Ok(()));
+    }
+
+    /// The contract's example answer fits the body cap with room to spare,
+    /// so the cap refuses only what no host writes.
+    #[test]
+    fn an_answer_fits_the_hello_body_cap() {
+        let answer = HelloAnswer::new(facts(), [0xab; 32]);
+        let bytes = serde_json::to_vec(&answer).expect("json");
+        assert!(bytes.len() * 4 < HELLO_BODY_BYTES, "{}", bytes.len());
     }
 
     #[test]
@@ -1033,7 +989,7 @@ mod tests {
 
     #[test]
     fn a_reply_is_read_by_its_status_and_its_code() {
-        let answer = signed(facts());
+        let answer = HelloAnswer::new(facts(), [1; 32]);
         let body = serde_json::to_vec(&answer).expect("json");
         assert_eq!(HelloReply::read(200, &body), HelloReply::Answer(answer));
         assert_eq!(HelloReply::read(200, b"{}"), HelloReply::Unrecognized);
