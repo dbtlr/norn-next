@@ -23,7 +23,8 @@ fn main() -> ExitCode {
         Invocation::Serve(serve) => norn_serve::run(
             BUILD_IDENTITY,
             norn_serve::Serve {
-                port: serve.port,
+                // Clap's range refuses 0, so every parsed port is non-zero.
+                port: serve.port.and_then(std::num::NonZeroU16::new),
                 config: serve.config,
                 launch: if serve.auto_launched {
                     norn_serve::Launch::Auto

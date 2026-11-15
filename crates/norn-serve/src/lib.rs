@@ -45,7 +45,7 @@ use log::log;
 pub struct Serve {
     /// The `--port` override; the settings file's `[endpoint] port` and the
     /// channel default stand behind it.
-    pub port: Option<u16>,
+    pub port: Option<std::num::NonZeroU16>,
     /// The `--config` file, read instead of the channel's `config.toml`.
     pub config: Option<PathBuf>,
     pub launch: Launch,
@@ -138,22 +138,15 @@ fn serve_channel(build: BuildIdentity, serve: &Serve) -> Result<Stop, Refusal> {
     stopped
 }
 
-/// Step 1 of the start: the settings file, then the `--port` override, each
-/// warning logged as its own line.
+/// Step 1 of the start: the settings file with the `--port` override resolved
+/// inside the read, each warning logged as its own line.
 fn settings(dirs: &ConfigDirs, serve: &Serve) -> Result<ServingSettings, Refusal> {
     let source = serve
         .config
         .as_deref()
         .map_or(SettingsSource::ChannelDefault, SettingsSource::Explicit);
-    let (mut settings, mut warnings) =
-        ServingSettings::read(dirs, source).map_err(|error| Refusal(error.to_string()))?;
-    if let Some(port) = serve.port {
-        warnings.extend(
-            settings
-                .override_port(port)
-                .map_err(|error| Refusal(error.to_string()))?,
-        );
-    }
+    let (settings, warnings) = ServingSettings::read(dirs, source, serve.port)
+        .map_err(|error| Refusal(error.to_string()))?;
     for warning in warnings {
         log(format_args!(
             "warning: {}: {}",

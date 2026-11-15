@@ -98,7 +98,7 @@ where
 /// holds it to the port `norn serve` listens on from the same file.
 pub fn endpoint(dirs: &ConfigDirs, config: Option<&Path>) -> Result<Endpoint, SettingsError> {
     let source = config.map_or(SettingsSource::ChannelDefault, SettingsSource::Explicit);
-    ServingSettings::read(dirs, source).map(|(settings, _)| settings.endpoint)
+    ServingSettings::read(dirs, source, None).map(|(settings, _)| settings.endpoint)
 }
 
 #[cfg(test)]
