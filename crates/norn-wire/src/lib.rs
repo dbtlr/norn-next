@@ -43,6 +43,9 @@
 //! is judged against, what [`Moved`] under it, and the [`CursorKey`] each
 //! paged row type stops at.
 //!
+//! The [`BuildIdentity`] a host and its dialers compare is spelled here too, so
+//! the serving and client halves of one artifact read one value.
+//!
 //! The six read verbs are spelled here as one params type and one report type
 //! each: [`FindParams`] answering [`FindReport`], [`SearchParams`] answering
 //! [`SearchReport`] over the [`RungSelection`] it asks for, declaring the

@@ -66,10 +66,11 @@
 //!   data that is complete. **No generator is in that path**: the profile and
 //!   seed name a recording rather than instruct a regeneration, and the
 //!   `norn-fixtures` generator binds only its own profiles.
-//! - **The binary's behavior.** The composition root is a stub; there is no
-//!   command to invoke.
+//! - **The binary's behavior.** The composition root runs one command,
+//!   `norn serve`, which renders nothing a case judges; no rendered command
+//!   exists to invoke.
 //!
-//! Until the runner and the composition root land,
+//! Until the runner and a rendered command land,
 //! [`activated_cases_reach_a_runner`] fails loudly for any case that is
 //! activated, naming what is missing. That is the honest failure: the gate is
 //! real, and what sits behind it is not built.
@@ -482,7 +483,7 @@ fn activated_cases_reach_a_runner() {
         unrunnable.is_empty(),
         "no runner can execute an activated case yet: a case needs its fixture \
          vault written out from its recorded manifest, and its argv needs a \
-         composition root that does something. Activate a command once both \
+         command the composition root renders. Activate a command once both \
          exist. Activated cases:\n  {}",
         unrunnable.join("\n  ")
     );
