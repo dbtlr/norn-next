@@ -186,22 +186,63 @@ fn top_level_warning_names_the_shape_and_fallback() {
 
 #[test]
 fn only_the_resolved_port_gets_an_ephemeral_warning() {
-    let ephemeral = crate::file::ephemeral_range().unwrap().0;
-    let (settings, warnings) = parse_with_port(
-        &format!("[endpoint]\nport={ephemeral}"),
+    // A fixed range, so the assertion does not depend on this machine's.
+    let range = Some((49152, 65535));
+    let (settings, warnings) = parse_with(
+        "[endpoint]\nport=50000",
         Path::new("config.toml"),
         NonZeroU16::new(12345),
+        range,
     )
     .unwrap();
     assert_eq!(settings.endpoint.port(), 12345);
     assert!(warnings.is_empty());
-    let (settings, warnings) = parse_with_port(
+    let (settings, warnings) = parse_with(
         "[endpoint]\nport=12345",
         Path::new("config.toml"),
-        NonZeroU16::new(ephemeral),
+        NonZeroU16::new(50000),
+        range,
     )
     .unwrap();
-    assert_eq!(settings.endpoint.port(), ephemeral);
+    assert_eq!(settings.endpoint.port(), 50000);
     assert_eq!(warnings.len(), 1);
-    assert!(warnings[0].message.contains(&ephemeral.to_string()));
+    assert!(warnings[0].message.contains("50000"));
+}
+
+#[test]
+fn an_absent_file_judges_the_default_port_against_the_range() {
+    let default = default_endpoint().port();
+    let (settings, warnings) =
+        parse_with("", Path::new("config.toml"), None, Some((default, default))).unwrap();
+    assert_eq!(settings.endpoint.port(), default);
+    assert_eq!(warnings.len(), 1);
+    assert_eq!(warnings[0].key, "endpoint.port");
+    let (_, warnings) = parse_with("", Path::new("config.toml"), None, Some((1, 2))).unwrap();
+    assert!(warnings.is_empty());
+}
+
+#[test]
+fn a_descending_range_is_read_in_either_order() {
+    let (_, warnings) = parse_with(
+        "[endpoint]\nport=50000",
+        Path::new("config.toml"),
+        None,
+        Some((65535, 49152)),
+    )
+    .unwrap();
+    assert_eq!(warnings.len(), 1);
+}
+
+#[test]
+fn a_bad_file_port_refuses_even_with_a_valid_flag() {
+    let error = parse_with(
+        "[serve]\nready_wait = \"30s\"\n[endpoint]\nport = 0",
+        Path::new("config.toml"),
+        NonZeroU16::new(40000),
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(error.path, Path::new("config.toml"));
+    assert_eq!(error.line, Some(4));
+    assert!(!error.fix.is_empty());
 }

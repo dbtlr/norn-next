@@ -118,16 +118,15 @@ impl ServingSettings {
                 format!("{e}; provide a readable regular settings file of at most 1 MiB"),
             )
         })?;
+        let ephemeral = crate::file::ephemeral_range();
+        // An absent file is every default, and the resolved port is still
+        // judged against the ephemeral range, the same as a file's would be.
         let Some(bytes) = bytes else {
-            return if port.is_some() {
-                parse_with_port("", path, port)
-            } else {
-                Ok((Self::default(), vec![]))
-            };
+            return parse_with("", path, port, ephemeral);
         };
         let text = std::str::from_utf8(&bytes)
             .map_err(|_| refusal(path, None, "save the settings file as UTF-8 TOML"))?;
-        parse_with_port(text, path, port)
+        parse_with(text, path, port, ephemeral)
     }
 }
 
@@ -150,8 +149,11 @@ fn duration(text: &str) -> Option<Duration> {
         .checked_mul(multiplier)
         .map(Duration::from_millis)
 }
-fn port_warning(port: u16) -> Option<SettingsWarning> {
-    crate::file::ephemeral_range()
+/// The warning for a resolved `port` inside the platform's ephemeral range.
+/// A range is read in either order, since a kernel may hold it descending.
+fn port_warning(port: u16, ephemeral: Option<(u16, u16)>) -> Option<SettingsWarning> {
+    ephemeral
+        .map(|(a, b)| (a.min(b), a.max(b)))
         .filter(|(lo, hi)| (*lo..=*hi).contains(&port))
         .map(|_| SettingsWarning {
             key: "endpoint.port".into(),
@@ -163,12 +165,15 @@ fn parse(
     text: &str,
     path: &Path,
 ) -> Result<(ServingSettings, Vec<SettingsWarning>), SettingsError> {
-    parse_with_port(text, path, None)
+    parse_with(text, path, None, crate::file::ephemeral_range())
 }
-fn parse_with_port(
+/// Parse `text` as the settings file at `path`, with the `--port` flag
+/// resolved inside, judging the resolved port against `ephemeral`.
+fn parse_with(
     text: &str,
     path: &Path,
     port: Option<NonZeroU16>,
+    ephemeral: Option<(u16, u16)>,
 ) -> Result<(ServingSettings, Vec<SettingsWarning>), SettingsError> {
     let table = text.parse::<toml::Table>().map_err(|e| {
         let line = e
@@ -335,7 +340,7 @@ fn parse_with_port(
     if let Some(port) = port {
         settings.endpoint = Endpoint::at(port.get());
     }
-    warnings.extend(port_warning(settings.endpoint.port()));
+    warnings.extend(port_warning(settings.endpoint.port(), ephemeral));
     Ok((settings, warnings))
 }
 // Diagnostics use the TOML parser's spans rather than guessing from repeated keys.

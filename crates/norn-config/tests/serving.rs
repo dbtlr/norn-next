@@ -149,7 +149,12 @@ fn flag_port_is_resolved_before_ephemeral_warning() {
     )
     .unwrap();
     assert_eq!(settings.endpoint.port(), 12345);
-    assert!(warnings.is_empty());
+    // Whether 12345 is ephemeral is the machine's; the file's 65535 is never
+    // judged once the flag resolves the port.
+    assert!(
+        warnings.iter().all(|w| !w.message.contains("65535")),
+        "{warnings:?}"
+    );
     std::fs::remove_file(&path).unwrap();
     let (settings, warnings) = ServingSettings::read(
         &dirs,
