@@ -100,6 +100,11 @@ const BEYOND_OWNER: u32 = 0o077;
 /// use than waiting on it forever.
 const LOCK_ATTEMPTS: usize = 64;
 
+/// The most bytes a bounded read takes: 1 MiB. Past it the file is refused as
+/// unreadable rather than read whole, so a read's cost is bounded by this
+/// rather than by whatever was put at the name.
+pub(crate) const READ_CAP: u64 = 1_048_576;
+
 /// Distinguishes two temporary files taken in the same process.
 static SERIAL: AtomicU64 = AtomicU64::new(0);
 
@@ -139,6 +144,12 @@ impl Sensitivity {
     }
 }
 
+/// How a file's bytes — `None` when nothing is there — become its value.
+///
+/// Handed the file's sensitivity, so that a refusal of a private file can leave
+/// out what the file holds.
+pub(crate) type Load<S> = fn(&Path, Option<&[u8]>, Sensitivity) -> Result<S, ConfigError>;
+
 /// One machine-local file: where it sits, what it holds, and how its bytes
 /// become a value and back.
 ///
@@ -148,7 +159,10 @@ impl Sensitivity {
 pub(crate) struct Stored<S> {
     path: PathBuf,
     sensitivity: Sensitivity,
-    load: fn(&Path, Option<&[u8]>) -> Result<S, ConfigError>,
+    /// Whether every read of the file is refused past [`READ_CAP`] bytes, and
+    /// every write that would leave it longer.
+    capped: bool,
+    load: Load<S>,
     render: fn(&mut S, &Path) -> Result<String, ConfigError>,
 }
 
@@ -156,21 +170,32 @@ impl<S> Stored<S> {
     pub(crate) fn new(
         path: PathBuf,
         sensitivity: Sensitivity,
-        load: fn(&Path, Option<&[u8]>) -> Result<S, ConfigError>,
+        load: Load<S>,
         render: fn(&mut S, &Path) -> Result<String, ConfigError>,
     ) -> Self {
         Stored {
             path,
             sensitivity,
+            capped: false,
             load,
             render,
         }
     }
 
+    /// The same file, refused as unreadable past [`READ_CAP`] bytes by every
+    /// read of it, the one inside a mutation included — and never written
+    /// past that size by a mutation, which refuses instead.
+    pub(crate) fn capped(self) -> Self {
+        Stored {
+            capped: true,
+            ..self
+        }
+    }
+
     /// The value the file holds. Never writes, whatever it finds.
     pub(crate) fn read(&self) -> Result<S, ConfigError> {
-        let bytes = read(&self.path, self.sensitivity)?;
-        (self.load)(&self.path, bytes.as_deref())
+        let bytes = read(&self.path, self.sensitivity, self.capped)?;
+        (self.load)(&self.path, bytes.as_deref(), self.sensitivity)
     }
 
     /// Read the file, hand the reading to `apply`, and write back what `apply`
@@ -200,10 +225,19 @@ impl<S> Stored<S> {
         let _lock = lock(&self.path, self.sensitivity)?;
         sweep_temporaries(&self.path)?;
 
-        let bytes = read(&self.path, self.sensitivity)?;
-        let mut state = (self.load)(&self.path, bytes.as_deref())?;
+        let bytes = read(&self.path, self.sensitivity, self.capped)?;
+        let mut state = (self.load)(&self.path, bytes.as_deref(), self.sensitivity)?;
         let outcome = apply(&mut state)?;
         let rendered = (self.render)(&mut state, &self.path)?;
+        if self.capped && rendered.len() as u64 > READ_CAP {
+            // Refused before anything lands: a file past the cap is one every
+            // later read of it refuses, this crate's own included.
+            return Err(io(
+                "writing",
+                &self.path,
+                std::io::Error::other("the file would exceed 1 MiB, which its reader refuses"),
+            ));
+        }
         if bytes.as_deref() == Some(rendered.as_bytes()) {
             // The mutation left the file's bytes exactly as they were.
             // Writing them would replace the file with a copy of itself: a new
@@ -216,20 +250,49 @@ impl<S> Stored<S> {
     }
 }
 
-/// The bytes at `path`, or `None` when nothing is there.
+/// The bytes at `path`, or `None` when nothing is there; when `capped`, a
+/// refusal past [`READ_CAP`] bytes.
 ///
 /// Absence is confirmed rather than assumed. A symlink pointing at nothing
 /// fails an open the way an absent file does, and so does a file under a
 /// directory symlink pointing at nothing, so both are asked about before the
 /// absence is reported.
-fn read(path: &Path, sensitivity: Sensitivity) -> Result<Option<Vec<u8>>, ConfigError> {
+fn read(
+    path: &Path,
+    sensitivity: Sensitivity,
+    capped: bool,
+) -> Result<Option<Vec<u8>>, ConfigError> {
     let Some(mut file) = open_existing(path, sensitivity)? else {
         return Ok(None);
     };
+    if capped {
+        return read_at_most(file, path).map(Some);
+    }
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)
         .map_err(|error| io("reading", path, error))?;
     Ok(Some(bytes))
+}
+
+/// The whole of `file`, or a refusal when it holds more than [`READ_CAP`]
+/// bytes.
+///
+/// At most one byte past the cap is read: that byte is what tells a file of
+/// exactly the cap, which is read, from a longer one, which is refused.
+#[allow(clippy::disallowed_types)] // Config-directory bytes: this crate owns them.
+fn read_at_most(file: std::fs::File, path: &Path) -> Result<Vec<u8>, ConfigError> {
+    let mut bytes = Vec::new();
+    file.take(READ_CAP + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| io("reading", path, error))?;
+    if bytes.len() as u64 > READ_CAP {
+        return Err(io(
+            "reading",
+            path,
+            std::io::Error::other("file exceeds 1 MiB"),
+        ));
+    }
+    Ok(bytes)
 }
 
 #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // Config-directory bytes: this crate owns them.
@@ -242,7 +305,10 @@ fn open_existing(
     }
 
     // The link is asked about before the open, because a machine-local data
-    // file that is a link is refused rather than read through.
+    // file that is a link is refused rather than read through. The open
+    // refuses one too, so a link swapped in after this check is not read
+    // through either; this check is what tells a dangling ancestor from a
+    // first run.
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() => return Err(symlink_refusal(path)),
         Ok(_) => {}
@@ -257,17 +323,11 @@ fn open_existing(
         Err(error) => return Err(io("reading the type of", path, error)),
     }
 
-    let file = match std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY)
-        .open(path)
-    {
-        Ok(file) => file,
+    let Some(file) = open_at_name(path)? else {
         // It was there a moment ago and is not now: a writer's rename or a
         // removal landed in between. At the instant of the open nothing was
         // there, and absent is the honest reading of that.
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(io("opening", path, error)),
+        return Ok(None);
     };
     // Inspect the opened descriptor: a path check alone races replacement,
     // and opening a FIFO must not wait for a writer.
@@ -298,6 +358,28 @@ fn open_existing(
         }
     }
     Ok(Some(file))
+}
+
+/// The file at `path`, opened to be read, or `None` when nothing is there.
+///
+/// Opened without blocking, so a FIFO at the name does not wait for a writer,
+/// and without making a terminal the process's own. **Opened without
+/// following a link at the name**, too: the `lstat` before the open refuses a
+/// link, and a link swapped in between the two would otherwise be read
+/// through. The open's `ELOOP` is that link, and it earns the refusal the
+/// `lstat` would have given it.
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)] // Config-directory bytes: this crate owns them.
+fn open_at_name(path: &Path) -> Result<Option<std::fs::File>, ConfigError> {
+    match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY)
+        .open(path)
+    {
+        Ok(file) => Ok(Some(file)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) if error.raw_os_error() == Some(libc::ELOOP) => Err(symlink_refusal(path)),
+        Err(error) => Err(io("opening", path, error)),
+    }
 }
 
 /// The refusal a symlink at a data file's own name earns, precise about which
@@ -410,6 +492,20 @@ fn name_identity(path: &Path) -> Result<Option<Identity>, ConfigError> {
         Ok(metadata) => Ok(Some(identity_of(&metadata))),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(io("reading the identity of", path, error)),
+    }
+}
+
+/// What is at `path` itself — a link's own metadata rather than its
+/// target's — or `None` when nothing is there.
+///
+/// A stat that fails for any reason but absence is the machine failing, and it
+/// travels as one.
+#[allow(clippy::disallowed_methods)] // Config-directory bytes: this crate owns them.
+pub(crate) fn name_metadata(path: &Path) -> Result<Option<std::fs::Metadata>, ConfigError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(io("reading the fingerprint of", path, error)),
     }
 }
 
@@ -695,7 +791,6 @@ fn lock_path(path: &Path) -> Result<PathBuf, ConfigError> {
 /// Bounded regular-file read for settings; links are intentionally followed.
 #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // Machine-local read seam.
 pub(crate) fn read_settings(path: &Path, optional: bool) -> Result<Option<Vec<u8>>, ConfigError> {
-    use std::io::Read;
     let file = match std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY)
@@ -731,18 +826,7 @@ pub(crate) fn read_settings(path: &Path, optional: bool) -> Result<Option<Vec<u8
             std::io::Error::other("not a regular file"),
         ));
     }
-    let mut bytes = Vec::new();
-    file.take(1_048_577)
-        .read_to_end(&mut bytes)
-        .map_err(|e| io("reading", path, e))?;
-    if bytes.len() > 1_048_576 {
-        return Err(io(
-            "reading",
-            path,
-            std::io::Error::other("file exceeds 1 MiB"),
-        ));
-    }
-    Ok(Some(bytes))
+    read_at_most(file, path).map(Some)
 }
 
 /// The kernel's dynamic port range, falling back to the platform default if unavailable.
@@ -878,7 +962,7 @@ mod tests {
         let stored = Stored::new(
             path.clone(),
             Sensitivity::Shared,
-            |_, bytes| Ok(String::from_utf8(bytes.unwrap_or_default().to_vec()).expect("text")),
+            |_, bytes, _| Ok(String::from_utf8(bytes.unwrap_or_default().to_vec()).expect("text")),
             |state: &mut String, _| Ok(state.clone()),
         );
         stored
@@ -1107,5 +1191,39 @@ mod tests {
         assert!(Sensitivity::Private.demands_privacy());
         assert_eq!(Sensitivity::Shared.mode(), 0o644);
         assert!(!Sensitivity::Shared.demands_privacy());
+    }
+
+    /// The open does not follow a link either. A link swapped in after the
+    /// `lstat` and before the open is a link at the name at the instant that
+    /// matters, and it is refused as the `lstat` would have refused it: the
+    /// open is called here on a link directly, as the race would leave it.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: planting links at a data file's name.
+    fn the_open_refuses_a_link_at_the_name_as_the_type_check_does() {
+        let scratch = scratch("open-no-follow");
+        let target = scratch.join("target.toml");
+        std::fs::write(&target, "version = 1\n").expect("a target");
+        let link = scratch.join("tokens.toml");
+        std::os::unix::fs::symlink(&target, &link).expect("a link to a file");
+        assert_eq!(
+            open_at_name(&link).expect_err("a link to a file"),
+            ConfigError::SymlinkedFile { path: link.clone() }
+        );
+
+        let dangling = scratch.join("dangling.toml");
+        std::os::unix::fs::symlink(scratch.join("nothing"), &dangling).expect("a dangling link");
+        assert_eq!(
+            open_at_name(&dangling).expect_err("a link to nothing"),
+            ConfigError::DanglingSymlink {
+                path: dangling.clone()
+            }
+        );
+
+        assert!(open_at_name(&target).expect("a regular file").is_some());
+        assert!(
+            open_at_name(&scratch.join("absent"))
+                .expect("nothing")
+                .is_none()
+        );
     }
 }

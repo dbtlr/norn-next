@@ -14,10 +14,13 @@ publish.workspace = true
 # serialization every type here carries, and `schemars` is the schema every
 # surface derives its rendering from.
 #
-# `serde_json` is here for one thing: the cursor's opaque rendering, which is
-# base64 of the canonical JSON of the cursor's own fields. It appears in no
-# signature — nothing crossing this seam is an untyped JSON value — and its one
-# runtime use is inside that wrapping. It is a registry dependency and not a
+# `serde_json` appears in no public signature — nothing crossing this seam is
+# an untyped JSON value — and is used only inside the crate, in three places:
+# the cursor's opaque rendering, which is base64 of the canonical JSON of the
+# cursor's own fields; the schemas written or adjusted by hand, which
+# `schemars` holds as JSON values; and the object-only readers of the hello and
+# drain shapes, which read a body as an object with each key once before
+# taking their fields out of it. It is a registry dependency and not a
 # workspace one, so the zero-workspace-dependency invariant stands.
 [dependencies]
 schemars = { workspace = true }

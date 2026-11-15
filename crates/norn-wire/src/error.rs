@@ -59,6 +59,15 @@
 //! refusal: it names what landed. The host's apply handler raises them, above
 //! this layer, so the call graph reaches none of them from this crate today.
 //!
+//! **The `serve/` codes are the server's own answers.** A request the server
+//! could not read, a bearer it did not accept, a hello it refused, a body over
+//! its bound, and the fail-closed state of an unreadable token file are each
+//! answered by the serving layer before any host verb runs. Each detail
+//! carries nothing: most of them reach a caller nobody has authenticated, so
+//! anything a detail held would be told to whoever asked. The serving layer's
+//! hello and bearer middleware raise them, and neither is built yet, so the
+//! call graph reaches none of them today.
+//!
 //! The pairing between a code and its detail is structural rather than a rule
 //! constructors keep: [`ErrorEnvelope::new`] takes the code from the detail,
 //! and the read path refuses an envelope whose code is not the code its detail
@@ -558,6 +567,35 @@ pub enum ReasonCode {
     /// failed. The detail is the rung and the failure.
     #[serde(rename = "engine/failed")]
     EngineFailed,
+    /// `serve/bad-request` — the server could not read the request as its
+    /// route's shape: a body that is not JSON of that shape, or one that did
+    /// not arrive in time. Nothing was dispatched. The detail carries
+    /// nothing.
+    #[serde(rename = "serve/bad-request")]
+    ServeBadRequest,
+    /// `serve/unauthorized` — the request carried no bearer, or one that
+    /// matches no stored token, so nothing ran. The detail carries nothing: a
+    /// caller holding no credential learns nothing about the stored ones.
+    #[serde(rename = "serve/unauthorized")]
+    ServeUnauthorized,
+    /// `serve/hello-refused` — the hello named a label the host's token set
+    /// does not hold, or a nonce that is not 64 lowercase hexadecimal digits,
+    /// so the host answered with no MAC. The detail carries nothing.
+    #[serde(rename = "serve/hello-refused")]
+    ServeHelloRefused,
+    /// `serve/request-too-large` — the request's body is over its route's
+    /// bound, so it was refused before it was read whole and nothing ran. The
+    /// detail carries nothing.
+    #[serde(rename = "serve/request-too-large")]
+    ServeRequestTooLarge,
+    /// `serve/token-file-unreadable` — the token file changed and no longer
+    /// reads, so the host refuses every request until it reads again: keeping
+    /// the set it read before would keep a revoked token working. Nothing
+    /// ran. The detail carries nothing — the host's log names the file and the
+    /// fix — and a hello answered with it carries no MAC, so a dialer reads it
+    /// as what an unverified listener said, not as a fact about the file.
+    #[serde(rename = "serve/token-file-unreadable")]
+    ServeTokenFileUnreadable,
 }
 
 /// A list of vault names naming fewer than two of them.
@@ -1014,6 +1052,21 @@ pub enum ErrorDetail {
         /// The failure in words, for a person reading a message or a log.
         detail: String,
     },
+    /// The detail of `serve/bad-request`, which carries nothing.
+    #[serde(rename = "serve/bad-request")]
+    BadRequest {},
+    /// The detail of `serve/unauthorized`, which carries nothing.
+    #[serde(rename = "serve/unauthorized")]
+    Unauthorized {},
+    /// The detail of `serve/hello-refused`, which carries nothing.
+    #[serde(rename = "serve/hello-refused")]
+    HelloRefused {},
+    /// The detail of `serve/request-too-large`, which carries nothing.
+    #[serde(rename = "serve/request-too-large")]
+    RequestTooLarge {},
+    /// The detail of `serve/token-file-unreadable`, which carries nothing.
+    #[serde(rename = "serve/token-file-unreadable")]
+    TokenFileUnreadable {},
 }
 
 impl ErrorDetail {
@@ -1275,6 +1328,31 @@ impl ErrorDetail {
         }
     }
 
+    /// The detail of `serve/bad-request`.
+    pub const fn bad_request() -> Self {
+        ErrorDetail::BadRequest {}
+    }
+
+    /// The detail of `serve/unauthorized`.
+    pub const fn unauthorized() -> Self {
+        ErrorDetail::Unauthorized {}
+    }
+
+    /// The detail of `serve/hello-refused`.
+    pub const fn hello_refused() -> Self {
+        ErrorDetail::HelloRefused {}
+    }
+
+    /// The detail of `serve/request-too-large`.
+    pub const fn request_too_large() -> Self {
+        ErrorDetail::RequestTooLarge {}
+    }
+
+    /// The detail of `serve/token-file-unreadable`.
+    pub const fn token_file_unreadable() -> Self {
+        ErrorDetail::TokenFileUnreadable {}
+    }
+
     /// The code this detail is the payload of.
     pub const fn code(&self) -> ReasonCode {
         match self {
@@ -1312,6 +1390,11 @@ impl ErrorDetail {
             ErrorDetail::EngineNotEnabled { .. } => ReasonCode::EngineNotEnabled,
             ErrorDetail::EngineUnavailable { .. } => ReasonCode::EngineUnavailable,
             ErrorDetail::EngineFailed { .. } => ReasonCode::EngineFailed,
+            ErrorDetail::BadRequest { .. } => ReasonCode::ServeBadRequest,
+            ErrorDetail::Unauthorized { .. } => ReasonCode::ServeUnauthorized,
+            ErrorDetail::HelloRefused { .. } => ReasonCode::ServeHelloRefused,
+            ErrorDetail::RequestTooLarge { .. } => ReasonCode::ServeRequestTooLarge,
+            ErrorDetail::TokenFileUnreadable { .. } => ReasonCode::ServeTokenFileUnreadable,
         }
     }
 }
@@ -1493,6 +1576,11 @@ mod tests {
             ReasonCode::EngineNotEnabled => "engine/not-enabled",
             ReasonCode::EngineUnavailable => "engine/unavailable",
             ReasonCode::EngineFailed => "engine/failed",
+            ReasonCode::ServeBadRequest => "serve/bad-request",
+            ReasonCode::ServeUnauthorized => "serve/unauthorized",
+            ReasonCode::ServeHelloRefused => "serve/hello-refused",
+            ReasonCode::ServeRequestTooLarge => "serve/request-too-large",
+            ReasonCode::ServeTokenFileUnreadable => "serve/token-file-unreadable",
         }
     }
 
@@ -1610,6 +1698,11 @@ mod tests {
             ReasonCode::EngineFailed => {
                 ErrorDetail::engine_failed(Rung::Vector, "the answer failed")
             }
+            ReasonCode::ServeBadRequest => ErrorDetail::bad_request(),
+            ReasonCode::ServeUnauthorized => ErrorDetail::unauthorized(),
+            ReasonCode::ServeHelloRefused => ErrorDetail::hello_refused(),
+            ReasonCode::ServeRequestTooLarge => ErrorDetail::request_too_large(),
+            ReasonCode::ServeTokenFileUnreadable => ErrorDetail::token_file_unreadable(),
         }
     }
 
@@ -1660,6 +1753,32 @@ mod tests {
             assert_eq!(detail.code(), code, "the detail of {string} names another");
             let json = serde_json::to_value(&detail).expect("a detail as JSON");
             assert_eq!(json["code"].as_str(), Some(string.as_str()));
+        }
+    }
+
+    /// A refusal the server answers before any verb runs carries nothing but
+    /// its code: the first three can be answered to a caller holding no
+    /// credential, and the token file's is answered without a MAC, so a detail
+    /// is a channel to a peer nobody has verified. Each serializes as the bare
+    /// tag.
+    #[test]
+    fn a_serve_detail_carries_nothing_but_its_code() {
+        for detail in [
+            ErrorDetail::bad_request(),
+            ErrorDetail::unauthorized(),
+            ErrorDetail::hello_refused(),
+            ErrorDetail::request_too_large(),
+            ErrorDetail::token_file_unreadable(),
+        ] {
+            let json = serde_json::to_value(&detail).expect("a detail as JSON");
+            let object = json.as_object().expect("a detail is an object");
+            assert_eq!(object.len(), 1, "{json}");
+            assert!(
+                object["code"]
+                    .as_str()
+                    .is_some_and(|code| code.starts_with("serve/")),
+                "{json}"
+            );
         }
     }
 

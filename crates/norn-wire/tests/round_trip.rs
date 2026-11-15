@@ -188,6 +188,11 @@ fn reason_codes() -> Vec<ReasonCode> {
         ReasonCode::EngineNotEnabled,
         ReasonCode::EngineUnavailable,
         ReasonCode::EngineFailed,
+        ReasonCode::ServeBadRequest,
+        ReasonCode::ServeUnauthorized,
+        ReasonCode::ServeHelloRefused,
+        ReasonCode::ServeRequestTooLarge,
+        ReasonCode::ServeTokenFileUnreadable,
     ]
 }
 
@@ -338,6 +343,13 @@ fn error_details() -> Vec<ErrorDetail> {
         details.push(ErrorDetail::engine_failed(rung, "the answer failed"));
     }
     details.extend(apply_details());
+    details.extend([
+        ErrorDetail::bad_request(),
+        ErrorDetail::unauthorized(),
+        ErrorDetail::hello_refused(),
+        ErrorDetail::request_too_large(),
+        ErrorDetail::token_file_unreadable(),
+    ]);
     details.extend(migration_refusals().into_iter().flat_map(|reason| {
         [ControlFile::Schema, ControlFile::Config]
             .map(|file| ErrorDetail::migration_refused(file, reason.clone()))
@@ -3945,11 +3957,11 @@ fn a_reload_failure_is_an_object_tagged_kind() {
     );
 }
 
-/// Every code the four namespaces hold is a fact about the host's serving of
-/// an entry, about the requested vault, about that vault's engine, or about
-/// the request's own shape.
+/// Every code the five namespaces hold is a fact about the host's serving of
+/// an entry, about the requested vault, about that vault's engine, about the
+/// request's own shape, or about the server's own handling of the request.
 #[test]
-fn every_code_sits_in_one_of_the_four_namespaces() {
+fn every_code_sits_in_one_of_the_five_namespaces() {
     let namespaces: BTreeSet<String> = reason_codes()
         .iter()
         .map(|code| {
@@ -3962,7 +3974,7 @@ fn every_code_sits_in_one_of_the_four_namespaces() {
         .collect();
     assert_eq!(
         namespaces,
-        ["host", "vault", "engine", "request"]
+        ["host", "vault", "engine", "request", "serve"]
             .map(str::to_string)
             .into_iter()
             .collect()

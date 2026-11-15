@@ -43,6 +43,7 @@ use toml::Table;
 use toml::Value;
 
 use crate::error::{ConfigError, corrupt};
+use crate::file::Sensitivity;
 
 /// The schema version this build reads and writes.
 pub(crate) const SCHEMA_VERSION: i64 = 1;
@@ -73,12 +74,19 @@ impl Document {
     }
 
     /// Read `bytes` as a versioned document, or say what is wrong with them.
-    pub(crate) fn parse(path: &Path, bytes: &[u8]) -> Result<Self, ConfigError> {
+    ///
+    /// A refusal of a [`Private`](Sensitivity::Private) file says where, and
+    /// never what the file holds there: see [`not_toml`].
+    pub(crate) fn parse(
+        path: &Path,
+        bytes: &[u8],
+        sensitivity: Sensitivity,
+    ) -> Result<Self, ConfigError> {
         let text = std::str::from_utf8(bytes)
             .map_err(|error| corrupt(path, format!("the file is not UTF-8: {error}")))?;
         let table: Table = text
             .parse()
-            .map_err(|error| corrupt(path, format!("the file is not TOML: {error}")))?;
+            .map_err(|error| not_toml(path, text, &error, sensitivity))?;
 
         let found = match table.get(VERSION_KEY) {
             Some(Value::Integer(found)) => *found,
@@ -115,9 +123,13 @@ impl Document {
     }
 
     /// The document at `path`, or the empty one when nothing is there.
-    pub(crate) fn read(path: &Path, bytes: Option<&[u8]>) -> Result<Self, ConfigError> {
+    pub(crate) fn read(
+        path: &Path,
+        bytes: Option<&[u8]>,
+        sensitivity: Sensitivity,
+    ) -> Result<Self, ConfigError> {
         match bytes {
-            Some(bytes) => Document::parse(path, bytes),
+            Some(bytes) => Document::parse(path, bytes, sensitivity),
             None => Ok(Document::empty()),
         }
     }
@@ -162,6 +174,53 @@ impl Document {
             )
         })
     }
+}
+
+/// The refusal for `text` that is not TOML.
+///
+/// `toml`'s own account quotes the line it stopped on, under a caret, which is
+/// the most helpful thing a person fixing a registry can be shown. In a file of
+/// secrets that line is a secret's line — an unterminated string, a duplicate
+/// key, trailing text after a value — and a refusal reaches a log the moment
+/// anything holding it is formatted. `toml`'s message alone is no safer: it
+/// quotes a value it cannot hold (`invalid type: integer `…` as i128`), and a
+/// secret written unquoted is such a value. So a private file's refusal is the
+/// line and column the parser stopped at, and nothing the parser wrote.
+fn not_toml(
+    path: &Path,
+    text: &str,
+    error: &toml::de::Error,
+    sensitivity: Sensitivity,
+) -> ConfigError {
+    match sensitivity {
+        Sensitivity::Shared => corrupt(path, format!("the file is not TOML: {error}")),
+        Sensitivity::Private => {
+            let at = error
+                .span()
+                .map(|span| {
+                    let (line, column) = line_and_column(text, span.start);
+                    format!(" at line {line}, column {column}")
+                })
+                .unwrap_or_default();
+            corrupt(
+                path,
+                format!(
+                    "the file is not TOML{at}; the parser's account is withheld because \
+                     it can quote a secret"
+                ),
+            )
+        }
+    }
+}
+
+/// The 1-based line and column of byte `offset` in `text`, the column counted
+/// in characters, as `toml`'s own account counts it.
+fn line_and_column(text: &str, offset: usize) -> (usize, usize) {
+    let before = text.get(..offset).unwrap_or(text);
+    let line = before.matches('\n').count() + 1;
+    let line_start = before.rfind('\n').map_or(0, |newline| newline + 1);
+    let column = before[line_start..].chars().count() + 1;
+    (line, column)
 }
 
 /// Bring a document written by an older build up to [`SCHEMA_VERSION`], in
@@ -269,7 +328,8 @@ mod tests {
 
     #[test]
     fn a_file_that_is_not_there_reads_as_the_current_version() {
-        let mut document = Document::read(at(), None).expect("the empty document");
+        let mut document =
+            Document::read(at(), None, Sensitivity::Shared).expect("the empty document");
         let rendered = document.render(at()).expect("rendering");
         assert!(rendered.contains("version = 1"), "{rendered}");
     }
@@ -285,7 +345,8 @@ mod tests {
         document.set_section("vaults", section);
 
         let rendered = document.render(at()).expect("rendering");
-        let reread = Document::parse(at(), rendered.as_bytes()).expect("re-reading");
+        let reread =
+            Document::parse(at(), rendered.as_bytes(), Sensitivity::Shared).expect("re-reading");
         assert!(
             reread
                 .section(at(), "vaults")
@@ -296,7 +357,8 @@ mod tests {
 
     #[test]
     fn a_version_ahead_of_this_build_is_refused() {
-        let error = Document::parse(at(), b"version = 2\n").expect_err("a newer file");
+        let error =
+            Document::parse(at(), b"version = 2\n", Sensitivity::Shared).expect_err("a newer file");
         assert_eq!(
             error,
             ConfigError::VersionAhead {
@@ -309,13 +371,15 @@ mod tests {
 
     #[test]
     fn a_file_with_no_version_is_corrupt() {
-        let error = Document::parse(at(), b"vaults = {}\n").expect_err("an unversioned file");
+        let error = Document::parse(at(), b"vaults = {}\n", Sensitivity::Shared)
+            .expect_err("an unversioned file");
         assert!(matches!(error, ConfigError::Corrupt { .. }), "{error}");
     }
 
     #[test]
     fn a_version_below_the_first_one_is_corrupt() {
-        let error = Document::parse(at(), b"version = 0\n").expect_err("a version nobody wrote");
+        let error = Document::parse(at(), b"version = 0\n", Sensitivity::Shared)
+            .expect_err("a version nobody wrote");
         let ConfigError::Corrupt { reason, .. } = error else {
             panic!("expected a corrupt reading");
         };
@@ -324,10 +388,42 @@ mod tests {
 
     #[test]
     fn bytes_that_are_not_toml_are_corrupt_with_the_reason() {
-        let error = Document::parse(at(), b"= not toml\n").expect_err("bytes that are not TOML");
+        let error = Document::parse(at(), b"= not toml\n", Sensitivity::Shared)
+            .expect_err("bytes that are not TOML");
         let ConfigError::Corrupt { reason, .. } = error else {
             panic!("expected a corrupt reading");
         };
         assert!(reason.contains("not TOML"), "{reason}");
+    }
+
+    /// A shared file's refusal quotes the line, which is what a person fixing
+    /// it needs; a private file's says where and quotes nothing.
+    #[test]
+    fn a_private_files_toml_refusal_names_the_place_and_quotes_nothing() {
+        let bytes = b"version = 1\n\n[t]\nk = \"hidden\" oops\n";
+        let shared = Document::parse(at(), bytes, Sensitivity::Shared).expect_err("not TOML");
+        assert!(shared.to_string().contains("hidden"), "{shared}");
+
+        let private = Document::parse(at(), bytes, Sensitivity::Private).expect_err("not TOML");
+        let ConfigError::Corrupt { reason, .. } = &private else {
+            panic!("expected a corrupt reading: {private}");
+        };
+        assert!(!reason.contains("hidden"), "{reason}");
+        assert!(!reason.contains('\n'), "{reason}");
+        assert!(
+            reason.starts_with("the file is not TOML at line 4, column 14; "),
+            "{reason}"
+        );
+    }
+
+    #[test]
+    fn a_place_is_counted_in_lines_and_characters_from_one() {
+        assert_eq!(line_and_column("", 0), (1, 1));
+        assert_eq!(line_and_column("ab\ncd", 4), (2, 2));
+        assert_eq!(
+            line_and_column("é\néx", 5),
+            (2, 2),
+            "a column counts characters"
+        );
     }
 }

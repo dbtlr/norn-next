@@ -454,7 +454,14 @@ fn a_version_past_its_integer_type_is_refused_rather_than_wrapped_on_both_files(
             let ConfigError::Corrupt { reason, .. } = error else {
                 panic!("the {which} file's version past its type was refused as {error}");
             };
-            assert!(reason.contains("18446744073709551617"), "{reason}");
+            // The registry's refusal quotes the value; the token file's
+            // quotes nothing the parser wrote, since a value there can be a
+            // secret, and names the place instead.
+            let named = match which {
+                "tokens" => "line 1, column",
+                _ => "18446744073709551617",
+            };
+            assert!(reason.contains(named), "{reason}");
         }
         assert_eq!(scratch.text_at(&path), past);
 

@@ -44,7 +44,13 @@
 //! paged row type stops at.
 //!
 //! The [`BuildIdentity`] a host and its dialers compare is spelled here too, so
-//! the serving and client halves of one artifact read one value.
+//! the serving and client halves of one artifact read one value, and so are
+//! the two exchanges every build must keep answering for older ones: the
+//! hello — [`HelloRequest`] with its [`Nonce`], answered by [`HelloAnswer`],
+//! whose [`HelloFacts`] build the bytes its MAC is computed over — and the
+//! drain request, [`DrainRequest`] answered by [`DrainAnswer`]. The one
+//! lowercase [`hex`] codec a token's secret, a bearer, a nonce and a MAC are
+//! written in is here too.
 //!
 //! The six read verbs are spelled here as one params type and one report type
 //! each: [`FindParams`] answering [`FindReport`], [`SearchParams`] answering
@@ -510,7 +516,7 @@
 //! [`ReasonCode`] for what was refused, and [`FindingKind`] for what a finding
 //! is filed under (`document/…`).
 //!
-//! [`ReasonCode`] holds four namespaces, and which one a code sits in is
+//! [`ReasonCode`] holds five namespaces, and which one a code sits in is
 //! decided by what the fact is about. `host/…` is a fact about the host's
 //! serving of an entry: a name it does not hold, a name it already serves, an
 //! entry that is held, warming, untrusted, or serving with its read seam
@@ -533,6 +539,10 @@
 //! any vault: a count it named outside the bound that count holds to, a part
 //! it carries that the answer it asks for does not take, or a cursor that
 //! names no position among the rows the request pages.
+//! `serve/…` is a fact about the server's own handling of the request, decided
+//! before any verb runs: a body it could not read as the route's shape or
+//! that is over its bound, a bearer it did not accept, a hello it refused, or
+//! a token file it cannot read, which refuses every request until it reads.
 //!
 //! A namespace names who the
 //! fact is about, never which crate produced it, and a code is *defined*
@@ -582,11 +592,15 @@ mod build;
 mod cursor;
 mod doctor;
 mod document;
+mod drain;
 mod error;
 mod finding;
 mod finding_row;
 mod glob;
+mod hello;
+pub mod hex;
 mod name;
+mod object;
 mod plan;
 mod predicate;
 mod product;
@@ -624,6 +638,7 @@ pub use document::{
     LinkHealth, LinkRow, Span, TagRow, TagSource, TargetGap, TotalBelowHead, UnknownReason,
     VAULT_PROTOCOL,
 };
+pub use drain::{DrainAnswer, DrainRequest};
 pub use error::{
     AnswerShape, ErrorDetail, ErrorEnvelope, MaintainerIdentity, NameSet, ReadFailure, ReasonCode,
     RequestBound, RequestPart, TooFewNames,
@@ -635,6 +650,10 @@ pub use finding_row::{
     ValueHead,
 };
 pub use glob::{Binding, Captures, CaseFold, Pattern, PatternError, sets_share_a_document_path};
+pub use hello::{
+    HelloAnswer, HelloChannel, HelloFacts, HelloLaunch, HelloRequest, HelloState, Nonce,
+    normalize_socket_address,
+};
 pub use name::{IllegalVaultName, VaultName};
 pub use plan::advisory::{
     AdvisoriesOmitted, AdvisoryValueType, ComputedAdvisories, HygieneConflict, RepairAdvisories,

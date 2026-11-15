@@ -428,3 +428,242 @@ fn set_mode(path: &Path, mode: u32) {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
         .unwrap_or_else(|e| panic!("setting the mode of {}: {e}", path.display()));
 }
+
+/// The most bytes a token file may hold. Spelled here rather than asked of the
+/// crate: the bound is a contract the serving side states, and this is the
+/// third spelling that makes the crate and the contract say the same number.
+const TOKEN_FILE_CAP: usize = 1_048_576;
+
+/// A valid token file padded with a comment to exactly `length` bytes.
+fn token_file_of_length(length: usize) -> String {
+    let head = "version = 1\n\n[tokens.laptop]\nsecret = \"0a\"\ncreated = 1\n#";
+    let mut text = String::from(head);
+    text.push_str(&"x".repeat(length - head.len() - 1));
+    text.push('\n');
+    assert_eq!(text.len(), length);
+    text
+}
+
+/// A token file is read on every changed request, inline, so its size is
+/// bounded the way `config.toml`'s is: past 1 MiB it is unreadable rather than
+/// a read that grows with whatever was put at the name.
+#[test]
+fn a_token_file_over_one_mebibyte_is_refused_as_unreadable() {
+    let scratch = Scratch::new("tokens-over-cap");
+    let dirs = scratch.dirs();
+    scratch.place_private(
+        &scratch.tokens_file(),
+        &token_file_of_length(TOKEN_FILE_CAP + 1),
+    );
+
+    let error = tokens::read(dirs).expect_err("a token file over the cap");
+    let ConfigError::Io { path, message, .. } = &error else {
+        panic!("refused as something other than unreadable: {error}");
+    };
+    assert_eq!(path, &scratch.tokens_file());
+    assert!(message.contains("exceeds 1 MiB"), "{message}");
+
+    // The read inside a mutation is the same read.
+    let error = tokens::mutate(dirs, |tokens| tokens.add(&label("service"), b"secret"))
+        .expect_err("a mutation of a token file over the cap");
+    assert!(
+        matches!(&error, ConfigError::Io { message, .. } if message.contains("exceeds 1 MiB")),
+        "{error}"
+    );
+}
+
+/// The bound is inclusive: a file of exactly 1 MiB is a file, and it reads.
+#[test]
+fn a_token_file_of_exactly_one_mebibyte_is_read() {
+    let scratch = Scratch::new("tokens-at-cap");
+    let dirs = scratch.dirs();
+    scratch.place_private(
+        &scratch.tokens_file(),
+        &token_file_of_length(TOKEN_FILE_CAP),
+    );
+    let read = tokens::read(dirs).expect("a token file at the cap");
+    assert_eq!(read.all().count(), 1);
+}
+
+/// The cap is the token file's, not every machine-local file's: the registry
+/// names vault roots and is read at whatever size it has.
+#[test]
+#[allow(clippy::disallowed_methods)] // The registry surface is this crate's own; here it is what the token file's cap is compared against.
+fn the_registry_file_is_not_held_to_the_token_cap() {
+    let scratch = Scratch::new("registry-uncapped");
+    let dirs = scratch.dirs();
+    let mut text = String::from("version = 1\n#");
+    text.push_str(&"x".repeat(TOKEN_FILE_CAP));
+    text.push('\n');
+    scratch.place(&scratch.registry_file(), &text);
+    norn_config::registry::read(dirs).expect("a registry over the token cap");
+}
+
+/// A FIFO at the token file's name is an unreadable file, answered at once: a
+/// read that waited for a writer would hang the request that asked, and on
+/// the serving side that request runs on the I/O thread.
+#[test]
+fn a_fifo_at_the_token_file_is_refused_promptly() {
+    let scratch = Scratch::new("tokens-fifo");
+    scratch.make_config_dir();
+    make_fifo(&scratch.tokens_file());
+    let dirs = scratch.dirs().clone();
+
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let read = tokens::read(&dirs).map(|_| ());
+        let mutation =
+            tokens::mutate(&dirs, |tokens| tokens.add(&label("laptop"), b"secret")).map(|_| ());
+        let _ = sender.send((read, mutation));
+    });
+    let (read, mutation) = receiver
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("a FIFO read answers rather than waiting for a writer");
+    for (what, outcome) in [("a read", read), ("a mutation", mutation)] {
+        let error = outcome.expect_err("a FIFO is not a token file");
+        assert!(
+            matches!(&error, ConfigError::Io { message, .. } if message.contains("not a regular file")),
+            "{what}: {error}"
+        );
+    }
+}
+
+/// Put a FIFO at `path`. Through the system's `mkfifo`, because the suite
+/// carries no `unsafe` and the standard library has no name for the call.
+pub(crate) fn make_fifo(path: &Path) {
+    let status = std::process::Command::new("mkfifo")
+        .arg(path)
+        .status()
+        .expect("running mkfifo");
+    assert!(status.success(), "mkfifo {} failed", path.display());
+}
+
+/// The set as a whole is printed without its secrets too: it was read from a
+/// document that holds every secret as text, and printing the document would
+/// print them all.
+#[test]
+fn a_token_sets_debug_does_not_carry_its_secrets() {
+    let scratch = Scratch::new("tokens-debug");
+    let dirs = scratch.dirs();
+    tokens::mutate(dirs, |tokens| {
+        tokens.add(&label("laptop"), b"the-secret-bytes")
+    })
+    .expect("a token");
+    let read = tokens::read(dirs).expect("the tokens");
+    let printed = format!("{read:?}");
+    assert!(printed.contains("laptop"), "{printed}");
+    assert!(
+        !printed.contains(&norn_wire::hex::encode(b"the-secret-bytes")),
+        "{printed}"
+    );
+    assert!(!printed.contains("secret-bytes"), "{printed}");
+}
+
+/// A token file that does not parse says where and why, and never what the
+/// line held: the line is a secret's line, and a refusal reaches a log the
+/// moment anything holding it is formatted.
+#[test]
+fn a_token_file_that_does_not_read_never_quotes_its_secret() {
+    let secret = "5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e";
+    let head = "version = 1\n\n[tokens.laptop]\n";
+    // Thirty-two digits: past an i64 and inside an i128, the width whose
+    // refusal the parser words by quoting the value.
+    let digits = "55555555555555555555555555555555";
+    for (case, body, needle) in [
+        (
+            "trailing text",
+            format!("{head}secret = \"{secret}\" oops\ncreated = 1\n"),
+            "line 4, column",
+        ),
+        (
+            "an unterminated string",
+            format!("{head}secret = \"{secret}\ncreated = 1\n"),
+            "line 4, column",
+        ),
+        (
+            "a duplicate key",
+            format!("{head}secret = \"{secret}\"\nsecret = \"{secret}\"\ncreated = 1\n"),
+            "line 5, column",
+        ),
+        (
+            // The parser's own message quotes a value it cannot hold: here an
+            // unquoted secret written as one integer too large for any.
+            "an unquoted secret read as an overflowing integer",
+            format!("{head}secret = {digits}\ncreated = 1\n"),
+            "line 4, column",
+        ),
+        (
+            "an unquoted secret read as a bare word",
+            format!("{head}secret = {secret}\ncreated = 1\n"),
+            "line 4, column",
+        ),
+        (
+            "a secret of the wrong type",
+            format!("{head}secret = 12\ncreated = 1\n# {secret}\n"),
+            "`secret` is integer",
+        ),
+    ] {
+        let scratch = Scratch::new("tokens-no-echo");
+        let dirs = scratch.dirs();
+        scratch.place_private(&scratch.tokens_file(), &body);
+
+        let error = tokens::read(dirs).expect_err("a token file that does not read");
+        let watched = tokens::WatchedTokens::read(dirs);
+        for printed in [
+            error.to_string(),
+            format!("{error:?}"),
+            format!("{watched:?}"),
+        ] {
+            assert!(!printed.contains(secret), "{case}: {printed}");
+            assert!(!printed.contains("5e5e5e"), "{case}: {printed}");
+            assert!(!printed.contains("555555"), "{case}: {printed}");
+        }
+        assert!(
+            error.to_string().contains(needle),
+            "{case}: `{error}` does not say `{needle}`"
+        );
+    }
+}
+
+/// The read direction agrees with [`tokens::Tokens::add`]: an empty secret is
+/// matched by a request that presents nothing, so a file holding one is
+/// corrupt rather than a token set that authenticates everybody.
+#[test]
+fn a_stored_empty_secret_is_refused_on_read() {
+    let scratch = Scratch::new("tokens-empty-secret");
+    let dirs = scratch.dirs();
+    scratch.place_private(
+        &scratch.tokens_file(),
+        "version = 1\n\n[tokens.laptop]\nsecret = \"\"\ncreated = 1\n",
+    );
+    let error = tokens::read(dirs).expect_err("an empty secret");
+    let ConfigError::Corrupt { reason, .. } = &error else {
+        panic!("refused as something other than corrupt: {error}");
+    };
+    assert!(reason.contains("token `laptop`"), "{reason}");
+    assert!(reason.contains("`secret` is empty"), "{reason}");
+    assert!(tokens::WatchedTokens::read(dirs).current().is_err());
+}
+
+/// The write direction agrees with the read direction: a mutation whose
+/// result would be over 1 MiB is refused before anything is written, rather
+/// than leaving a file every later read refuses.
+#[test]
+fn a_mutation_that_would_write_past_one_mebibyte_writes_nothing() {
+    let scratch = Scratch::new("tokens-write-over-cap");
+    let dirs = scratch.dirs();
+    tokens::mutate(dirs, |tokens| tokens.add(&label("laptop"), b"secret")).expect("a token");
+    let before = scratch.text_at(&scratch.tokens_file());
+
+    // Hex doubles a secret, so this one alone renders past the cap.
+    let secret = vec![0x5a; TOKEN_FILE_CAP / 2];
+    let error = tokens::mutate(dirs, |tokens| tokens.add(&label("service"), &secret))
+        .expect_err("a token set over the cap");
+    assert!(
+        matches!(&error, ConfigError::Io { message, .. } if message.contains("exceed 1 MiB")),
+        "{error}"
+    );
+    assert_eq!(scratch.text_at(&scratch.tokens_file()), before);
+    let read = tokens::read(dirs).expect("the file as it was");
+    assert_eq!(read.labels().count(), 1);
+}
