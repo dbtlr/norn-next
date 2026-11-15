@@ -165,6 +165,7 @@ fn top_level_warning_names_the_shape_and_fallback() {
     for (text, key, message) in [
         ("client=1", "client", "expected a table; ignored"),
         ("future=1", "future", "unknown key; ignored"),
+        ("[[future]]\nx=1", "future", "unknown table; ignored"),
         (
             "serve=1",
             "serve",

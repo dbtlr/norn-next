@@ -2627,7 +2627,7 @@ defaults:
 | `[serve]` | `drain_bound` | 10 s, capped below the release bound | How long a drain lets in-flight requests run |
 | `[serve]` | `request_log` | off | Whether the server log carries request lines |
 
-This is the starting key set; a key may be renamed before any build reads it.
+`norn-config` reads these keys; until the first release a key may still be renamed without a migration.
 
 - **The host reads the file and never writes it**, so a person's comments and layout
   survive. No verb rewrites it.

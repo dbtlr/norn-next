@@ -191,7 +191,11 @@ fn parse_with_port(
         if name != "endpoint" && name != "serve" {
             warnings.push(SettingsWarning {
                 key: name,
-                message: if value.is_table() {
+                // An array of tables (`[[name]]`) is a table to the person who wrote it.
+                message: if value.is_table()
+                    || value.as_array().is_some_and(|items| {
+                        !items.is_empty() && items.iter().all(|item| item.is_table())
+                    }) {
                     "unknown table; ignored"
                 } else {
                     "unknown key; ignored"
