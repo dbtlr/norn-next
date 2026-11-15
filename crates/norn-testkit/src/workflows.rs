@@ -78,6 +78,10 @@
 //! leave for it — an entry written to `$GITHUB_ENV` or `$GITHUB_PATH`, a file
 //! such as `.cargo/config.toml` or `rust-toolchain.toml` — which a static
 //! reading cannot see; review of the workflow's diff is the backstop there.
+//! The flag's value is one such case: cargo reads a `--config` argument as a
+//! config file when a file of that name exists, so a file an earlier step
+//! writes under that name is left to that review, while a committed one is
+//! refused by a test.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -105,7 +109,9 @@ const FLAKE_TRIPWIRE: &str = ".github/scripts/flake-tripwire.sh";
 /// script builds its own command and never passes it.
 pub(crate) const SQLITE_OPT_FLAG: &str = "--config";
 
-/// The value [`SQLITE_OPT_FLAG`] may carry, and no other.
+/// The value [`SQLITE_OPT_FLAG`] may carry, and no other. Cargo loads a
+/// `--config` argument as a config file when a file of that name exists, so
+/// the workspace root must hold no entry named this; a test refuses one.
 pub(crate) const SQLITE_OPT_VALUE: &str = "profile.dev.package.libsqlite3-sys.opt-level=3";
 
 /// The environment key a lane step names its cargo features through.
@@ -869,6 +875,7 @@ mod tests {
             "--config profile.dev.package.rusqlite.opt-level=3",
             "--config profile.test.package.libsqlite3-sys.opt-level=3",
             "--config=profile.dev.package.libsqlite3-sys.opt-level=3",
+            "--config profile.dev.package.libsqlite3-sys.opt-level=32",
             "--config profile.dev.package.libsqlite3-sys.opt-level=3 --config profile.dev.opt-level=3",
             "--config --locked",
         ] {
@@ -879,6 +886,22 @@ mod tests {
             );
         }
         assert_eq!(invocation(&format!("{head} {tail} --config")), None);
+    }
+
+    /// **The workspace root holds no entry named the flag's value.** Cargo
+    /// loads a `--config` argument as a config file when a file of that name
+    /// exists, so a committed one would run as arbitrary cargo config in every
+    /// step that carries the pair.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: looks for a file in the checkout.
+    fn the_workspace_root_holds_no_entry_named_the_sqlite_opt_value() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let entry = root.join(super::SQLITE_OPT_VALUE);
+        assert!(
+            !entry.exists(),
+            "{} exists and cargo would load it as a config file",
+            entry.display()
+        );
     }
 
     /// **The lane script never passes the flag**, so a lane command carrying

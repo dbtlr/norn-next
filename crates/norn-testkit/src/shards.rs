@@ -405,6 +405,7 @@ jobs:
             "--config profile.dev.package.rusqlite.opt-level=3",
             "--config profile.test.package.libsqlite3-sys.opt-level=3",
             "--config=profile.dev.package.libsqlite3-sys.opt-level=3",
+            "--config profile.dev.package.libsqlite3-sys.opt-level=32",
             "--config --locked",
         ] {
             let workflow = WORKFLOW.replace(

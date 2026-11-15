@@ -1621,6 +1621,7 @@ fn assert_matrix_mapping_keys(workflow: &str, full: bool) {
                     [
                         "persist-credentials",
                         "args",
+                        "key",
                         "name",
                         "path",
                         "if-no-files-found"
@@ -1689,7 +1690,13 @@ fn assert_matrix_step_values(workflow: &str, job: &str, runs: &[&str], full: boo
     if job == "architecture" {
         expected.push("uses: docker://rhysd/actionlint:1.7.12\nargs: -color".to_string());
     }
-    expected.push("uses: Swatinem/rust-cache@v2".to_string());
+    // The four PR jobs that carry the SQLite flag key their cache apart from
+    // the caches saved before it.
+    if !full && matches!(job, "build" | "build-host" | "host-functional" | "platform") {
+        expected.push("uses: Swatinem/rust-cache@v2\nkey: sqlite-opt3".to_string());
+    } else {
+        expected.push("uses: Swatinem/rust-cache@v2".to_string());
+    }
     for command in runs {
         let command = if full {
             command.replace("cargo test --locked", "cargo test --locked --no-fail-fast")

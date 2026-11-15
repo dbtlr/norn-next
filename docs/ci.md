@@ -34,10 +34,15 @@ functional tests run faster. Each functional `cargo` command carries
 `--locked`: both the `Build` and `Test` steps of `build and test`, the `Test`
 step of `build and test (norn-host and norn-testkit)`, the host functional suite
 step, and every `cargo test` step of the macOS platform job that runs before the
-folding-root spelling bar. Cargo reads a per-package profile override only from
-`--config`, never from the environment. The macOS folding-root spelling bar and
-every nightly lane run without the flag, so every measurement stays at opt-level
-0. Lane steps cannot carry the flag, because `lane-suite.sh` builds its own
+folding-root spelling bar. Cargo does not read a per-package profile override from the
+environment, so the flag is how a single run sets it. Every cargo step of the
+three Linux jobs carries the flag, so each of those jobs builds one variant. The
+macOS job builds two: its functional steps with the flag, then the folding-root
+spelling bar at opt-level 0, which rebuilds `libsqlite3-sys` and the crates above
+it. Every nightly lane also runs without the flag, so every measurement stays at
+opt-level 0. The `rust-cache` step of the four jobs that carry the flag has the
+extra key `sqlite-opt3`, which separates their caches from the ones saved before
+the flag, so the optimized SQLite object is saved. Lane steps cannot carry the flag, because `lane-suite.sh` builds its own
 `cargo test` command. The workflow reader and the shard check accept this one
 exact flag and value and refuse every other `--config`.
 

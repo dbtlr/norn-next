@@ -85,12 +85,20 @@ jobs:
         run: |
           rustc --version
           cargo --version
+      # The key separates these jobs' caches from the ones saved before the flag,
+      # so the optimized SQLite object is saved.
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: sqlite-opt3
       # `--config profile.dev.package.libsqlite3-sys.opt-level=3` builds the bundled
-      # SQLite at opt-level 3, so functional tests run faster. Cargo reads a
-      # per-package profile override only from `--config`, never from the
-      # environment. The workflow reader and the shard check accept this one exact
-      # pair and no other `--config`. Every step of a job builds one variant.
+      # SQLite at opt-level 3, so functional tests run faster. Cargo does not read
+      # a per-package profile override from the environment, so the flag is how a
+      # single run sets it. The workflow reader and the shard check accept this
+      # one exact pair and no other `--config`. Every cargo step of the three
+      # Linux jobs carries the flag, so each of those jobs builds one variant. The
+      # macOS job builds two: its functional steps with the flag, then the
+      # folding-root step at opt-level 0, which rebuilds `libsqlite3-sys` and the
+      # crates above it.
       - name: Build
         run: cargo build --locked --config profile.dev.package.libsqlite3-sys.opt-level=3 --workspace
       - name: Test
@@ -112,6 +120,8 @@ jobs:
         with:
           persist-credentials: false
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: sqlite-opt3
       # cargo test builds every selected target before running tests and doctests.
       - name: Test
         run: .github/scripts/flake-tripwire.sh cargo test --locked --config profile.dev.package.libsqlite3-sys.opt-level=3 -p norn-host -p norn-testkit -p norn-serve
@@ -191,6 +201,8 @@ jobs:
         with:
           persist-credentials: false
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: sqlite-opt3
       - name: Host functional suite
         run: .github/scripts/flake-tripwire.sh cargo test --locked --config profile.dev.package.libsqlite3-sys.opt-level=3 -p norn-host --features induced-failure
 
@@ -226,6 +238,8 @@ jobs:
       - name: Assert architecture
         run: test "$(uname -m)" = arm64
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: sqlite-opt3
       - name: Embedding determinism
         run: .github/scripts/flake-tripwire.sh cargo test --locked --config profile.dev.package.libsqlite3-sys.opt-level=3 -p norn-embed --test determinism
       - name: Filesystem contracts
