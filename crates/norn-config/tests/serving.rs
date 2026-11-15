@@ -16,7 +16,9 @@ fn absent_default_is_silent_but_explicit_missing_refuses() {
     let (_scratch, dirs) = fixture();
     let (s, w) = ServingSettings::read(&dirs, SettingsSource::ChannelDefault, None).unwrap();
     assert_eq!(s, ServingSettings::default());
-    assert!(w.is_empty());
+    // The only warning an absent file can bring is the default port inside
+    // this machine's ephemeral range.
+    assert!(w.iter().all(|w| w.key == "endpoint.port"), "{w:?}");
     assert!(
         ServingSettings::read(
             &dirs,

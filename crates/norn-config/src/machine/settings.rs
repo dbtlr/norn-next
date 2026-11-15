@@ -160,12 +160,14 @@ fn port_warning(port: u16, ephemeral: Option<(u16, u16)>) -> Option<SettingsWarn
             message: format!("port {port} is in the platform ephemeral range; using it"),
         })
 }
+/// `text` parsed with no ephemeral range, so a test's warnings do not depend
+/// on this machine's kernel settings; range tests call [`parse_with`].
 #[cfg(test)]
 fn parse(
     text: &str,
     path: &Path,
 ) -> Result<(ServingSettings, Vec<SettingsWarning>), SettingsError> {
-    parse_with(text, path, None, crate::file::ephemeral_range())
+    parse_with(text, path, None, None)
 }
 /// Parse `text` as the settings file at `path`, with the `--port` flag
 /// resolved inside, judging the resolved port against `ephemeral`.

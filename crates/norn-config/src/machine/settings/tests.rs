@@ -99,13 +99,14 @@ fn inconsistent_quota_pair_falls_back_together() {
 }
 #[test]
 fn ephemeral_port_is_used_and_warned_once() {
-    let port = crate::file::ephemeral_range().unwrap().0;
-    let (s, w) = parse(
-        &format!("[endpoint]\nport={port}"),
+    let (s, w) = parse_with(
+        "[endpoint]\nport=50000",
         Path::new("config.toml"),
+        None,
+        Some((49152, 65535)),
     )
     .unwrap();
-    assert_eq!(s.endpoint.port(), port);
+    assert_eq!(s.endpoint.port(), 50000);
     assert_eq!(w.len(), 1);
 }
 #[test]
