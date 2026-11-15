@@ -73,20 +73,51 @@ impl ProcessTable for KernelProcessTable {
     }
 }
 
-// `own_pid` is the scanning process's ID in its own pid namespace; a table whose
-// `self` names another ID lists another namespace's processes and proves nothing.
+/// Count members of `pgid` through the guarded kernel process table.
+///
+/// A process that vanishes between listing and stat (`NotFound` or `ESRCH`)
+/// is skipped. A pid-namespace mismatch, failed listing or listing entry,
+/// any other stat-read failure, or an unparseable stat line returns `Err`.
+pub(in crate::process) fn process_group_count(pgid: libc::pid_t) -> io::Result<usize> {
+    let own_pid = libc::pid_t::try_from(std::process::id())
+        .map_err(|_| io::Error::other("this process ID does not fit pid_t"))?;
+    count(&KernelProcessTable, own_pid, pgid)
+}
+
+fn count(table: &impl ProcessTable, own_pid: libc::pid_t, pgid: libc::pid_t) -> io::Result<usize> {
+    let mut count = 0;
+    walk_group(table, own_pid, pgid, |_, _| {
+        count += 1;
+        true
+    })?;
+    Ok(count)
+}
+
 fn scan(table: &impl ProcessTable, own_pid: libc::pid_t, pgid: libc::pid_t) -> bool {
-    if table.self_pid().ok() != Some(own_pid) {
-        return false;
-    }
-    let Ok(entries) = table.entries() else {
-        return false;
-    };
     let mut leader_seen = false;
-    for entry in entries {
-        let Ok(name) = entry else {
+    let complete = walk_group(table, own_pid, pgid, |pid, stat| {
+        if pid != pgid || stat.state().ok() != Some(b'Z') {
             return false;
-        };
+        }
+        leader_seen = true;
+        true
+    });
+    complete.unwrap_or(false) && leader_seen
+}
+
+// `own_pid` is the reader's ID in its own pid namespace. The visitor may stop
+// early once a group member disproves the cleanup scan's claim.
+fn walk_group(
+    table: &impl ProcessTable,
+    own_pid: libc::pid_t,
+    pgid: libc::pid_t,
+    mut visit: impl FnMut(libc::pid_t, LinuxStat<'_>) -> bool,
+) -> io::Result<bool> {
+    if table.self_pid()? != own_pid {
+        return Err(io::Error::other("/proc names another pid namespace"));
+    }
+    for entry in table.entries()? {
+        let name = entry?;
         let Some(pid) = name
             .to_str()
             .and_then(|name| name.parse::<libc::pid_t>().ok())
@@ -96,23 +127,14 @@ fn scan(table: &impl ProcessTable, own_pid: libc::pid_t, pgid: libc::pid_t) -> b
         let stat = match table.stat(pid) {
             Ok(stat) => stat,
             Err(error) if vanished(&error) => continue,
-            Err(_) => return false,
+            Err(error) => return Err(error),
         };
-        let Ok(stat) = LinuxStat::parse(pid, &stat) else {
-            return false;
-        };
-        let Ok(pgrp) = stat.pgrp() else {
-            return false;
-        };
-        if pgrp != pgid {
-            continue;
+        let stat = LinuxStat::parse(pid, &stat)?;
+        if stat.pgrp()? == pgid && !visit(pid, stat) {
+            return Ok(false);
         }
-        if pid != pgid || stat.state().ok() != Some(b'Z') {
-            return false;
-        }
-        leader_seen = true;
     }
-    leader_seen
+    Ok(true)
 }
 
 // A process that ended between the listing and the read is gone, not unknown.
@@ -186,6 +208,55 @@ mod tests {
                 Some((_, Err(errno))) => Err(io::Error::from_raw_os_error(*errno)),
                 None => Err(io::Error::from_raw_os_error(libc::ENOENT)),
             }
+        }
+    }
+
+    #[test]
+    fn counting_includes_group_members_and_ignores_other_groups() {
+        assert_eq!(count(&FixedTable::proving(), OWN_PID, LEADER).unwrap(), 1);
+        let table = FixedTable::proving().with_other_stat(Ok(b"200 (sleep) S 100 100 100 0"));
+        assert_eq!(count(&table, OWN_PID, LEADER).unwrap(), 2);
+        assert_eq!(count(&table, OWN_PID, OTHER).unwrap(), 0);
+    }
+
+    #[test]
+    fn counting_skips_processes_that_vanished() {
+        for errno in [libc::ENOENT, libc::ESRCH] {
+            let table = FixedTable::proving().with_other_stat(Err(errno));
+            assert_eq!(count(&table, OWN_PID, LEADER).unwrap(), 1);
+        }
+    }
+
+    #[test]
+    fn counting_rejects_a_namespace_mismatch() {
+        let mut table = FixedTable::proving();
+        table.self_pid = Ok(OWN_PID + 1);
+        assert!(count(&table, OWN_PID, LEADER).is_err());
+    }
+
+    #[test]
+    fn counting_rejects_unparseable_stat_lines() {
+        for stat in [&b"200 (init"[..], b"200 (init) S 0", b"200 (init) S 0 x"] {
+            let table = FixedTable::proving().with_other_stat(Ok(stat));
+            assert!(count(&table, OWN_PID, LEADER).is_err());
+        }
+    }
+
+    #[test]
+    fn counting_rejects_a_failed_listing() {
+        let mut table = FixedTable::proving();
+        table.listing = None;
+        assert!(count(&table, OWN_PID, LEADER).is_err());
+    }
+
+    #[test]
+    fn counting_rejects_failed_entries_and_non_vanishing_stat_errors() {
+        let mut table = FixedTable::proving();
+        table.listing.as_mut().unwrap().push(Err(libc::EIO));
+        assert!(count(&table, OWN_PID, LEADER).is_err());
+        for errno in [libc::EACCES, libc::EIO] {
+            let table = FixedTable::proving().with_other_stat(Err(errno));
+            assert!(count(&table, OWN_PID, LEADER).is_err());
         }
     }
 

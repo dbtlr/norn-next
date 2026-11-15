@@ -438,18 +438,8 @@ fn unix_ms(time: SystemTime) -> io::Result<u64> {
 }
 
 #[cfg(target_os = "linux")]
-#[allow(clippy::disallowed_methods)] // Recovery counts members through the kernel process table for audit evidence.
 fn process_group_count(pgid: libc::pid_t) -> io::Result<usize> {
-    let mut count = 0;
-    for entry in std::fs::read_dir("/proc")? {
-        let Ok(pid) = entry?.file_name().to_string_lossy().parse::<libc::pid_t>() else {
-            continue;
-        };
-        if unsafe { libc::getpgid(pid) } == pgid {
-            count += 1;
-        }
-    }
-    Ok(count)
+    super::group::process_group_count(pgid)
 }
 
 #[cfg(target_os = "macos")]
