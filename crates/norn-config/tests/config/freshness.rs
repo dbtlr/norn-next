@@ -138,9 +138,12 @@ fn an_unchanged_token_file_costs_one_fingerprint_and_no_read() {
 fn an_unchanged_file_is_read_again_while_its_fingerprint_is_racy() {
     let scratch = Scratch::new("fresh-racy");
     let path = scratch.tokens_file();
+    // The clock stands at a moment taken before the write, so the file's
+    // times are never a window behind it, however long the case stalls.
+    let base = SystemTime::now();
     scratch.place_private(&path, &one_token("0a"));
 
-    let mut watched = WatchedTokens::read(scratch.dirs());
+    let mut watched = WatchedTokens::read_with_clock(scratch.dirs(), move || base);
     for _ in 0..3 {
         assert_reread(watched.check());
         assert_eq!(laptop_secret(&watched), [0x0a]);
@@ -160,19 +163,25 @@ fn a_holder_reads_again_until_the_file_has_settled_then_stops() {
     let scratch = Scratch::new("fresh-converges");
     let path = scratch.tokens_file();
     let text = one_token("0a");
+    // The case's clock is a moment taken before the first write plus an
+    // offset only the case moves, so real time passing never moves it: a
+    // stalled runner cannot carry a racy step past the window. The file's
+    // times are at or after that moment, so an offset short of the window is
+    // racy whatever the stall, and a settled step's offset of a minute
+    // leaves the writes, a few milliseconds apart, far behind it.
+    let base = SystemTime::now();
     scratch.place_private(&path, &text);
     let ahead = Arc::new(AtomicU64::new(0));
     let clock = Arc::clone(&ahead);
     let mut watched = WatchedTokens::read_with_clock(scratch.dirs(), move || {
-        SystemTime::now() + Duration::from_secs(clock.load(Ordering::SeqCst))
+        base + Duration::from_secs(clock.load(Ordering::SeqCst))
     });
-    // The window is 3 s: FAT's 2 s tick with a margin. A clock 1 s ahead is
-    // still inside it with 2 s to spare, so a stalled runner does not carry
-    // the case past the window; the window's own value is pinned to the
-    // nanosecond by the crate's unit test of the rule.
+    // The window is 3 s: FAT's 2 s tick with a margin. An offset of 1 s is
+    // inside it; the window's own value is pinned to the nanosecond by the
+    // crate's unit test of the rule.
     let short_of_the_window = || ahead.store(1, Ordering::SeqCst);
-    let past_the_window = || ahead.store(4, Ordering::SeqCst);
-    let at_the_system_clock = || ahead.store(0, Ordering::SeqCst);
+    let past_the_window = || ahead.store(60, Ordering::SeqCst);
+    let at_the_base = || ahead.store(0, Ordering::SeqCst);
 
     assert_reread(watched.check());
     assert_reread(watched.check());
@@ -187,7 +196,7 @@ fn a_holder_reads_again_until_the_file_has_settled_then_stops() {
     assert_unchanged(watched.check());
     assert_unchanged(watched.check());
 
-    at_the_system_clock();
+    at_the_base();
     past_a_tick();
     overwrite_in_place(&path, secret_offset(&text), b"0b");
     assert_reread(watched.check());
