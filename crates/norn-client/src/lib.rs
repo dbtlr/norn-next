@@ -40,7 +40,9 @@ pub struct ServeArgs {
     )]
     pub port: Option<u16>,
     /// Read serving settings from this file instead of the channel's config.toml.
-    #[arg(long, value_name = "PATH")]
+    // A path is free text, so one beginning with a hyphen is a path rather
+    // than a flag.
+    #[arg(long, value_name = "PATH", allow_hyphen_values = true)]
     pub config: Option<PathBuf>,
     /// The auto-launch marker. Hidden: only a client launching a host passes
     /// it, and such a host binds only its resolved endpoint, which is why it
@@ -117,6 +119,14 @@ mod tests {
                 config: Some(PathBuf::from("/elsewhere/config.toml")),
                 auto_launched: false,
             }
+        );
+    }
+
+    #[test]
+    fn a_config_path_may_begin_with_a_hyphen() {
+        assert_eq!(
+            serve(&["--config", "-settings.toml"]).unwrap().config,
+            Some(PathBuf::from("-settings.toml"))
         );
     }
 
