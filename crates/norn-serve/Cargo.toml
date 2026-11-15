@@ -1,33 +1,58 @@
 [package]
 name = "norn-serve"
-description = "The HTTP surface and the host process it runs in — the channel lock, the serving socket and the server log"
+description = "The HTTP surface and the host process it runs in — the channel lock, the bearer token and the hello, the serving socket and the server log"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+# `GET /v1/debug/counters`: the server's cumulative `serve.*` counters behind
+# the bearer, for the counter bars a test or nightly build of the binary reads.
+# Off by default, so no shipped build serves it.
+counters = []
+
 [dependencies]
 # The HTTP/1.1 server the routes are served by (ruling R2: hyper 1 on tokio,
-# inside this crate only; no async type reaches norn-host).
-hyper = { version = "1.11", features = ["http1", "server"] }
+# inside this crate only; no async type reaches norn-host), and the low-level
+# HTTP/1.1 client the takeover dial speaks its hello over.
+hyper = { version = "1.11", features = ["client", "http1", "server"] }
 # The bridge from tokio's sockets to hyper's I/O traits.
 hyper-util = { version = "0.1.21", features = ["tokio"] }
-# The empty body a 404 answers with.
+# The bodies a route answers with, and the capped read of a request's body.
 http-body-util = "0.1.5"
 # One current-thread runtime for the listener and its connections, its signal
 # streams, the timer that paces a failing accept, and the blocking thread the
 # host is constructed on.
 tokio = { version = "1.52", features = ["macros", "net", "rt", "signal", "time"] }
+# The operating system's random source: the 32 bytes of the token minted at a
+# first start, and the takeover dial's hello nonce. This crate is the one mint
+# site; nothing else in the workspace draws a credential.
+getrandom = "0.4"
+# HMAC-SHA256: the hello's MAC, keyed by the labelled token, which the host
+# answers with and the takeover dial verifies. Built on the workspace's `sha2`.
+hmac = "0.13"
+# SHA-256 over a presented bearer, the key it is looked up by: one lookup,
+# never a walk over the stored tokens.
+sha2 = { workspace = true }
+# The constant-time comparison of a presented bearer with the stored secret
+# its digest found, so the time a refusal takes says nothing about the secret.
+subtle = "2.6"
+# The hello's and the refusals' JSON bodies, and the counters route's object.
+serde_json = { workspace = true }
 norn-config = { path = "../norn-config" }
 norn-host = { path = "../norn-host" }
 norn-wire = { path = "../norn-wire" }
 
-# `norn-config`'s `test-support` names `WatchedTokens::read_with_clock`, the
-# clock seam a suite stands a settled or a racy token file on. A
-# whole-workspace run turns it on through `norn-config`'s own dev-dependency,
-# and this package's shard must build its tests with the same set
-# (`norn-testkit --test shards`); it also lets this crate's own unit tests name
-# the seam.
 [dev-dependencies]
+# `norn-config`'s `test-support` names `WatchedTokens::read_with_clock`, the
+# clock seam this crate's in-process credential tests stand a settled or a racy
+# token file on. A whole-workspace run turns it on through `norn-config`'s own
+# dev-dependency, and this package's shard must build its tests with the same
+# set (`norn-testkit --test shards`).
 norn-config = { path = "../norn-config", features = ["test-support"] }
+# The scratch directories the mint's and the credential state's unit suites
+# keep a token file in. A development edge: the allowlist does not describe
+# it, and the architecture gate reads and discards it.
+norn-testkit = { path = "../norn-testkit" }

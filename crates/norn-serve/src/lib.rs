@@ -6,15 +6,20 @@
 //! once its signal handlers are installed
 //! and runs it in its own process — a process entry, not a request.
 //!
-//! **What lands first is the start and a plain stop.** [`run`] reads the
-//! serving settings, takes the channel lock before any other start-up work,
-//! reads the registry, constructs the host, binds the exact resolved loopback
-//! address and logs `listening`; SIGTERM or SIGINT then logs `stopped` and
-//! exits 0. Every request is answered 404 until the routes land; the wire
-//! route's dispatch is reserved in `wire.rs`. The hello, the bearer, the
-//! takeover of a held lock, the port probe, the bounded drain and the
-//! start-bound watchdog are later tasks of the same phase, and each is named
-//! where its absence shows.
+//! **What runs is the start, the credential and a plain stop.** [`run`] reads
+//! the serving settings, takes the channel lock before any other start-up
+//! work, mints the bearer token where the file holds none (the private `mint`
+//! module), reads the registry, constructs the host, binds the exact resolved
+//! loopback address and logs `listening`; SIGTERM or SIGINT then logs
+//! `stopped` and exits 0. In front of every route stand the hello and the
+//! bearer middleware (`http.rs`, over the credential state in
+//! `credentials.rs`); behind them an authenticated request is answered 404
+//! until the wire route lands, its dispatch reserved in `wire.rs`, and under
+//! the `counters` feature `GET /v1/debug/counters` answers the `serve.*`
+//! counters. The [`dial`] module is the takeover dial's hello. The takeover
+//! of a held lock, the port probe, the bounded drain and the start-bound
+//! watchdog are later tasks of the same phase, and each is named where its
+//! absence shows.
 //!
 //! **No async type reaches `norn-host`** (ruling R2): tokio and hyper live in
 //! this crate alone, and the host is built and dropped on ordinary threads.
@@ -25,17 +30,22 @@
 use std::fmt;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use norn_config::machine::settings::{ServingSettings, SettingsSource};
+use norn_config::machine::tokens::WatchedTokens;
 use norn_config::{Channel, ChannelLock, ConfigDirs};
 use norn_host::{Host, ProductionEntryOps, RegistryRead};
-use norn_wire::BuildIdentity;
+use norn_wire::{BuildIdentity, HelloLaunch};
 use tokio::net::{TcpListener, TcpSocket};
 use tokio::signal::unix::{Signal, SignalKind, signal};
 
+mod credentials;
+pub mod dial;
 mod http;
 mod log;
+mod mint;
 mod policy;
 mod wire;
 
@@ -59,6 +69,15 @@ pub enum Launch {
     Explicit,
     /// A client launched it with the auto-launch marker.
     Auto,
+}
+
+impl From<Launch> for HelloLaunch {
+    fn from(launch: Launch) -> Self {
+        match launch {
+            Launch::Explicit => HelloLaunch::Explicit,
+            Launch::Auto => HelloLaunch::Auto,
+        }
+    }
 }
 
 impl fmt::Display for Launch {
@@ -103,7 +122,8 @@ impl fmt::Display for Stop {
 ///
 /// Exits 0 after a signal stopped a listening host, and 1 for every refused
 /// start: a bad settings file, a held or refused channel lock, an unreadable
-/// registry, a held port, or a signal before listening.
+/// token file, an unreadable registry, a held port, or a signal before
+/// listening.
 ///
 /// The build identity is captured by the bin. Argument parsing is deferred
 /// until signal handlers are installed.
@@ -188,13 +208,20 @@ async fn serve_on_runtime(
         let dirs = dirs.clone();
         tokio::task::spawn_blocking(move || construct(dirs, &settings))
     };
-    let (lock, host) = tokio::select! {
+    let (lock, host, watched) = tokio::select! {
         biased;
         _ = terminate.recv() => return Err(before_listening(Stop::Terminate)),
         _ = interrupt.recv() => return Err(before_listening(Stop::Interrupt)),
         built = construction => built
             .map_err(|error| Refusal(format!("constructing the host failed: {error}")))??,
     };
+
+    let context = Arc::new(http::Context {
+        credentials: Mutex::new(credentials::Credentials::new(&dirs, watched)),
+        channel: Channel::COMPILED.into(),
+        build,
+        launch: serve.launch.into(),
+    });
 
     let result = async {
         let listener = bind(endpoint.address()).map_err(|error| {
@@ -221,7 +248,7 @@ async fn serve_on_runtime(
             tokio::select! {
                 accepted = listener.accept() => match accepted {
                     Ok((stream, _)) => {
-                        tokio::spawn(http::answer(stream));
+                        tokio::spawn(http::answer(stream, Arc::clone(&context)));
                     }
                     Err(error) => {
                         log(format_args!("warning: accepting a connection failed: {error}"));
@@ -250,13 +277,13 @@ async fn serve_on_runtime(
     result
 }
 
-/// Step 2 and the first half of step 5: the channel lock, then the registry
-/// read and the host built over it. The host's startup sweep runs inside
-/// `Host::new`.
+/// Step 2 and the first half of step 5: the channel lock, the token minted
+/// where the file holds none and the set read, then the registry read and the
+/// host built over it. The host's startup sweep runs inside `Host::new`.
 fn construct(
     dirs: ConfigDirs,
     settings: &ServingSettings,
-) -> Result<(ChannelLock, Host<ProductionEntryOps>), Refusal> {
+) -> Result<(ChannelLock, Host<ProductionEntryOps>, WatchedTokens), Refusal> {
     let lock = match ChannelLock::try_take(&dirs) {
         Ok(Some(lock)) => lock,
         // Waiting out the holder and taking over an auto-launched one is a
@@ -274,6 +301,7 @@ fn construct(
             )));
         }
     };
+    let watched = mint_and_read(&dirs)?;
     let registry = RegistryRead::load(&dirs).map_err(|error| {
         // An error that already names the file is not prefixed with it again.
         let path = dirs.config_dir().join("registry.toml");
@@ -295,7 +323,32 @@ fn construct(
         policy::lifecycle(settings),
     )
     .map_err(|error| Refusal(format!("the serving settings are not usable: {error}")))?;
-    Ok((lock, host))
+    Ok((lock, host, watched))
+}
+
+/// Step 5.1: mint a `default` token if the file holds none, then read the set
+/// the hello and the bearer middleware serve from.
+///
+/// A set that does not read on that second read — the file changed in the
+/// moment between — is held like any later refusal: the host fails closed
+/// from its first request and logs it, rather than refusing a start whose
+/// mint just read the file.
+fn mint_and_read(dirs: &ConfigDirs) -> Result<WatchedTokens, Refusal> {
+    let file = credentials::tokens_file(dirs);
+    let secret = mint::random_secret().map_err(|error| {
+        Refusal(format!(
+            "drawing a token from the operating system's random source failed: {error}"
+        ))
+    })?;
+    match mint::mint(dirs, &secret) {
+        Ok(mint::Mint::Held) => {}
+        Ok(mint::Mint::Minted) => log(format_args!("minted the `default` token into {file}")),
+        Ok(mint::Mint::MintedUnconfirmed(error)) => log(format_args!(
+            "minted the `default` token into {file}; warning: {error}"
+        )),
+        Err(error) => return Err(Refusal(credentials::unreadable(&file, &error))),
+    }
+    Ok(WatchedTokens::read(dirs))
 }
 
 /// Bind and listen on exactly `address`, with `SO_REUSEADDR` so a socket this

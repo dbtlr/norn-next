@@ -4,207 +4,18 @@
 //!
 //! What is held here is the start and the plain stop: the settings precedence
 //! and refusals, the channel lock, the bind, `listening`, a 404 for every
-//! request while no route is served, and `stopped` with status 0 on SIGTERM.
-//! A host that outlives its test is killed by the pid this suite started, and
-//! by nothing wider.
+//! authenticated request while no route is served behind the bearer, and
+//! `stopped` with status 0 on SIGTERM. The token mint, the bearer and the
+//! hello are held in `serve_tokens.rs` and `serve_hello.rs`.
 #![allow(clippy::disallowed_methods)] // Harness scaffolding: the settings files a start reads.
 
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
-use std::time::{Duration, Instant};
+mod support;
 
-use norn_config::ConfigDirs;
+use std::net::TcpListener;
+
 use norn_config::machine::default_endpoint;
-use norn_testkit::process::{Run, RunStatus, Sandbox};
-
-/// Long enough for a debug build to construct an empty host and bind.
-const START_WITHIN: Duration = Duration::from_secs(30);
-const STOP_WITHIN: Duration = Duration::from_secs(30);
-
-struct Fixture {
-    sandbox: Sandbox,
-    binary: PathBuf,
-}
-
-impl Fixture {
-    fn new(label: &str) -> Fixture {
-        let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), label)
-            .expect("making the sandbox");
-        let binary = sandbox
-            .install_binary(Path::new(env!("CARGO_BIN_EXE_norn")))
-            .expect("installing the binary");
-        Fixture { sandbox, binary }
-    }
-
-    /// The directories the started binary resolves from the sandbox's
-    /// environment.
-    fn dirs(&self) -> ConfigDirs {
-        let environment = self.sandbox.environment();
-        ConfigDirs::new(
-            &environment["XDG_CONFIG_HOME"],
-            &environment["XDG_DATA_HOME"],
-        )
-        .expect("the sandbox's directories")
-    }
-
-    fn write_settings(&self, text: &str) -> PathBuf {
-        let path = self.dirs().config_dir().join("config.toml");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, text).unwrap();
-        path
-    }
-
-    /// A run to completion, for a start expected to refuse.
-    fn run(&self, args: &[&str]) -> (RunStatus, String) {
-        let outcome = Run::new(&self.sandbox, &self.binary)
-            .args(args)
-            .deadline(START_WITHIN)
-            .wait()
-            .expect("running norn");
-        (outcome.status, outcome.stderr_text())
-    }
-
-    /// A host left running, read line by line.
-    fn start(&self, args: &[&str]) -> Served {
-        let mut child = Command::new(&self.binary)
-            .args(args)
-            .env_clear()
-            .envs(self.sandbox.environment())
-            .current_dir(self.sandbox.work_dir())
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("starting norn serve");
-        let stderr = child.stderr.take().unwrap();
-        let (sender, lines) = channel();
-        std::thread::spawn(move || {
-            for line in BufReader::new(stderr).lines() {
-                let Ok(line) = line else { break };
-                if sender.send(line).is_err() {
-                    break;
-                }
-            }
-        });
-        Served {
-            child,
-            lines,
-            seen: Vec::new(),
-        }
-    }
-}
-
-struct Served {
-    child: Child,
-    lines: Receiver<String>,
-    seen: Vec<String>,
-}
-
-impl Served {
-    /// The first log line starting with `prefix`, every line before it kept.
-    fn line_starting(&mut self, prefix: &str) -> String {
-        let deadline = Instant::now() + START_WITHIN;
-        loop {
-            let left = deadline.saturating_duration_since(Instant::now());
-            match self.lines.recv_timeout(left) {
-                Ok(line) => {
-                    self.seen.push(line.clone());
-                    if line.starts_with(prefix) {
-                        return line;
-                    }
-                }
-                Err(RecvTimeoutError::Timeout) => {
-                    panic!(
-                        "no `{prefix}` line within {START_WITHIN:?}: {:?}",
-                        self.seen
-                    )
-                }
-                Err(RecvTimeoutError::Disconnected) => {
-                    panic!(
-                        "norn serve closed stderr before `{prefix}`: {:?}",
-                        self.seen
-                    )
-                }
-            }
-        }
-    }
-
-    /// The port the `listening` line names.
-    fn listening_port(&mut self) -> u16 {
-        let line = self.line_starting("listening:");
-        let port = line
-            .split(", ")
-            .find_map(|part| part.strip_prefix("port "))
-            .unwrap_or_else(|| panic!("`{line}` names no port"));
-        port.parse()
-            .unwrap_or_else(|_| panic!("`{line}` names no port"))
-    }
-
-    /// SIGTERM, then the status and every remaining log line.
-    fn terminate(self) -> (ExitStatus, Vec<String>) {
-        self.signal(libc::SIGTERM)
-    }
-
-    fn signal(mut self, signal: libc::c_int) -> (ExitStatus, Vec<String>) {
-        let pid = libc::pid_t::try_from(self.child.id()).unwrap();
-        // SAFETY: a plain signal to the child this suite spawned and has not
-        // reaped, so the pid still names it.
-        assert_eq!(unsafe { libc::kill(pid, signal) }, 0);
-        let deadline = Instant::now() + STOP_WITHIN;
-        let status = loop {
-            if let Some(status) = self.child.try_wait().unwrap() {
-                break status;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "norn serve did not stop within {STOP_WITHIN:?} of SIGTERM: {:?}",
-                self.seen
-            );
-            std::thread::sleep(Duration::from_millis(20));
-        };
-        self.seen.extend(self.lines.try_iter());
-        while let Ok(line) = self.lines.recv_timeout(Duration::from_secs(1)) {
-            self.seen.push(line);
-        }
-        (status, std::mem::take(&mut self.seen))
-    }
-}
-
-impl Drop for Served {
-    fn drop(&mut self) {
-        if let Ok(None) = self.child.try_wait() {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
-        }
-    }
-}
-
-/// A port nothing listens on now, chosen by the kernel. Another process may
-/// take it before the test binds it; that race is accepted.
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .and_then(|listener| listener.local_addr())
-        .expect("asking the kernel for a free port")
-        .port()
-}
-
-fn ask(port: u16, path: &str) -> String {
-    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connecting to norn serve");
-    stream
-        .set_read_timeout(Some(Duration::from_secs(10)))
-        .unwrap();
-    write!(
-        stream,
-        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
-    )
-    .unwrap();
-    let mut answer = String::new();
-    stream.read_to_string(&mut answer).unwrap();
-    answer
-}
+use norn_testkit::process::{Run, RunStatus};
+use support::{Fixture, free_port, get};
 
 #[test]
 fn serve_listens_on_the_resolved_port_answers_404_and_stops_on_sigterm() {
@@ -222,9 +33,14 @@ fn serve_listens_on_the_resolved_port_answers_404_and_stops_on_sigterm() {
         )),
         "{listening}"
     );
+    // No route is served behind the bearer yet: an authenticated request
+    // anywhere is a 404, and the same request without the bearer a 401.
+    let bearer = fixture.default_bearer();
     for path in ["/", "/v1/hello", "/v1/wire/find"] {
-        let answer = ask(port, path);
-        assert!(answer.starts_with("HTTP/1.1 404"), "{path}: {answer}");
+        let answer = get(port, path, Some(&bearer));
+        assert_eq!(answer.status, 404, "{path}: {answer:?}");
+        assert!(answer.body.is_empty(), "{path}: {answer:?}");
+        assert_eq!(get(port, path, None).status, 401, "{path}");
     }
 
     let (status, lines) = served.terminate();
@@ -401,7 +217,7 @@ fn invalid_registry_entries_refuse_naming_the_file_and_the_fix() {
     for (name, root) in [("notes", "relative"), ("Notes_1", "/vault")] {
         let fixture = Fixture::new("serve-invalid-registry");
         fixture.write_settings("");
-        let path = fixture.dirs().config_dir().join("registry.toml");
+        let path = fixture.config_dir().join("registry.toml");
         std::fs::write(
             &path,
             format!("version = 1\n[vaults.{name}]\nroot = {root:?}\n"),
@@ -423,7 +239,7 @@ fn a_registry_fifo_refuses_naming_the_file() {
     use std::os::unix::ffi::OsStrExt;
     let fixture = Fixture::new("serve-registry-fifo");
     fixture.write_settings("");
-    let path = fixture.dirs().config_dir().join("registry.toml");
+    let path = fixture.config_dir().join("registry.toml");
     let cpath = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
     // SAFETY: a live NUL-terminated path; no pointers are retained.
     assert_eq!(unsafe { libc::mkfifo(cpath.as_ptr(), 0o600) }, 0);
