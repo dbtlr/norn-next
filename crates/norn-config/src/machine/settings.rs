@@ -2,22 +2,36 @@
 use super::{Endpoint, default_endpoint};
 use crate::ConfigDirs;
 use std::fmt;
+use std::num::NonZeroU16;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+/// Resolved endpoint and serving resource limits, with recoverable knobs defaulted.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServingSettings {
+    /// Loopback endpoint after flag, file and built-in precedence.
     pub endpoint: Endpoint,
+    /// Host-wide actual read-connection cap.
     pub read_connections: usize,
+    /// How long unused read connections remain warm.
     pub read_idle_grace: Duration,
+    /// Per-result count retention quota; `None` leaves bytes unlimited.
     pub count_result_max_bytes: Option<u64>,
+    /// Total count retention quota; `None` leaves bytes unlimited.
     pub count_results_total_bytes: Option<u64>,
+    /// Host-wide background lane threads.
     pub background_threads: usize,
+    /// Time budget for one background turn.
     pub background_turn_budget: Duration,
+    /// Inactivity before an attached vault retires.
     pub idle_after: Duration,
+    /// Inactivity before an auto-launched host exits.
     pub auto_exit_after: Duration,
+    /// Maximum readiness wait for one request.
     pub ready_wait: Duration,
+    /// Maximum graceful drain duration.
     pub drain_bound: Duration,
+    /// Whether the serving layer logs requests.
     pub request_log: bool,
 }
 impl Default for ServingSettings {
@@ -38,20 +52,30 @@ impl Default for ServingSettings {
         }
     }
 }
+/// Which settings file to read; explicit paths must exist.
 #[derive(Clone, Copy, Debug)]
 pub enum SettingsSource<'a> {
+    /// The channel config directory's optional `config.toml`.
     ChannelDefault,
+    /// A required invocation-selected settings file.
     Explicit(&'a Path),
 }
+/// A recoverable setting problem and the fallback used.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SettingsWarning {
+    /// Qualified setting name, or top-level name.
     pub key: String,
+    /// Problem and the default or ignored value it selects.
     pub message: String,
 }
+/// A settings refusal naming the file, available source line, and resolution.
 #[derive(Debug)]
 pub struct SettingsError {
+    /// Settings file that could not be read or validated.
     pub path: PathBuf,
+    /// One-based TOML line when a source span is available.
     pub line: Option<usize>,
+    /// Diagnostic with the action that resolves the refusal.
     pub fix: String,
 }
 impl fmt::Display for SettingsError {
@@ -72,9 +96,15 @@ fn refusal(path: &Path, line: Option<usize>, fix: impl Into<String>) -> Settings
     }
 }
 impl ServingSettings {
+    /// Read a bounded regular file, following links, then resolve the optional port flag.
+    ///
+    /// Only an absent channel default uses all defaults silently. Invalid files
+    /// and endpoint values refuse; bad serving knobs warn and default. Only the
+    /// resolved port is checked against the platform ephemeral range.
     pub fn read(
         dirs: &ConfigDirs,
         source: SettingsSource<'_>,
+        port: Option<NonZeroU16>,
     ) -> Result<(Self, Vec<SettingsWarning>), SettingsError> {
         let default = dirs.config_dir().join("config.toml");
         let (path, optional) = match source {
@@ -89,25 +119,18 @@ impl ServingSettings {
             )
         })?;
         let Some(bytes) = bytes else {
-            return Ok((Self::default(), vec![]));
+            return if port.is_some() {
+                parse_with_port("", path, port)
+            } else {
+                Ok((Self::default(), vec![]))
+            };
         };
         let text = std::str::from_utf8(&bytes)
             .map_err(|_| refusal(path, None, "save the settings file as UTF-8 TOML"))?;
-        parse(text, path)
-    }
-    /// Apply the invocation's port after reading the file, preserving flag precedence.
-    pub fn override_port(&mut self, port: u16) -> Result<Vec<SettingsWarning>, SettingsError> {
-        if port == 0 {
-            return Err(refusal(
-                Path::new("--port"),
-                None,
-                "choose a port between 1 and 65535",
-            ));
-        }
-        self.endpoint = Endpoint::at(port);
-        Ok(port_warning(port).into_iter().collect())
+        parse_with_port(text, path, port)
     }
 }
+
 fn duration(text: &str) -> Option<Duration> {
     let split = text.find(|c: char| !c.is_ascii_digit())?;
     if split == 0 {
@@ -135,9 +158,17 @@ fn port_warning(port: u16) -> Option<SettingsWarning> {
             message: format!("port {port} is in the platform ephemeral range; using it"),
         })
 }
+#[cfg(test)]
 fn parse(
     text: &str,
     path: &Path,
+) -> Result<(ServingSettings, Vec<SettingsWarning>), SettingsError> {
+    parse_with_port(text, path, None)
+}
+fn parse_with_port(
+    text: &str,
+    path: &Path,
+    port: Option<NonZeroU16>,
 ) -> Result<(ServingSettings, Vec<SettingsWarning>), SettingsError> {
     let table = text.parse::<toml::Table>().map_err(|e| {
         let line = e
@@ -148,13 +179,24 @@ fn parse(
     let mut settings = ServingSettings::default();
     let mut warnings = Vec::new();
     for (name, value) in table {
-        if name == "client" && value.is_table() {
+        if name == "client" {
+            if !value.is_table() {
+                warnings.push(SettingsWarning {
+                    key: name,
+                    message: "expected a table; ignored".into(),
+                });
+            }
             continue;
         }
         if name != "endpoint" && name != "serve" {
             warnings.push(SettingsWarning {
                 key: name,
-                message: "unknown table; ignored".into(),
+                message: if value.is_table() {
+                    "unknown table; ignored"
+                } else {
+                    "unknown key; ignored"
+                }
+                .into(),
             });
             continue;
         }
@@ -187,7 +229,6 @@ fn parse(
                         )
                     })?;
                 settings.endpoint = Endpoint::at(port);
-                warnings.extend(port_warning(port));
                 continue;
             }
             let mut known = name == "serve";
@@ -287,19 +328,22 @@ fn parse(
             message: "inconsistent quotas; using default none for both".into(),
         });
     }
+    if let Some(port) = port {
+        settings.endpoint = Endpoint::at(port.get());
+    }
+    warnings.extend(port_warning(settings.endpoint.port()));
     Ok((settings, warnings))
 }
 // Diagnostics use the TOML parser's spans rather than guessing from repeated keys.
 fn key_line(text: &str, key: &str) -> Option<usize> {
-    use std::collections::BTreeMap;
-    let offset = if key == "endpoint" {
-        let table: BTreeMap<String, toml::Spanned<toml::Value>> = toml::from_str(text).ok()?;
-        table.get("endpoint")?.span().start
+    let table = toml::de::DeTable::parse(text).ok()?;
+    let endpoint = table.get_ref().get("endpoint")?;
+    let value = if key == "endpoint" {
+        endpoint
     } else {
-        let table: BTreeMap<String, BTreeMap<String, toml::Spanned<toml::Value>>> =
-            toml::from_str(text).ok()?;
-        table.get("endpoint")?.get(key)?.span().start
+        endpoint.get_ref().get(key)?
     };
+    let offset = value.span().start;
     Some(text[..offset].bytes().filter(|b| *b == b'\n').count() + 1)
 }
 #[cfg(test)]

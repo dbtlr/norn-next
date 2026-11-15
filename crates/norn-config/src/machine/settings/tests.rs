@@ -100,16 +100,13 @@ fn inconsistent_quota_pair_falls_back_together() {
 #[test]
 fn ephemeral_port_is_used_and_warned_once() {
     let port = crate::file::ephemeral_range().unwrap().0;
-    let (mut s, w) = parse(
+    let (s, w) = parse(
         &format!("[endpoint]\nport={port}"),
         Path::new("config.toml"),
     )
     .unwrap();
     assert_eq!(s.endpoint.port(), port);
     assert_eq!(w.len(), 1);
-    assert!(s.override_port(0).is_err());
-    assert!(s.override_port(12345).unwrap().is_empty());
-    assert_eq!(s.endpoint.port(), 12345);
 }
 #[test]
 fn malformed_serve_table_degrades_once() {
@@ -148,4 +145,62 @@ fn port_refusal_points_to_endpoint_not_another_tables_port() {
     )
     .unwrap_err();
     assert_eq!(error.line, Some(4));
+}
+
+#[test]
+fn port_line_survives_other_top_level_shapes() {
+    for (text, line) in [
+        ("x = 1\n[endpoint]\nport = 0", 3),
+        ("[[jobs]]\na=1\n[endpoint]\nport = 0", 4),
+    ] {
+        assert_eq!(
+            parse(text, Path::new("config.toml")).unwrap_err().line,
+            Some(line)
+        );
+    }
+}
+
+#[test]
+fn top_level_warning_names_the_shape_and_fallback() {
+    for (text, key, message) in [
+        ("client=1", "client", "expected a table; ignored"),
+        ("future=1", "future", "unknown key; ignored"),
+        (
+            "serve=1",
+            "serve",
+            "expected a table; using all serve defaults",
+        ),
+    ] {
+        let (settings, warnings) = parse(text, Path::new("config.toml")).unwrap();
+        assert_eq!(settings, ServingSettings::default());
+        assert_eq!(
+            warnings,
+            vec![SettingsWarning {
+                key: key.into(),
+                message: message.into()
+            }]
+        );
+    }
+}
+
+#[test]
+fn only_the_resolved_port_gets_an_ephemeral_warning() {
+    let ephemeral = crate::file::ephemeral_range().unwrap().0;
+    let (settings, warnings) = parse_with_port(
+        &format!("[endpoint]\nport={ephemeral}"),
+        Path::new("config.toml"),
+        NonZeroU16::new(12345),
+    )
+    .unwrap();
+    assert_eq!(settings.endpoint.port(), 12345);
+    assert!(warnings.is_empty());
+    let (settings, warnings) = parse_with_port(
+        "[endpoint]\nport=12345",
+        Path::new("config.toml"),
+        NonZeroU16::new(ephemeral),
+    )
+    .unwrap();
+    assert_eq!(settings.endpoint.port(), ephemeral);
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].message.contains(&ephemeral.to_string()));
 }

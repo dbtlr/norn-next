@@ -53,8 +53,10 @@
 //! recheck with its bounded retry, and the
 //! create-new/write/fsync-file/rename/fsync-parent publish order.
 //!
-//! Waits are unbounded. A blocked writer is waiting on another writer's
-//! read-modify-write, which is bounded by a small file's rewrite, and a
+//! Read-modify-write lock waits are unbounded; the channel lifetime lock uses
+//! a non-blocking attempt. Settings reads follow links to regular files, while
+//! the writable data-file protocol refuses links. A blocked writer waits on
+//! another writer's read-modify-write, bounded by a small file's rewrite, and a
 //! timeout here would turn "somebody else is mid-write" into a failure a
 //! caller has to handle for no gain.
 //!
@@ -424,6 +426,22 @@ fn lock_where(
     sensitivity: Sensitivity,
     mut disturb: impl FnMut(usize),
 ) -> Result<Lock, ConfigError> {
+    let lock_path = lock_path(path)?;
+    Ok(Lock {
+        _file: lock_file_where(&lock_path, sensitivity, true, &mut disturb)?
+            .expect("blocking acquisition never reports contention"),
+    })
+}
+
+/// Shared open, lock and identity retry for data-file and channel locks.
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)] // Config-directory lock seam.
+fn lock_file_where(
+    lock_path: &Path,
+    sensitivity: Sensitivity,
+    blocking: bool,
+    mut disturb: impl FnMut(usize),
+) -> Result<Option<std::fs::File>, ConfigError> {
+    let path = lock_path;
     let directory = parent_of(path)?;
     // Asked before the directory is built: a dangling directory symlink makes
     // `create_dir_all` fail with "file exists", which is the least useful true
@@ -438,7 +456,6 @@ fn lock_where(
         demand_owner_only(directory)?;
     }
 
-    let lock_path = lock_path(path)?;
     for attempt in 0..LOCK_ATTEMPTS {
         let file = std::fs::OpenOptions::new()
             .read(true)
@@ -446,11 +463,29 @@ fn lock_where(
             .create(true)
             .truncate(false)
             .mode(PRIVATE_MODE)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(&lock_path)
-            .map_err(|error| io("opening", &lock_path, error))?;
-        file.lock()
-            .map_err(|error| io("locking", &lock_path, error))?;
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(lock_path)
+            .map_err(|error| io("opening", lock_path, error))?;
+        if !file
+            .metadata()
+            .map_err(|e| io("reading the type of", lock_path, e))?
+            .is_file()
+        {
+            return Err(io(
+                "opening",
+                lock_path,
+                std::io::Error::other("not a regular file"),
+            ));
+        }
+        if blocking {
+            file.lock().map_err(|e| io("locking", lock_path, e))?;
+        } else {
+            match file.try_lock() {
+                Ok(()) => {}
+                Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
+                Err(std::fs::TryLockError::Error(e)) => return Err(io("locking", lock_path, e)),
+            }
+        }
 
         disturb(attempt);
 
@@ -461,10 +496,10 @@ fn lock_where(
         let held = identity_of(
             &file
                 .metadata()
-                .map_err(|error| io("reading the identity of", &lock_path, error))?,
+                .map_err(|error| io("reading the identity of", lock_path, error))?,
         );
-        if name_identity(&lock_path)? == Some(held) {
-            return Ok(Lock { _file: file });
+        if name_identity(lock_path)? == Some(held) {
+            return Ok(Some(file));
         }
         // The name means another file, or nothing. Dropping the handle releases
         // the lock on an inode this name no longer reaches, which is the only
@@ -473,7 +508,7 @@ fn lock_where(
     }
     Err(ConfigError::Io {
         operation: "locking",
-        path: lock_path,
+        path: lock_path.to_path_buf(),
         message: format!("the lock file was replaced on each of {LOCK_ATTEMPTS} attempts"),
     })
 }
@@ -638,6 +673,139 @@ fn temporary_prefix(path: &Path) -> Result<String, ConfigError> {
 
 fn lock_path(path: &Path) -> Result<PathBuf, ConfigError> {
     Ok(parent_of(path)?.join(format!(".{}.lock", name_of(path)?)))
+}
+
+/// Bounded regular-file read for settings; links are intentionally followed.
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)] // Machine-local read seam.
+pub(crate) fn read_settings(path: &Path, optional: bool) -> Result<Option<Vec<u8>>, ConfigError> {
+    use std::io::Read;
+    let file = match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            match std::fs::symlink_metadata(path) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    return Err(symlink_refusal(path));
+                }
+                Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                    return Err(io("reading the type of", path, error));
+                }
+                _ => {}
+            }
+            dangling_ancestor(path)?;
+            if optional {
+                return Ok(None);
+            }
+            return Err(io("opening", path, e));
+        }
+        Err(e) => return Err(io("opening", path, e)),
+    };
+    if !file
+        .metadata()
+        .map_err(|e| io("reading the type of", path, e))?
+        .is_file()
+    {
+        return Err(io(
+            "reading",
+            path,
+            std::io::Error::other("not a regular file"),
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.take(1_048_577)
+        .read_to_end(&mut bytes)
+        .map_err(|e| io("reading", path, e))?;
+    if bytes.len() > 1_048_576 {
+        return Err(io(
+            "reading",
+            path,
+            std::io::Error::other("file exceeds 1 MiB"),
+        ));
+    }
+    Ok(Some(bytes))
+}
+
+/// The kernel's dynamic port range, falling back to the platform default if unavailable.
+#[allow(clippy::disallowed_methods)] // Kernel configuration, not vault bytes.
+pub(crate) fn ephemeral_range() -> Option<(u16, u16)> {
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(text) = std::fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range") {
+            let mut words = text.split_whitespace();
+            if let (Some(lo), Some(hi)) = (words.next(), words.next())
+                && let (Ok(lo), Ok(hi)) = (lo.parse(), hi.parse())
+            {
+                return Some((lo, hi));
+            }
+        }
+        Some((32768, 60999))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        fn read(name: &std::ffi::CStr) -> Option<u16> {
+            let mut value: libc::c_int = 0;
+            let mut size = std::mem::size_of_val(&value);
+            // SAFETY: both output pointers cover their declared sizes, the name
+            // is NUL-terminated, and null newp makes this a read-only sysctl.
+            let status = unsafe {
+                libc::sysctlbyname(
+                    name.as_ptr(),
+                    (&mut value as *mut libc::c_int).cast(),
+                    &mut size,
+                    std::ptr::null_mut(),
+                    0,
+                )
+            };
+            (status == 0).then(|| u16::try_from(value).ok()).flatten()
+        }
+        Some((
+            read(c"net.inet.ip.portrange.first").unwrap_or(49152),
+            read(c"net.inet.ip.portrange.last").unwrap_or(65535),
+        ))
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        Some((49152, 65535))
+    }
+}
+
+/// The channel's exclusive lifetime lock on the regular `serve.lock` file.
+/// Drop releases the lock and closes the descriptor; the empty name stays.
+#[derive(Debug)]
+#[allow(clippy::disallowed_types)] // Machine-local lock descriptor.
+pub struct ChannelLock {
+    file: std::fs::File,
+    path: PathBuf,
+}
+/// A refusal to open, lock or recheck the channel lock, including its path.
+pub type ChannelLockError = ConfigError;
+impl ChannelLock {
+    #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // Config-directory lock seam.
+    /// Try the channel lock without waiting for another holder.
+    ///
+    /// `Ok(None)` means another holder. `Err` is a filesystem or lock refusal,
+    /// never a held-lock report. Links and non-regular files are refused; a
+    /// replaced name is retried at most 64 times before refusing.
+    pub fn try_take(dirs: &crate::ConfigDirs) -> Result<Option<Self>, ChannelLockError> {
+        let path = dirs.config_dir().join("serve.lock");
+        Ok(lock_file_where(&path, Sensitivity::Shared, false, |_| {})?
+            .map(|file| Self { file, path }))
+    }
+    /// Compare the held descriptor's device and inode with the current name.
+    /// Returns false for a missing or replaced name, and an error when the
+    /// filesystem cannot answer; the held lock remains held in either case.
+    pub fn matches_name(&self) -> Result<bool, ChannelLockError> {
+        let held = identity_of(
+            &self
+                .file
+                .metadata()
+                .map_err(|e| io("reading the identity of", &self.path, e))?,
+        );
+        Ok(name_identity(&self.path)? == Some(held))
+    }
 }
 
 #[cfg(test)]
@@ -901,6 +1069,39 @@ mod tests {
         );
     }
 
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Manufacture replacement at the identity seam.
+    fn nonblocking_lock_retries_replacement_and_refuses_at_the_bound() {
+        for replace_forever in [false, true] {
+            let scratch = scratch("nonblocking-lock-aba");
+            let path = scratch.root().join("serve.lock");
+            let mut attempts = 0;
+            let taken = lock_file_where(&path, Sensitivity::Shared, false, |attempt| {
+                attempts += 1;
+                if replace_forever || attempt == 0 {
+                    std::fs::remove_file(&path).unwrap();
+                    std::fs::write(&path, b"").unwrap();
+                }
+            });
+            if replace_forever {
+                assert_eq!(attempts, 64);
+                assert!(taken.unwrap_err().to_string().contains("64"));
+            } else {
+                assert_eq!(attempts, 2);
+                let held = taken.unwrap().unwrap();
+                assert_eq!(
+                    Some(identity_of(&held.metadata().unwrap())),
+                    name_identity(&path).unwrap()
+                );
+                assert!(
+                    lock_file_where(&path, Sensitivity::Shared, false, |_| {})
+                        .unwrap()
+                        .is_none()
+                );
+            }
+        }
+    }
+
     /// The mode is a property of what the file holds, and the reader's demand
     /// is the same property read the other way.
     #[test]
@@ -909,133 +1110,5 @@ mod tests {
         assert!(Sensitivity::Private.demands_privacy());
         assert_eq!(Sensitivity::Shared.mode(), 0o644);
         assert!(!Sensitivity::Shared.demands_privacy());
-    }
-}
-
-/// Bounded regular-file read for settings; links are intentionally followed.
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)] // Machine-local read seam.
-pub(crate) fn read_settings(path: &Path, optional: bool) -> std::io::Result<Option<Vec<u8>>> {
-    use std::io::Read;
-    let file = match std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY)
-        .open(path)
-    {
-        Ok(file) => file,
-        Err(e) if optional && e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e),
-    };
-    if !file.metadata()?.is_file() {
-        return Err(std::io::Error::other("not a regular file"));
-    }
-    let mut bytes = Vec::new();
-    file.take(1_048_577).read_to_end(&mut bytes)?;
-    if bytes.len() > 1_048_576 {
-        return Err(std::io::Error::other("file exceeds 1 MiB"));
-    }
-    Ok(Some(bytes))
-}
-
-/// The kernel's dynamic port range, falling back to the platform default if unavailable.
-#[allow(clippy::disallowed_methods)] // Kernel configuration, not vault bytes.
-pub(crate) fn ephemeral_range() -> Option<(u16, u16)> {
-    #[cfg(target_os = "linux")]
-    {
-        if let Ok(text) = std::fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range") {
-            let mut words = text.split_whitespace();
-            if let (Some(lo), Some(hi)) = (words.next(), words.next())
-                && let (Ok(lo), Ok(hi)) = (lo.parse(), hi.parse())
-            {
-                return Some((lo, hi));
-            }
-        }
-        Some((32768, 60999))
-    }
-    #[cfg(target_os = "macos")]
-    {
-        fn read(name: &std::ffi::CStr) -> Option<u16> {
-            let mut value: libc::c_int = 0;
-            let mut size = std::mem::size_of_val(&value);
-            // SAFETY: both output pointers cover their declared sizes, the name
-            // is NUL-terminated, and null newp makes this a read-only sysctl.
-            let status = unsafe {
-                libc::sysctlbyname(
-                    name.as_ptr(),
-                    (&mut value as *mut libc::c_int).cast(),
-                    &mut size,
-                    std::ptr::null_mut(),
-                    0,
-                )
-            };
-            (status == 0).then(|| u16::try_from(value).ok()).flatten()
-        }
-        Some((
-            read(c"net.inet.ip.portrange.first").unwrap_or(49152),
-            read(c"net.inet.ip.portrange.last").unwrap_or(65535),
-        ))
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-        Some((49152, 65535))
-    }
-}
-
-/// The channel's empty lifetime lock. Drop closes the descriptor; the name stays.
-#[derive(Debug)]
-#[allow(clippy::disallowed_types)] // Machine-local lock descriptor.
-pub struct ChannelLock {
-    file: std::fs::File,
-    path: PathBuf,
-}
-/// A refusal to open, lock or recheck the channel lock, including its path.
-pub type ChannelLockError = ConfigError;
-impl ChannelLock {
-    #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // Config-directory lock seam.
-    pub fn try_take(dirs: &crate::ConfigDirs) -> Result<Option<Self>, ChannelLockError> {
-        let path = dirs.config_dir().join("serve.lock");
-        dangling_ancestor(&path)?;
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(DIRECTORY_MODE)
-            .create(dirs.config_dir())
-            .map_err(|e| io("creating", dirs.config_dir(), e))?;
-        for _ in 0..LOCK_ATTEMPTS {
-            let file = std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .truncate(false)
-                .mode(PRIVATE_MODE)
-                .custom_flags(libc::O_NOFOLLOW)
-                .open(&path)
-                .map_err(|e| io("opening", &path, e))?;
-            match file.try_lock() {
-                Ok(()) => {}
-                Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
-                Err(std::fs::TryLockError::Error(e)) => return Err(io("locking", &path, e)),
-            }
-            let lock = Self {
-                file,
-                path: path.clone(),
-            };
-            if lock.matches_name()? {
-                return Ok(Some(lock));
-            }
-        }
-        Err(ConfigError::Io {
-            operation: "locking",
-            path,
-            message: format!("the lock file was replaced on each of {LOCK_ATTEMPTS} attempts"),
-        })
-    }
-    /// Compare the current descriptor with the name, without releasing the lock.
-    pub fn matches_name(&self) -> Result<bool, ChannelLockError> {
-        let held = identity_of(
-            &self
-                .file
-                .metadata()
-                .map_err(|e| io("reading the identity of", &self.path, e))?,
-        );
-        Ok(name_identity(&self.path)? == Some(held))
     }
 }

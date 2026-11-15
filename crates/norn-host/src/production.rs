@@ -153,9 +153,9 @@ pub const BACKGROUND_THREADS: usize = 1;
 pub const STORE_PAGE_SIZE: usize = 128;
 /// Release probes favored 128 over 32; 512 offered no consistent build or warm-write gain.
 pub const CHANGESET_SIZE: usize = 128;
-/// One lifecycle slot preserves serial attachment work and bounds its active working set.
+/// The attach helper's lifecycle slots, kept so the in-process bar compares like with like.
 pub const WORKER_SLOTS: usize = 1;
-/// A 50 ms poll preserves the measured in-process latency without a busy dispatcher.
+/// The attach helper's poll interval, kept so the in-process bar compares like with like.
 pub const WATCH_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// Resource bounds for the concrete filesystem/store adapter.
@@ -177,7 +177,10 @@ pub struct ProductionPolicy {
 }
 
 impl ProductionPolicy {
-    /// Compose serving policies without requiring the caller to name store types.
+    /// Validate plain serving values into store policies and use the production page sizes.
+    ///
+    /// Count quotas must be positive when set, with the per-result limit no
+    /// larger than the total. Reader-policy refusals preserve the store's cause.
     pub fn serving(
         read_connections: usize,
         read_idle_grace: Duration,
@@ -185,7 +188,13 @@ impl ProductionPolicy {
         count_results_total_bytes: Option<u64>,
     ) -> Result<Self, ProductionPolicyError> {
         let read_budget = norn_store::ReadBudgetPolicy::new(read_connections, read_idle_grace)
-            .map_err(|_| ProductionPolicyError::ReadConnections(read_connections))?;
+            .map_err(ProductionPolicyError::ReadBudget)?;
+        if count_result_max_bytes == Some(0)
+            || count_results_total_bytes == Some(0)
+            || matches!((count_result_max_bytes, count_results_total_bytes), (Some(max), Some(total)) if max > total)
+        {
+            return Err(ProductionPolicyError::CountQuotas);
+        }
         Ok(Self {
             read_budget,
             count_retention: norn_store::CountRetentionPolicy {
@@ -240,9 +249,12 @@ impl ProductionPolicy {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProductionPolicyError {
-    ReadConnections(usize),
+    /// The store refused the reader policy.
+    ReadBudget(norn_store::StoreError),
+    /// Count quotas are zero or the per-result limit exceeds the total.
+    CountQuotas,
     StorePageSize(usize),
     ChangesetSize(usize),
 }
@@ -250,9 +262,9 @@ pub enum ProductionPolicyError {
 impl fmt::Display for ProductionPolicyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::ReadConnections(given) => write!(
-                f,
-                "reader capacity must allow at least two connections, got {given}"
+            Self::ReadBudget(error) => error.fmt(f),
+            Self::CountQuotas => f.write_str(
+                "count quotas must be positive and the per-result limit must not exceed the total",
             ),
             Self::StorePageSize(given) => write!(
                 f,

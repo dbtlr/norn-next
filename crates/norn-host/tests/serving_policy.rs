@@ -36,3 +36,25 @@ fn serving_does_not_add_a_store_capacity_ceiling() {
     assert_eq!(policy.count_retention.max_result_bytes, None);
     assert_eq!(policy.count_retention.total_bytes, None);
 }
+
+#[test]
+fn serving_refuses_zero_and_inconsistent_count_quotas() {
+    for (max, total) in [(Some(0), None), (None, Some(0)), (Some(2), Some(1))] {
+        assert!(ProductionPolicy::serving(2, Duration::ZERO, max, total).is_err());
+    }
+    for (max, total) in [
+        (None, None),
+        (Some(1), None),
+        (None, Some(1)),
+        (Some(2), Some(2)),
+    ] {
+        assert!(ProductionPolicy::serving(2, Duration::ZERO, max, total).is_ok());
+    }
+}
+
+#[test]
+fn serving_preserves_store_policy_refusal() {
+    let expected = norn_store::ReadBudgetPolicy::new(1, Duration::ZERO).unwrap_err();
+    let error = ProductionPolicy::serving(1, Duration::ZERO, None, None).unwrap_err();
+    assert_eq!(error.to_string(), expected.to_string());
+}
