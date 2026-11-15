@@ -28,6 +28,19 @@ The whole feature-enabled
 `norn-host` package runs in `host functional (induced-failure)`, so current and
 future ordinary targets and cases join PR coverage automatically.
 
+The PR jobs build the bundled SQLite (`libsqlite3-sys`) at opt-level 3, so
+functional tests run faster. Each functional `cargo` command carries
+`--config profile.dev.package.libsqlite3-sys.opt-level=3` directly after
+`--locked`: both the `Build` and `Test` steps of `build and test`, the `Test`
+step of `build and test (norn-host and norn-testkit)`, the host functional suite
+step, and every `cargo test` step of the macOS platform job that runs before the
+folding-root spelling bar. Cargo reads a per-package profile override only from
+`--config`, never from the environment. The macOS folding-root spelling bar and
+every nightly lane run without the flag, so every measurement stays at opt-level
+0. Lane steps cannot carry the flag, because `lane-suite.sh` builds its own
+`cargo test` command. The workflow reader and the shard check accept this one
+exact flag and value and refuse every other `--config`.
+
 | PR job | Evidence |
 |---|---|
 | Build and test | Workspace build, default tests and doctests except norn-host and norn-testkit, cheap registry structure and dormancy checks |
@@ -180,6 +193,11 @@ verified. An ad-hoc run that executes no measurement suite can shrink its target
 with `CARGO_INCREMENTAL=0`, `CARGO_PROFILE_DEV_DEBUG=line-tables-only` and
 `CARGO_PROFILE_TEST_DEBUG=line-tables-only`. A measurement suite refuses any
 profile override, so a full gate runs without them.
+
+An ad-hoc run that executes no measurement suite can also pass
+`--config profile.dev.package.libsqlite3-sys.opt-level=3` to `cargo test` for
+faster functional tests. The build-profile guard cannot see a `--config` flag, so
+never pass it to a measurement suite.
 
 The default macOS volume (APFS) folds case, so a walk or normalizer test with a
 wrong case-sensitive branch passes on a Mac and fails only on the hosted Linux
