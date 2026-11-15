@@ -36,3 +36,9 @@ norn-config = { path = "../norn-config" }
 # BuildIdentity and the hello v1 types, the reply's reading and the dialer's
 # comparison of an answer's facts with its connection.
 norn-wire = { path = "../norn-wire" }
+
+# The scratch directory the dialer's unit suite keeps a token file in. A
+# development edge: the allowlist does not describe it, and the architecture
+# gate reads and discards it.
+[dev-dependencies]
+norn-testkit = { path = "../norn-testkit" }

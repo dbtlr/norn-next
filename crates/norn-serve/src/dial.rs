@@ -38,7 +38,7 @@ use norn_wire::{
     HELLO_BODY_BYTES, HelloAnswer, HelloChannel, HelloExpectation, HelloFailure, HelloMismatch,
     HelloReply, HelloRequest, Nonce, is_dialable,
 };
-use tokio::net::TcpSocket;
+use tokio::net::{TcpSocket, TcpStream};
 use tokio::task::JoinHandle;
 
 use crate::credentials::mac_verifies;
@@ -93,16 +93,25 @@ pub async fn dial(
     channel: HelloChannel,
     tokens: &Tokens,
 ) -> Result<Verified, HelloFailure> {
+    dial_over(address, channel, tokens, new_socket).await
+}
+
+/// [`dial`], over the socket `open` makes: the dial path's one seam, so a
+/// suite sees what the path itself does to each connection's socket.
+async fn dial_over<S: DialerSocket>(
+    address: SocketAddr,
+    channel: HelloChannel,
+    tokens: &Tokens,
+    open: impl FnOnce(SocketAddr) -> io::Result<S>,
+) -> Result<Verified, HelloFailure> {
     if !is_dialable(address) {
         return Err(HelloFailure::NotLoopback(address));
     }
     let token = tokens.dialer_token().ok_or(HelloFailure::NoToken)?;
     let connect = |error| HelloFailure::Connect { address, error };
-    let stream = dialer_socket(address)
-        .map_err(connect)?
-        .connect(address)
-        .await
-        .map_err(connect)?;
+    let socket = open(address).map_err(connect)?;
+    set_options(&socket).map_err(connect)?;
+    let stream = socket.connect(address).await.map_err(connect)?;
     let local = stream.local_addr().map_err(connect)?;
     let exchange = |error: hyper::Error| HelloFailure::Exchange {
         address,
@@ -185,32 +194,37 @@ impl Drop for Connection {
     }
 }
 
-/// The options a dialer's socket carries. Set once, on a socket nothing else
-/// holds a descriptor of, before it connects.
-trait SocketOptions {
+/// The socket a dial connects with. Its one option is set once, on a socket
+/// nothing else holds a descriptor of, before it connects; the dial path
+/// sets it through this trait, so a suite can watch it do so.
+trait DialerSocket {
     fn set_reuseaddr(&self, reuseaddr: bool) -> io::Result<()>;
+    fn connect(self, address: SocketAddr) -> impl Future<Output = io::Result<TcpStream>> + Send;
 }
 
-impl SocketOptions for TcpSocket {
+impl DialerSocket for TcpSocket {
     fn set_reuseaddr(&self, reuseaddr: bool) -> io::Result<()> {
         TcpSocket::set_reuseaddr(self, reuseaddr)
+    }
+
+    fn connect(self, address: SocketAddr) -> impl Future<Output = io::Result<TcpStream>> + Send {
+        TcpSocket::connect(self, address)
     }
 }
 
 /// `SO_REUSEADDR`, so a dialer's socket left in TIME_WAIT on the endpoint
 /// cannot make a later start's probe or bind fail.
-fn set_options(socket: &impl SocketOptions) -> io::Result<()> {
+fn set_options(socket: &impl DialerSocket) -> io::Result<()> {
     socket.set_reuseaddr(true)
 }
 
-fn dialer_socket(address: SocketAddr) -> io::Result<TcpSocket> {
-    let socket = if address.is_ipv4() {
-        TcpSocket::new_v4()?
+/// A fresh socket of `address`'s family, no option set yet.
+fn new_socket(address: SocketAddr) -> io::Result<TcpSocket> {
+    if address.is_ipv4() {
+        TcpSocket::new_v4()
     } else {
-        TcpSocket::new_v6()?
-    };
-    set_options(&socket)?;
-    Ok(socket)
+        TcpSocket::new_v6()
+    }
 }
 
 fn fresh_nonce() -> Result<Nonce, getrandom::Error> {
@@ -221,34 +235,122 @@ fn fresh_nonce() -> Result<Nonce, getrandom::Error> {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
+    use std::sync::{Arc, Mutex};
+
+    use norn_config::ConfigDirs;
+    use norn_config::machine::tokens::{self, TokenLabel};
+    use norn_testkit::scratch::Scratch;
 
     use super::*;
 
-    struct Recording(Cell<Vec<bool>>);
+    /// What the dial path did to one socket, in order.
+    #[derive(Debug, PartialEq)]
+    enum Event {
+        SetReuseaddr(bool),
+        /// The connect, with the option as the socket held it then.
+        Connect {
+            reuseaddr: bool,
+        },
+    }
 
-    impl SocketOptions for Recording {
+    /// A real socket that records what the dial path does to it.
+    struct Recorded {
+        socket: TcpSocket,
+        events: Arc<Mutex<Vec<Event>>>,
+    }
+
+    impl DialerSocket for Recorded {
         fn set_reuseaddr(&self, reuseaddr: bool) -> io::Result<()> {
-            let mut calls = self.0.take();
-            calls.push(reuseaddr);
-            self.0.set(calls);
-            Ok(())
+            self.events
+                .lock()
+                .unwrap()
+                .push(Event::SetReuseaddr(reuseaddr));
+            self.socket.set_reuseaddr(reuseaddr)
+        }
+
+        async fn connect(self, address: SocketAddr) -> io::Result<TcpStream> {
+            let reuseaddr = self.socket.reuseaddr()?;
+            self.events
+                .lock()
+                .unwrap()
+                .push(Event::Connect { reuseaddr });
+            self.socket.connect(address).await
         }
     }
 
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: the base the token file lives under.
+    fn one_token(scratch: &Scratch) -> Tokens {
+        std::fs::create_dir_all(scratch.join("config")).expect("a config base");
+        let dirs = ConfigDirs::new(scratch.join("config"), scratch.join("data")).expect("bases");
+        tokens::mutate(&dirs, |tokens| {
+            tokens.add(&TokenLabel::default_label(), b"a secret")
+        })
+        .expect("a token");
+        tokens::read(&dirs).expect("the token file")
+    }
+
+    /// The dial path itself, through the socket it opens: `SO_REUSEADDR` set
+    /// once on each connection's socket, and on before it connects. A dial
+    /// refused before it connects opens no socket.
     #[test]
     fn the_dialer_sets_reuseaddr_once_before_connecting() {
-        let recording = Recording(Cell::new(Vec::new()));
-        set_options(&recording).unwrap();
-        assert_eq!(recording.0.take(), [true]);
-
+        let scratch = Scratch::new("norn-dialer-reuseaddr");
+        let tokens = one_token(&scratch);
+        // A listener that closes each connection unanswered, so each dial
+        // connects and then fails its hello.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                drop(stream);
+            }
+        });
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_io()
             .build()
             .unwrap();
-        runtime.block_on(async {
-            let socket = dialer_socket("127.0.0.1:1".parse().unwrap()).unwrap();
-            assert!(socket.reuseaddr().unwrap());
-        });
+        let dial = |address: SocketAddr| {
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let recorded = Arc::clone(&events);
+            let outcome = runtime.block_on(dial_over(address, HelloChannel::Dev, &tokens, |at| {
+                Ok(Recorded {
+                    socket: new_socket(at)?,
+                    events: recorded,
+                })
+            }));
+            let events = std::mem::take(&mut *events.lock().unwrap());
+            (outcome, events)
+        };
+        for _ in 0..2 {
+            let (outcome, events) = dial(address);
+            assert!(
+                matches!(outcome, Err(HelloFailure::Exchange { .. })),
+                "{outcome:?}"
+            );
+            assert_eq!(
+                events,
+                [
+                    Event::SetReuseaddr(true),
+                    Event::Connect { reuseaddr: true }
+                ]
+            );
+        }
+        let (outcome, events) = dial("192.0.2.1:9".parse().unwrap());
+        assert!(matches!(outcome, Err(HelloFailure::NotLoopback(_))));
+        assert_eq!(events, []);
+    }
+
+    /// The seam leaves the public dial a future a multi-threaded runtime can
+    /// move between threads.
+    #[test]
+    fn a_dial_is_send() {
+        fn is_send<T: Send>(_: T) {}
+        let scratch = Scratch::new("norn-dialer-send");
+        let tokens = one_token(&scratch);
+        is_send(dial(
+            "127.0.0.1:9".parse().unwrap(),
+            HelloChannel::Dev,
+            &tokens,
+        ));
     }
 }
