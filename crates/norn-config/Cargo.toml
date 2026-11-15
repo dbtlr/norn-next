@@ -62,6 +62,13 @@ unicode-normalization = { workspace = true }
 # that a dev binary cannot reach live state by any route, mistake included.
 [features]
 channel-live = []
+# `test-support` gates `WatchedTokens::read_with_clock`, a token holder whose
+# fingerprint moments come from a clock a suite states. A clock set forward
+# makes every fingerprint settled, which is how a suite shows a holder a
+# settled file without waiting out the window, and also how a holder would
+# keep serving a revoked secret. Off by default, so a shipped build has no way
+# to name it; a crate turns it on only in its dev-dependency on this one.
+test-support = []
 
 # Every scratch tree this crate's suites work in is named and removed through
 # `norn_testkit::scratch`, so one helper owns what a temporary directory is
@@ -69,4 +76,5 @@ channel-live = []
 # allowlist does not describe it: dev edges cycle by construction and the
 # architecture gate reads and discards them.
 [dev-dependencies]
+norn-config = { path = ".", features = ["test-support"] }
 norn-testkit = { path = "../norn-testkit" }

@@ -73,11 +73,11 @@
 //! fingerprint of the file — device, inode, size, modification and change
 //! times — at every check and reads the file again only when that tells it
 //! to. A fingerprint vouches for the file only once the file's times stand
-//! 2 s before the moment it was taken, since a filesystem's clock ticks
+//! 3 s before the moment it was taken, since a filesystem's clock ticks
 //! coarsely enough for two same-size edits to share every field of it. Until
 //! then it is racy and a check reads the file again, so a revocation is seen
 //! on the next check whatever tick it landed in: a check costs a second
-//! fingerprint and a read within 2 s of a change, and one fingerprint and no
+//! fingerprint and a read within 3 s of a change, and one fingerprint and no
 //! read once the file has settled.
 //!
 //! # What a rewrite preserves
@@ -482,7 +482,7 @@ impl Fingerprint {
 }
 
 /// How long a token file's times must stand before the moment a fingerprint
-/// is taken for that fingerprint to vouch for the file: 2 s.
+/// is taken for that fingerprint to vouch for the file: 3 s.
 ///
 /// A filesystem stamps a write with a coarse clock — one kernel tick on ext4
 /// (a few milliseconds), 1 s on some network and older filesystems, 2 s on FAT
@@ -490,10 +490,15 @@ impl Fingerprint {
 /// fingerprint as the first left it. A fingerprint taken after the file's
 /// latest time is at least one window old is out of that reach: any later
 /// write is stamped in a later tick, so it differs. One taken sooner is
-/// **racy**, and a holder reads the file again rather than trust it. The value
-/// is the coarsest tick of a filesystem in common use, FAT's; it is git's
-/// "racy timestamp" rule for its index, applied to the token file.
-pub(crate) const SETTLE_WINDOW: Duration = Duration::from_secs(2);
+/// **racy**, and a holder reads the file again rather than trust it. This is
+/// git's "racy timestamp" rule for its index, applied to the token file.
+///
+/// The value is the coarsest tick of a filesystem in common use, FAT's 2 s,
+/// plus a margin: the kernel stamps a write from a clock that can trail the
+/// wall clock by milliseconds, so a window of exactly one tick would leave a
+/// write just after a fingerprint settled able to land, truncated, on the
+/// time the holder already holds.
+pub(crate) const SETTLE_WINDOW: Duration = Duration::from_secs(3);
 
 /// A fingerprint and the wall-clock moment it was taken: the clock is read
 /// right after the `lstat`, so a write landing between the two is stamped no
@@ -578,14 +583,15 @@ impl fmt::Debug for WallClock {
 /// replacement renamed over the file that reuses its inode number, can leave
 /// every field of the fingerprint as the first change left it. A held
 /// fingerprint is therefore trusted only once it is **settled**: the file's
-/// later time, modification or change, stands at least 2 s before the moment
-/// the fingerprint was taken, the coarsest tick of a filesystem in common use.
+/// later time, modification or change, stands at least 3 s before the moment
+/// the fingerprint was taken: the coarsest tick of a filesystem in common use,
+/// with a margin.
 /// Until then it is **racy** — a time after that moment, from a clock stepped
 /// back or a time set ahead by hand, is racy too — and an unchanged racy
 /// fingerprint is treated as a change. Each such check holds a fingerprint
 /// taken later than the last, so a holder checked throughout returns to one
-/// fingerprint and no read about 2 s after the file's last change, and pays
-/// two fingerprints and a read per check within those 2 s. This is git's
+/// fingerprint and no read about 3 s after the file's last change, and pays
+/// two fingerprints and a read per check within those 3 s. This is git's
 /// "racy timestamp" rule for its index, and it is decided at the check alone:
 /// nothing waits for the window to pass.
 ///
@@ -611,7 +617,9 @@ impl fmt::Debug for WallClock {
 /// machine's clock behind this one's, or the wall clock stepped back after a
 /// fingerprint settled, far enough that a later same-size edit is stamped
 /// with the earlier one's times — or on a filesystem whose times are coarser
-/// than 2 s. And the fingerprint is the file's alone: a mode change on the
+/// than 3 s, or a store through a shared memory mapping of the file, which a
+/// filesystem need not stamp store by store. And the fingerprint is the
+/// file's alone: a mode change on the
 /// config *directory* does not change it, so a directory loosened after a read
 /// is judged at the next read of the file, not before — and a directory
 /// tightened after a refused read is judged at the next check, since a held
@@ -655,7 +663,7 @@ impl Check {
     ///
     /// A read that answers the set already held replaces it all the same, so
     /// a holder checked while its fingerprint is racy reports a replacement at
-    /// every check of that window, about 2 s after a change. The set is not
+    /// every check of that window, about 3 s after a change. The set is not
     /// compared: the rebuild a replacement asks for is over a handful of
     /// tokens, and costs no more than the read that preceded it.
     pub const fn replaced(self) -> bool {
@@ -670,21 +678,29 @@ impl WatchedTokens {
     /// A read that refuses is held like any later one: the holder fails
     /// closed from the start.
     pub fn read(dirs: &ConfigDirs) -> Self {
-        WatchedTokens::read_with_clock(dirs, SystemTime::now)
+        WatchedTokens::read_under(dirs, WallClock(Arc::new(SystemTime::now)))
     }
 
     /// [`read`](Self::read), with the moment of each fingerprint read from
     /// `clock` rather than the system clock.
     ///
-    /// A suite's seam — this crate's, and the serving side's counter bar: a
-    /// file's change time cannot be set back, so a holder is shown a settled
+    /// **A suite's seam, and a fail-open one in any other hand.** A file's
+    /// change time cannot be set back, so a suite shows a holder a settled
     /// file by a clock set forward rather than by waiting out the window, and
-    /// a racy one by a clock set behind.
+    /// a racy one by a clock set behind. A clock set forward is exactly what
+    /// makes every fingerprint settled, so a holder built on one trusts a
+    /// fingerprint a same-size edit inside one tick left unchanged, and keeps
+    /// serving a revoked secret. So the seam exists only under the
+    /// `test-support` feature, which a shipped build does not turn on.
+    #[cfg(feature = "test-support")]
     pub fn read_with_clock(
         dirs: &ConfigDirs,
         clock: impl Fn() -> SystemTime + Send + Sync + 'static,
     ) -> Self {
-        let clock = WallClock(Arc::new(clock));
+        WatchedTokens::read_under(dirs, WallClock(Arc::new(clock)))
+    }
+
+    fn read_under(dirs: &ConfigDirs, clock: WallClock) -> Self {
         let fingerprint = fingerprint(dirs, &clock);
         let outcome = match &fingerprint {
             Ok(_) => read(dirs),
@@ -1019,7 +1035,11 @@ mod tests {
             fingerprint: Some(fingerprint),
             at: moment,
         };
-        let window = SETTLE_WINDOW.as_nanos() as u64;
+        // Written out rather than read from the constant, so the window's
+        // value is pinned and not only its use: a window shrunk below the
+        // coarsest tick plus its margin fails here.
+        let window = 3 * 1_000_000_000;
+        assert_eq!(SETTLE_WINDOW, Duration::from_secs(3));
         let stamped = file((100, 0), (100, 500));
         let latest = 100 * 1_000_000_000 + 500;
 
@@ -1036,6 +1056,14 @@ mod tests {
         assert!(
             taken(file((200, 0), (100, 0)), at(150 * 1_000_000_000)).racy(),
             "a modification time set ahead of the change time"
+        );
+        assert!(
+            Taken {
+                fingerprint: Some(file((0, 0), (0, 0))),
+                at: UNIX_EPOCH - Duration::from_secs(60),
+            }
+            .racy(),
+            "a clock reading before the epoch, behind the file's times"
         );
         assert!(
             !Taken {
