@@ -6,8 +6,9 @@
 //! Recovery asks a second: how many processes are in a group
 //! ([`process_group_count`]).
 //!
-//! The leader question's answer is "yes" only when it is proved. Every doubt reads as "no", which
-//! keeps the full signal-delivery window: `/proc` was mounted for another pid
+//! The leader question's answer is "yes" only when it is proved. Every doubt
+//! reads as "no", which keeps the full signal-delivery window: `/proc` was
+//! mounted for another pid
 //! namespace (its `self` link does not name this process), `/proc` cannot be
 //! listed or an entry of the listing cannot be read, a member's `stat` cannot be
 //! read for a reason other than the process having gone, a `stat` line does not
@@ -91,9 +92,12 @@ impl ProcessTable for KernelProcessTable {
 /// is skipped. A process whose `stat` the reader is refused (`EPERM` or
 /// `EACCES`, as a `/proc` mounted with `hidepid=1` does for another user's
 /// process) is placed by `getpgid` instead, which still answers there; a
-/// process that vanishes during that call is skipped too. A pid-namespace mismatch, failed listing or listing entry,
-/// any other stat-read failure, any other `getpgid` failure, or an unparseable
-/// stat line returns `Err`.
+/// process that vanishes during that call is skipped too. A pid-namespace
+/// mismatch, failed listing or listing entry, any other stat-read failure, any
+/// other `getpgid` failure, or an unparseable stat line returns `Err`.
+///
+/// A `/proc` that hides other users' processes from the listing (`hidepid=2`)
+/// cannot show them, so such a process is not counted, as before this change.
 pub(in crate::process) fn process_group_count(pgid: libc::pid_t) -> io::Result<usize> {
     let own_pid = libc::pid_t::try_from(std::process::id())
         .map_err(|_| io::Error::other("this process ID does not fit pid_t"))?;
@@ -317,6 +321,15 @@ mod tests {
         }
     }
 
+    // The `getpgid` fallback is for permission refusals only: an EIO stat stays
+    // an error even when `getpgid` could place the process in the counted group.
+    #[test]
+    fn counting_rejects_a_non_permission_stat_failure_even_when_getpgid_answers() {
+        let mut table = FixedTable::proving().with_other_stat(Err(libc::EIO));
+        table.groups.push((OTHER, Ok(LEADER)));
+        assert!(count(&table, OWN_PID, LEADER).is_err());
+    }
+
     #[test]
     fn counting_ignores_a_refused_process_in_another_group() {
         let table = FixedTable::proving().with_other_refused(Ok(OTHER));
@@ -340,6 +353,14 @@ mod tests {
     #[test]
     fn a_permission_refused_stat_proves_nothing_even_when_getpgid_answers() {
         let table = FixedTable::proving().with_other_refused(Ok(LEADER));
+        assert!(!scan(&table, OWN_PID, LEADER));
+    }
+
+    // The scan never asks `getpgid`: a refused stat proves nothing even when
+    // `getpgid` would place the process outside the leader's group.
+    #[test]
+    fn a_permission_refused_stat_proves_nothing_even_when_getpgid_names_another_group() {
+        let table = FixedTable::proving().with_other_refused(Ok(OTHER));
         assert!(!scan(&table, OWN_PID, LEADER));
     }
 
