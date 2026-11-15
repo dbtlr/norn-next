@@ -586,6 +586,7 @@ mod error;
 mod finding;
 mod finding_row;
 mod glob;
+pub mod hex;
 mod name;
 mod plan;
 mod predicate;

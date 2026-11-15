@@ -38,9 +38,10 @@
 //! created = 1753900000
 //! ```
 //!
-//! The secret is written as lowercase hex. A token's bytes are arbitrary and a
-//! TOML value is text, so they are encoded rather than embedded; hex is chosen
-//! over anything denser because it is decodable by inspection and its
+//! The secret is written as lowercase hex, through [`norn_wire::hex`], the one
+//! codec a presented bearer is decoded by too. A token's bytes are arbitrary
+//! and a TOML value is text, so they are encoded rather than embedded; hex is
+//! chosen over anything denser because it is decodable by inspection and its
 //! implementation is short enough to be read at a glance.
 //!
 //! # What a rewrite preserves
@@ -57,6 +58,7 @@ use std::fmt;
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use norn_wire::hex;
 use toml::{Table, Value};
 
 use crate::ConfigDirs;
@@ -256,7 +258,7 @@ impl Tokens {
             let table = document::entry_table(path, &context, value)?;
             let label = TokenLabel::new(key)?;
             let secret = document::required_string(path, &context, &table, SECRET_KEY)?;
-            let secret = decode_hex(&secret).ok_or_else(|| {
+            let secret = hex::decode(&secret).ok_or_else(|| {
                 corrupt(
                     path,
                     format!("{context}: `{SECRET_KEY}` is not lowercase hexadecimal"),
@@ -298,7 +300,7 @@ impl Tokens {
             let mut table = self.raw.get(label).cloned().unwrap_or_default();
             table.insert(
                 SECRET_KEY.to_string(),
-                Value::String(encode_hex(&token.secret)),
+                Value::String(hex::encode(&token.secret)),
             );
             table.insert(
                 CREATED_KEY.to_string(),
@@ -372,71 +374,12 @@ fn stamp(moment: SystemTime) -> Result<u64, ConfigError> {
         .map_err(|_| ConfigError::ClockBeforeEpoch)
 }
 
-fn encode_hex(bytes: &[u8]) -> String {
-    let mut text = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        text.push(char::from_digit(u32::from(byte >> 4), 16).expect("a nibble is a hex digit"));
-        text.push(char::from_digit(u32::from(byte & 0x0f), 16).expect("a nibble is a hex digit"));
-    }
-    text
-}
-
-/// The bytes `text` spells, or `None` when it spells none.
-///
-/// Read as bytes rather than as characters: the length, the pairing and the
-/// digit lookup are then all in the same unit, and a multi-byte character
-/// cannot make a string of `n` digits decode as anything but `n / 2` bytes.
-fn decode_hex(text: &str) -> Option<Vec<u8>> {
-    let bytes = text.as_bytes();
-    if !bytes.len().is_multiple_of(2) {
-        return None;
-    }
-    let (chunks, _) = bytes.as_chunks::<2>();
-    chunks
-        .iter()
-        .map(|pair| Some((digit(pair[0])? << 4) | digit(pair[1])?))
-        .collect()
-}
-
-/// The value of one lowercase hexadecimal digit.
-fn digit(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn label(text: &str) -> TokenLabel {
         TokenLabel::new(text).unwrap_or_else(|error| panic!("`{text}` is a label: {error}"))
-    }
-
-    #[test]
-    fn hex_round_trips_every_byte() {
-        let bytes: Vec<u8> = (0..=255u8).collect();
-        let text = encode_hex(&bytes);
-        assert_eq!(text.len(), 512);
-        assert_eq!(decode_hex(&text).expect("a decoding"), bytes);
-    }
-
-    #[test]
-    fn hex_that_is_not_hex_decodes_to_nothing() {
-        assert_eq!(decode_hex("abc"), None, "an odd number of digits");
-        assert_eq!(decode_hex("zz"), None, "a digit outside the alphabet");
-        assert_eq!(
-            decode_hex("AB"),
-            None,
-            "uppercase, which is not what is written"
-        );
-        assert_eq!(
-            decode_hex("é"),
-            None,
-            "two bytes that are one character, and neither of them a digit"
-        );
     }
 
     /// A secret in a log is a secret leaked, and the derived `Debug` is how it
