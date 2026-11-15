@@ -18,7 +18,10 @@
 //! by digest and by label, so `serve.token_lookups` is the lookups made
 //! through the index. A walk over the tokens added beside the index makes no
 //! counted lookup, and this bar cannot see it: `norn-serve`'s poisoned-index
-//! unit test catches one, and review catches the rest.
+//! unit test catches one, and review catches the rest. That test is also the
+//! only guard against rebuilding the digest index on every check, an
+//! O(tokens) cost per request this bar cannot see: a rebuild would wipe the
+//! poison, so it must keep poisoning the index after the set is held.
 #![cfg(feature = "counters")]
 
 mod support;

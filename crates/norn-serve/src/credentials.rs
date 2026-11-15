@@ -4,10 +4,13 @@
 //!
 //! **One check per request, inline on the I/O thread.** Each request that
 //! reaches the hello or the bearer middleware calls [`Credentials::check`]
-//! once, before it reads anything from the set: one fingerprint of the token
-//! file through `norn-config`, and a re-read (at most 1 MiB) only when that
-//! changed. Neither waits on a blocking pool. The index is rebuilt only when
-//! the check replaced the held set.
+//! once, before it reads anything from the set. A settled, unchanged token
+//! file costs one fingerprint through `norn-config` and no read. A racy,
+//! changed or refused one costs two fingerprints and a re-read (at most
+//! 1 MiB): racy while the held fingerprint was taken less than 3 s after the
+//! file's later modification or change time, refused while a refusal is
+//! held. Neither waits on a blocking pool. The index is rebuilt only when the
+//! check replaced the held set.
 //!
 //! **One lookup, never a walk.** A hello's label is looked up in the set
 //! itself; a bearer is looked up by the SHA-256 of its decoded bytes in the
@@ -185,6 +188,12 @@ impl Credentials {
 ///
 /// Nothing outside this module can walk the stored tokens without editing
 /// it: the set and the digest index are its fields alone.
+///
+/// Rebuilding the digest index on every check would cost O(tokens) per
+/// request, and the counter bar cannot see it. The guard is the unit test
+/// `a_bearer_is_admitted_only_when_the_secret_its_digest_finds_is_equal`,
+/// by side effect: it poisons the index after the set is held, so a rebuild
+/// would wipe the poison. It must keep poisoning after the set is held.
 mod held {
     use std::collections::HashMap;
 
@@ -467,7 +476,10 @@ pub(crate) mod tests {
     /// tokens added beside the index would make no counted lookup, so this
     /// bar cannot see it: the poisoned-index test above catches one, by
     /// refusing a bearer whose digest the index misdirects or misses, and
-    /// review catches the rest.
+    /// review catches the rest. The same test is the only guard against a
+    /// per-request index rebuild, which this bar cannot see either: a rebuild
+    /// would wipe the poison, so that test must keep poisoning the index
+    /// after the set is held.
     #[test]
     fn an_unchanged_file_costs_one_fingerprint_and_one_lookup_per_request() {
         for count in [1, 64] {

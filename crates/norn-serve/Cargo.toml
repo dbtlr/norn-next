@@ -47,8 +47,8 @@ norn-wire = { path = "../norn-wire" }
 
 [dev-dependencies]
 # `norn-config`'s `test-support` names `WatchedTokens::read_with_clock`, the
-# clock seam this crate's in-process credential tests stand a settled or a racy
-# token file on. A whole-workspace run turns it on through `norn-config`'s own
+# clock seam this crate's in-process credential tests stand a settled token
+# file on. A whole-workspace run turns it on through `norn-config`'s own
 # dev-dependency, and this package's shard must build its tests with the same
 # set (`norn-testkit --test shards`).
 norn-config = { path = "../norn-config", features = ["test-support"] }
