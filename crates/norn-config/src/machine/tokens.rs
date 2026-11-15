@@ -46,9 +46,10 @@
 //! # What a refusal says
 //!
 //! A refusal of this file names a label, a key and a type, and never a
-//! secret. A file that is not TOML is refused with the parser's message and the
-//! line and column it stopped at, without the excerpt of the line that the
-//! parser's own account carries: that line is a secret's line as often as not.
+//! secret. A file that is not TOML is refused with the line and column the
+//! parser stopped at and nothing the parser wrote: its excerpt of the line is a
+//! secret's line as often as not, and its message quotes a value it cannot hold,
+//! which a secret written unquoted is.
 //!
 //! # The file
 //!

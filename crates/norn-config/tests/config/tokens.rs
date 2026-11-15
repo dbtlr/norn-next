@@ -566,6 +566,9 @@ fn a_token_sets_debug_does_not_carry_its_secrets() {
 fn a_token_file_that_does_not_read_never_quotes_its_secret() {
     let secret = "5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e";
     let head = "version = 1\n\n[tokens.laptop]\n";
+    // Thirty-two digits: past an i64 and inside an i128, the width whose
+    // refusal the parser words by quoting the value.
+    let digits = "55555555555555555555555555555555";
     for (case, body, needle) in [
         (
             "trailing text",
@@ -581,6 +584,18 @@ fn a_token_file_that_does_not_read_never_quotes_its_secret() {
             "a duplicate key",
             format!("{head}secret = \"{secret}\"\nsecret = \"{secret}\"\ncreated = 1\n"),
             "line 5, column",
+        ),
+        (
+            // The parser's own message quotes a value it cannot hold: here an
+            // unquoted secret written as one integer too large for any.
+            "an unquoted secret read as an overflowing integer",
+            format!("{head}secret = {digits}\ncreated = 1\n"),
+            "line 4, column",
+        ),
+        (
+            "an unquoted secret read as a bare word",
+            format!("{head}secret = {secret}\ncreated = 1\n"),
+            "line 4, column",
         ),
         (
             "a secret of the wrong type",
@@ -601,6 +616,7 @@ fn a_token_file_that_does_not_read_never_quotes_its_secret() {
         ] {
             assert!(!printed.contains(secret), "{case}: {printed}");
             assert!(!printed.contains("5e5e5e"), "{case}: {printed}");
+            assert!(!printed.contains("555555"), "{case}: {printed}");
         }
         assert!(
             error.to_string().contains(needle),

@@ -75,8 +75,8 @@ impl Document {
 
     /// Read `bytes` as a versioned document, or say what is wrong with them.
     ///
-    /// A refusal of a [`Private`](Sensitivity::Private) file says where and
-    /// why, and never what the file holds there: see [`not_toml`].
+    /// A refusal of a [`Private`](Sensitivity::Private) file says where, and
+    /// never what the file holds there: see [`not_toml`].
     pub(crate) fn parse(
         path: &Path,
         bytes: &[u8],
@@ -182,8 +182,10 @@ impl Document {
 /// the most helpful thing a person fixing a registry can be shown. In a file of
 /// secrets that line is a secret's line — an unterminated string, a duplicate
 /// key, trailing text after a value — and a refusal reaches a log the moment
-/// anything holding it is formatted. So a private file's refusal is `toml`'s
-/// message and the line and column it stopped at, and no excerpt.
+/// anything holding it is formatted. `toml`'s message alone is no safer: it
+/// quotes a value it cannot hold (`invalid type: integer `…` as i128`), and a
+/// secret written unquoted is such a value. So a private file's refusal is the
+/// line and column the parser stopped at, and nothing the parser wrote.
 fn not_toml(
     path: &Path,
     text: &str,
@@ -202,7 +204,10 @@ fn not_toml(
                 .unwrap_or_default();
             corrupt(
                 path,
-                format!("the file is not TOML{at}: {}", error.message().trim_end()),
+                format!(
+                    "the file is not TOML{at}; the parser's account is withheld because \
+                     it can quote a secret"
+                ),
             )
         }
     }
@@ -392,7 +397,7 @@ mod tests {
     }
 
     /// A shared file's refusal quotes the line, which is what a person fixing
-    /// it needs; a private file's says where and why and quotes nothing.
+    /// it needs; a private file's says where and quotes nothing.
     #[test]
     fn a_private_files_toml_refusal_names_the_place_and_quotes_nothing() {
         let bytes = b"version = 1\n\n[t]\nk = \"hidden\" oops\n";
@@ -406,7 +411,7 @@ mod tests {
         assert!(!reason.contains("hidden"), "{reason}");
         assert!(!reason.contains('\n'), "{reason}");
         assert!(
-            reason.starts_with("the file is not TOML at line 4, column 14: "),
+            reason.starts_with("the file is not TOML at line 4, column 14; "),
             "{reason}"
         );
     }
