@@ -33,6 +33,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 
 use crate::build::BuildIdentity;
 use crate::hex;
+use crate::object::read_object;
 
 /// The ASCII domain separator the MAC input opens with, before its zero byte.
 const MAC_DOMAIN: &[u8] = b"norn-hello-v1";
@@ -81,9 +82,9 @@ impl Nonce {
 /// Keeping the two as text is what lets the host tell those apart. The label's
 /// grammar is the token store's, and the nonce's is [`Nonce::from_hex`].
 ///
-/// Read as an object and nothing else, ignoring a field it does not know: a
-/// derived reader would also take the two values as an array, which is not
-/// the shape.
+/// Read as an object and nothing else, each key once, ignoring a field it
+/// does not know: a derived reader would also take the two values as an
+/// array, which is not the shape.
 #[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
 pub struct HelloRequest {
     /// The label of the token the dialer holds, which keys the answer's MAC.
@@ -94,7 +95,7 @@ pub struct HelloRequest {
 
 impl<'de> Deserialize<'de> for HelloRequest {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let object = serde_json::Map::<String, serde_json::Value>::deserialize(deserializer)?;
+        let object = read_object(deserializer)?;
         let text = |key: &'static str| match object.get(key) {
             Some(serde_json::Value::String(text)) => Ok(text.clone()),
             Some(_) => Err(D::Error::custom(format!("`{key}` is not a string"))),
@@ -730,5 +731,28 @@ mod tests {
     fn a_nonce_round_trips_through_its_hex() {
         assert_eq!(Nonce::from_hex(&nonce().to_hex()), Some(nonce()));
         assert_eq!(nonce().to_hex().len(), 64);
+    }
+
+    /// A key given twice is refused rather than read as whichever came last,
+    /// as the answer's reader refuses one: the request and the answer read one
+    /// grammar of objects.
+    #[test]
+    fn a_request_refuses_a_key_given_twice() {
+        let digits = nonce().to_hex();
+        for twice in [
+            format!(r#"{{"label":"a","label":"b","nonce":"{digits}"}}"#),
+            format!(r#"{{"label":"a","nonce":"{digits}","nonce":"{digits}"}}"#),
+        ] {
+            assert!(
+                serde_json::from_str::<HelloRequest>(&twice).is_err(),
+                "`{twice}` read as a hello request"
+            );
+        }
+        let answer = serde_json::to_string(&HelloAnswer::new(facts(), [1; 32])).expect("json");
+        let twice = answer.replacen(r#""mac":"#, r#""mac":"00","mac":"#, 1);
+        assert!(
+            serde_json::from_str::<HelloAnswer>(&twice).is_err(),
+            "{twice}"
+        );
     }
 }

@@ -11,19 +11,21 @@
 //! workspace reaches them but their tests.
 
 use schemars::JsonSchema;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
+
+use crate::object::read_object;
 
 /// The drain request's body: `{}`.
 ///
 /// Read as an object and nothing else. A derived reader of an empty struct
-/// also takes `[]`, which is not the shape; the reader here takes any object
-/// and ignores what it holds.
+/// also takes `[]`, which is not the shape; the reader here takes any object,
+/// each key once, and ignores what it holds.
 #[derive(Clone, Copy, Debug, Default, Eq, JsonSchema, PartialEq, Serialize)]
 pub struct DrainRequest {}
 
 impl<'de> Deserialize<'de> for DrainRequest {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        serde_json::Map::<String, serde_json::Value>::deserialize(deserializer)?;
+        read_object(deserializer)?;
         Ok(DrainRequest {})
     }
 }
@@ -36,12 +38,30 @@ impl DrainRequest {
 
 /// The answer a host that has begun to drain gives:
 /// `{ "version": 1, "draining": true }`.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+///
+/// Read as an object and nothing else, each key once, ignoring a field it does
+/// not know: a derived reader would also take the two values as an array.
+#[derive(Clone, Copy, Debug, Eq, JsonSchema, PartialEq, Serialize)]
 pub struct DrainAnswer {
     /// The drain shape's version: 1.
     version: u32,
     /// Always `true`: a host that is not draining answers with a refusal.
     draining: bool,
+}
+
+impl<'de> Deserialize<'de> for DrainAnswer {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        /// The answer's fields, read out of an object [`read_object`] took.
+        #[derive(Deserialize)]
+        struct Fields {
+            version: u32,
+            draining: bool,
+        }
+        let object = read_object(deserializer)?;
+        let Fields { version, draining } =
+            Fields::deserialize(serde_json::Value::Object(object)).map_err(D::Error::custom)?;
+        Ok(DrainAnswer { version, draining })
+    }
 }
 
 impl DrainAnswer {
@@ -98,5 +118,28 @@ mod tests {
         assert_eq!(read, answer);
         assert_eq!(read.version(), 1);
         assert!(read.is_draining());
+    }
+
+    /// An answer is an object, as the request is: a derived reader would also
+    /// take its two values as an array, which is not the shape. A key given
+    /// twice is refused rather than read as whichever came last.
+    #[test]
+    fn a_drain_answer_is_read_from_an_object_only() {
+        for not_an_answer in [
+            "[1, true]",
+            "null",
+            r#"{"version":1,"draining":true,"draining":false}"#,
+            r#"{"version":1}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<DrainAnswer>(not_an_answer).is_err(),
+                "`{not_an_answer}` read as a drain answer"
+            );
+        }
+    }
+
+    #[test]
+    fn a_drain_request_refuses_a_key_given_twice() {
+        assert!(serde_json::from_str::<DrainRequest>(r#"{"reason":1,"reason":2}"#).is_err());
     }
 }

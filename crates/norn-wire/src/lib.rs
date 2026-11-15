@@ -600,6 +600,7 @@ mod glob;
 mod hello;
 pub mod hex;
 mod name;
+mod object;
 mod plan;
 mod predicate;
 mod product;
