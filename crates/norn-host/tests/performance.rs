@@ -80,11 +80,17 @@ fn performance_verify() {
 
 fn performance_worker() {
     let root = root();
-    let changeset_size = std::env::var("NORN_PERFORMANCE_CHANGESET_SIZE").map_or(128, |value| {
-        value.parse().expect("an integer changeset size")
-    });
-    let policy =
-        norn_host::ProductionPolicy::new(128, changeset_size).expect("bounded measurement policy");
+    let changeset_size = std::env::var("NORN_PERFORMANCE_CHANGESET_SIZE")
+        .map_or(norn_host::CHANGESET_SIZE, |value| {
+            value.parse().expect("an integer changeset size")
+        });
+    let policy = norn_host::ProductionPolicy::new(
+        std::env::var("NORN_PERFORMANCE_STORE_PAGE_SIZE").map_or(norn_host::STORE_PAGE_SIZE, |v| {
+            v.parse().expect("an integer page size")
+        }),
+        changeset_size,
+    )
+    .expect("bounded measurement policy");
     let profiling = std::env::var("NORN_PERFORMANCE_PROFILE").is_ok_and(|value| value == "1");
     #[cfg(not(feature = "induced-failure"))]
     assert!(

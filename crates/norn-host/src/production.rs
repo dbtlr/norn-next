@@ -149,6 +149,15 @@ pub const BACKGROUND_TURN_BUDGET: Duration = Duration::from_millis(100);
 /// thread is shared fairly rather than held.
 pub const BACKGROUND_THREADS: usize = 1;
 
+/// Release probes at 2k/10k documents found no consistent gain from 512-row pages.
+pub const STORE_PAGE_SIZE: usize = 128;
+/// Release probes favored 128 over 32; 512 offered no consistent build or warm-write gain.
+pub const CHANGESET_SIZE: usize = 128;
+/// The attach helper's lifecycle slots, kept so the in-process bar compares like with like.
+pub const WORKER_SLOTS: usize = 1;
+/// The attach helper's poll interval, kept so the in-process bar compares like with like.
+pub const WATCH_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
 /// Resource bounds for the concrete filesystem/store adapter.
 #[derive(Clone, Copy, Debug)]
 pub struct ProductionPolicy {
@@ -168,6 +177,35 @@ pub struct ProductionPolicy {
 }
 
 impl ProductionPolicy {
+    /// Validate plain serving values into store policies and use the production page sizes.
+    ///
+    /// Count quotas must be positive when set, with the per-result limit no
+    /// larger than the total. Reader-policy refusals preserve the store's cause.
+    pub fn serving(
+        read_connections: usize,
+        read_idle_grace: Duration,
+        count_result_max_bytes: Option<u64>,
+        count_results_total_bytes: Option<u64>,
+    ) -> Result<Self, ProductionPolicyError> {
+        let read_budget = norn_store::ReadBudgetPolicy::new(read_connections, read_idle_grace)
+            .map_err(ProductionPolicyError::ReadBudget)?;
+        if count_result_max_bytes == Some(0)
+            || count_results_total_bytes == Some(0)
+            || matches!((count_result_max_bytes, count_results_total_bytes), (Some(max), Some(total)) if max > total)
+        {
+            return Err(ProductionPolicyError::CountQuotas);
+        }
+        Ok(Self {
+            read_budget,
+            count_retention: norn_store::CountRetentionPolicy {
+                max_result_bytes: count_result_max_bytes,
+                total_bytes: count_results_total_bytes,
+                ..Default::default()
+            },
+            ..Self::new(STORE_PAGE_SIZE, CHANGESET_SIZE)?
+        })
+    }
+
     pub fn new(
         store_page_size: usize,
         changeset_size: usize,
@@ -211,8 +249,12 @@ impl ProductionPolicy {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProductionPolicyError {
+    /// The store refused the reader policy.
+    ReadBudget(norn_store::StoreError),
+    /// Count quotas are zero or the per-result limit exceeds the total.
+    CountQuotas,
     StorePageSize(usize),
     ChangesetSize(usize),
 }
@@ -220,6 +262,10 @@ pub enum ProductionPolicyError {
 impl fmt::Display for ProductionPolicyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::ReadBudget(error) => error.fmt(f),
+            Self::CountQuotas => f.write_str(
+                "count quotas must be positive and the per-result limit must not exceed the total",
+            ),
             Self::StorePageSize(given) => write!(
                 f,
                 "store page size must be between 1 and {}, got {given}",

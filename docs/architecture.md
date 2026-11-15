@@ -2121,7 +2121,7 @@ membership rule binds.
 | `norn-db` | The parts of a database file's lifecycle the driver does not cover: deleting the file and the sidecars a journal leaves beside it, and preparing its parent directory. Disposable-result storage additionally uses exclusive file creation, private file and directory modes, identity checks before reopening or deleting, derived-directory discovery and recognized-name orphan sweeps. Its ceremony suite carries allows too — the scratch directory a case's database lives in, and the foreign bytes a case writes where a database would stand |
 | `norn-store` | Behind the induced-failure feature, the record file a fired arm appends to — the rest of the derived database's file lifecycle is `norn-db`'s, and the rungs and modes that decide when it happens reach it through that API. Its suites carry allows too — the directory a case's store lives in, the bytes a case damages, and the sidecar a torn changeset left |
 | `norn-semantic` | Its suites' scaffolding only: the scratch directories a case's store and sidecar live in. The sidecar file's own lifecycle is `norn-db`'s, reached through that API |
-| `norn-config` | Config-directory bytes, and the whole protocol around them: the registry file and the token file, the `0700` creation of the config directory, the `.lock` file each data file is guarded by, the temporary file every write lands in and the sweep that clears a dead writer's, and the directory fsync that makes a rename durable. *Reserved* beside them, in the same directory: `config.toml`, read only — nothing in the API writes it — and the channel lock file a host holds for its lifetime, taken without blocking and recording nothing. Its suites carry allows for what they arrange outside that protocol: modes the API never writes, links planted at a name, and residue a dead writer left |
+| `norn-config` | Config-directory bytes, and the whole protocol around them: the registry file and the token file, the `0700` creation of the config directory, the `.lock` file each data file is guarded by, the temporary file every write lands in and the sweep that clears a dead writer's, and the directory fsync that makes a rename durable. Beside them, in the same directory: `config.toml`, read only — nothing in the API writes it — and the channel lock file a host holds for its lifetime, taken without blocking and recording nothing. Settings validation also reads the platform ephemeral port range (`/proc/sys/net/ipv4/ip_local_port_range` on Linux, with its default if unreadable; elsewhere, macOS included, the IANA dynamic range 49152–65535, not read live). Its suites carry allows for what they arrange outside that protocol: modes the API never writes, links planted at a name, and residue a dead writer left |
 | `norn-embed` | *Reserved.* The opt-in weight fetch and load, which is not built; the crate reaches no filesystem today |
 | `norn-host` | Its suites' scaffolding, which is the whole of the crate's contact today: generated trees, subprocess probes, and fixtures impersonating external editors and retargets. *Reserved* beside it: the one-shot legacy-cache janitor, which is not built |
 | `norn-client` | *Reserved.* Machine-local effects only: self-update binary replacement and service-unit install |
@@ -2602,8 +2602,8 @@ handle beside the attachment, so reads proceed while a lifecycle job holds the s
 The host composes one `norn-store::ReadBudget` across its registrations through the
 validated `ProductionPolicy.read_budget`. Its default is four actual connections and
 a five-second idle grace; capacity must be at least two. Both are serving settings, read
-from `config.toml`'s `[serve]` table as below; there is no serving configuration parser
-today, so the composition root hands the defaults.
+from `config.toml`'s `[serve]` table by `norn-config` as below; wiring the settings
+into the serving composition root remains part of the target shape.
 
 **Serving settings are a file the host reads and never writes.** Machine settings live in
 `config.toml` in each channel's config directory, beside `registry.toml` and `tokens.toml`.
@@ -2627,7 +2627,7 @@ defaults:
 | `[serve]` | `drain_bound` | 10 s, capped below the release bound | How long a drain lets in-flight requests run |
 | `[serve]` | `request_log` | off | Whether the server log carries request lines |
 
-This is the starting key set; a key may be renamed before any build reads it.
+`norn-config` reads these keys; until the first release a key may still be renamed without a migration.
 
 - **The host reads the file and never writes it**, so a person's comments and layout
   survive. No verb rewrites it.

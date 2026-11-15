@@ -29,7 +29,7 @@
 //! - [`registry`] — the registry file: the vaults a host serves, and the
 //!   locked read-modify-write that changes them.
 //! - [`machine`] — the surface both sides of the client/host seam share: the
-//!   bearer tokens, and the loopback endpoint.
+//!   bearer tokens, serving settings, and the loopback endpoint.
 //! - [`vault`] — the generic per-vault config envelope.
 //! - [`schema`] — the vault schema's content model: the declared fields with
 //!   their types, the declared tag facet, the folders, the path rules, and the
@@ -58,7 +58,7 @@
 //!
 //! What lives at the root is what both surfaces are expressed over: the
 //! directories, the channel, the layout conventions, the vault name, and the
-//! one error type.
+//! errors and the host lifetime [`ChannelLock`].
 //!
 //! # Injection
 //!
@@ -84,6 +84,7 @@
 mod document;
 mod error;
 mod file;
+pub use file::{ChannelLock, ChannelLockError};
 
 pub mod machine;
 pub mod migration;

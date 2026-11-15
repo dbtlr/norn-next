@@ -79,9 +79,10 @@ pub use lifecycle::{
 /// spelling of it.
 pub use norn_config::registry::Entry as Registration;
 pub use production::{
-    BACKGROUND_THREADS, BACKGROUND_TURN_BUDGET, DEATH_PRUNE_PERIOD, DeathPruneReading,
-    MAX_CHANGESET_SIZE, ProductionEntryOps, ProductionPolicy, ProductionPolicyError,
-    READ_SETTLE_BOUND, WATCH_SYNCHRONIZATION_DEADLINE, stored_path_order,
+    BACKGROUND_THREADS, BACKGROUND_TURN_BUDGET, CHANGESET_SIZE, DEATH_PRUNE_PERIOD,
+    DeathPruneReading, MAX_CHANGESET_SIZE, ProductionEntryOps, ProductionPolicy,
+    ProductionPolicyError, READ_SETTLE_BOUND, STORE_PAGE_SIZE, WATCH_POLL_INTERVAL,
+    WATCH_SYNCHRONIZATION_DEADLINE, WORKER_SLOTS, stored_path_order,
 };
 pub use read::Answered;
 pub use registry::{AliasConflict, RecordRefusal, RegistryRead, RegistryUnwritable, RetireRefusal};
