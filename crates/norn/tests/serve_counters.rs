@@ -6,6 +6,12 @@
 //! many. Each reading is a delta between two reads of the route, and the
 //! second read is itself a bearer request: it costs one fingerprint and one
 //! lookup of its own, which every expectation below names as `+ 1`.
+//!
+//! The host counts a lookup inside the held token set's two lookup methods,
+//! by digest and by label, so `serve.token_lookups` is the lookups made
+//! through the index. A walk over the tokens added beside the index makes no
+//! counted lookup, and this bar cannot see it: `norn-serve`'s poisoned-index
+//! unit test catches one, and review catches the rest.
 #![cfg(feature = "counters")]
 
 mod support;

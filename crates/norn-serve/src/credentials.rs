@@ -11,13 +11,14 @@
 //!
 //! **One lookup, never a walk.** A hello's label is looked up in the set
 //! itself; a bearer is looked up by the SHA-256 of its decoded bytes in the
-//! digest index, then compared with the stored secret in constant time.
+//! digest index, then compared with the stored secret in constant time. Both
+//! lookups are the private `held` module's, which alone holds the set and the
+//! index, and each counts itself.
 //!
 //! **A changed file that no longer reads fails closed**: while the held
 //! outcome is a refusal, every request is refused, and the log says so once,
 //! on entering that state, naming the file and the fix.
 
-use std::collections::HashMap;
 use std::path::Path;
 
 use hmac::{Hmac, KeyInit, Mac};
@@ -66,10 +67,12 @@ pub(crate) struct TokenCounters {
 }
 
 pub(crate) struct Credentials {
-    watched: WatchedTokens,
-    /// The SHA-256 of each held secret, to the secret it is the digest of.
-    by_digest: HashMap<[u8; 32], Vec<u8>>,
-    counters: TokenCounters,
+    /// The token set and the index over it: the only way to a secret.
+    held: Held,
+    /// Fingerprints of the token file taken, `serve.token_fingerprints`.
+    fingerprints: u64,
+    /// Reads of the token file, `serve.token_file_reads`.
+    file_reads: u64,
     /// Whether the held outcome was a refusal at the last check, so the log
     /// line is written on entering the state rather than on every request.
     failed_closed: bool,
@@ -80,9 +83,9 @@ impl Credentials {
     /// The state over a token set already read.
     pub(crate) fn new(dirs: &ConfigDirs, watched: WatchedTokens) -> Self {
         let mut credentials = Credentials {
-            watched,
-            by_digest: HashMap::new(),
-            counters: TokenCounters::default(),
+            held: Held::new(watched),
+            fingerprints: 0,
+            file_reads: 0,
             failed_closed: false,
             tokens_file: tokens_file(dirs),
         };
@@ -93,9 +96,9 @@ impl Credentials {
     /// Bring the held set up to date with the file: the one check a request
     /// makes.
     pub(crate) fn check(&mut self) {
-        let check = self.watched.check();
-        self.counters.fingerprints += u64::from(check.fingerprints());
-        self.counters.file_reads += u64::from(check.read());
+        let check = self.held.check();
+        self.fingerprints += u64::from(check.fingerprints());
+        self.file_reads += u64::from(check.read());
         if check.replaced() {
             self.held_replaced();
         }
@@ -104,19 +107,13 @@ impl Credentials {
     /// Whether the held outcome is a refusal: the fail-closed state, in
     /// which every request is refused until the file reads again.
     pub(crate) fn fails_closed(&self) -> bool {
-        self.watched.current().is_err()
+        self.held.refusal().is_some()
     }
 
-    /// Rebuild the index from the held outcome, and log the transitions into
-    /// and out of the fail-closed state.
+    /// Log the transitions into and out of the fail-closed state.
     fn held_replaced(&mut self) {
-        self.by_digest.clear();
-        match self.watched.current() {
-            Ok(tokens) => {
-                self.by_digest = tokens
-                    .all()
-                    .map(|token| (digest(token.secret()), token.secret().to_vec()))
-                    .collect();
+        match self.held.refusal() {
+            None => {
                 if self.failed_closed {
                     log(format_args!(
                         "the token file {} reads again; requests are served",
@@ -125,7 +122,7 @@ impl Credentials {
                 }
                 self.failed_closed = false;
             }
-            Err(error) => {
+            Some(error) => {
                 if !self.failed_closed {
                     log(format_args!(
                         "warning: the token file no longer reads, so every request is refused \
@@ -147,9 +144,8 @@ impl Credentials {
         let Some(presented) = bearer(authorization) else {
             return Admission::Unauthorized;
         };
-        self.counters.lookups += 1;
-        match self.by_digest.get(&digest(&presented)) {
-            Some(secret) if bool::from(secret.as_slice().ct_eq(&presented)) => Admission::Admitted,
+        match self.held.by_digest(&presented) {
+            Some(secret) if bool::from(secret.ct_eq(&presented)) => Admission::Admitted,
             _ => Admission::Unauthorized,
         }
     }
@@ -159,25 +155,125 @@ impl Credentials {
     /// like an unknown label and costs no lookup. [`check`](Self::check) is
     /// the caller's, first.
     pub(crate) fn key(&mut self, label: &str, input: impl FnOnce() -> Option<Vec<u8>>) -> Keyed {
-        let tokens = match self.watched.current() {
-            Ok(tokens) => tokens,
-            Err(_) => return Keyed::FailedClosed,
-        };
+        if self.fails_closed() {
+            return Keyed::FailedClosed;
+        }
         let (Ok(label), Some(input)) = (TokenLabel::new(label), input()) else {
             return Keyed::Refused;
         };
-        self.counters.lookups += 1;
-        match tokens.get(&label) {
-            Some(token) => Keyed::Mac(mac(token.secret(), &input)),
+        match self.held.by_label(&label) {
+            Some(secret) => Keyed::Mac(mac(secret, &input)),
             None => Keyed::Refused,
         }
     }
 
     #[cfg_attr(not(any(test, feature = "counters")), allow(dead_code))]
     pub(crate) fn counters(&self) -> TokenCounters {
-        self.counters
+        TokenCounters {
+            fingerprints: self.fingerprints,
+            file_reads: self.file_reads,
+            lookups: self.held.lookups(),
+        }
     }
 }
+
+/// The held token set, private to this module so the only way a request
+/// reaches a stored secret is one of [`Held`]'s two lookups: by digest for a
+/// bearer, by label for the hello. Each counts itself, so
+/// `serve.token_lookups` is the number of lookups actually made through them,
+/// not a number a call site claims.
+///
+/// Nothing outside this module can walk the stored tokens without editing
+/// it: the set and the digest index are its fields alone.
+mod held {
+    use std::collections::HashMap;
+
+    use norn_config::ConfigError;
+    use norn_config::machine::tokens::{Check, Token, TokenLabel, WatchedTokens};
+
+    use super::digest;
+
+    pub(super) struct Held {
+        watched: WatchedTokens,
+        /// The SHA-256 of each held secret, to the secret it is the digest
+        /// of. Rebuilt only when a check replaces the held set.
+        by_digest: HashMap<[u8; 32], Vec<u8>>,
+        /// Lookups by digest or by label, `serve.token_lookups`.
+        lookups: u64,
+    }
+
+    impl Held {
+        pub(super) fn new(watched: WatchedTokens) -> Self {
+            let mut held = Held {
+                watched,
+                by_digest: HashMap::new(),
+                lookups: 0,
+            };
+            held.index();
+            held
+        }
+
+        /// The token file's check, rebuilding the index when it replaced the
+        /// held set.
+        pub(super) fn check(&mut self) -> Check {
+            let check = self.watched.check();
+            if check.replaced() {
+                self.index();
+            }
+            check
+        }
+
+        fn index(&mut self) {
+            self.by_digest = match self.watched.current() {
+                Ok(tokens) => tokens
+                    .all()
+                    .map(|token| (digest(token.secret()), token.secret().to_vec()))
+                    .collect(),
+                Err(_) => HashMap::new(),
+            };
+        }
+
+        /// Why the held outcome is a refusal, if it is one. It names no
+        /// secret.
+        pub(super) fn refusal(&self) -> Option<&ConfigError> {
+            self.watched.current().err()
+        }
+
+        /// The one bearer lookup: the secret whose digest is the presented
+        /// bytes' digest. A hit is not an admission; the caller compares.
+        pub(super) fn by_digest(&mut self, presented: &[u8]) -> Option<&[u8]> {
+            self.lookups += 1;
+            self.by_digest.get(&digest(presented)).map(Vec::as_slice)
+        }
+
+        /// The one hello lookup: the secret of the token `label` names,
+        /// through `Tokens::get`.
+        pub(super) fn by_label(&mut self, label: &TokenLabel) -> Option<&[u8]> {
+            self.lookups += 1;
+            self.watched.current().ok()?.get(label).map(Token::secret)
+        }
+
+        pub(super) fn lookups(&self) -> u64 {
+            self.lookups
+        }
+
+        /// Point the index entry for `presented`'s digest at `secret`, or
+        /// drop it: the unit suite's poisoned index.
+        #[cfg(test)]
+        pub(super) fn point(&mut self, presented: &[u8], secret: Option<&[u8]>) {
+            match secret {
+                Some(secret) => {
+                    self.by_digest.insert(digest(presented), secret.to_vec());
+                }
+                None => {
+                    self.by_digest.remove(&digest(presented));
+                }
+            }
+        }
+    }
+}
+
+use held::Held;
 
 /// The bytes a request's bearer spells: exactly one `Authorization` value,
 /// `Bearer ` and lowercase hex. The scheme is matched without regard to case,
@@ -321,16 +417,47 @@ mod tests {
         );
         // Point s0's digest at another secret: the lookup hits, the compare
         // refuses.
-        credentials.by_digest.insert(digest(b"s0"), b"s1".to_vec());
+        credentials.held.point(b"s0", Some(b"s1"));
+        assert_eq!(
+            admit(&mut credentials, &format!("Bearer {s0}")),
+            Admission::Unauthorized
+        );
+        // Drop s0's digest from the index: the lookup misses, and a stored
+        // secret the index does not find is refused. A walk over the tokens
+        // beside the index would admit it here.
+        credentials.held.point(b"s0", None);
         assert_eq!(
             admit(&mut credentials, &format!("Bearer {s0}")),
             Admission::Unauthorized
         );
     }
 
+    /// `serve.token_lookups` counts each lookup made through the held set's
+    /// two lookup methods, hit or miss, and only those.
+    #[test]
+    fn every_lookup_through_the_held_set_is_counted_hit_or_miss() {
+        let scratch = norn_testkit::scratch::Scratch::new("norn-serve-held-lookups");
+        let (_dirs, mut credentials) = held(&scratch, 3);
+        assert_eq!(credentials.counters().lookups, 0);
+        assert_eq!(credentials.held.by_digest(b"s1"), Some(&b"s1"[..]));
+        assert_eq!(credentials.held.by_digest(b"s9"), None);
+        let t2 = TokenLabel::new("t2").unwrap();
+        assert_eq!(credentials.held.by_label(&t2), Some(&b"s2"[..]));
+        let t9 = TokenLabel::new("t9").unwrap();
+        assert_eq!(credentials.held.by_label(&t9), None);
+        assert_eq!(credentials.counters().lookups, 4);
+    }
+
     /// The token counter bar at the unit seam: one fingerprint and one lookup
     /// per request over an unchanged file, whatever the number of tokens; no
     /// lookup for a request that presents nothing.
+    ///
+    /// The lookups are counted inside the held set's two lookup methods, so
+    /// the bar measures the lookups made through the index. A walk over the
+    /// tokens added beside the index would make no counted lookup, so this
+    /// bar cannot see it: the poisoned-index test above catches one, by
+    /// refusing a bearer whose digest the index misdirects or misses, and
+    /// review catches the rest.
     #[test]
     fn an_unchanged_file_costs_one_fingerprint_and_one_lookup_per_request() {
         for count in [1, 64] {
