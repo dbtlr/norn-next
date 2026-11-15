@@ -37,7 +37,7 @@ the ones saved before the flag, so the optimized SQLite object is saved.
 
 The other PR jobs do not pass the flag. Measured on hosted runners over three
 warm runs each, it shortened the host functional job by about a quarter and left
-the two package shards within 2% of `main`. The macOS job, which would also have
+the two package shards within 3% of `main`. The macOS job, which would also have
 to build the crates above SQLite a second time for the folding-root spelling
 bar, was 7% slower.
 
