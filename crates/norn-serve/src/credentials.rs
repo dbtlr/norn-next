@@ -9,8 +9,10 @@
 //! changed or refused one costs two fingerprints and a re-read (at most
 //! 1 MiB): racy while the held fingerprint was taken less than 3 s after the
 //! file's later modification or change time, refused while a refusal is
-//! held. Neither waits on a blocking pool. The index is rebuilt only when the
-//! check replaced the held set.
+//! held. A refusal whose fingerprint itself fails (a parent directory that
+//! cannot be searched) costs the two fingerprints and no read, since there is
+//! nothing the read could open. Neither waits on a blocking pool. The index
+//! is rebuilt only when the check replaced the held set.
 //!
 //! **One lookup, never a walk.** A hello's label is looked up in the set
 //! itself; a bearer is looked up by the SHA-256 of its decoded bytes in the
