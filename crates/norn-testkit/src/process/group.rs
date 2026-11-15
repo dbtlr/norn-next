@@ -54,6 +54,8 @@ use crate::poll;
 
 #[cfg(target_os = "linux")]
 mod members;
+#[cfg(target_os = "linux")]
+pub(super) use members::process_group_count;
 
 /// The longest cleanup keeps repeating `SIGKILL` while the leader is pinned.
 /// The module documentation says when it ends sooner.

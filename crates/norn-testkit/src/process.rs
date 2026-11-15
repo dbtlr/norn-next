@@ -774,6 +774,12 @@ mod tests {
             .err()
             .expect("a run whose launcher could not report");
         assert!(error.to_string().contains("without a report"), "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("norn measuring launcher: report publication failed"),
+            "{error}"
+        );
     }
 
     /// Plant `contents` at `name` in a fresh sandbox, then run `script` there

@@ -14,7 +14,7 @@ one vault without drift.
 
 `scripts/norn-process` runs Norn's non-shipping process-supervision tool. The
 launcher finds the repository from its own path, so callers can use it from any
-working directory.
+working directory. It uses `CARGO` when nonempty, otherwise `cargo`.
 
 ```sh
 ./scripts/norn-process reap

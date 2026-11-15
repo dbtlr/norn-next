@@ -13,9 +13,44 @@ use norn_testkit::scratch::Scratch;
 #[allow(clippy::disallowed_methods)] // The repository launcher must not depend on the caller's working directory.
 fn the_repository_launcher_exposes_the_process_command_from_any_directory() {
     let scratch = Scratch::new("norn-process-launcher");
-    let launcher = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/norn-process");
+    let repository_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("the repository root");
+    let launcher = repository_root.join("scripts/norn-process");
+    let cargo = scratch.join("cargo-stand-in");
+    let invoked = scratch.join("cargo-invoked");
+    fs::write(
+        &cargo,
+        r#"#!/bin/sh
+set -eu
+for expected in run --locked --quiet --manifest-path "$NORN_TEST_REPOSITORY_ROOT/Cargo.toml" -p norn-testkit --bin norn-process --; do
+    if [ "$#" -eq 0 ] || [ "$1" != "$expected" ]; then
+        echo "cargo argument mismatch: expected $expected" >&2
+        exit 1
+    fi
+    shift
+done
+if [ "$#" -ne 1 ] || [ "$1" != --help ]; then
+    echo "cargo argument mismatch: expected only --help after --" >&2
+    exit 1
+fi
+: > "$NORN_TEST_CARGO_INVOKED"
+exec "$NORN_TEST_PROCESS_BINARY" "$@"
+"#,
+    )
+    .expect("writing the cargo stand-in");
+    fs::set_permissions(&cargo, fs::Permissions::from_mode(0o755))
+        .expect("making the cargo stand-in executable");
 
     let output = Command::new(launcher)
+        .env("CARGO", &cargo)
+        .env("NORN_TEST_REPOSITORY_ROOT", &repository_root)
+        .env(
+            "NORN_TEST_PROCESS_BINARY",
+            env!("CARGO_BIN_EXE_norn-process"),
+        )
+        .env("NORN_TEST_CARGO_INVOKED", &invoked)
         .arg("--help")
         .current_dir(scratch.root())
         .output()
@@ -27,6 +62,7 @@ fn the_repository_launcher_exposes_the_process_command_from_any_directory() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("Usage: norn-process <COMMAND>"));
+    assert!(invoked.exists(), "the launcher must use the CARGO override");
 }
 
 #[test]
