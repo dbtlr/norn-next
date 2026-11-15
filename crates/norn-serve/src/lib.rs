@@ -20,7 +20,7 @@
 //! this crate alone, and the host is built and dropped on ordinary threads.
 //!
 //! **The server log is stderr**, one plain-text line per lifecycle event
-//! ([`log`]). It is a diagnostic stream, not rendered output.
+//! (the private `log` module). It is a diagnostic stream, not rendered output.
 
 use std::fmt;
 use std::path::PathBuf;
