@@ -170,6 +170,18 @@ impl Channel {
     }
 }
 
+/// The channel as the hello states it: the same two channels, spelled on the
+/// wire by `norn-wire`, so a host answering a hello names the channel this
+/// build is pinned to by converting [`Channel::COMPILED`].
+impl From<Channel> for norn_wire::HelloChannel {
+    fn from(channel: Channel) -> Self {
+        match channel {
+            Channel::Dev => norn_wire::HelloChannel::Dev,
+            Channel::Live => norn_wire::HelloChannel::Live,
+        }
+    }
+}
+
 /// Where this machine keeps norn's state.
 ///
 /// Constructed once, at the edge, and passed down. Every path this value
@@ -443,6 +455,18 @@ mod tests {
 
     fn some(text: &str) -> Option<OsString> {
         Some(OsString::from(text))
+    }
+
+    #[test]
+    fn a_channel_is_the_hellos_channel_of_the_same_name() {
+        assert_eq!(
+            norn_wire::HelloChannel::from(Channel::Dev),
+            norn_wire::HelloChannel::Dev
+        );
+        assert_eq!(
+            norn_wire::HelloChannel::from(Channel::Live),
+            norn_wire::HelloChannel::Live
+        );
     }
 
     #[test]

@@ -44,7 +44,13 @@
 //! paged row type stops at.
 //!
 //! The [`BuildIdentity`] a host and its dialers compare is spelled here too, so
-//! the serving and client halves of one artifact read one value.
+//! the serving and client halves of one artifact read one value, and so are
+//! the two exchanges every build must keep answering for older ones: the
+//! hello — [`HelloRequest`] with its [`Nonce`], answered by [`HelloAnswer`],
+//! whose [`HelloFacts`] build the bytes its MAC is computed over — and the
+//! drain request, [`DrainRequest`] answered by [`DrainAnswer`]. The one
+//! lowercase [`hex`] codec a token's secret, a bearer, a nonce and a MAC are
+//! written in is here too.
 //!
 //! The six read verbs are spelled here as one params type and one report type
 //! each: [`FindParams`] answering [`FindReport`], [`SearchParams`] answering
@@ -586,10 +592,12 @@ mod build;
 mod cursor;
 mod doctor;
 mod document;
+mod drain;
 mod error;
 mod finding;
 mod finding_row;
 mod glob;
+mod hello;
 pub mod hex;
 mod name;
 mod plan;
@@ -629,6 +637,7 @@ pub use document::{
     LinkHealth, LinkRow, Span, TagRow, TagSource, TargetGap, TotalBelowHead, UnknownReason,
     VAULT_PROTOCOL,
 };
+pub use drain::{DrainAnswer, DrainRequest};
 pub use error::{
     AnswerShape, ErrorDetail, ErrorEnvelope, MaintainerIdentity, NameSet, ReadFailure, ReasonCode,
     RequestBound, RequestPart, TooFewNames,
@@ -640,6 +649,10 @@ pub use finding_row::{
     ValueHead,
 };
 pub use glob::{Binding, Captures, CaseFold, Pattern, PatternError, sets_share_a_document_path};
+pub use hello::{
+    HelloAnswer, HelloChannel, HelloFacts, HelloLaunch, HelloRequest, HelloState, Nonce,
+    normalize_socket_address,
+};
 pub use name::{IllegalVaultName, VaultName};
 pub use plan::advisory::{
     AdvisoriesOmitted, AdvisoryValueType, ComputedAdvisories, HygieneConflict, RepairAdvisories,
