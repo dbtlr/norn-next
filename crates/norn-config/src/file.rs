@@ -144,6 +144,12 @@ impl Sensitivity {
     }
 }
 
+/// How a file's bytes — `None` when nothing is there — become its value.
+///
+/// Handed the file's sensitivity, so that a refusal of a private file can leave
+/// out what the file holds.
+pub(crate) type Load<S> = fn(&Path, Option<&[u8]>, Sensitivity) -> Result<S, ConfigError>;
+
 /// One machine-local file: where it sits, what it holds, and how its bytes
 /// become a value and back.
 ///
@@ -156,9 +162,7 @@ pub(crate) struct Stored<S> {
     /// Whether every read of the file is refused past [`READ_CAP`] bytes, and
     /// every write that would leave it longer.
     capped: bool,
-    /// Reads the bytes, handed the file's sensitivity so that a refusal of a
-    /// private file can leave out what the file holds.
-    load: fn(&Path, Option<&[u8]>, Sensitivity) -> Result<S, ConfigError>,
+    load: Load<S>,
     render: fn(&mut S, &Path) -> Result<String, ConfigError>,
 }
 
@@ -166,7 +170,7 @@ impl<S> Stored<S> {
     pub(crate) fn new(
         path: PathBuf,
         sensitivity: Sensitivity,
-        load: fn(&Path, Option<&[u8]>, Sensitivity) -> Result<S, ConfigError>,
+        load: Load<S>,
         render: fn(&mut S, &Path) -> Result<String, ConfigError>,
     ) -> Self {
         Stored {
