@@ -743,30 +743,10 @@ pub(crate) fn ephemeral_range() -> Option<(u16, u16)> {
         }
         Some((32768, 60999))
     }
-    #[cfg(target_os = "macos")]
-    {
-        fn read(name: &std::ffi::CStr) -> Option<u16> {
-            let mut value: libc::c_int = 0;
-            let mut size = std::mem::size_of_val(&value);
-            // SAFETY: both output pointers cover their declared sizes, the name
-            // is NUL-terminated, and null newp makes this a read-only sysctl.
-            let status = unsafe {
-                libc::sysctlbyname(
-                    name.as_ptr(),
-                    (&mut value as *mut libc::c_int).cast(),
-                    &mut size,
-                    std::ptr::null_mut(),
-                    0,
-                )
-            };
-            (status == 0).then(|| u16::try_from(value).ok()).flatten()
-        }
-        Some((
-            read(c"net.inet.ip.portrange.first").unwrap_or(49152),
-            read(c"net.inet.ip.portrange.last").unwrap_or(65535),
-        ))
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    // Elsewhere (macOS included) the range is not read live: this crate
+    // forbids `unsafe`, and the value only feeds an advisory warning, so the
+    // IANA dynamic range — macOS's default `net.inet.ip.portrange` — stands in.
+    #[cfg(not(target_os = "linux"))]
     {
         Some((49152, 65535))
     }
