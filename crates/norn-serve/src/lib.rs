@@ -333,9 +333,8 @@ fn construct(
 /// the hello and the bearer middleware serve from.
 ///
 /// A set that does not read on that second read — the file changed in the
-/// moment between — is held like any later refusal: the host fails closed
-/// from its first request and logs it, rather than refusing a start whose
-/// mint just read the file.
+/// moment between — refuses the start, as an unreadable token file does at
+/// the mint: a host serves from a set it has read, or does not start.
 fn mint_and_read(dirs: &ConfigDirs) -> Result<WatchedTokens, Refusal> {
     let file = credentials::tokens_file(dirs);
     let secret = mint::random_secret().map_err(|error| {
@@ -351,7 +350,17 @@ fn mint_and_read(dirs: &ConfigDirs) -> Result<WatchedTokens, Refusal> {
         )),
         Err(error) => return Err(Refusal(credentials::unreadable(&file, &error))),
     }
-    Ok(WatchedTokens::read(dirs))
+    readable(dirs, WatchedTokens::read(dirs))
+}
+
+/// `watched`, or the start's refusal when the read it holds refused: the file
+/// and the fix, as the mint's own refusal names them.
+fn readable(dirs: &ConfigDirs, watched: WatchedTokens) -> Result<WatchedTokens, Refusal> {
+    if let Err(error) = watched.current() {
+        let file = credentials::tokens_file(dirs);
+        return Err(Refusal(credentials::unreadable(&file, error)));
+    }
+    Ok(watched)
 }
 
 /// Bind and listen on exactly `address`, with `SO_REUSEADDR` so a socket this
@@ -377,5 +386,42 @@ fn settings_file_named(serve: &Serve, dirs: &ConfigDirs) -> String {
     match &serve.config {
         Some(path) => path.display().to_string(),
         None => format!("config.toml in {}", dirs.config_dir().display()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A start whose read of the token file refuses, after a mint that read
+    /// it, refuses the start rather than serving fail-closed: an unreadable
+    /// token file refuses a start, however the moment between came to change
+    /// it. The refusal names the file and the fix.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: a token file whose mode the API never writes.
+    fn a_start_whose_read_of_the_token_file_refuses_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let scratch = norn_testkit::scratch::Scratch::new("norn-serve-start-read");
+        std::fs::create_dir_all(scratch.join("config")).expect("a config base");
+        let dirs = ConfigDirs::new(scratch.join("config"), scratch.join("data")).expect("bases");
+        norn_config::machine::tokens::mutate(&dirs, |tokens| {
+            tokens.add(
+                &norn_config::machine::tokens::TokenLabel::new("default").unwrap(),
+                b"secret",
+            )
+        })
+        .expect("a token");
+        assert!(readable(&dirs, WatchedTokens::read(&dirs)).is_ok());
+
+        let file = credentials::tokens_file(&dirs);
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let Err(Refusal(reason)) = readable(&dirs, WatchedTokens::read(&dirs)) else {
+            panic!("a token file that does not read refused no start");
+        };
+        assert!(
+            reason.contains(&file) && reason.contains("chmod 600"),
+            "{reason}"
+        );
     }
 }
