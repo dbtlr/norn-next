@@ -290,7 +290,10 @@ fn open_existing(
     }
 
     // The link is asked about before the open, because a machine-local data
-    // file that is a link is refused rather than read through.
+    // file that is a link is refused rather than read through. The open
+    // refuses one too, so a link swapped in after this check is not read
+    // through either; this check is what tells a dangling ancestor from a
+    // first run.
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() => return Err(symlink_refusal(path)),
         Ok(_) => {}
@@ -305,17 +308,11 @@ fn open_existing(
         Err(error) => return Err(io("reading the type of", path, error)),
     }
 
-    let file = match std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY)
-        .open(path)
-    {
-        Ok(file) => file,
+    let Some(file) = open_at_name(path)? else {
         // It was there a moment ago and is not now: a writer's rename or a
         // removal landed in between. At the instant of the open nothing was
         // there, and absent is the honest reading of that.
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(io("opening", path, error)),
+        return Ok(None);
     };
     // Inspect the opened descriptor: a path check alone races replacement,
     // and opening a FIFO must not wait for a writer.
@@ -346,6 +343,28 @@ fn open_existing(
         }
     }
     Ok(Some(file))
+}
+
+/// The file at `path`, opened to be read, or `None` when nothing is there.
+///
+/// Opened without blocking, so a FIFO at the name does not wait for a writer,
+/// and without making a terminal the process's own. **Opened without
+/// following a link at the name**, too: the `lstat` before the open refuses a
+/// link, and a link swapped in between the two would otherwise be read
+/// through. The open's `ELOOP` is that link, and it earns the refusal the
+/// `lstat` would have given it.
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)] // Config-directory bytes: this crate owns them.
+fn open_at_name(path: &Path) -> Result<Option<std::fs::File>, ConfigError> {
+    match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY)
+        .open(path)
+    {
+        Ok(file) => Ok(Some(file)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) if error.raw_os_error() == Some(libc::ELOOP) => Err(symlink_refusal(path)),
+        Err(error) => Err(io("opening", path, error)),
+    }
 }
 
 /// The refusal a symlink at a data file's own name earns, precise about which
@@ -1157,5 +1176,39 @@ mod tests {
         assert!(Sensitivity::Private.demands_privacy());
         assert_eq!(Sensitivity::Shared.mode(), 0o644);
         assert!(!Sensitivity::Shared.demands_privacy());
+    }
+
+    /// The open does not follow a link either. A link swapped in after the
+    /// `lstat` and before the open is a link at the name at the instant that
+    /// matters, and it is refused as the `lstat` would have refused it: the
+    /// open is called here on a link directly, as the race would leave it.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: planting links at a data file's name.
+    fn the_open_refuses_a_link_at_the_name_as_the_type_check_does() {
+        let scratch = scratch("open-no-follow");
+        let target = scratch.join("target.toml");
+        std::fs::write(&target, "version = 1\n").expect("a target");
+        let link = scratch.join("tokens.toml");
+        std::os::unix::fs::symlink(&target, &link).expect("a link to a file");
+        assert_eq!(
+            open_at_name(&link).expect_err("a link to a file"),
+            ConfigError::SymlinkedFile { path: link.clone() }
+        );
+
+        let dangling = scratch.join("dangling.toml");
+        std::os::unix::fs::symlink(scratch.join("nothing"), &dangling).expect("a dangling link");
+        assert_eq!(
+            open_at_name(&dangling).expect_err("a link to nothing"),
+            ConfigError::DanglingSymlink {
+                path: dangling.clone()
+            }
+        );
+
+        assert!(open_at_name(&target).expect("a regular file").is_some());
+        assert!(
+            open_at_name(&scratch.join("absent"))
+                .expect("nothing")
+                .is_none()
+        );
     }
 }
