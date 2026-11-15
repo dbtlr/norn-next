@@ -1,0 +1,24 @@
+[package]
+name = "norn-serve"
+description = "The HTTP surface and the host process it runs in — the channel lock, the serving socket and the server log"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+# The HTTP/1.1 server the routes are served by (ruling R2: hyper 1 on tokio,
+# inside this crate only; no async type reaches norn-host).
+hyper = { version = "1.11", features = ["http1", "server"] }
+# The bridge from tokio's sockets to hyper's I/O traits.
+hyper-util = { version = "0.1.21", features = ["tokio"] }
+# The empty body a 404 answers with.
+http-body-util = "0.1.5"
+# One current-thread runtime for the listener and its connections, its signal
+# streams, the timer that paces a failing accept, and the blocking thread the
+# host is constructed on.
+tokio = { version = "1.52", features = ["macros", "net", "rt", "signal", "time"] }
+norn-config = { path = "../norn-config" }
+norn-host = { path = "../norn-host" }
+norn-wire = { path = "../norn-wire" }

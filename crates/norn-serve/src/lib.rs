@@ -1,0 +1,299 @@
+#![forbid(unsafe_code)]
+//! The HTTP surface and the host process it runs in.
+//!
+//! `norn serve` is the one way a host process starts (ADR 0053), and [`run`]
+//! is its entry: the composition root hands it the parsed `serve` arguments
+//! and runs it in its own process — a process entry, not a request.
+//!
+//! **What lands first is the start and a plain stop.** [`run`] reads the
+//! serving settings, takes the channel lock before any other start-up work,
+//! reads the registry, constructs the host, binds the exact resolved loopback
+//! address and logs `listening`; SIGTERM or SIGINT then logs `stopped` and
+//! exits 0. Every request is answered 404 until the routes land; the wire
+//! route's dispatch is reserved in `wire.rs`. The hello, the bearer, the
+//! takeover of a held lock, the port probe, the bounded drain and the
+//! start-bound watchdog are later tasks of the same phase, and each is named
+//! where its absence shows.
+//!
+//! **No async type reaches `norn-host`** (ruling R2): tokio and hyper live in
+//! this crate alone, and the host is built and dropped on ordinary threads.
+//!
+//! **The server log is stderr**, one plain-text line per lifecycle event
+//! ([`log`]). It is a diagnostic stream, not rendered output.
+
+use std::fmt;
+use std::path::PathBuf;
+use std::process::ExitCode;
+use std::time::Duration;
+
+use norn_config::machine::settings::{ServingSettings, SettingsSource};
+use norn_config::{Channel, ChannelLock, ConfigDirs};
+use norn_host::{Host, ProductionEntryOps, RegistryRead};
+use norn_wire::BuildIdentity;
+use tokio::net::{TcpListener, TcpSocket};
+use tokio::signal::unix::{Signal, SignalKind, signal};
+
+mod http;
+mod log;
+mod policy;
+mod wire;
+
+use log::log;
+
+/// What `norn serve` was asked to do.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Serve {
+    /// The `--port` override; the settings file's `[endpoint] port` and the
+    /// channel default stand behind it.
+    pub port: Option<u16>,
+    /// The `--config` file, read instead of the channel's `config.toml`.
+    pub config: Option<PathBuf>,
+    pub launch: Launch,
+}
+
+/// Who started this host.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Launch {
+    /// `norn serve` by hand, or the service manager.
+    Explicit,
+    /// A client launched it with the auto-launch marker.
+    Auto,
+}
+
+impl fmt::Display for Launch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Launch::Explicit => "explicit",
+            Launch::Auto => "auto",
+        })
+    }
+}
+
+/// The status a start that refused, or a host that stopped abnormally, exits
+/// with.
+const REFUSED: u8 = 1;
+
+/// How long the accept loop rests after a failed accept, so a condition that
+/// fails every accept (descriptor exhaustion) is not a busy loop.
+const ACCEPT_RETRY_PAUSE: Duration = Duration::from_millis(100);
+
+/// A start that cannot go on: what refused it and how to resolve it, as the
+/// one log line the refusal is.
+#[derive(Debug)]
+struct Refusal(String);
+
+/// What ended a serving host.
+#[derive(Clone, Copy, Debug)]
+enum Stop {
+    Terminate,
+    Interrupt,
+}
+
+impl fmt::Display for Stop {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Stop::Terminate => "SIGTERM",
+            Stop::Interrupt => "SIGINT",
+        })
+    }
+}
+
+/// Run the host process for this channel until a signal stops it.
+///
+/// Exits 0 after a signal stopped a listening host, and 1 for every refused
+/// start: a bad settings file, a held or refused channel lock, an unreadable
+/// registry, a held port, or a signal before listening.
+///
+/// `build` is the identity the bin's build script captured.
+pub fn run(build: &'static str, serve: Serve) -> ExitCode {
+    match serve_channel(BuildIdentity::new(build), &serve) {
+        Ok(stop) => {
+            log(format_args!("stopped: {stop}"));
+            ExitCode::SUCCESS
+        }
+        Err(Refusal(reason)) => {
+            log(format_args!("refused: {reason}"));
+            ExitCode::from(REFUSED)
+        }
+    }
+}
+
+fn serve_channel(build: BuildIdentity, serve: &Serve) -> Result<Stop, Refusal> {
+    let dirs = ConfigDirs::from_environment().map_err(|error| {
+        Refusal(format!(
+            "{error}; set HOME, or XDG_CONFIG_HOME and XDG_DATA_HOME, to absolute paths"
+        ))
+    })?;
+    let settings = settings(&dirs, serve)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+        .map_err(|error| Refusal(format!("starting the I/O runtime failed: {error}")))?;
+    let stopped = runtime.block_on(serve_on_runtime(build, serve, dirs, settings));
+    // A host construction a signal cut off is still running on its blocking
+    // thread, holding the channel lock; it is not waited for. The process
+    // exits next, and the kernel frees the lock.
+    runtime.shutdown_background();
+    stopped
+}
+
+/// Step 1 of the start: the settings file, then the `--port` override, each
+/// warning logged as its own line.
+fn settings(dirs: &ConfigDirs, serve: &Serve) -> Result<ServingSettings, Refusal> {
+    let source = serve
+        .config
+        .as_deref()
+        .map_or(SettingsSource::ChannelDefault, SettingsSource::Explicit);
+    let (mut settings, mut warnings) =
+        ServingSettings::read(dirs, source).map_err(|error| Refusal(error.to_string()))?;
+    if let Some(port) = serve.port {
+        warnings.extend(
+            settings
+                .override_port(port)
+                .map_err(|error| Refusal(error.to_string()))?,
+        );
+    }
+    for warning in warnings {
+        log(format_args!(
+            "warning: {}: {}",
+            warning.key, warning.message
+        ));
+    }
+    Ok(settings)
+}
+
+async fn serve_on_runtime(
+    build: BuildIdentity,
+    serve: &Serve,
+    dirs: ConfigDirs,
+    settings: ServingSettings,
+) -> Result<Stop, Refusal> {
+    // Registered before the lock is tried, so from here on a signal is this
+    // process's to answer rather than the default disposition's: before
+    // listening it ends the start at once with status 1, freeing the lock if
+    // it was taken.
+    let mut terminate = stop_signal(SignalKind::terminate())?;
+    let mut interrupt = stop_signal(SignalKind::interrupt())?;
+
+    let endpoint = settings.endpoint;
+    let construction = {
+        let dirs = dirs.clone();
+        tokio::task::spawn_blocking(move || construct(dirs, &settings))
+    };
+    let (lock, host) = tokio::select! {
+        built = construction => built
+            .map_err(|error| Refusal(format!("constructing the host failed: {error}")))??,
+        _ = terminate.recv() => return Err(before_listening(Stop::Terminate)),
+        _ = interrupt.recv() => return Err(before_listening(Stop::Interrupt)),
+    };
+
+    let listener = bind(endpoint.address()).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::AddrInUse {
+            Refusal(format!(
+                "port {} on {} is held by another process; choose another with `--port N`, or \
+                 with `[endpoint] port` in {}",
+                endpoint.port(),
+                endpoint.address().ip(),
+                settings_file_named(serve, &dirs),
+            ))
+        } else {
+            Refusal(format!("binding {endpoint} failed: {error}"))
+        }
+    })?;
+    log(format_args!(
+        "listening: channel {}, port {}, {} start, build {build}",
+        Channel::COMPILED.app_directory(),
+        endpoint.port(),
+        serve.launch,
+    ));
+
+    let stop = loop {
+        tokio::select! {
+            accepted = listener.accept() => match accepted {
+                Ok((stream, _)) => {
+                    tokio::spawn(http::answer(stream));
+                }
+                Err(error) => {
+                    log(format_args!("warning: accepting a connection failed: {error}"));
+                    tokio::time::sleep(ACCEPT_RETRY_PAUSE).await;
+                }
+            },
+            _ = terminate.recv() => break Stop::Terminate,
+            _ = interrupt.recv() => break Stop::Interrupt,
+        }
+    };
+    // A plain stop: the listener closes, and the host's own destruction joins
+    // its workers. The bounded drain that answers what is still in flight is
+    // a later task of this phase.
+    drop(listener);
+    drop(host);
+    drop(lock);
+    Ok(stop)
+}
+
+/// Step 2 and the first half of step 5: the channel lock, then the registry
+/// read and the host built over it. The host's startup sweep runs inside
+/// `Host::new`.
+fn construct(
+    dirs: ConfigDirs,
+    settings: &ServingSettings,
+) -> Result<(ChannelLock, Host<ProductionEntryOps>), Refusal> {
+    let lock = match ChannelLock::try_take(&dirs) {
+        Ok(Some(lock)) => lock,
+        // Waiting out the holder and taking over an auto-launched one is a
+        // later task; until it lands a held lock refuses.
+        Ok(None) => {
+            return Err(Refusal(format!(
+                "a norn host already holds this channel's lock in {}; stop that host before \
+                 starting another (deleting the lock file does not stop it)",
+                dirs.config_dir().display()
+            )));
+        }
+        Err(error) => {
+            return Err(Refusal(format!(
+                "the channel lock could not be taken: {error}"
+            )));
+        }
+    };
+    let registry = RegistryRead::load(&dirs).map_err(|error| {
+        Refusal(format!(
+            "{error}; repair the registry file, or move it aside to start with no vaults"
+        ))
+    })?;
+    let production = policy::production(settings)
+        .map_err(|error| Refusal(format!("the serving settings are not usable: {error}")))?;
+    let host = Host::new(
+        registry,
+        ProductionEntryOps::new(dirs, production),
+        policy::lifecycle(settings),
+    )
+    .map_err(|error| Refusal(format!("the serving settings are not usable: {error}")))?;
+    Ok((lock, host))
+}
+
+/// Bind and listen on exactly `address`, with `SO_REUSEADDR` so a socket this
+/// channel's previous host left in TIME_WAIT does not refuse the start, and
+/// without `SO_REUSEPORT`, so a second listener cannot share the port.
+fn bind(address: std::net::SocketAddr) -> std::io::Result<TcpListener> {
+    let socket = TcpSocket::new_v4()?;
+    socket.set_reuseaddr(true)?;
+    socket.bind(address)?;
+    socket.listen(1024)
+}
+
+fn stop_signal(kind: SignalKind) -> Result<Signal, Refusal> {
+    signal(kind).map_err(|error| Refusal(format!("installing a signal handler failed: {error}")))
+}
+
+fn before_listening(stop: Stop) -> Refusal {
+    Refusal(format!("{stop} arrived before the host was listening"))
+}
+
+/// The settings file a port refusal points at, as a person would find it.
+fn settings_file_named(serve: &Serve, dirs: &ConfigDirs) -> String {
+    match &serve.config {
+        Some(path) => path.display().to_string(),
+        None => format!("config.toml in {}", dirs.config_dir().display()),
+    }
+}

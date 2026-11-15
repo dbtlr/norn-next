@@ -575,6 +575,7 @@
 mod address;
 mod apply;
 mod base64url;
+mod build;
 mod cursor;
 mod doctor;
 mod document;
@@ -605,6 +606,7 @@ pub use address::{
 pub use apply::{
     AppliedTarget, ApplyMode, ApplyParams, ApplyReport, ChangesetOutcome, TargetResult,
 };
+pub use build::BuildIdentity;
 pub use cursor::{
     Cursor, CursorKey, CursorOrderChanged, FacetKind, HitResume, Moved, NonFiniteScore, OrderPair,
     Page, PagedRows, Score, SidecarRevision, Snapshot,
