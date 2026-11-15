@@ -3,8 +3,10 @@
 //! [`super::OwnedProcessGroup::close`] asks one question here: is the exited,
 //! unreaped leader the only process left in the group? `killpg` cannot answer
 //! it, because on Linux signalling a group that holds only a zombie succeeds.
+//! Recovery asks a second: how many processes are in a group
+//! ([`process_group_count`]).
 //!
-//! The answer is "yes" only when it is proved. Every doubt reads as "no", which
+//! The leader question's answer is "yes" only when it is proved. Every doubt reads as "no", which
 //! keeps the full signal-delivery window: `/proc` was mounted for another pid
 //! namespace (its `self` link does not name this process), `/proc` cannot be
 //! listed or an entry of the listing cannot be read, a member's `stat` cannot be
@@ -34,7 +36,7 @@ pub(super) fn only_the_exited_leader_remains(pgid: libc::pid_t) -> bool {
     own_pid.is_some_and(|own_pid| scan(&KernelProcessTable, own_pid, pgid))
 }
 
-/// What the scan reads of the kernel's process table. [`KernelProcessTable`]
+/// What the scan and the count read of the kernel's process table. [`KernelProcessTable`]
 /// reads `/proc`; the tests stand in for each way that read can fail.
 trait ProcessTable {
     /// The process ID `/proc/self` names, which is the reader's own only when
@@ -44,6 +46,8 @@ trait ProcessTable {
     fn entries(&self) -> io::Result<Vec<io::Result<OsString>>>;
     /// The bytes of `/proc/<pid>/stat`.
     fn stat(&self, pid: libc::pid_t) -> io::Result<Vec<u8>>;
+    /// The process group of one process, as the kernel's `getpgid` answers it.
+    fn process_group(&self, pid: libc::pid_t) -> io::Result<libc::pid_t>;
 }
 
 struct KernelProcessTable;
@@ -71,13 +75,25 @@ impl ProcessTable for KernelProcessTable {
     fn stat(&self, pid: libc::pid_t) -> io::Result<Vec<u8>> {
         std::fs::read(format!("/proc/{pid}/stat"))
     }
+
+    fn process_group(&self, pid: libc::pid_t) -> io::Result<libc::pid_t> {
+        // SAFETY: `getpgid` takes a plain integer and touches no memory.
+        match unsafe { libc::getpgid(pid) } {
+            -1 => Err(io::Error::last_os_error()),
+            pgid => Ok(pgid),
+        }
+    }
 }
 
 /// Count members of `pgid` through the guarded kernel process table.
 ///
 /// A process that vanishes between listing and stat (`NotFound` or `ESRCH`)
-/// is skipped. A pid-namespace mismatch, failed listing or listing entry,
-/// any other stat-read failure, or an unparseable stat line returns `Err`.
+/// is skipped. A process whose `stat` the reader is refused (`EPERM` or
+/// `EACCES`, as a `/proc` mounted with `hidepid=1` does for another user's
+/// process) is placed by `getpgid` instead, which still answers there; a
+/// process that vanishes during that call is skipped too. A pid-namespace mismatch, failed listing or listing entry,
+/// any other stat-read failure, any other `getpgid` failure, or an unparseable
+/// stat line returns `Err`.
 pub(in crate::process) fn process_group_count(pgid: libc::pid_t) -> io::Result<usize> {
     let own_pid = libc::pid_t::try_from(std::process::id())
         .map_err(|_| io::Error::other("this process ID does not fit pid_t"))?;
@@ -86,7 +102,7 @@ pub(in crate::process) fn process_group_count(pgid: libc::pid_t) -> io::Result<u
 
 fn count(table: &impl ProcessTable, own_pid: libc::pid_t, pgid: libc::pid_t) -> io::Result<usize> {
     let mut count = 0;
-    walk_group(table, own_pid, pgid, |_, _| {
+    walk_group(table, own_pid, pgid, true, |_, _| {
         count += 1;
         true
     })?;
@@ -95,8 +111,9 @@ fn count(table: &impl ProcessTable, own_pid: libc::pid_t, pgid: libc::pid_t) -> 
 
 fn scan(table: &impl ProcessTable, own_pid: libc::pid_t, pgid: libc::pid_t) -> bool {
     let mut leader_seen = false;
-    let complete = walk_group(table, own_pid, pgid, |pid, stat| {
-        if pid != pgid || stat.state().ok() != Some(b'Z') {
+    // A refused stat stays unknown here: the leader's zombie state needs it.
+    let complete = walk_group(table, own_pid, pgid, false, |pid, stat| {
+        if pid != pgid || stat.is_none_or(|stat| stat.state().ok() != Some(b'Z')) {
             return false;
         }
         leader_seen = true;
@@ -106,12 +123,15 @@ fn scan(table: &impl ProcessTable, own_pid: libc::pid_t, pgid: libc::pid_t) -> b
 }
 
 // `own_pid` is the reader's ID in its own pid namespace. The visitor may stop
-// early once a group member disproves the cleanup scan's claim.
+// early once a group member disproves the cleanup scan's claim. It receives no
+// `stat` for a member placed by `getpgid` after a permission-refused read, which
+// only happens when `getpgid_on_refusal` is set.
 fn walk_group(
     table: &impl ProcessTable,
     own_pid: libc::pid_t,
     pgid: libc::pid_t,
-    mut visit: impl FnMut(libc::pid_t, LinuxStat<'_>) -> bool,
+    getpgid_on_refusal: bool,
+    mut visit: impl FnMut(libc::pid_t, Option<LinuxStat<'_>>) -> bool,
 ) -> io::Result<bool> {
     if table.self_pid()? != own_pid {
         return Err(io::Error::other("/proc names another pid namespace"));
@@ -127,10 +147,18 @@ fn walk_group(
         let stat = match table.stat(pid) {
             Ok(stat) => stat,
             Err(error) if vanished(&error) => continue,
+            Err(error) if getpgid_on_refusal && error.kind() == io::ErrorKind::PermissionDenied => {
+                match table.process_group(pid) {
+                    Ok(group) if group == pgid && !visit(pid, None) => return Ok(false),
+                    Ok(_) => continue,
+                    Err(error) if vanished(&error) => continue,
+                    Err(error) => return Err(error),
+                }
+            }
             Err(error) => return Err(error),
         };
         let stat = LinuxStat::parse(pid, &stat)?;
-        if stat.pgrp()? == pgid && !visit(pid, stat) {
+        if stat.pgrp()? == pgid && !visit(pid, Some(stat)) {
             return Ok(false);
         }
     }
@@ -157,6 +185,8 @@ mod tests {
         self_pid: io::Result<libc::pid_t>,
         listing: Option<Vec<Result<&'static str, libc::c_int>>>,
         stats: Vec<(libc::pid_t, Result<&'static [u8], libc::c_int>)>,
+        // What `getpgid` answers per pid; an unscripted pid fails with EIO.
+        groups: Vec<(libc::pid_t, Result<libc::pid_t, libc::c_int>)>,
     }
 
     impl FixedTable {
@@ -169,6 +199,7 @@ mod tests {
                     (LEADER, Ok(b"100 (sh) Z 1 100 100 0")),
                     (OTHER, Ok(b"200 (init) S 0 200 200 0")),
                 ],
+                groups: Vec::new(),
             }
         }
 
@@ -176,6 +207,12 @@ mod tests {
             self.stats.retain(|(pid, _)| *pid != OTHER);
             self.stats.push((OTHER, stat));
             self
+        }
+
+        // `OTHER`'s stat is refused for permission and `getpgid` answers `group`.
+        fn with_other_refused(mut self, group: Result<libc::pid_t, libc::c_int>) -> FixedTable {
+            self.groups.push((OTHER, group));
+            self.with_other_stat(Err(libc::EPERM))
         }
     }
 
@@ -207,6 +244,14 @@ mod tests {
                 Some((_, Ok(stat))) => Ok(stat.to_vec()),
                 Some((_, Err(errno))) => Err(io::Error::from_raw_os_error(*errno)),
                 None => Err(io::Error::from_raw_os_error(libc::ENOENT)),
+            }
+        }
+
+        fn process_group(&self, pid: libc::pid_t) -> io::Result<libc::pid_t> {
+            match self.groups.iter().find(|(listed, _)| *listed == pid) {
+                Some((_, Ok(group))) => Ok(*group),
+                Some((_, Err(errno))) => Err(io::Error::from_raw_os_error(*errno)),
+                None => Err(io::Error::from_raw_os_error(libc::EIO)),
             }
         }
     }
@@ -254,10 +299,48 @@ mod tests {
         let mut table = FixedTable::proving();
         table.listing.as_mut().unwrap().push(Err(libc::EIO));
         assert!(count(&table, OWN_PID, LEADER).is_err());
-        for errno in [libc::EACCES, libc::EIO] {
-            let table = FixedTable::proving().with_other_stat(Err(errno));
-            assert!(count(&table, OWN_PID, LEADER).is_err());
+        let table = FixedTable::proving().with_other_stat(Err(libc::EIO));
+        assert!(count(&table, OWN_PID, LEADER).is_err());
+    }
+
+    #[test]
+    fn counting_places_a_permission_refused_process_by_getpgid() {
+        for refusal in [libc::EPERM, libc::EACCES] {
+            let mut table = FixedTable::proving().with_other_refused(Ok(LEADER));
+            table.stats.retain(|(pid, _)| *pid != OTHER);
+            table.stats.push((OTHER, Err(refusal)));
+            assert_eq!(
+                count(&table, OWN_PID, LEADER).unwrap(),
+                2,
+                "errno {refusal}"
+            );
         }
+    }
+
+    #[test]
+    fn counting_ignores_a_refused_process_in_another_group() {
+        let table = FixedTable::proving().with_other_refused(Ok(OTHER));
+        assert_eq!(count(&table, OWN_PID, LEADER).unwrap(), 1);
+    }
+
+    #[test]
+    fn counting_skips_a_refused_process_that_vanished_during_getpgid() {
+        for errno in [libc::ESRCH, libc::ENOENT] {
+            let table = FixedTable::proving().with_other_refused(Err(errno));
+            assert_eq!(count(&table, OWN_PID, LEADER).unwrap(), 1, "errno {errno}");
+        }
+    }
+
+    #[test]
+    fn counting_rejects_a_refused_process_whose_getpgid_fails() {
+        let table = FixedTable::proving().with_other_refused(Err(libc::EIO));
+        assert!(count(&table, OWN_PID, LEADER).is_err());
+    }
+
+    #[test]
+    fn a_permission_refused_stat_proves_nothing_even_when_getpgid_answers() {
+        let table = FixedTable::proving().with_other_refused(Ok(LEADER));
+        assert!(!scan(&table, OWN_PID, LEADER));
     }
 
     #[test]
