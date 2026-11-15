@@ -2,8 +2,8 @@
 //!
 //! A client needs two things to talk to a host — where it is listening, and
 //! what to authenticate with. The serving side needs the second of them to
-//! verify. That is the whole of this module: the loopback [`Endpoint`], and
-//! the [`tokens`] file.
+//! verify. This module owns the loopback [`Endpoint`], the [`tokens`] file,
+//! and the read-only [`settings`] that resolve the endpoint and serving knobs.
 //!
 //! **The shared dependency is not a channel.** Both sides reading the same
 //! convention out of the same crate is what keeps them from drifting; it is
@@ -25,6 +25,7 @@
 //! share no path, and no argument reaches across them because no API takes a
 //! channel.
 
+pub mod settings;
 pub mod tokens;
 
 use std::fmt;

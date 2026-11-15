@@ -149,6 +149,15 @@ pub const BACKGROUND_TURN_BUDGET: Duration = Duration::from_millis(100);
 /// thread is shared fairly rather than held.
 pub const BACKGROUND_THREADS: usize = 1;
 
+/// Release probes at 2k/10k documents found no consistent gain from 512-row pages.
+pub const STORE_PAGE_SIZE: usize = 128;
+/// Release probes favored 128 over 32; 512 offered no consistent build or warm-write gain.
+pub const CHANGESET_SIZE: usize = 128;
+/// One lifecycle slot preserves serial attachment work and bounds its active working set.
+pub const WORKER_SLOTS: usize = 1;
+/// A 50 ms poll preserves the measured in-process latency without a busy dispatcher.
+pub const WATCH_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
 /// Resource bounds for the concrete filesystem/store adapter.
 #[derive(Clone, Copy, Debug)]
 pub struct ProductionPolicy {
@@ -168,6 +177,26 @@ pub struct ProductionPolicy {
 }
 
 impl ProductionPolicy {
+    /// Compose serving policies without requiring the caller to name store types.
+    pub fn serving(
+        read_connections: usize,
+        read_idle_grace: Duration,
+        count_result_max_bytes: Option<u64>,
+        count_results_total_bytes: Option<u64>,
+    ) -> Result<Self, ProductionPolicyError> {
+        let read_budget = norn_store::ReadBudgetPolicy::new(read_connections, read_idle_grace)
+            .map_err(|_| ProductionPolicyError::ReadConnections(read_connections))?;
+        Ok(Self {
+            read_budget,
+            count_retention: norn_store::CountRetentionPolicy {
+                max_result_bytes: count_result_max_bytes,
+                total_bytes: count_results_total_bytes,
+                ..Default::default()
+            },
+            ..Self::new(STORE_PAGE_SIZE, CHANGESET_SIZE)?
+        })
+    }
+
     pub fn new(
         store_page_size: usize,
         changeset_size: usize,
@@ -213,6 +242,7 @@ impl ProductionPolicy {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProductionPolicyError {
+    ReadConnections(usize),
     StorePageSize(usize),
     ChangesetSize(usize),
 }
@@ -220,6 +250,10 @@ pub enum ProductionPolicyError {
 impl fmt::Display for ProductionPolicyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::ReadConnections(given) => write!(
+                f,
+                "reader capacity must allow at least two connections, got {given}"
+            ),
             Self::StorePageSize(given) => write!(
                 f,
                 "store page size must be between 1 and {}, got {given}",

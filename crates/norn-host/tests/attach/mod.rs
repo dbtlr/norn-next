@@ -405,7 +405,8 @@ impl Vault {
         self.serve_with_policy(
             names,
             schema_source,
-            ProductionPolicy::new(128, 128).expect("production policy"),
+            ProductionPolicy::new(norn_host::STORE_PAGE_SIZE, norn_host::CHANGESET_SIZE)
+                .expect("production policy"),
             compose,
         )
     }
@@ -448,8 +449,8 @@ impl Vault {
             ops,
             LifecyclePolicy {
                 idle_after: IDLE_AFTER,
-                worker_slots: 1,
-                watch_poll_interval: Duration::from_millis(50),
+                worker_slots: norn_host::WORKER_SLOTS,
+                watch_poll_interval: norn_host::WATCH_POLL_INTERVAL,
                 read_settle_bound: norn_host::READ_SETTLE_BOUND,
                 background_threads: norn_host::BACKGROUND_THREADS,
                 background_turn_budget: norn_host::BACKGROUND_TURN_BUDGET,
