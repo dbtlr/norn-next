@@ -594,6 +594,11 @@ fn an_error_detail_advertises_the_code_as_its_tag() {
             "engine/not-enabled",
             "engine/unavailable",
             "engine/failed",
+            "serve/bad-request",
+            "serve/unauthorized",
+            "serve/hello-refused",
+            "serve/request-too-large",
+            "serve/token-file-unreadable",
         ])
     );
 }
@@ -755,6 +760,11 @@ fn a_reason_code_advertises_its_flat_namespaced_string() {
             "engine/not-enabled",
             "engine/unavailable",
             "engine/failed",
+            "serve/bad-request",
+            "serve/unauthorized",
+            "serve/hello-refused",
+            "serve/request-too-large",
+            "serve/token-file-unreadable",
         ])
     );
 }

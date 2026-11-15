@@ -510,7 +510,7 @@
 //! [`ReasonCode`] for what was refused, and [`FindingKind`] for what a finding
 //! is filed under (`document/…`).
 //!
-//! [`ReasonCode`] holds four namespaces, and which one a code sits in is
+//! [`ReasonCode`] holds five namespaces, and which one a code sits in is
 //! decided by what the fact is about. `host/…` is a fact about the host's
 //! serving of an entry: a name it does not hold, a name it already serves, an
 //! entry that is held, warming, untrusted, or serving with its read seam
@@ -533,6 +533,10 @@
 //! any vault: a count it named outside the bound that count holds to, a part
 //! it carries that the answer it asks for does not take, or a cursor that
 //! names no position among the rows the request pages.
+//! `serve/…` is a fact about the server's own handling of the request, decided
+//! before any verb runs: a body it could not read as the route's shape or
+//! that is over its bound, a bearer it did not accept, a hello it refused, or
+//! a token file it cannot read, which refuses every request until it reads.
 //!
 //! A namespace names who the
 //! fact is about, never which crate produced it, and a code is *defined*
