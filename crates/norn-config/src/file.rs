@@ -459,6 +459,20 @@ fn name_identity(path: &Path) -> Result<Option<Identity>, ConfigError> {
     }
 }
 
+/// What is at `path` itself — a link's own metadata rather than its
+/// target's — or `None` when nothing is there.
+///
+/// A stat that fails for any reason but absence is the machine failing, and it
+/// travels as one.
+#[allow(clippy::disallowed_methods)] // Config-directory bytes: this crate owns them.
+pub(crate) fn name_metadata(path: &Path) -> Result<Option<std::fs::Metadata>, ConfigError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(io("reading the fingerprint of", path, error)),
+    }
+}
+
 /// An exclusive lock over one machine-local file, held for as long as the
 /// value lives.
 #[derive(Debug)]

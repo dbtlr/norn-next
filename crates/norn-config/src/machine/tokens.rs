@@ -73,7 +73,7 @@ use toml::{Table, Value};
 use crate::ConfigDirs;
 use crate::document::{self, Document};
 use crate::error::{ConfigError, corrupt};
-use crate::file::{Sensitivity, Stored};
+use crate::file::{self, Sensitivity, Stored};
 
 /// The key of the table holding the tokens.
 const TOKENS_KEY: &str = "tokens";
@@ -192,13 +192,25 @@ impl fmt::Debug for Token {
 }
 
 /// The token file, as read.
-#[derive(Clone, Debug)]
+///
+/// Its `Debug` prints the tokens, each with its secret redacted, and nothing
+/// of the document they were read from: the document holds every secret as
+/// text, and a derived `Debug` would print all of them.
+#[derive(Clone)]
 pub struct Tokens {
     document: Document,
     /// The sub-table each token was read from, keyed the same way as the
     /// tokens, so a key this build does not model survives a rewrite by it.
     raw: BTreeMap<TokenLabel, Table>,
     tokens: BTreeMap<TokenLabel, Token>,
+}
+
+impl fmt::Debug for Tokens {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Tokens")
+            .field("tokens", &self.tokens.values().collect::<Vec<_>>())
+            .finish_non_exhaustive()
+    }
 }
 
 impl Tokens {
@@ -243,6 +255,12 @@ impl Tokens {
     pub fn remove(&mut self, label: &TokenLabel) -> bool {
         self.raw.remove(label);
         self.tokens.remove(label).is_some()
+    }
+
+    /// The token labelled `label`, if there is one: one lookup, whatever the
+    /// number of tokens.
+    pub fn get(&self, label: &TokenLabel) -> Option<&Token> {
+        self.tokens.get(label)
     }
 
     /// Every label, in order.
@@ -371,6 +389,176 @@ pub fn mutate<T>(
     stored(dirs).mutate(apply)
 }
 
+/// What is at the token file's name, as the serving side compares it from one
+/// request to the next: which file (device and inode), its size, and its
+/// modification and change times, each to the nanosecond.
+///
+/// Taken without following a link, so a link planted at the name is a change
+/// of fingerprint — and the read that follows refuses it. Two fingerprints are
+/// the same file in the same state exactly when they are equal; what that
+/// misses is [`WatchedTokens`]'s declared limit.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Fingerprint {
+    device: u64,
+    inode: u64,
+    size: u64,
+    modified: (i64, i64),
+    changed: (i64, i64),
+}
+
+impl Fingerprint {
+    fn of(metadata: &std::fs::Metadata) -> Self {
+        use std::os::unix::fs::MetadataExt;
+        Fingerprint {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            size: metadata.size(),
+            modified: (metadata.mtime(), metadata.mtime_nsec()),
+            changed: (metadata.ctime(), metadata.ctime_nsec()),
+        }
+    }
+}
+
+/// The token file's fingerprint, or `None` when nothing is at its name.
+///
+/// One `lstat` of the name and nothing else: no open, no read, so it costs the
+/// same whatever the file holds. A stat that fails for any reason but absence
+/// is reported as itself.
+pub fn fingerprint(dirs: &ConfigDirs) -> Result<Option<Fingerprint>, ConfigError> {
+    Ok(file::name_metadata(&dirs.tokens_file())?.map(|metadata| Fingerprint::of(&metadata)))
+}
+
+/// The token set a long-lived holder serves from, kept fresh against the file
+/// by one fingerprint per check.
+///
+/// **Dormant carrier.** The serving layer's bearer middleware and hello, and
+/// the dialer's held-lock wait, hold one of these and check it once per
+/// request or poll; neither is built yet, so nothing in the workspace reaches
+/// it but its suite.
+///
+/// It holds the fingerprint it last took and the outcome of the read that
+/// followed it: the parsed [`Tokens`], or the refusal the read answered with.
+/// A [`check`](Self::check) takes the fingerprint once. Unchanged, that is the
+/// whole cost. Changed — or not taken at all, since a stat that fails says
+/// nothing about the file being the one that was read — it takes the
+/// fingerprint again, then reads, and holds the second fingerprint with the
+/// read's outcome. Because the held fingerprint was taken before the read, an
+/// edit landing between the two differs from it, and the next check reads
+/// again: an edit is never hidden behind a fingerprint taken after it.
+///
+/// **A changed file that no longer reads fails closed.** A TOML error, an
+/// illegal label, a mode reaching beyond the owner, a file over 1 MiB, or a
+/// FIFO, a device or a link at the name each leave [`current`](Self::current)
+/// answering the refusal, and a holder must refuse every request while it
+/// does. The old set is not kept: it would keep a revoked token working. A
+/// fingerprint that keeps failing fails closed the same way, with no read.
+/// The holder recovers on the first check that reads the file again.
+///
+/// **Declared limits.** A filesystem whose timestamps are coarser than the
+/// interval between two edits can miss the second of two same-size edits made
+/// in place within one tick, until the next change; the change time, which
+/// the kernel sets on every write and on any attempt to restore the
+/// modification time, catches an in-place, same-size edit and a restored
+/// modification time otherwise. And the fingerprint is the file's alone: a mode
+/// change on the config *directory* does not change it, so a directory
+/// loosened after a read is judged at the next change to the file, not before.
+#[derive(Debug)]
+pub struct WatchedTokens {
+    dirs: ConfigDirs,
+    fingerprint: Result<Option<Fingerprint>, ConfigError>,
+    outcome: Result<Tokens, ConfigError>,
+}
+
+/// What one [`WatchedTokens::check`] cost, and what it changed.
+///
+/// The serving side counts fingerprints and reads from it, and rebuilds
+/// anything it derived from the held set — a lookup index — only when the set
+/// was replaced.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Check {
+    fingerprints: u32,
+    read: bool,
+    replaced: bool,
+}
+
+impl Check {
+    /// How many fingerprints the check took: 1 when nothing changed, 2 when
+    /// something did.
+    pub const fn fingerprints(self) -> u32 {
+        self.fingerprints
+    }
+
+    /// Whether the check read the token file.
+    pub const fn read(self) -> bool {
+        self.read
+    }
+
+    /// Whether the held outcome — the set, or the refusal a holder fails
+    /// closed on — was replaced.
+    pub const fn replaced(self) -> bool {
+        self.replaced
+    }
+}
+
+impl WatchedTokens {
+    /// The token file as it reads now, with the fingerprint taken just before
+    /// the read: one fingerprint and one read.
+    ///
+    /// A read that refuses is held like any later one: the holder fails
+    /// closed from the start.
+    pub fn read(dirs: &ConfigDirs) -> Self {
+        let fingerprint = fingerprint(dirs);
+        let outcome = match &fingerprint {
+            Ok(_) => read(dirs),
+            Err(error) => Err(error.clone()),
+        };
+        WatchedTokens {
+            dirs: dirs.clone(),
+            fingerprint,
+            outcome,
+        }
+    }
+
+    /// Bring the held set up to date with the file, as the type's
+    /// documentation describes, and say what that cost.
+    pub fn check(&mut self) -> Check {
+        self.check_where(|| {})
+    }
+
+    /// [`check`](Self::check), with `between` run after the second fingerprint
+    /// and before the read: the window an edit can land in.
+    fn check_where(&mut self, between: impl FnOnce()) -> Check {
+        let first = fingerprint(&self.dirs);
+        if let (Ok(held), Ok(now)) = (&self.fingerprint, &first)
+            && held == now
+        {
+            return Check {
+                fingerprints: 1,
+                read: false,
+                replaced: false,
+            };
+        }
+        let second = fingerprint(&self.dirs);
+        between();
+        let (read_it, outcome) = match &second {
+            Ok(_) => (true, read(&self.dirs)),
+            Err(error) => (false, Err(error.clone())),
+        };
+        self.fingerprint = second;
+        self.outcome = outcome;
+        Check {
+            fingerprints: 2,
+            read: read_it,
+            replaced: true,
+        }
+    }
+
+    /// The set to serve from, or the refusal to fail closed on.
+    pub fn current(&self) -> Result<&Tokens, &ConfigError> {
+        self.outcome.as_ref()
+    }
+}
+
 /// The seconds since the Unix epoch at `moment`, or a refusal.
 ///
 /// A clock reading before the epoch has no stamp to give, and writing one
@@ -390,6 +578,39 @@ mod tests {
 
     fn label(text: &str) -> TokenLabel {
         TokenLabel::new(text).unwrap_or_else(|error| panic!("`{text}` is a label: {error}"))
+    }
+
+    /// The fingerprint a check holds is the one taken *before* its read, so an
+    /// edit landing between the two is read by the next check rather than
+    /// hidden behind a fingerprint that already describes it.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: the bases a case's state lives under.
+    fn an_edit_between_the_second_fingerprint_and_the_read_is_read_by_the_next_check() {
+        let scratch = norn_testkit::scratch::Scratch::new("norn-config-fresh-window");
+        std::fs::create_dir_all(scratch.join("config")).expect("a config base");
+        let dirs = ConfigDirs::new(scratch.join("config"), scratch.join("data"))
+            .expect("absolute scratch bases");
+        mutate(&dirs, |tokens| tokens.add(&label("laptop"), b"first")).expect("a token");
+        let mut watched = WatchedTokens::read(&dirs);
+        mutate(&dirs, |tokens| tokens.add(&label("service"), b"second")).expect("a token");
+
+        let check = watched.check_where(|| {
+            mutate(&dirs, |tokens| Ok(tokens.remove(&label("laptop")))).expect("a revocation");
+        });
+        assert!(check.read());
+        let held: Vec<&str> = watched
+            .current()
+            .expect("a set")
+            .labels()
+            .map(TokenLabel::as_str)
+            .collect();
+        assert_eq!(held, ["service"], "the read saw the edit in the window");
+
+        let next = watched.check();
+        assert!(
+            next.read(),
+            "the held fingerprint predates the edit, so the next check reads: {next:?}"
+        );
     }
 
     /// A secret in a log is a secret leaked, and the derived `Debug` is how it

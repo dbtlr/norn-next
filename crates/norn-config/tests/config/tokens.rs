@@ -537,3 +537,24 @@ pub(crate) fn make_fifo(path: &Path) {
         .expect("running mkfifo");
     assert!(status.success(), "mkfifo {} failed", path.display());
 }
+
+/// The set as a whole is printed without its secrets too: it was read from a
+/// document that holds every secret as text, and printing the document would
+/// print them all.
+#[test]
+fn a_token_sets_debug_does_not_carry_its_secrets() {
+    let scratch = Scratch::new("tokens-debug");
+    let dirs = scratch.dirs();
+    tokens::mutate(dirs, |tokens| {
+        tokens.add(&label("laptop"), b"the-secret-bytes")
+    })
+    .expect("a token");
+    let read = tokens::read(dirs).expect("the tokens");
+    let printed = format!("{read:?}");
+    assert!(printed.contains("laptop"), "{printed}");
+    assert!(
+        !printed.contains(&norn_wire::hex::encode(b"the-secret-bytes")),
+        "{printed}"
+    );
+    assert!(!printed.contains("secret-bytes"), "{printed}");
+}
