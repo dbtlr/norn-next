@@ -180,10 +180,11 @@ struct Witness {
 }
 
 impl Witness {
-    fn observe(&self, bytes: &[u8]) {
-        let text = String::from_utf8_lossy(bytes).to_ascii_lowercase();
-        if text.contains("authorization:") {
-            self.authorization.store(true, Ordering::SeqCst);
+    /// A witness of one connection's stream from the dialer.
+    fn stream(&self) -> StreamWitness {
+        StreamWitness {
+            seen: Vec::new(),
+            authorization: Arc::clone(&self.authorization),
         }
     }
 
@@ -192,8 +193,29 @@ impl Witness {
     }
 }
 
+/// What one connection's stream carried so far, lowercased: the header is
+/// searched for in all of it, so one split across reads is still seen.
+struct StreamWitness {
+    seen: Vec<u8>,
+    authorization: Arc<AtomicBool>,
+}
+
+impl StreamWitness {
+    fn observe(&mut self, bytes: &[u8]) {
+        self.seen.extend(bytes.iter().map(u8::to_ascii_lowercase));
+        let needle = b"authorization:";
+        if self
+            .seen
+            .windows(needle.len())
+            .any(|window| window == needle)
+        {
+            self.authorization.store(true, Ordering::SeqCst);
+        }
+    }
+}
+
 /// One HTTP request's head and body off `stream`, every byte witnessed.
-fn read_request(stream: &mut TcpStream, witness: &Witness) -> Option<(String, Vec<u8>)> {
+fn read_request(stream: &mut TcpStream, witness: &mut StreamWitness) -> Option<(String, Vec<u8>)> {
     let mut bytes = Vec::new();
     let mut buffer = [0u8; 4096];
     let head_end = loop {
@@ -223,7 +245,7 @@ fn read_request(stream: &mut TcpStream, witness: &Witness) -> Option<(String, Ve
 }
 
 /// Read everything else the dialer sends until it closes, witnessing it.
-fn witness_the_rest(stream: &mut TcpStream, witness: &Witness) {
+fn witness_the_rest(stream: &mut TcpStream, witness: &mut StreamWitness) {
     stream
         .set_read_timeout(Some(Duration::from_secs(10)))
         .unwrap();
@@ -246,7 +268,8 @@ fn forger(listener: TcpListener) -> Witness {
             let Ok(mut stream) = stream else { break };
             let seen = seen.clone();
             std::thread::spawn(move || {
-                let Some((head, _)) = read_request(&mut stream, &seen) else {
+                let mut witness = seen.stream();
+                let Some((head, _)) = read_request(&mut stream, &mut witness) else {
                     return;
                 };
                 seen.first_lines
@@ -268,7 +291,7 @@ fn forger(listener: TcpListener) -> Witness {
                     body.len()
                 );
                 let _ = stream.write_all(&body);
-                witness_the_rest(&mut stream, &seen);
+                witness_the_rest(&mut stream, &mut witness);
             });
         }
     });
@@ -280,6 +303,7 @@ fn forger(listener: TcpListener) -> Witness {
 fn relay(mut downstream: TcpStream, mut upstream: TcpStream, witness: Witness) {
     let mut down_reader = downstream.try_clone().unwrap();
     let mut up_writer = upstream.try_clone().unwrap();
+    let mut witness = witness.stream();
     std::thread::spawn(move || {
         let mut buffer = [0u8; 4096];
         while let Ok(read) = down_reader.read(&mut buffer) {
@@ -315,6 +339,18 @@ fn connect_from(source: Option<SocketAddr>, target: SocketAddr) -> TcpStream {
 }
 
 // The cases.
+
+/// The witness reads a stream, not each read: a header split across two
+/// reads, in any case, is still seen.
+#[test]
+fn the_witness_sees_an_authorization_header_split_across_reads() {
+    let witness = Witness::default();
+    let mut stream = witness.stream();
+    stream.observe(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthor");
+    assert!(!witness.saw_a_bearer());
+    stream.observe(b"IZATION: Bearer 00ff\r\n\r\n");
+    assert!(witness.saw_a_bearer());
+}
 
 /// The positive control, and the one exemption: a verified dial sends its
 /// bearer and is admitted, and the hello is the only exchange a host answers
@@ -663,7 +699,8 @@ fn an_answer_over_the_cap_is_refused_unread() {
             let Ok(mut stream) = stream else { break };
             let seen = seen.clone();
             std::thread::spawn(move || {
-                if read_request(&mut stream, &seen).is_none() {
+                let mut witness = seen.stream();
+                if read_request(&mut stream, &mut witness).is_none() {
                     return;
                 }
                 let body = vec![b' '; 1 << 20];
@@ -673,7 +710,7 @@ fn an_answer_over_the_cap_is_refused_unread() {
                     body.len()
                 );
                 let _ = stream.write_all(&body);
-                witness_the_rest(&mut stream, &seen);
+                witness_the_rest(&mut stream, &mut witness);
             });
         }
     });
