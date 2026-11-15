@@ -607,6 +607,8 @@ dependencies = [
 name = "norn"
 version = "0.0.0"
 dependencies = [
+ "http-body-util",
+ "hyper",
  "libc",
  "norn-client",
  "norn-config",
@@ -614,6 +616,7 @@ dependencies = [
  "norn-testkit",
  "norn-wire",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -621,8 +624,16 @@ name = "norn-client"
 version = "0.0.0"
 dependencies = [
  "clap",
+ "getrandom",
+ "hmac",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "norn-config",
  "norn-wire",
+ "serde_json",
+ "sha2",
+ "tokio",
 ]
 
 [[package]]
