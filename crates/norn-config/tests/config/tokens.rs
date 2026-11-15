@@ -628,3 +628,26 @@ fn a_stored_empty_secret_is_refused_on_read() {
     assert!(reason.contains("`secret` is empty"), "{reason}");
     assert!(tokens::WatchedTokens::read(dirs).current().is_err());
 }
+
+/// The write direction agrees with the read direction: a mutation whose
+/// result would be over 1 MiB is refused before anything is written, rather
+/// than leaving a file every later read refuses.
+#[test]
+fn a_mutation_that_would_write_past_one_mebibyte_writes_nothing() {
+    let scratch = Scratch::new("tokens-write-over-cap");
+    let dirs = scratch.dirs();
+    tokens::mutate(dirs, |tokens| tokens.add(&label("laptop"), b"secret")).expect("a token");
+    let before = scratch.text_at(&scratch.tokens_file());
+
+    // Hex doubles a secret, so this one alone renders past the cap.
+    let secret = vec![0x5a; TOKEN_FILE_CAP / 2];
+    let error = tokens::mutate(dirs, |tokens| tokens.add(&label("service"), &secret))
+        .expect_err("a token set over the cap");
+    assert!(
+        matches!(&error, ConfigError::Io { message, .. } if message.contains("exceed 1 MiB")),
+        "{error}"
+    );
+    assert_eq!(scratch.text_at(&scratch.tokens_file()), before);
+    let read = tokens::read(dirs).expect("the file as it was");
+    assert_eq!(read.labels().count(), 1);
+}

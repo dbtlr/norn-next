@@ -153,7 +153,8 @@ impl Sensitivity {
 pub(crate) struct Stored<S> {
     path: PathBuf,
     sensitivity: Sensitivity,
-    /// Whether every read of the file is refused past [`READ_CAP`] bytes.
+    /// Whether every read of the file is refused past [`READ_CAP`] bytes, and
+    /// every write that would leave it longer.
     capped: bool,
     /// Reads the bytes, handed the file's sensitivity so that a refusal of a
     /// private file can leave out what the file holds.
@@ -178,7 +179,8 @@ impl<S> Stored<S> {
     }
 
     /// The same file, refused as unreadable past [`READ_CAP`] bytes by every
-    /// read of it, the one inside a mutation included.
+    /// read of it, the one inside a mutation included — and never written
+    /// past that size by a mutation, which refuses instead.
     pub(crate) fn capped(self) -> Self {
         Stored {
             capped: true,
@@ -223,6 +225,15 @@ impl<S> Stored<S> {
         let mut state = (self.load)(&self.path, bytes.as_deref(), self.sensitivity)?;
         let outcome = apply(&mut state)?;
         let rendered = (self.render)(&mut state, &self.path)?;
+        if self.capped && rendered.len() as u64 > READ_CAP {
+            // Refused before anything lands: a file past the cap is one every
+            // later read of it refuses, this crate's own included.
+            return Err(io(
+                "writing",
+                &self.path,
+                std::io::Error::other("the file would exceed 1 MiB, which its reader refuses"),
+            ));
+        }
         if bytes.as_deref() == Some(rendered.as_bytes()) {
             // The mutation left the file's bytes exactly as they were.
             // Writing them would replace the file with a copy of itself: a new

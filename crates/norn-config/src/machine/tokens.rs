@@ -31,11 +31,17 @@
 //! # What a read refuses besides
 //!
 //! Every read of the file — [`read`], and the one inside [`mutate`] — opens it
-//! without blocking, refuses anything but a regular file by its open
-//! descriptor, and refuses a file over 1 MiB as unreadable. A FIFO or a device
-//! at the name is then an unreadable file rather than a read that waits for a
-//! writer, and a read's cost is bounded whatever was put at the name: the
-//! serving side reads this file inline on its I/O thread when it changes.
+//! without blocking and without following a link at the name, refuses
+//! anything but a regular file by its open descriptor, and refuses a file over
+//! 1 MiB as unreadable. A FIFO or a device at the name is then an unreadable
+//! file rather than a read that waits for a writer, and a read's cost is
+//! bounded whatever was put at the name: the serving side reads this file
+//! inline on its I/O thread when it changes. A [`mutate`] whose result would
+//! be over 1 MiB is refused before it writes, so this crate never leaves a
+//! file its own reader refuses.
+//!
+//! A stored secret that is empty is refused as corrupt, as [`Tokens::add`]
+//! refuses to store one.
 //!
 //! # What a refusal says
 //!
@@ -399,6 +405,10 @@ pub fn read(dirs: &ConfigDirs) -> Result<Tokens, ConfigError> {
 /// **`apply` must not call [`mutate`] again.** A nested mutation would wait on
 /// its own caller's lock forever, so it is refused with
 /// [`NestedMutation`](ConfigError::NestedMutation).
+///
+/// A mutation whose result would be over 1 MiB is refused with
+/// [`Io`](ConfigError::Io) and writes nothing: the read cap holds for this
+/// crate's own writes too.
 ///
 /// A [`MutationUnconfirmed`](ConfigError::MutationUnconfirmed) refusal means
 /// the token is in the file and its durability is not confirmed. The token was
