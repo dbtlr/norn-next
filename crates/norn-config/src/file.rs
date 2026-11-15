@@ -100,6 +100,11 @@ const BEYOND_OWNER: u32 = 0o077;
 /// use than waiting on it forever.
 const LOCK_ATTEMPTS: usize = 64;
 
+/// The most bytes a bounded read takes: 1 MiB. Past it the file is refused as
+/// unreadable rather than read whole, so a read's cost is bounded by this
+/// rather than by whatever was put at the name.
+pub(crate) const READ_CAP: u64 = 1_048_576;
+
 /// Distinguishes two temporary files taken in the same process.
 static SERIAL: AtomicU64 = AtomicU64::new(0);
 
@@ -148,6 +153,8 @@ impl Sensitivity {
 pub(crate) struct Stored<S> {
     path: PathBuf,
     sensitivity: Sensitivity,
+    /// Whether every read of the file is refused past [`READ_CAP`] bytes.
+    capped: bool,
     load: fn(&Path, Option<&[u8]>) -> Result<S, ConfigError>,
     render: fn(&mut S, &Path) -> Result<String, ConfigError>,
 }
@@ -162,14 +169,24 @@ impl<S> Stored<S> {
         Stored {
             path,
             sensitivity,
+            capped: false,
             load,
             render,
         }
     }
 
+    /// The same file, refused as unreadable past [`READ_CAP`] bytes by every
+    /// read of it, the one inside a mutation included.
+    pub(crate) fn capped(self) -> Self {
+        Stored {
+            capped: true,
+            ..self
+        }
+    }
+
     /// The value the file holds. Never writes, whatever it finds.
     pub(crate) fn read(&self) -> Result<S, ConfigError> {
-        let bytes = read(&self.path, self.sensitivity)?;
+        let bytes = read(&self.path, self.sensitivity, self.capped)?;
         (self.load)(&self.path, bytes.as_deref())
     }
 
@@ -200,7 +217,7 @@ impl<S> Stored<S> {
         let _lock = lock(&self.path, self.sensitivity)?;
         sweep_temporaries(&self.path)?;
 
-        let bytes = read(&self.path, self.sensitivity)?;
+        let bytes = read(&self.path, self.sensitivity, self.capped)?;
         let mut state = (self.load)(&self.path, bytes.as_deref())?;
         let outcome = apply(&mut state)?;
         let rendered = (self.render)(&mut state, &self.path)?;
@@ -216,20 +233,49 @@ impl<S> Stored<S> {
     }
 }
 
-/// The bytes at `path`, or `None` when nothing is there.
+/// The bytes at `path`, or `None` when nothing is there; when `capped`, a
+/// refusal past [`READ_CAP`] bytes.
 ///
 /// Absence is confirmed rather than assumed. A symlink pointing at nothing
 /// fails an open the way an absent file does, and so does a file under a
 /// directory symlink pointing at nothing, so both are asked about before the
 /// absence is reported.
-fn read(path: &Path, sensitivity: Sensitivity) -> Result<Option<Vec<u8>>, ConfigError> {
+fn read(
+    path: &Path,
+    sensitivity: Sensitivity,
+    capped: bool,
+) -> Result<Option<Vec<u8>>, ConfigError> {
     let Some(mut file) = open_existing(path, sensitivity)? else {
         return Ok(None);
     };
+    if capped {
+        return read_at_most(file, path).map(Some);
+    }
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)
         .map_err(|error| io("reading", path, error))?;
     Ok(Some(bytes))
+}
+
+/// The whole of `file`, or a refusal when it holds more than [`READ_CAP`]
+/// bytes.
+///
+/// At most one byte past the cap is read: that byte is what tells a file of
+/// exactly the cap, which is read, from a longer one, which is refused.
+#[allow(clippy::disallowed_types)] // Config-directory bytes: this crate owns them.
+fn read_at_most(file: std::fs::File, path: &Path) -> Result<Vec<u8>, ConfigError> {
+    let mut bytes = Vec::new();
+    file.take(READ_CAP + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| io("reading", path, error))?;
+    if bytes.len() as u64 > READ_CAP {
+        return Err(io(
+            "reading",
+            path,
+            std::io::Error::other("file exceeds 1 MiB"),
+        ));
+    }
+    Ok(bytes)
 }
 
 #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // Config-directory bytes: this crate owns them.
@@ -695,7 +741,6 @@ fn lock_path(path: &Path) -> Result<PathBuf, ConfigError> {
 /// Bounded regular-file read for settings; links are intentionally followed.
 #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // Machine-local read seam.
 pub(crate) fn read_settings(path: &Path, optional: bool) -> Result<Option<Vec<u8>>, ConfigError> {
-    use std::io::Read;
     let file = match std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY)
@@ -731,18 +776,7 @@ pub(crate) fn read_settings(path: &Path, optional: bool) -> Result<Option<Vec<u8
             std::io::Error::other("not a regular file"),
         ));
     }
-    let mut bytes = Vec::new();
-    file.take(1_048_577)
-        .read_to_end(&mut bytes)
-        .map_err(|e| io("reading", path, e))?;
-    if bytes.len() > 1_048_576 {
-        return Err(io(
-            "reading",
-            path,
-            std::io::Error::other("file exceeds 1 MiB"),
-        ));
-    }
-    Ok(Some(bytes))
+    read_at_most(file, path).map(Some)
 }
 
 /// The kernel's dynamic port range, falling back to the platform default if unavailable.
