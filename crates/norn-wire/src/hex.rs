@@ -115,4 +115,20 @@ mod tests {
         let thirty_two = [0x5a; 32];
         assert_eq!(decode_array::<32>(&encode(&thirty_two)), Some(thirty_two));
     }
+
+    /// The bytes just outside each digit range are not digits, in either
+    /// nibble: `/` and `:` around `0-9`, `` ` `` and `g` around `a-f`, and
+    /// `@` and `G` around the uppercase range the decoder also refuses.
+    #[test]
+    fn the_bytes_beside_each_digit_range_are_refused_in_both_nibbles() {
+        for outside in ['/', ':', '`', 'g', '@', 'G'] {
+            for pair in [format!("{outside}0"), format!("0{outside}")] {
+                assert_eq!(decode(&pair), None, "`{pair}` decoded");
+                assert_eq!(decode_array::<1>(&pair), None, "`{pair}` decoded");
+            }
+        }
+        for inside in ['0', '9', 'a', 'f'] {
+            assert!(decode(&format!("{inside}{inside}")).is_some(), "`{inside}`");
+        }
+    }
 }

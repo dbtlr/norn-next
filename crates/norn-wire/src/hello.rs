@@ -755,4 +755,19 @@ mod tests {
             "{twice}"
         );
     }
+
+    /// A MAC is 64 digits exactly: a decode of any other even width, short or
+    /// long, is no MAC rather than the first 32 bytes of one.
+    #[test]
+    fn a_mac_of_any_width_but_sixty_four_digits_reads_as_none() {
+        let json = serde_json::to_value(HelloAnswer::new(facts(), [0x5a; 32])).expect("json");
+        for digits in [62, 66, 128] {
+            let mut answer = json.clone();
+            answer["mac"] = serde_json::Value::String("5a".repeat(digits / 2));
+            let read: HelloAnswer = serde_json::from_value(answer).expect("an answer");
+            assert_eq!(read.mac(), None, "a {digits}-digit MAC read as one");
+        }
+        let read: HelloAnswer = serde_json::from_value(json).expect("an answer");
+        assert_eq!(read.mac(), Some([0x5a; 32]));
+    }
 }
