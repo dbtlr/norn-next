@@ -135,8 +135,12 @@ fn counters(context: &Context) -> Answer {
     json(StatusCode::OK, body.to_string().into_bytes())
 }
 
-/// `POST /v1/hello`: the body read under its cap, then one check of the
-/// token set and one lookup by label.
+/// `POST /v1/hello`: one check of the token set, then the body read under
+/// its cap, then one lookup by label.
+///
+/// The check comes before the body, so the fail-closed state is answered to
+/// every hello, whatever its body: a caller nobody has verified learns of a
+/// malformed or oversized body only from a host that is serving.
 async fn hello<B>(
     request: Request<B>,
     context: &Context,
@@ -147,6 +151,14 @@ where
     B: Body<Data = Bytes>,
     B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
 {
+    let failed_closed = {
+        let mut credentials = context.credentials();
+        credentials.check();
+        credentials.fails_closed()
+    };
+    if failed_closed {
+        return token_file_unreadable();
+    }
     let body = match capped_body(request).await {
         Ok(body) => body,
         Err(Unread::TooLarge) => {
@@ -170,13 +182,12 @@ where
         local,
         peer,
     );
-    let keyed = {
-        let mut credentials = context.credentials();
-        credentials.check();
-        credentials.key(hello.label(), || {
-            hello.nonce().map(|nonce| facts.mac_input(&nonce))
-        })
-    };
+    // No second check: the held set is the one this request's check left,
+    // unless another connection's check replaced it while the body arrived,
+    // and `key` answers whatever is held now, a fail-closed state included.
+    let keyed = context.credentials().key(hello.label(), || {
+        hello.nonce().map(|nonce| facts.mac_input(&nonce))
+    });
     match keyed {
         Keyed::Mac(mac) => {
             let answer = HelloAnswer::new(facts, mac);
@@ -532,25 +543,76 @@ mod tests {
         assert!(body.is_empty());
     }
 
+    /// The fail-closed state is answered before a hello's body is read, so
+    /// a body that is malformed or over the cap meets it too.
     #[test]
     fn the_fail_closed_state_refuses_the_hello_and_every_bearer_with_500() {
         let case = case("norn-serve-fail-closed");
         let stored = norn_wire::hex::encode(SECRET);
         fail_closed(&case);
-        for request in [
-            request(
-                Method::POST,
-                HELLO_PATH,
-                None,
-                &hello_body("default", &nonce().to_hex()),
+        let mut declared_over = request(Method::POST, HELLO_PATH, None, b"{}");
+        declared_over
+            .headers_mut()
+            .insert(CONTENT_LENGTH, HeaderValue::from_static("4097"));
+        for (what, request) in [
+            (
+                "a hello",
+                request(
+                    Method::POST,
+                    HELLO_PATH,
+                    None,
+                    &hello_body("default", &nonce().to_hex()),
+                ),
             ),
-            request(Method::GET, "/", Some(&stored), b""),
-            request(Method::GET, "/", None, b""),
+            ("an array", request(Method::POST, HELLO_PATH, None, b"[1]")),
+            (
+                "not json",
+                request(Method::POST, HELLO_PATH, None, b"notjson"),
+            ),
+            (
+                "no nonce",
+                request(Method::POST, HELLO_PATH, None, br#"{"label":"default"}"#),
+            ),
+            (
+                "over the cap",
+                request(Method::POST, HELLO_PATH, None, &[b' '; 5000]),
+            ),
+            ("declared over the cap", declared_over),
+            ("a bearer", request(Method::GET, "/", Some(&stored), b"")),
+            ("no bearer", request(Method::GET, "/", None, b"")),
         ] {
             let (status, _, body) = send(&case, request);
-            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-            assert_eq!(code(&body), "serve/token-file-unreadable");
-            assert!(!String::from_utf8_lossy(&body).contains("mac"));
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{what}");
+            assert_eq!(code(&body), "serve/token-file-unreadable", "{what}");
+            assert!(!String::from_utf8_lossy(&body).contains("mac"), "{what}");
+        }
+    }
+
+    /// Every hello makes the one check, whatever its body, and only one: a
+    /// hello refused for its body costs one fingerprint and no lookup.
+    #[test]
+    fn every_hello_checks_the_token_file_exactly_once() {
+        let case = case("norn-serve-hello-one-check");
+        let good = nonce().to_hex();
+        let mut over = hello_body("default", &good);
+        over.resize(HELLO_BODY_BYTES + 1, b' ');
+        for (what, body, lookups) in [
+            ("a hello", hello_body("default", &good), 1),
+            ("not json", b"notjson".to_vec(), 0),
+            ("over the cap", over, 0),
+        ] {
+            let before = case.context.credentials().counters();
+            send(&case, request(Method::POST, HELLO_PATH, None, &body));
+            let after = case.context.credentials().counters();
+            assert_eq!(
+                (
+                    after.fingerprints - before.fingerprints,
+                    after.file_reads - before.file_reads,
+                    after.lookups - before.lookups,
+                ),
+                (1, 0, lookups),
+                "{what}"
+            );
         }
     }
 

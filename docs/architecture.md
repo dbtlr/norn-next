@@ -2563,8 +2563,8 @@ the tokens, and a digest hit that is not the secret is still refused. Each reque
 one fingerprint, and a read only when it changed — runs inline on the I/O thread, the hello's
 included; neither waits on a blocking pool. No bearer, a malformed one, or one that names no
 stored token answers 401 `serve/unauthorized`; the fail-closed state answers 500
-`serve/token-file-unreadable` to every request, the hello included, before any bearer is
-read, and the log says so once, on entering the state, naming the file and the fix. An
+`serve/token-file-unreadable` to every request, the hello included, before any bearer or
+hello body is read, and the log says so once, on entering the state, naming the file and the fix. An
 authenticated request to a path with no route answers 404 with an empty body.
 
 **A client verifies the host before it sends a bearer** ([ADR
@@ -2606,7 +2606,9 @@ naming each key once: an array, or a key given twice, does not parse.
 
 The hello's request is `{"label": "...", "nonce": "<64 lowercase hex>"}`: the label of the
 token the dialer holds and 32 random bytes, sent as `POST /v1/hello`, the one exchange the
-bearer middleware does not stand in front of (any other method at that path meets it). Its
+bearer middleware does not stand in front of (any other method at that path meets it). The
+hello makes its one check of the token file before it reads the body, so while the file
+fails closed every hello answers 500 `serve/token-file-unreadable`, whatever its body. Its
 body is capped at 4 KiB (`norn-wire`'s `HELLO_BODY_BYTES`): over the cap, by its declared
 length or by what arrives, it answers 413 `serve/request-too-large` before it is read whole.
 The label and the nonce arrive as text and are read after the body parses, so a body of this

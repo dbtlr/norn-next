@@ -101,6 +101,12 @@ impl Credentials {
         }
     }
 
+    /// Whether the held outcome is a refusal: the fail-closed state, in
+    /// which every request is refused until the file reads again.
+    pub(crate) fn fails_closed(&self) -> bool {
+        self.watched.current().is_err()
+    }
+
     /// Rebuild the index from the held outcome, and log the transitions into
     /// and out of the fail-closed state.
     fn held_replaced(&mut self) {
@@ -135,7 +141,7 @@ impl Credentials {
     /// The bearer middleware's decision over the `Authorization` values a
     /// request carried. [`check`](Self::check) is the caller's, first.
     pub(crate) fn admit<'a>(&mut self, authorization: impl Iterator<Item = &'a [u8]>) -> Admission {
-        if self.watched.current().is_err() {
+        if self.fails_closed() {
             return Admission::FailedClosed;
         }
         let Some(presented) = bearer(authorization) else {

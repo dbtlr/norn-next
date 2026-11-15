@@ -16,7 +16,7 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 
 use norn_config::machine::tokens::{self, TokenLabel};
-use support::{Fixture, assert_refused_start, free_port, get, hello};
+use support::{Fixture, assert_refused_start, exchange, free_port, get, hello};
 
 fn labels(fixture: &Fixture) -> Vec<String> {
     tokens::read(&fixture.dirs())
@@ -241,6 +241,12 @@ fn a_changed_file_that_no_longer_reads_refuses_every_request_until_it_reads_agai
         get(port, "/", None),
         get(port, "/v1/debug/counters", Some(&bearer)),
         hello(port, "default"),
+        // The state is answered before a hello's body is read, so neither a
+        // malformed body nor one over the cap is told apart from a good one.
+        exchange(port, "POST", "/v1/hello", None, b"[1]"),
+        exchange(port, "POST", "/v1/hello", None, b"notjson"),
+        exchange(port, "POST", "/v1/hello", None, br#"{"label":"default"}"#),
+        exchange(port, "POST", "/v1/hello", None, &[b' '; 5000]),
     ] {
         assert_eq!(reply.status, 500, "{reply:?}");
         assert_eq!(reply.code(), "serve/token-file-unreadable", "{reply:?}");
