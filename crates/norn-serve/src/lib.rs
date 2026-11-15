@@ -275,9 +275,16 @@ fn construct(
         }
     };
     let registry = RegistryRead::load(&dirs).map_err(|error| {
+        // An error that already names the file is not prefixed with it again.
+        let path = dirs.config_dir().join("registry.toml");
+        let error = error.to_string();
+        let named = if error.contains(&path.display().to_string()) {
+            error
+        } else {
+            format!("{}: {error}", path.display())
+        };
         Refusal(format!(
-            "{}: {error}; repair the registry file, or move it aside to start with no vaults",
-            dirs.config_dir().join("registry.toml").display()
+            "{named}; repair the registry file, or move it aside to start with no vaults"
         ))
     })?;
     let production = policy::production(settings)

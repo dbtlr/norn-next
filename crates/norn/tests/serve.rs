@@ -409,7 +409,11 @@ fn invalid_registry_entries_refuse_naming_the_file_and_the_fix() {
         .unwrap();
         let (status, stderr) = fixture.run(&["serve"]);
         assert_eq!(status, RunStatus::Exited(1), "{stderr}");
-        assert!(stderr.contains(&path.display().to_string()), "{stderr}");
+        assert_eq!(
+            stderr.matches(&path.display().to_string()).count(),
+            1,
+            "{stderr}"
+        );
         assert!(stderr.contains("repair the registry file"), "{stderr}");
     }
 }
@@ -425,7 +429,11 @@ fn a_registry_fifo_refuses_naming_the_file() {
     assert_eq!(unsafe { libc::mkfifo(cpath.as_ptr(), 0o600) }, 0);
     let (status, stderr) = fixture.run(&["serve"]);
     assert_eq!(status, RunStatus::Exited(1), "{stderr}");
-    assert!(stderr.contains(&path.display().to_string()), "{stderr}");
+    assert_eq!(
+        stderr.matches(&path.display().to_string()).count(),
+        1,
+        "{stderr}"
+    );
     assert!(stderr.contains("not a regular file"), "{stderr}");
 }
 
