@@ -24,6 +24,8 @@ use std::process::Command;
 
 use serde_yaml::Value;
 
+use crate::workflows::{SQLITE_OPT_FLAG, SQLITE_OPT_VALUE};
+
 /// The jobs of `ci.yml` that are the two package shards.
 pub const SHARD_JOBS: [&str; 2] = ["build", "build-host"];
 
@@ -120,7 +122,9 @@ pub struct Shard {
 /// The shard selections `workflow` (the text of `ci.yml`) runs.
 ///
 /// Each shard job must hold exactly one `cargo test` step, and its command may
-/// carry only `--locked` and the package selectors the guard understands; any
+/// carry only `--locked`, the one exact `--config` pair that
+/// builds the bundled SQLite at opt-level 3 (see `workflows::SQLITE_OPT_FLAG`),
+/// and the package selectors the guard understands; any
 /// other flag could change what is built, so it is refused rather than
 /// ignored.
 pub fn shards_in(workflow: &str) -> Result<Vec<Shard>, String> {
@@ -165,6 +169,14 @@ fn selection_of(command: &str) -> Result<Selection, String> {
     while let Some(word) = words.next() {
         match word {
             "--locked" => {}
+            SQLITE_OPT_FLAG => {
+                // The one pair `ci.yml` may carry; see the constants.
+                if words.next() != Some(SQLITE_OPT_VALUE) {
+                    return Err(format!(
+                        "`{command}` carries `{word}` with a value other than `{SQLITE_OPT_VALUE}`"
+                    ));
+                }
+            }
             "--workspace" => selection.push(word.to_string()),
             "-p" | "--package" | "--exclude" => {
                 let name = words
@@ -371,6 +383,41 @@ jobs:
                 "-p norn-host -p norn-testkit"
             ]
         );
+    }
+
+    #[test]
+    fn the_sqlite_opt_level_pair_does_not_change_a_shard_selection() {
+        let workflow = WORKFLOW.replace(
+            "cargo test --locked",
+            "cargo test --locked --config profile.dev.package.libsqlite3-sys.opt-level=3",
+        );
+        assert_eq!(
+            shards_in(&workflow).expect("reading the shards"),
+            shards_in(WORKFLOW).expect("reading the shards")
+        );
+    }
+
+    #[test]
+    fn any_other_config_is_refused() {
+        for config in [
+            "--config profile.dev.opt-level=3",
+            "--config profile.dev.package.libsqlite3-sys.opt-level=2",
+            "--config profile.dev.package.rusqlite.opt-level=3",
+            "--config profile.test.package.libsqlite3-sys.opt-level=3",
+            "--config=profile.dev.package.libsqlite3-sys.opt-level=3",
+            "--config --locked",
+        ] {
+            let workflow = WORKFLOW.replace(
+                "cargo test --locked",
+                &format!("cargo test --locked {config}"),
+            );
+            assert!(shards_in(&workflow).is_err(), "{config}");
+        }
+        let workflow = WORKFLOW.replace(
+            "-p norn-host -p norn-testkit",
+            "-p norn-host -p norn-testkit --config",
+        );
+        assert!(shards_in(&workflow).is_err());
     }
 
     #[test]

@@ -57,7 +57,11 @@
 //! front, then either the lane script with a package, a target and harness
 //! arguments that select nothing, or `cargo test` with the flags that name a
 //! package, a feature and the targets it selects and the few that change
-//! nothing about which tests run. `--release` is not among them: it compiles
+//! nothing about which tests run. One more is read, only as the exact pair
+//! `--config profile.dev.package.libsqlite3-sys.opt-level=3`: it changes how
+//! one C dependency is compiled, not which tests run, and the lane script never
+//! passes it, so a lane command carrying it is no lane step. Any other
+//! `--config` runs nothing. `--release` is not among them: it compiles
 //! out every test gated on `debug_assertions`. A command outside that grammar
 //! runs nothing, so a step this
 //! cannot read fails whatever needed it rather than vouching for a test it may
@@ -92,6 +96,17 @@ const LANE_SCRIPT_FILE: &str = "lane-suite.sh";
 /// The wrapper a step may run its command through, which runs the command it
 /// is given and changes nothing about it.
 const FLAKE_TRIPWIRE: &str = ".github/scripts/flake-tripwire.sh";
+
+/// The one cargo flag, and its one value, that compiles the bundled SQLite at
+/// opt-level 3 for a functional `cargo test` step. It changes how one C
+/// dependency is built, not which tests run. Only this exact pair is read: any
+/// other `--config` could change what is built or run, and the build-profile
+/// guard cannot see a `--config` flag, so nothing wider is trusted. The lane
+/// script builds its own command and never passes it.
+pub(crate) const SQLITE_OPT_FLAG: &str = "--config";
+
+/// The value [`SQLITE_OPT_FLAG`] may carry, and no other.
+pub(crate) const SQLITE_OPT_VALUE: &str = "profile.dev.package.libsqlite3-sys.opt-level=3";
 
 /// The environment key a lane step names its cargo features through.
 pub(crate) const LANE_FEATURES: &str = "LANE_FEATURES";
@@ -581,6 +596,7 @@ fn featured_runs_of(arguments: &[&str]) -> Option<Vec<FeaturedRun>> {
     while let Some(token) = tokens.next() {
         match token {
             "--locked" | "--frozen" | "--offline" | "--no-fail-fast" => {}
+            SQLITE_OPT_FLAG => (tokens.next()? == SQLITE_OPT_VALUE).then_some(())?,
             "-p" | "--package" => packages.push(tokens.next()?),
             "-F" | "--features" => features.extend(tokens.next()?.split(',')),
             "--lib" => targets.push(Target::Lib),
@@ -819,6 +835,66 @@ mod tests {
         );
         for narrowing in ["--no-run", "--release", "-- --ignored", "a_filter"] {
             assert_eq!(invocation(&format!("{command} {narrowing}")), None);
+        }
+    }
+
+    /// The one `--config` pair a `cargo test` step may carry still vouches for
+    /// everything else the step names.
+    #[test]
+    fn the_sqlite_opt_level_pair_changes_nothing_about_what_a_step_runs() {
+        let bare = "cargo test --locked -p norn-host --features induced-failure --test churn";
+        let with_pair = "cargo test --locked --config profile.dev.package.libsqlite3-sys.opt-level=3 \
+                         -p norn-host --features induced-failure --test churn";
+        assert_eq!(
+            invocation(with_pair),
+            tested(vec![run(
+                "norn-host",
+                Some(Target::Integration("churn".to_string())),
+                "induced-failure"
+            )])
+        );
+        assert_eq!(invocation(with_pair), invocation(bare));
+    }
+
+    /// **Any other `--config` reads as nothing**: another key, another
+    /// package, another level, the `=` spelling, a missing value, or a flag in
+    /// the value's place.
+    #[test]
+    fn any_other_config_runs_nothing() {
+        let head = "cargo test --locked";
+        let tail = "-p norn-host --features induced-failure";
+        for config in [
+            "--config profile.dev.opt-level=3",
+            "--config profile.dev.package.libsqlite3-sys.opt-level=2",
+            "--config profile.dev.package.rusqlite.opt-level=3",
+            "--config profile.test.package.libsqlite3-sys.opt-level=3",
+            "--config=profile.dev.package.libsqlite3-sys.opt-level=3",
+            "--config profile.dev.package.libsqlite3-sys.opt-level=3 --config profile.dev.opt-level=3",
+            "--config --locked",
+        ] {
+            assert_eq!(
+                invocation(&format!("{head} {config} {tail}")),
+                None,
+                "{config}"
+            );
+        }
+        assert_eq!(invocation(&format!("{head} {tail} --config")), None);
+    }
+
+    /// **The lane script never passes the flag**, so a lane command carrying
+    /// it is no lane step.
+    #[test]
+    fn a_lane_command_carrying_the_sqlite_opt_level_pair_is_no_lane_step() {
+        let pair = "--config profile.dev.package.libsqlite3-sys.opt-level=3";
+        for command in [
+            format!(".github/scripts/lane-suite.sh norn-host memory {pair}"),
+            format!(".github/scripts/lane-suite.sh norn-host memory --nocapture {pair}"),
+            format!(".github/scripts/lane-suite.sh {pair} norn-host memory"),
+            format!(
+                ".github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host memory {pair}"
+            ),
+        ] {
+            assert_eq!(invocation(&command), None, "{command}");
         }
     }
 
