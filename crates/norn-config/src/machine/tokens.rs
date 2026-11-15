@@ -79,6 +79,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use norn_wire::hex;
@@ -428,9 +429,11 @@ pub fn mutate<T>(
 /// modification and change times, each to the nanosecond.
 ///
 /// Taken without following a link, so a link planted at the name is a change
-/// of fingerprint — and the read that follows refuses it. Two fingerprints are
-/// the same file in the same state exactly when they are equal; what that
-/// misses is [`WatchedTokens`]'s declared limit.
+/// of fingerprint — and the read that follows refuses it. Two equal
+/// fingerprints are the same file in the same state only once the file's
+/// times have [settled](SETTLE_WINDOW): a filesystem stamps a write with a
+/// clock that ticks in milliseconds, so two writes inside one tick can leave
+/// equal fingerprints behind them.
 ///
 /// Crate-private: the serving side and the dialer reach freshness only through
 /// [`WatchedTokens`], which is the one place a fingerprint is compared.
@@ -454,15 +457,87 @@ impl Fingerprint {
             changed: (metadata.ctime(), metadata.ctime_nsec()),
         }
     }
+
+    /// The later of the file's modification and change times, in nanoseconds
+    /// from the Unix epoch: the last moment the filesystem stamped on it.
+    fn latest_nanos(&self) -> i128 {
+        let nanos = |(seconds, nanoseconds): (i64, i64)| {
+            i128::from(seconds) * 1_000_000_000 + i128::from(nanoseconds)
+        };
+        nanos(self.modified).max(nanos(self.changed))
+    }
 }
 
-/// The token file's fingerprint, or `None` when nothing is at its name.
+/// How long a token file's times must stand before the moment a fingerprint
+/// is taken for that fingerprint to vouch for the file: 2 s.
+///
+/// A filesystem stamps a write with a coarse clock — one kernel tick on ext4
+/// (a few milliseconds), 1 s on some network and older filesystems, 2 s on FAT
+/// — so a second write in the tick of the first can leave every field of the
+/// fingerprint as the first left it. A fingerprint taken after the file's
+/// latest time is at least one window old is out of that reach: any later
+/// write is stamped in a later tick, so it differs. One taken sooner is
+/// **racy**, and a holder reads the file again rather than trust it. The value
+/// is the coarsest tick of a filesystem in common use, FAT's; it is git's
+/// "racy timestamp" rule for its index, applied to the token file.
+pub(crate) const SETTLE_WINDOW: Duration = Duration::from_secs(2);
+
+/// A fingerprint and the wall-clock moment it was taken: the clock is read
+/// right after the `lstat`, so a write landing between the two is stamped no
+/// later than that moment, and inside its window.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Taken {
+    fingerprint: Option<Fingerprint>,
+    at: SystemTime,
+}
+
+impl Taken {
+    /// Whether this fingerprint is too young to vouch for the file: the
+    /// file's latest time is less than [`SETTLE_WINDOW`] before the moment
+    /// it was taken, or after it. Nothing at the name is never racy — a file
+    /// arriving there is a change of fingerprint whatever its times.
+    fn racy(&self) -> bool {
+        let Some(fingerprint) = &self.fingerprint else {
+            return false;
+        };
+        let at = match self.at.duration_since(UNIX_EPOCH) {
+            Ok(since) => since.as_nanos() as i128,
+            Err(before) => -(before.duration().as_nanos() as i128),
+        };
+        at - fingerprint.latest_nanos() < SETTLE_WINDOW.as_nanos() as i128
+    }
+}
+
+/// The token file's fingerprint — `None` when nothing is at its name — and
+/// the moment `clock` reads right after it.
 ///
 /// One `lstat` of the name and nothing else: no open, no read, so it costs the
 /// same whatever the file holds. A stat that fails for any reason but absence
 /// is reported as itself.
-pub(crate) fn fingerprint(dirs: &ConfigDirs) -> Result<Option<Fingerprint>, ConfigError> {
-    Ok(file::name_metadata(&dirs.tokens_file())?.map(|metadata| Fingerprint::of(&metadata)))
+fn fingerprint(dirs: &ConfigDirs, clock: &WallClock) -> Result<Taken, ConfigError> {
+    let metadata = file::name_metadata(&dirs.tokens_file())?;
+    let at = clock.now();
+    Ok(Taken {
+        fingerprint: metadata.map(|metadata| Fingerprint::of(&metadata)),
+        at,
+    })
+}
+
+/// The wall clock a [`WatchedTokens`] reads the moment of each fingerprint
+/// from: the system clock, or the clock a suite states.
+#[derive(Clone)]
+struct WallClock(Arc<dyn Fn() -> SystemTime + Send + Sync>);
+
+impl WallClock {
+    fn now(&self) -> SystemTime {
+        (self.0)()
+    }
+}
+
+impl fmt::Debug for WallClock {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("WallClock")
+    }
 }
 
 /// The token set a long-lived holder serves from, kept fresh against the file
@@ -514,7 +589,8 @@ pub(crate) fn fingerprint(dirs: &ConfigDirs) -> Result<Option<Fingerprint>, Conf
 #[derive(Debug)]
 pub struct WatchedTokens {
     dirs: ConfigDirs,
-    fingerprint: Result<Option<Fingerprint>, ConfigError>,
+    clock: WallClock,
+    fingerprint: Result<Taken, ConfigError>,
     outcome: Result<Tokens, ConfigError>,
 }
 
@@ -557,13 +633,30 @@ impl WatchedTokens {
     /// A read that refuses is held like any later one: the holder fails
     /// closed from the start.
     pub fn read(dirs: &ConfigDirs) -> Self {
-        let fingerprint = fingerprint(dirs);
+        WatchedTokens::read_with_clock(dirs, SystemTime::now)
+    }
+
+    /// [`read`](Self::read), with the moment of each fingerprint read from
+    /// `clock` rather than the system clock.
+    ///
+    /// A suite's seam — this crate's, and the serving side's counter bar: a
+    /// file's change time cannot be set back, so a holder is shown a
+    /// [settled](Self#a-young-fingerprint-is-read-again) file by a clock set
+    /// forward rather than by waiting out the window, and a racy one by a
+    /// clock set behind.
+    pub fn read_with_clock(
+        dirs: &ConfigDirs,
+        clock: impl Fn() -> SystemTime + Send + Sync + 'static,
+    ) -> Self {
+        let clock = WallClock(Arc::new(clock));
+        let fingerprint = fingerprint(dirs, &clock);
         let outcome = match &fingerprint {
             Ok(_) => read(dirs),
             Err(error) => Err(error.clone()),
         };
         WatchedTokens {
             dirs: dirs.clone(),
+            clock,
             fingerprint,
             outcome,
         }
@@ -578,13 +671,16 @@ impl WatchedTokens {
     /// [`check`](Self::check), with `between` run after the second fingerprint
     /// and before the read: the window an edit can land in.
     fn check_where(&mut self, between: impl FnOnce()) -> Check {
-        let first = fingerprint(&self.dirs);
+        let first = fingerprint(&self.dirs, &self.clock);
         // A held refusal is never an unchanged file: what it refused can lift
         // with the file as it was — a directory tightened, a descriptor freed
-        // — so while it is held, every check reads again.
+        // — so while it is held, every check reads again. Nor is a racy held
+        // fingerprint: a same-size edit in the tick of the last one would
+        // leave it as it is, so until the file settles, every check reads.
         if self.outcome.is_ok()
             && let (Ok(held), Ok(now)) = (&self.fingerprint, &first)
-            && held == now
+            && held.fingerprint == now.fingerprint
+            && !held.racy()
         {
             return Check {
                 fingerprints: 1,
@@ -592,7 +688,7 @@ impl WatchedTokens {
                 replaced: false,
             };
         }
-        let second = fingerprint(&self.dirs);
+        let second = fingerprint(&self.dirs, &self.clock);
         between();
         let (read_it, outcome) = match &second {
             Ok(_) => (true, read(&self.dirs)),
@@ -634,6 +730,16 @@ mod tests {
         TokenLabel::new(text).unwrap_or_else(|error| panic!("`{text}` is a label: {error}"))
     }
 
+    /// A clock an hour ahead of the system's: every file a case writes is
+    /// settled under it, so what a case pins is the fingerprint.
+    fn an_hour_ahead() -> SystemTime {
+        SystemTime::now() + Duration::from_secs(3_600)
+    }
+
+    fn system_clock() -> WallClock {
+        WallClock(Arc::new(SystemTime::now))
+    }
+
     /// The fingerprint a check holds is the one taken *before* its read, so an
     /// edit landing between the two is read by the next check rather than
     /// hidden behind a fingerprint that already describes it.
@@ -645,7 +751,7 @@ mod tests {
         let dirs = ConfigDirs::new(scratch.join("config"), scratch.join("data"))
             .expect("absolute scratch bases");
         mutate(&dirs, |tokens| tokens.add(&label("laptop"), b"first")).expect("a token");
-        let mut watched = WatchedTokens::read(&dirs);
+        let mut watched = WatchedTokens::read_with_clock(&dirs, an_hour_ahead);
         mutate(&dirs, |tokens| tokens.add(&label("service"), b"second")).expect("a token");
 
         let check = watched.check_where(|| {
@@ -690,21 +796,24 @@ mod tests {
         let scratch = norn_testkit::scratch::Scratch::new("norn-config-fingerprint");
         let dirs = dirs_in(&scratch);
         let path = dirs.tokens_file();
-        assert_eq!(fingerprint(&dirs).expect("a fingerprint"), None);
+        let of = |dirs: &ConfigDirs| {
+            fingerprint(dirs, &system_clock())
+                .expect("a fingerprint")
+                .fingerprint
+        };
+        assert_eq!(of(&dirs), None);
 
         std::fs::write(&path, "version = 1\n").expect("a token file");
-        let file = fingerprint(&dirs).expect("a fingerprint").expect("a file");
+        let file = of(&dirs).expect("a file");
         assert_eq!(
-            fingerprint(&dirs).expect("a fingerprint"),
+            of(&dirs),
             Some(file),
             "an untouched file fingerprints the same"
         );
 
         std::fs::remove_file(&path).expect("removing the file");
         std::os::unix::fs::symlink(scratch.join("elsewhere"), &path).expect("planting a link");
-        let link = fingerprint(&dirs)
-            .expect("a fingerprint of a dangling link")
-            .expect("a link is something at the name");
+        let link = of(&dirs).expect("a link is something at the name");
         assert_ne!(link, file);
     }
 
@@ -760,7 +869,7 @@ mod tests {
             let next = dirs.config_dir().join("tokens.next");
             write_private(&path, held_text);
             write_private(&next, next_text);
-            let mut watched = WatchedTokens::read(&dirs);
+            let mut watched = WatchedTokens::read_with_clock(&dirs, an_hour_ahead);
             let held = stamp_of(&path);
             std::fs::rename(&next, &path).expect("renaming the replacement over the file");
             let now = stamp_of(&path);
@@ -796,6 +905,109 @@ mod tests {
         eprintln!(
             "skipped: no attempt in {ATTEMPTS} landed both writes and the rename inside one \
              tick, so this filesystem's times alone tell the two files apart"
+        );
+    }
+
+    /// The revocation race, made deterministic. Two same-size, in-place edits
+    /// inside one filesystem tick, with a check between them, leave the
+    /// fingerprint that check took — and the second edit revokes the secret
+    /// the first left. The case builds that state directly: the holder holds
+    /// the set read before the revoking edit beside the fingerprint the edit
+    /// left, taken at a moment within the window of the file's times. The
+    /// next check must read the file, and serve the revocation.
+    #[test]
+    #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // Harness scaffolding: the in-place edit the API never makes.
+    fn a_same_size_edit_inside_one_tick_is_read_while_the_held_fingerprint_is_racy() {
+        use std::io::{Seek, SeekFrom, Write};
+        let scratch = norn_testkit::scratch::Scratch::new("norn-config-fresh-racy-revocation");
+        let dirs = dirs_in(&scratch);
+        let path = dirs.tokens_file();
+        let text = "version = 1\n\n[tokens.laptop]\nsecret = \"0a0a\"\ncreated = 1\n";
+        write_private(&path, text);
+        let mut watched = WatchedTokens::read(&dirs);
+        let held_at = watched.fingerprint.as_ref().expect("a fingerprint").at;
+
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("opening the token file for writing");
+        let offset = text.find("0a0a").expect("the secret") as u64;
+        file.seek(SeekFrom::Start(offset)).expect("seeking");
+        file.write_all(b"0b0b").expect("revoking `0a0a` in place");
+        drop(file);
+
+        // The tick the edits shared: the fingerprint after the revocation is
+        // the one the holder took before it.
+        let left = fingerprint(&dirs, &system_clock()).expect("a fingerprint");
+        watched.fingerprint = Ok(Taken {
+            fingerprint: left.fingerprint,
+            at: held_at,
+        });
+        assert!(
+            watched.fingerprint.as_ref().expect("a fingerprint").racy(),
+            "the file was written within the window of the held moment"
+        );
+
+        let check = watched.check();
+        assert_eq!(
+            (check.fingerprints(), check.read(), check.replaced()),
+            (2, true, true),
+            "an unchanged racy fingerprint is read again: {check:?}"
+        );
+        let secret = watched
+            .current()
+            .expect("a set")
+            .get(&label("laptop"))
+            .expect("a token")
+            .secret()
+            .to_vec();
+        assert_eq!(secret, [0x0b, 0x0b], "the revoked secret is still served");
+    }
+
+    /// The racy rule at its edges: a fingerprint is settled exactly when the
+    /// file's later time stands a full window before the moment it was taken.
+    /// A time after that moment — a clock stepped back, a time set ahead by
+    /// hand — is racy, and so is a modification time later than the change
+    /// time. Nothing at the name is never racy.
+    #[test]
+    fn a_fingerprint_is_racy_until_the_files_times_are_a_window_old() {
+        let at = |nanos: u64| UNIX_EPOCH + Duration::from_nanos(nanos);
+        let file = |modified: (i64, i64), changed: (i64, i64)| Fingerprint {
+            device: 1,
+            inode: 1,
+            size: 1,
+            modified,
+            changed,
+        };
+        let taken = |fingerprint: Fingerprint, moment: SystemTime| Taken {
+            fingerprint: Some(fingerprint),
+            at: moment,
+        };
+        let window = SETTLE_WINDOW.as_nanos() as u64;
+        let stamped = file((100, 0), (100, 500));
+        let latest = 100 * 1_000_000_000 + 500;
+
+        assert!(!taken(stamped, at(latest + window)).racy(), "a window old");
+        assert!(
+            taken(stamped, at(latest + window - 1)).racy(),
+            "a nanosecond short"
+        );
+        assert!(taken(stamped, at(latest)).racy(), "taken in the same tick");
+        assert!(
+            taken(stamped, at(50 * 1_000_000_000)).racy(),
+            "times after the moment"
+        );
+        assert!(
+            taken(file((200, 0), (100, 0)), at(150 * 1_000_000_000)).racy(),
+            "a modification time set ahead of the change time"
+        );
+        assert!(
+            !Taken {
+                fingerprint: None,
+                at: at(0),
+            }
+            .racy(),
+            "nothing at the name"
         );
     }
 

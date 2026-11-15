@@ -5,7 +5,9 @@
 use std::io::{Seek, SeekFrom, Write};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
+
+use norn_config::ConfigDirs;
 
 use norn_config::ConfigError;
 use norn_config::machine::tokens::{self, Check, WatchedTokens};
@@ -16,6 +18,15 @@ use crate::tokens::make_fifo;
 /// A token file holding one token, `laptop`, whose secret is `secret_hex`.
 fn one_token(secret_hex: &str) -> String {
     format!("version = 1\n\n[tokens.laptop]\nsecret = \"{secret_hex}\"\ncreated = 1\n")
+}
+
+/// A holder whose clock runs an hour ahead of the system's, so every file a
+/// case writes is settled under it: what such a case pins is the fingerprint,
+/// not the racy rule. A file's change time cannot be set back, so a clock set
+/// forward is how a case reaches a settled file without waiting out the
+/// window.
+fn settled(dirs: &ConfigDirs) -> WatchedTokens {
+    WatchedTokens::read_with_clock(dirs, || SystemTime::now() + Duration::from_secs(3_600))
 }
 
 /// The labels the holder holds, or a panic when it is failing closed.
@@ -108,12 +119,93 @@ fn an_unchanged_token_file_costs_one_fingerprint_and_no_read() {
     let dirs = scratch.dirs();
     tokens::mutate(dirs, |tokens| tokens.add(&label("laptop"), b"secret")).expect("a token");
 
-    let mut watched = WatchedTokens::read(dirs);
+    let mut watched = settled(dirs);
     assert_eq!(labels(&watched), ["laptop"]);
     for _ in 0..3 {
         assert_unchanged(watched.check());
     }
     assert_eq!(labels(&watched), ["laptop"]);
+}
+
+/// A file written within the settle window of a fingerprint is not vouched
+/// for by it: a second same-size edit inside the filesystem's tick would leave
+/// the fingerprint as it is. So while the file is that young, an unchanged
+/// fingerprint is read again, check after check.
+#[test]
+fn an_unchanged_file_is_read_again_while_its_fingerprint_is_racy() {
+    let scratch = Scratch::new("fresh-racy");
+    let path = scratch.tokens_file();
+    scratch.place_private(&path, &one_token("0a"));
+
+    let mut watched = WatchedTokens::read(scratch.dirs());
+    for _ in 0..3 {
+        assert_reread(watched.check());
+        assert_eq!(laptop_secret(&watched), [0x0a]);
+    }
+}
+
+/// After a change, a holder reads again while its fingerprint is racy, and
+/// returns to one fingerprint and no read once the file's times stand a
+/// window before the moment of the fingerprint it holds. The clock is the
+/// case's: it stands still, then moves past the window, and stepping it back
+/// makes a later edit young again.
+#[test]
+fn a_holder_reads_again_until_the_file_has_settled_then_stops() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    let scratch = Scratch::new("fresh-converges");
+    let path = scratch.tokens_file();
+    let text = one_token("0a");
+    scratch.place_private(&path, &text);
+    let ahead = Arc::new(AtomicU64::new(0));
+    let clock = Arc::clone(&ahead);
+    let mut watched = WatchedTokens::read_with_clock(scratch.dirs(), move || {
+        SystemTime::now() + Duration::from_secs(clock.load(Ordering::SeqCst))
+    });
+    let past_the_window = || ahead.store(3, Ordering::SeqCst);
+    let at_the_system_clock = || ahead.store(0, Ordering::SeqCst);
+
+    assert_reread(watched.check());
+    assert_reread(watched.check());
+
+    // The fingerprint held was taken inside the window, so the first check
+    // past it reads once more and holds one taken outside it.
+    past_the_window();
+    assert_reread(watched.check());
+    assert_unchanged(watched.check());
+    assert_unchanged(watched.check());
+
+    at_the_system_clock();
+    past_a_tick();
+    overwrite_in_place(&path, secret_offset(&text), b"0b");
+    assert_reread(watched.check());
+    assert_eq!(laptop_secret(&watched), [0x0b]);
+    assert_reread(watched.check());
+
+    past_the_window();
+    assert_reread(watched.check());
+    assert_unchanged(watched.check());
+    assert_eq!(laptop_secret(&watched), [0x0b]);
+}
+
+/// A file whose times are later than the moment of the fingerprint — a clock
+/// stepped back, or a time set ahead by hand — is racy for as long as they
+/// are, so the holder reads it at every check rather than trust a fingerprint
+/// a later edit might share.
+#[test]
+fn a_file_whose_times_are_in_the_future_is_read_at_every_check() {
+    let scratch = Scratch::new("fresh-future");
+    let path = scratch.tokens_file();
+    scratch.place_private(&path, &one_token("0a"));
+
+    let mut watched = WatchedTokens::read_with_clock(scratch.dirs(), || {
+        SystemTime::now() - Duration::from_secs(3_600)
+    });
+    for _ in 0..3 {
+        assert_reread(watched.check());
+    }
+    assert_eq!(laptop_secret(&watched), [0x0a]);
 }
 
 /// No file is a file that holds no tokens, and it stays one cheaply.
@@ -136,7 +228,7 @@ fn a_revocation_by_rewrite_is_seen_on_the_next_check() {
         tokens.add(&label("service"), b"second")
     })
     .expect("two tokens");
-    let mut watched = WatchedTokens::read(dirs);
+    let mut watched = settled(dirs);
     assert_eq!(labels(&watched), ["laptop", "service"]);
 
     tokens::mutate(dirs, |tokens| Ok(tokens.remove(&label("laptop")))).expect("a revocation");
@@ -154,7 +246,7 @@ fn an_in_place_same_size_edit_is_seen() {
     let path = scratch.tokens_file();
     let text = one_token("0a0a");
     scratch.place_private(&path, &text);
-    let mut watched = WatchedTokens::read(scratch.dirs());
+    let mut watched = settled(scratch.dirs());
     assert_eq!(laptop_secret(&watched), [0x0a, 0x0a]);
     let before = inode_and_size(&path);
 
@@ -180,7 +272,7 @@ fn an_edit_whose_modification_time_is_restored_is_seen_by_the_change_time() {
     let path = scratch.tokens_file();
     let text = one_token("0a0a");
     scratch.place_private(&path, &text);
-    let mut watched = WatchedTokens::read(scratch.dirs());
+    let mut watched = settled(scratch.dirs());
     let original = std::fs::metadata(&path)
         .and_then(|metadata| metadata.modified())
         .expect("the modification time");
@@ -246,7 +338,7 @@ fn a_changed_file_that_no_longer_reads_fails_closed_until_it_reads_again() {
         let scratch = Scratch::new("fresh-fail-closed");
         let path = scratch.tokens_file();
         scratch.place_private(&path, &one_token("0a"));
-        let mut watched = WatchedTokens::read(scratch.dirs());
+        let mut watched = settled(scratch.dirs());
         assert_eq!(labels(&watched), ["laptop"], "{name}");
 
         past_a_tick();
@@ -280,7 +372,7 @@ fn a_token_file_loosened_to_group_readable_fails_closed() {
     let scratch = Scratch::new("fresh-loosened");
     let path = scratch.tokens_file();
     scratch.place_private(&path, &one_token("0a"));
-    let mut watched = WatchedTokens::read(scratch.dirs());
+    let mut watched = settled(scratch.dirs());
 
     past_a_tick();
     set_mode(&path, 0o640);
@@ -299,7 +391,7 @@ fn a_removed_token_file_reads_as_no_tokens() {
     let scratch = Scratch::new("fresh-removed");
     let dirs = scratch.dirs();
     tokens::mutate(dirs, |tokens| tokens.add(&label("laptop"), b"secret")).expect("a token");
-    let mut watched = WatchedTokens::read(dirs);
+    let mut watched = settled(dirs);
 
     remove(&scratch.tokens_file());
 
@@ -315,7 +407,7 @@ fn a_first_read_that_refuses_fails_closed_until_the_file_reads() {
     let scratch = Scratch::new("fresh-first-refused");
     let path = scratch.tokens_file();
     scratch.place_private(&path, "version = 1\n[tokens\n");
-    let mut watched = WatchedTokens::read(scratch.dirs());
+    let mut watched = settled(scratch.dirs());
     assert!(watched.current().is_err());
     assert_reread(watched.check());
     assert!(watched.current().is_err());
@@ -333,7 +425,7 @@ fn a_fingerprint_that_cannot_be_taken_fails_closed() {
     let scratch = Scratch::new("fresh-unstattable");
     let path = scratch.tokens_file();
     scratch.place_private(&path, &one_token("0a"));
-    let mut watched = WatchedTokens::read(scratch.dirs());
+    let mut watched = settled(scratch.dirs());
     let directory = scratch.dirs().config_dir().to_path_buf();
 
     set_mode(&directory, 0o000);
@@ -366,7 +458,7 @@ fn a_mode_change_on_the_directory_alone_is_not_a_change_to_the_file() {
     let scratch = Scratch::new("fresh-directory-mode");
     let path = scratch.tokens_file();
     scratch.place_private(&path, &one_token("0a"));
-    let mut watched = WatchedTokens::read(scratch.dirs());
+    let mut watched = settled(scratch.dirs());
 
     set_mode(scratch.dirs().config_dir(), 0o750);
     assert_unchanged(watched.check());
@@ -395,7 +487,7 @@ fn a_refusal_that_lifts_without_a_change_to_the_file_is_recovered_from() {
     let scratch = Scratch::new("fresh-directory-tightened");
     let path = scratch.tokens_file();
     scratch.place_private(&path, &one_token("0a"));
-    let mut watched = WatchedTokens::read(scratch.dirs());
+    let mut watched = settled(scratch.dirs());
 
     set_mode(scratch.dirs().config_dir(), 0o750);
     past_a_tick();
