@@ -11,6 +11,34 @@ publish.workspace = true
 # The argument grammar: clap derives the parser, the usage errors and the
 # stock help that stand until the render seam lands.
 clap = { workspace = true }
+# The hello's transport: the low-level HTTP/1.1 client the dialer speaks over
+# one connection it owns, so a bearer goes only where that connection's own
+# hello verified. No pooling client: a pooled connection would carry a bearer
+# past the hello that verified another.
+hyper = { version = "1.11", features = ["client", "http1"] }
+# The bridge from tokio's sockets to hyper's I/O traits.
+hyper-util = { version = "0.1.21", features = ["tokio"] }
+# The hello's request body, and the capped read of its answer.
+http-body-util = "0.1.5"
+# The socket the dialer connects with (`SO_REUSEADDR` set once, before the
+# connect) and the task that drives its connection. The caller's runtime runs
+# both; this crate starts none.
+tokio = { version = "1.52", features = ["net", "rt"] }
+# The operating system's random source the hello's nonce is drawn from.
+getrandom = "0.4"
+# HMAC-SHA256: the hello answer's MAC, verified in constant time under the
+# token the dialer read. Built on the workspace's `sha2`.
+hmac = "0.13"
+sha2 = { workspace = true }
+# The hello's request JSON.
+serde_json = { workspace = true }
 norn-config = { path = "../norn-config" }
-# Carries BuildIdentity and the hello v1 types once T2's dialer (crates/norn-client/src/hello.rs) lands.
+# BuildIdentity and the hello v1 types, the reply's reading and the dialer's
+# comparison of an answer's facts with its connection.
 norn-wire = { path = "../norn-wire" }
+
+# The scratch directory the dialer's unit suite keeps a token file in. A
+# development edge: the allowlist does not describe it, and the architecture
+# gate reads and discards it.
+[dev-dependencies]
+norn-testkit = { path = "../norn-testkit" }

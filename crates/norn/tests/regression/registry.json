@@ -444,10 +444,11 @@
       "sources": ["norn-legacy engineering learnings"],
       "binding": {
         "status": "dormant",
-        "reason": "crates/norn-serve/src/lib.rs carries the serving entry. The dialer's per-connection options wait on its hello module, declared at crates/norn-client/src/lib.rs::hello when T2 lands it; that module is not declared yet. The per-connection server bounds wait on the served request path at crates/norn-serve/src/wire.rs::dispatch, which is not implemented.",
+        "reason": "crates/norn-serve/src/lib.rs carries the serving entry. The dialer half has landed: both dialers set their one per-connection option, SO_REUSEADDR, once, on a socket no other descriptor holds, before it connects, and each holds a named test of that option-setting, cited as a present symbol because a dormant case names no tests: crates/norn-client/src/hello.rs::the_dialer_sets_reuseaddr_once_before_connecting and crates/norn-serve/src/dial.rs::the_dialer_sets_reuseaddr_once_before_connecting. The case stays dormant on its server half: the per-connection bounds the served request path sets on an accepted connection wait on crates/norn-serve/src/wire.rs::dispatch, which is not implemented, and binding the case then names those tests beside the dialers'.",
         "grounds": [
           { "present": "crates/norn-serve/src/lib.rs" },
-          { "symbol-absent": "crates/norn-client/src/lib.rs::hello" },
+          { "symbol-present": "crates/norn-client/src/hello.rs::the_dialer_sets_reuseaddr_once_before_connecting" },
+          { "symbol-present": "crates/norn-serve/src/dial.rs::the_dialer_sets_reuseaddr_once_before_connecting" },
           { "symbol-absent": "crates/norn-serve/src/wire.rs::dispatch" }
         ]
       }

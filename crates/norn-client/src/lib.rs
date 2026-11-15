@@ -5,8 +5,9 @@
 //! routing, the hello's dialer half, auto-launch, the projections onto the
 //! render seam and the machine-local verbs. **It lands carrying only the
 //! `serve` command's argument grammar** — `--port`, `--config` and the hidden
-//! auto-launch marker — and the endpoint resolution every dialer will stand
-//! on. Every other command arrives with the surfaces (6.3).
+//! auto-launch marker — the endpoint resolution every dialer will stand on,
+//! and the [`hello`] dialer the 6.3 CLI and stdio shim will open every
+//! connection with. Every other command arrives with the surfaces (6.3).
 //!
 //! [`parse`] reads argv and answers an [`Invocation`]; the composition root
 //! hands a [`Invocation::Serve`] to `norn-serve`'s entry, which this crate has
@@ -20,6 +21,8 @@ use clap::{Args, Parser, Subcommand};
 use norn_config::ConfigDirs;
 use norn_config::machine::Endpoint;
 use norn_config::machine::settings::{ServingSettings, SettingsError, SettingsSource};
+
+pub mod hello;
 
 /// What one invocation of the `norn` binary asks for.
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -7,6 +7,11 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+# A build of the binary that serves `GET /v1/debug/counters`, for the token
+# counter bar and the nightly subject. Shipped builds leave it off.
+counters = ["norn-serve/counters"]
+
 [dependencies]
 norn-client = { path = "../norn-client" }
 norn-serve = { path = "../norn-serve" }
@@ -15,6 +20,12 @@ norn-serve = { path = "../norn-serve" }
 # the rendering a campaign stores records in is exercised where the record's own
 # validator is. The corpus suite reads the wire verb registry a ruling names.
 [dev-dependencies]
+# The hello suite drives both dialers, each an async function over a hyper
+# connection, on a runtime of its own, and builds the requests a verified
+# connection sends.
+http-body-util = "0.1.5"
+hyper = { version = "1.11", features = ["client", "http1"] }
+tokio = { version = "1.52", features = ["net", "rt"] }
 # The serving suite signals the `norn serve` it started, by the pid it holds.
 libc = { workspace = true }
 # The serving suite resolves the client's endpoint from the file the host read.

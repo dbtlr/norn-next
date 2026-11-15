@@ -129,6 +129,12 @@ impl TokenLabel {
     /// The longest a label may be.
     pub const MAXIMUM_BYTES: usize = 64;
 
+    /// `default`: the label a host mints its first token under, and the one
+    /// a dialer presents when the set holds it ([`Tokens::dialer_token`]).
+    pub fn default_label() -> Self {
+        TokenLabel("default".to_string())
+    }
+
     /// The label `text` spells, or the reason it spells none.
     pub fn new(text: impl AsRef<str>) -> Result<Self, ConfigError> {
         let text = text.as_ref();
@@ -295,6 +301,22 @@ impl Tokens {
     /// Every label, in order.
     pub fn labels(&self) -> impl Iterator<Item = &TokenLabel> {
         self.tokens.keys()
+    }
+
+    /// Whether the file holds no token at all — what a host's first start
+    /// mints into.
+    pub fn is_empty(&self) -> bool {
+        self.tokens.is_empty()
+    }
+
+    /// The token a dialer presents in its hello and then as its bearer:
+    /// `default` if the set holds it, otherwise the one whose label sorts
+    /// first. Every dialer chooses through this, so two dialers reading one
+    /// file present one token.
+    pub fn dialer_token(&self) -> Option<&Token> {
+        self.tokens
+            .get(&TokenLabel::default_label())
+            .or_else(|| self.tokens.values().next())
     }
 
     /// Every token, in label order — what the serving side verifies a
@@ -561,10 +583,10 @@ impl fmt::Debug for WallClock {
 /// The token set a long-lived holder serves from, kept fresh against the file
 /// by one fingerprint per check once the file has settled.
 ///
-/// **Dormant carrier.** The serving layer's bearer middleware and hello, and
-/// the dialer's held-lock wait, hold one of these and check it once per
-/// request or poll; neither is built yet, so nothing in the workspace reaches
-/// it but its suite.
+/// The serving layer's bearer middleware and hello hold one of these and
+/// check it once per request. **The dialer's held-lock wait is its dormant
+/// consumer**: it will check one on every poll once the takeover lands, a
+/// later task of the serving phase.
 ///
 /// It holds the fingerprint it last took, with the moment it took it, and the
 /// outcome of the read that followed: the parsed [`Tokens`], or the refusal
@@ -1073,6 +1095,35 @@ mod tests {
             .racy(),
             "nothing at the name"
         );
+    }
+
+    /// A dialer presents `default` when the set holds it, and otherwise the
+    /// label that sorts first; an empty set has nothing to present.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: the bases a case's state lives under.
+    fn a_dialer_presents_default_or_else_the_first_label() {
+        let scratch = norn_testkit::scratch::Scratch::new("norn-config-dialer-token");
+        std::fs::create_dir_all(scratch.join("config")).expect("a config base");
+        let dirs = ConfigDirs::new(scratch.join("config"), scratch.join("data"))
+            .expect("absolute scratch bases");
+        let chosen = || {
+            read(&dirs)
+                .expect("a read")
+                .dialer_token()
+                .map(|token| token.label().to_string())
+        };
+
+        assert!(read(&dirs).expect("a read").is_empty());
+        assert_eq!(chosen(), None);
+        mutate(&dirs, |tokens| tokens.add(&label("service"), b"s")).expect("a token");
+        mutate(&dirs, |tokens| tokens.add(&label("laptop"), b"l")).expect("a token");
+        assert_eq!(chosen().as_deref(), Some("laptop"));
+        mutate(&dirs, |tokens| {
+            tokens.add(&TokenLabel::default_label(), b"d")
+        })
+        .expect("a token");
+        assert_eq!(chosen().as_deref(), Some("default"));
+        assert!(!read(&dirs).expect("a read").is_empty());
     }
 
     /// A secret in a log is a secret leaked, and the derived `Debug` is how it

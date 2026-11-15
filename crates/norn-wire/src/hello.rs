@@ -20,9 +20,18 @@
 //! the answer — but never to the MAC input, which would make every older
 //! dialer's check fail.
 //!
-//! **Dormant carrier.** The serving layer's hello route and every dialer's
-//! hello read and write these types; neither is built yet, so nothing in the
-//! workspace reaches them but their tests.
+//! **The dialer's check is spelled here too**, crypto-free: what a reply's
+//! status and body say ([`HelloReply::read`]), whether an address may be
+//! dialed at all ([`is_dialable`]), how large a hello body may be
+//! ([`HELLO_BODY_BYTES`]), how a MAC-verified answer's facts are compared
+//! with the dialer's connection ([`HelloFacts::check_connection`]), and how a
+//! failed dial is reported ([`HelloFailure`]). The two dialers —
+//! `norn-client`'s and the serving crate's takeover dial — keep only their
+//! transport and their HMAC check, so neither their comparisons nor their
+//! reports can drift.
+//!
+//! The serving layer's hello route reads and writes these types, and so do
+//! both dialers.
 
 use std::borrow::Cow;
 use std::fmt;
@@ -32,8 +41,16 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 
 use crate::build::BuildIdentity;
+use crate::error::{ErrorEnvelope, ReasonCode};
 use crate::hex;
 use crate::object::read_object;
+
+/// The most bytes a hello body may be, in either direction: the host refuses
+/// a larger request with `serve/request-too-large` before reading it whole,
+/// and a dialer reads no more of an answer than this before parsing it. The
+/// MAC input's length prefixes are 4 bytes wide, so this is also what keeps a
+/// hostile listener's answer far from the field length they cannot carry.
+pub const HELLO_BODY_BYTES: usize = 4096;
 
 /// The ASCII domain separator the MAC input opens with, before its zero byte.
 const MAC_DOMAIN: &[u8] = b"norn-hello-v1";
@@ -351,12 +368,35 @@ impl HelloFacts {
         input.push(0);
         for field in fields {
             // A field is a short string or 32 bytes; none comes near `u32`'s
-            // range, and the 4 KiB hello body bounds what a peer can send.
+            // range, and `HELLO_BODY_BYTES` bounds what either peer reads.
             let prefix = u32::try_from(field.len()).expect("a hello field fits a u32 length");
             input.extend_from_slice(&prefix.to_be_bytes());
             input.extend_from_slice(field);
         }
         input
+    }
+}
+
+impl HelloFacts {
+    /// The dialer's comparison of these facts with its own connection: the
+    /// channel, then the host end against the address dialed, then the client
+    /// end against the dialer's own local address, each address normalized.
+    ///
+    /// Pure and crypto-free, so both dialers compare by one rule. **The MAC
+    /// is each dialer's to check first**, in constant time, with the HMAC
+    /// this crate does not depend on: until it verifies, these facts are the
+    /// word of whoever answered.
+    pub fn check_connection(&self, expected: &HelloExpectation) -> Result<(), HelloMismatch> {
+        if self.channel != expected.channel {
+            return Err(HelloMismatch::Channel);
+        }
+        if self.host() != normalize_socket_address(expected.dialed) {
+            return Err(HelloMismatch::Host);
+        }
+        if self.client() != normalize_socket_address(expected.local) {
+            return Err(HelloMismatch::Client);
+        }
+        Ok(())
     }
 }
 
@@ -431,6 +471,181 @@ impl HelloAnswer {
     pub fn mac(&self) -> Option<[u8; 32]> {
         hex::decode_array(&self.mac)
     }
+}
+
+/// What a dialer checks a hello answer against: its own channel, the socket
+/// address it dialed, and its own local socket address on that connection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HelloExpectation {
+    pub channel: HelloChannel,
+    pub dialed: SocketAddr,
+    pub local: SocketAddr,
+}
+
+/// Why a dialer refused a hello answer. Each one withholds the bearer and
+/// closes the connection.
+///
+/// Its `Display` names both possible causes and asserts neither, because a
+/// dialer cannot tell them apart: the token may have changed since the dialer
+/// read it, or something other than a norn host holds the port.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HelloMismatch {
+    /// The reply is not a hello answer, a refused hello, or a fail-closed
+    /// answer: not a norn hello at all.
+    NotAnAnswer,
+    /// The MAC is missing or does not verify under the dialer's token.
+    Mac,
+    /// The answer names another channel.
+    Channel,
+    /// The answer's host end is not the address the dialer dialed.
+    Host,
+    /// The answer's client end is not the dialer's own end of this
+    /// connection.
+    Client,
+}
+
+impl fmt::Display for HelloMismatch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let what = match self {
+            HelloMismatch::NotAnAnswer => "the reply is not a hello answer",
+            HelloMismatch::Mac => {
+                "the answer's MAC does not verify under the token this dialer read"
+            }
+            HelloMismatch::Channel => "the answer names another channel",
+            HelloMismatch::Host => "the answer's host address is not the address dialed",
+            HelloMismatch::Client => {
+                "the answer's client address is not this end of the connection"
+            }
+        };
+        write!(f, "host verification failed: {what}. {BOTH_CAUSES}")
+    }
+}
+
+/// The two causes every failed verification names, asserting neither.
+const BOTH_CAUSES: &str = "Either the token changed since it was read, or something other than \
+                           a norn host holds the port; the bearer was not sent";
+
+/// Why a dial returned no verified connection. No bearer was sent in any.
+///
+/// Both dialers — `norn-client`'s and the serving crate's takeover dial —
+/// answer this one type, so a failure reads the same from either. It carries
+/// no transport type: a dialer writes its HTTP stack's error as text.
+///
+/// A refused hello and an answer that did not verify are both reported as a
+/// failed verification naming both causes, since a refusal carries no MAC.
+/// The one unverified answer reported for what it said is the fail-closed
+/// one, and it is reported as a listener's word, not as a fact about any
+/// file.
+#[derive(Debug)]
+pub enum HelloFailure {
+    /// The address is not a loopback address, so it is not dialed.
+    NotLoopback(SocketAddr),
+    /// The token set holds no token to run the hello with.
+    NoToken,
+    /// The connection could not be made.
+    Connect {
+        address: SocketAddr,
+        error: std::io::Error,
+    },
+    /// The connection failed during the hello.
+    Exchange { address: SocketAddr, error: String },
+    /// A listener at the address refused the hello (401
+    /// `serve/hello-refused`). Unverified: a refusal carries no MAC.
+    HelloRefused { address: SocketAddr },
+    /// A listener at the address said its token file is unreadable (500
+    /// `serve/token-file-unreadable`). Unverified, so it says nothing about
+    /// any file for certain.
+    ListenerSaysTokenFileUnreadable { address: SocketAddr },
+    /// The answer did not verify.
+    Verification {
+        address: SocketAddr,
+        mismatch: HelloMismatch,
+    },
+}
+
+impl fmt::Display for HelloFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            HelloFailure::NotLoopback(address) => write!(
+                f,
+                "{address} is not a loopback address; a dialer dials only loopback"
+            ),
+            HelloFailure::NoToken => {
+                f.write_str("the token file holds no token to run the hello with")
+            }
+            HelloFailure::Connect { address, error } => {
+                write!(f, "connecting to {address} failed: {error}")
+            }
+            HelloFailure::Exchange { address, error } => write!(
+                f,
+                "the connection to {address} failed during the hello: {error}"
+            ),
+            HelloFailure::HelloRefused { address } => write!(
+                f,
+                "{address}: host verification failed: a listener there refused the hello (401 \
+                 `serve/hello-refused`), which carries no MAC. {BOTH_CAUSES}"
+            ),
+            HelloFailure::ListenerSaysTokenFileUnreadable { address } => write!(
+                f,
+                "a listener at {address} said the token file is unreadable; the answer is \
+                 unverified"
+            ),
+            HelloFailure::Verification { address, mismatch } => {
+                write!(f, "{address}: {mismatch}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for HelloFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            HelloFailure::Connect { error, .. } => Some(error),
+            _ => None,
+        }
+    }
+}
+
+/// A reply to the hello, read from its status and body before anything in it
+/// is trusted.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum HelloReply {
+    /// A 200 whose body is a hello answer, still to be verified.
+    Answer(HelloAnswer),
+    /// A 401 `serve/hello-refused`: unverified, since a refusal carries no MAC.
+    Refused,
+    /// A 500 `serve/token-file-unreadable`: unverified, so it is what a
+    /// listener at the endpoint *said*, not a fact about any file.
+    TokenFileUnreadable,
+    /// Anything else, which no norn host answers to a hello.
+    Unrecognized,
+}
+
+impl HelloReply {
+    /// Read a reply from its HTTP status code and its body.
+    pub fn read(status: u16, body: &[u8]) -> Self {
+        match status {
+            200 => serde_json::from_slice::<HelloAnswer>(body)
+                .map_or(HelloReply::Unrecognized, HelloReply::Answer),
+            401 | 500 => match serde_json::from_slice::<ErrorEnvelope>(body) {
+                Ok(envelope) => match (status, envelope.code()) {
+                    (401, ReasonCode::ServeHelloRefused) => HelloReply::Refused,
+                    (500, ReasonCode::ServeTokenFileUnreadable) => HelloReply::TokenFileUnreadable,
+                    _ => HelloReply::Unrecognized,
+                },
+                Err(_) => HelloReply::Unrecognized,
+            },
+            _ => HelloReply::Unrecognized,
+        }
+    }
+}
+
+/// Whether a dialer may dial `address`: a loopback address, once normalized.
+///
+/// Every dialer connects only to a resolved loopback socket address. A
+/// `SocketAddr` already rules out a hostname; this rules out the rest.
+pub fn is_dialable(address: SocketAddr) -> bool {
+    normalize_socket_address(address).ip().is_loopback()
 }
 
 #[cfg(test)]
@@ -750,6 +965,197 @@ mod tests {
                 "{not_a_request} parsed as a hello request"
             );
         }
+    }
+
+    fn expectation() -> HelloExpectation {
+        HelloExpectation {
+            channel: HelloChannel::Dev,
+            dialed: address("127.0.0.1:28472"),
+            local: address("127.0.0.1:54121"),
+        }
+    }
+
+    #[test]
+    fn facts_that_state_this_connection_pass() {
+        assert_eq!(facts().check_connection(&expectation()), Ok(()));
+    }
+
+    #[test]
+    fn facts_naming_another_channel_or_either_other_end_are_refused() {
+        let other_channel = HelloExpectation {
+            channel: HelloChannel::Live,
+            ..expectation()
+        };
+        assert_eq!(
+            facts().check_connection(&other_channel),
+            Err(HelloMismatch::Channel)
+        );
+        let other_port = HelloExpectation {
+            dialed: address("127.0.0.1:28471"),
+            ..expectation()
+        };
+        assert_eq!(
+            facts().check_connection(&other_port),
+            Err(HelloMismatch::Host)
+        );
+        // The client's own port on a second loopback address: only the IP
+        // differs, and that is a different end.
+        let other_address = HelloExpectation {
+            local: address("127.0.0.2:54121"),
+            ..expectation()
+        };
+        assert_eq!(
+            facts().check_connection(&other_address),
+            Err(HelloMismatch::Client)
+        );
+        let other_source_port = HelloExpectation {
+            local: address("127.0.0.1:54122"),
+            ..expectation()
+        };
+        assert_eq!(
+            facts().check_connection(&other_source_port),
+            Err(HelloMismatch::Client)
+        );
+    }
+
+    /// The dialer's own addresses are normalized the way the host's are, so
+    /// a dual-stack dialer's mapped spelling compares equal.
+    #[test]
+    fn the_dialers_addresses_are_normalized_before_they_are_compared() {
+        let mapped = |port| {
+            SocketAddr::V6(SocketAddrV6::new(
+                Ipv4Addr::LOCALHOST.to_ipv6_mapped(),
+                port,
+                0,
+                0,
+            ))
+        };
+        let expected = HelloExpectation {
+            channel: HelloChannel::Dev,
+            dialed: mapped(28472),
+            local: mapped(54121),
+        };
+        assert_eq!(facts().check_connection(&expected), Ok(()));
+    }
+
+    /// The contract's example answer fits the body cap with room to spare,
+    /// so the cap refuses only what no host writes.
+    #[test]
+    fn an_answer_fits_the_hello_body_cap() {
+        let answer = HelloAnswer::new(facts(), [0xab; 32]);
+        let bytes = serde_json::to_vec(&answer).expect("json");
+        assert!(bytes.len() * 4 < HELLO_BODY_BYTES, "{}", bytes.len());
+    }
+
+    #[test]
+    fn a_mismatch_says_verification_failed_and_names_both_causes() {
+        for mismatch in [
+            HelloMismatch::NotAnAnswer,
+            HelloMismatch::Mac,
+            HelloMismatch::Channel,
+            HelloMismatch::Host,
+            HelloMismatch::Client,
+        ] {
+            let text = mismatch.to_string();
+            assert!(text.starts_with("host verification failed"), "{text}");
+            assert!(
+                text.contains("the token changed since it was read"),
+                "{text}"
+            );
+            assert!(
+                text.contains("something other than a norn host holds the port"),
+                "{text}"
+            );
+        }
+    }
+
+    /// A 401 carries no MAC, so a listener that refused the hello is no more
+    /// verified than one whose MAC failed: the failure reads the same.
+    #[test]
+    fn a_refused_hello_says_verification_failed_and_names_both_causes() {
+        let address = address("127.0.0.1:28472");
+        for failure in [
+            HelloFailure::HelloRefused { address },
+            HelloFailure::Verification {
+                address,
+                mismatch: HelloMismatch::Mac,
+            },
+        ] {
+            let text = failure.to_string();
+            assert!(text.starts_with("127.0.0.1:28472: "), "{text}");
+            assert!(text.contains("host verification failed"), "{text}");
+            assert!(
+                text.contains("the token changed since it was read"),
+                "{text}"
+            );
+            assert!(
+                text.contains("something other than a norn host holds the port"),
+                "{text}"
+            );
+            assert!(text.contains("the bearer was not sent"), "{text}");
+        }
+        let refused = HelloFailure::HelloRefused { address }.to_string();
+        assert!(refused.contains("serve/hello-refused"), "{refused}");
+    }
+
+    /// The one unverified answer reported for what it said rather than as a
+    /// failed verification.
+    #[test]
+    fn a_listener_saying_the_token_file_is_unreadable_is_reported_as_its_word() {
+        let address = address("127.0.0.1:28472");
+        let text = HelloFailure::ListenerSaysTokenFileUnreadable { address }.to_string();
+        assert!(
+            text.contains("a listener at 127.0.0.1:28472 said the token file is unreadable"),
+            "{text}"
+        );
+        assert!(text.contains("unverified"), "{text}");
+        assert!(!text.contains("verification failed"), "{text}");
+    }
+
+    #[test]
+    fn a_reply_is_read_by_its_status_and_its_code() {
+        let answer = HelloAnswer::new(facts(), [1; 32]);
+        let body = serde_json::to_vec(&answer).expect("json");
+        assert_eq!(HelloReply::read(200, &body), HelloReply::Answer(answer));
+        assert_eq!(HelloReply::read(200, b"{}"), HelloReply::Unrecognized);
+        assert_eq!(HelloReply::read(201, &body), HelloReply::Unrecognized);
+
+        let envelope =
+            |detail| serde_json::to_vec(&ErrorEnvelope::new("refused", detail)).expect("json");
+        let refused = envelope(crate::ErrorDetail::hello_refused());
+        let unreadable = envelope(crate::ErrorDetail::token_file_unreadable());
+        assert_eq!(HelloReply::read(401, &refused), HelloReply::Refused);
+        assert_eq!(
+            HelloReply::read(500, &unreadable),
+            HelloReply::TokenFileUnreadable
+        );
+        // A code under the other status, another code, and no envelope at
+        // all are none of those.
+        assert_eq!(HelloReply::read(500, &refused), HelloReply::Unrecognized);
+        assert_eq!(HelloReply::read(401, &unreadable), HelloReply::Unrecognized);
+        let unauthorized = envelope(crate::ErrorDetail::unauthorized());
+        assert_eq!(
+            HelloReply::read(401, &unauthorized),
+            HelloReply::Unrecognized
+        );
+        assert_eq!(HelloReply::read(404, b""), HelloReply::Unrecognized);
+        assert_eq!(HelloReply::read(401, b"no"), HelloReply::Unrecognized);
+    }
+
+    #[test]
+    fn only_a_loopback_address_is_dialable() {
+        assert!(is_dialable(address("127.0.0.1:28472")));
+        assert!(is_dialable(address("127.0.0.2:28472")));
+        assert!(is_dialable(address("[::1]:28472")));
+        assert!(is_dialable(SocketAddr::V6(SocketAddrV6::new(
+            Ipv4Addr::LOCALHOST.to_ipv6_mapped(),
+            1,
+            0,
+            0
+        ))));
+        assert!(!is_dialable(address("0.0.0.0:28472")));
+        assert!(!is_dialable(address("192.0.2.1:28472")));
+        assert!(!is_dialable(address("[::]:28472")));
     }
 
     #[test]

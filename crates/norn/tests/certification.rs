@@ -1726,6 +1726,12 @@ fn assert_complete_active_matrix(workflow: &str, full: bool) {
             ]
         }
     );
+    // The counters build's one suite: a test step the PR gate runs in its
+    // lint job, beside the lint of the same feature build.
+    const TOKEN_COUNTER_BAR: &str = ".github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn --features counters --test serve_counters";
+    // And norn-serve's one unit test behind the same feature, named exactly
+    // so a rename is a run of no case, which test-suite.sh rejects.
+    const COUNTERS_ROUTE: &str = ".github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-serve --features counters --lib http::tests::the_counters_route_answers_the_token_counters_behind_the_bearer -- --exact";
     let commands: &[(&str, &str, &[&str])] = &[
         (
             "build",
@@ -1739,6 +1745,9 @@ fn assert_complete_active_matrix(workflow: &str, full: bool) {
                 "python3 -m unittest discover -s scripts/performance -v",
                 "cargo clippy --locked -p norn-db -p norn-fs -p norn-store --lib -- -D warnings",
                 "cargo clippy --locked -p norn-host --all-targets --features induced-failure -- -D warnings",
+                "cargo clippy --locked --workspace --all-targets --features norn/counters -- -D warnings",
+                TOKEN_COUNTER_BAR,
+                COUNTERS_ROUTE,
                 "cargo doc --locked --workspace --no-deps --document-private-items",
                 ".github/scripts/flake-tripwire.sh cargo test --locked --workspace",
             ],
@@ -1821,6 +1830,8 @@ fn assert_complete_active_matrix(workflow: &str, full: bool) {
                         || command.starts_with("cargo clippy")
                         || command.starts_with("cargo doc")
                         || command.starts_with("python3")
+                        || *command == TOKEN_COUNTER_BAR
+                        || *command == COUNTERS_ROUTE
                 })
                 .collect();
             let lint_lines = ci_job(workflow, "lint");
