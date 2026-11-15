@@ -173,6 +173,15 @@ Creates add the same bounded number of documents to each engine's run.
   Outliers are retained. p95 is descriptive at the selected sample count;
   report differences need repeated qualification before an optimization claim.
 
+### Profile a statement by its steps
+
+Before changing a slow statement, read what it costs in SQLite virtual-machine
+steps. `norn-db` counts them per statement (`vm_steps`), and the store's
+snapshot counters report them beside full-scan steps and sorts. A step count
+is the logical counter a statement's clock is paired with: it shows whether a
+change removed work or only moved it, and it does not drift with the machine.
+Report steps beside every timing claim about a statement.
+
 ## Evidence and checks
 
 `run.json` records identity, environment, completion, and any failure.
