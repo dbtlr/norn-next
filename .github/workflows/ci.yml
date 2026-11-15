@@ -151,6 +151,16 @@ jobs:
       # for that crate.
       - name: Lint the induced-failure targets
         run: cargo clippy --locked -p norn-host --all-targets --features induced-failure -- -D warnings
+      # The `counters` feature compiles the counters route into norn-serve and
+      # the token counter bar into the `norn` package's tests; with it off,
+      # both compile to nothing, so neither the lint above nor the build job
+      # reads them. These two steps are the lane that does. test-suite.sh
+      # rejects a run that executes no case, which is what a missing feature
+      # would produce.
+      - name: Lint the counters build
+        run: cargo clippy --locked --workspace --all-targets --features norn/counters -- -D warnings
+      - name: Token counter bar
+        run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn --features counters --test serve_counters
       # rustdoc is its own compiler pass: a public doc that links a private
       # item, or an intra-doc link that resolves to nothing, is a warning only
       # this pass sees, and no lint above reads it. Denied here so the doc

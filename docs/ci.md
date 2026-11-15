@@ -50,7 +50,7 @@ and refuses every other `--config`.
 |---|---|
 | Build and test | Workspace build, default tests and doctests except norn-host and norn-testkit, cheap registry structure and dormancy checks |
 | Build and test (norn-host and norn-testkit) | Default norn-host and norn-testkit tests and doctests; cargo test builds its selected targets |
-| Lint and document | Format, all five clippy contexts, performance-harness unit tests, denied-warning rustdoc |
+| Lint and document | Format, all six clippy contexts, performance-harness unit tests, the token counter bar under `counters`, denied-warning rustdoc |
 | Host functional (induced-failure) | Complete ordinary feature-enabled host suite, including churn and rolling-heal correctness and work counters |
 | macOS platform | Embedding determinism, filesystem contracts, Obsidian parity, exact case-rename and unreadable-document/subtree cases, folding-root spelling bar |
 | Architecture | Actionlint, the architecture gate and the shard certification |
