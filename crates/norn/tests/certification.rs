@@ -1299,8 +1299,8 @@ fn the_fast_gate_keeps_ordinary_functional_coverage() {
         gate.replace("--exclude norn-host", "--exclude norn-store"),
         gate.replace(" --exclude norn-host", ""),
         gate.replace(
-            "--locked --config profile.dev.package.libsqlite3-sys.opt-level=3 -p norn-host -p norn-testkit -p norn-serve\n",
-            "--locked --config profile.dev.package.libsqlite3-sys.opt-level=3 -p norn-store\n",
+            "--locked -p norn-host -p norn-testkit -p norn-serve\n",
+            "--locked -p norn-store\n",
         ),
         gate.replace(" --exclude norn-serve", ""),
         gate.replace(" -p norn-serve\n", "\n"),
@@ -1324,8 +1324,8 @@ fn the_fast_gate_keeps_ordinary_functional_coverage() {
         ),
     ];
     for command in [
-        "cargo test --locked --config profile.dev.package.libsqlite3-sys.opt-level=3 --workspace --exclude norn-host --exclude norn-testkit --exclude norn-serve",
-        "cargo test --locked --config profile.dev.package.libsqlite3-sys.opt-level=3 -p norn-host -p norn-testkit -p norn-serve",
+        "cargo test --locked --workspace --exclude norn-host --exclude norn-testkit --exclude norn-serve",
+        "cargo test --locked -p norn-host -p norn-testkit -p norn-serve",
     ] {
         for narrowing in [
             " ordinary",
@@ -1355,26 +1355,6 @@ fn the_fast_gate_keeps_ordinary_functional_coverage() {
     }
 }
 
-/// The cargo flag that builds the bundled SQLite at opt-level 3 in PR jobs.
-const SQLITE_OPT_PAIR: &str = "--config profile.dev.package.libsqlite3-sys.opt-level=3";
-
-/// `command` as a PR job spells it: a cargo build or test carries
-/// [`SQLITE_OPT_PAIR`] after `--locked`, and a lane step never does.
-fn pr_sqlite_flag(command: &str) -> String {
-    if command.contains("lane-suite.sh") {
-        return command.to_string();
-    }
-    command
-        .replace(
-            "cargo build --locked",
-            &format!("cargo build --locked {SQLITE_OPT_PAIR}"),
-        )
-        .replace(
-            "cargo test --locked",
-            &format!("cargo test --locked {SQLITE_OPT_PAIR}"),
-        )
-}
-
 fn assert_fast_gate(workflow: &str) {
     assert_triggers(
         workflow,
@@ -1400,7 +1380,7 @@ fn assert_fast_gate(workflow: &str) {
         workflow,
         "build-host",
         &[
-            ".github/scripts/flake-tripwire.sh cargo test --locked --config profile.dev.package.libsqlite3-sys.opt-level=3 -p norn-host -p norn-testkit -p norn-serve",
+            ".github/scripts/flake-tripwire.sh cargo test --locked -p norn-host -p norn-testkit -p norn-serve",
         ],
         false,
     );
@@ -1690,9 +1670,9 @@ fn assert_matrix_step_values(workflow: &str, job: &str, runs: &[&str], full: boo
     if job == "architecture" {
         expected.push("uses: docker://rhysd/actionlint:1.7.12\nargs: -color".to_string());
     }
-    // The four PR jobs that carry the SQLite flag key their cache apart from
-    // the caches saved before it.
-    if !full && matches!(job, "build" | "build-host" | "host-functional" | "platform") {
+    // Only the PR host functional job builds the bundled SQLite at opt-level 3,
+    // so only its cache key is separated from the caches saved before the flag.
+    if !full && job == "host-functional" {
         expected.push("uses: Swatinem/rust-cache@v2\nkey: sqlite-opt3".to_string());
     } else {
         expected.push("uses: Swatinem/rust-cache@v2".to_string());
@@ -1820,7 +1800,6 @@ fn assert_complete_active_matrix(workflow: &str, full: bool) {
             continue;
         }
         let mut runs = runs.to_vec();
-        let owned: Vec<String>;
         if full {
             match key {
                 "build" => runs.extend([
@@ -1862,6 +1841,10 @@ fn assert_complete_active_matrix(workflow: &str, full: bool) {
         } else if key == "induced-failure" {
             key = "host-functional";
             name = "host functional (induced-failure)";
+            // The one PR job that builds the bundled SQLite at opt-level 3.
+            runs = vec![
+                ".github/scripts/flake-tripwire.sh cargo test --locked --config profile.dev.package.libsqlite3-sys.opt-level=3 -p norn-host --features induced-failure",
+            ];
         } else if key == "platform" {
             runs = vec![
                 ".github/scripts/flake-tripwire.sh cargo test --locked -p norn-embed --test determinism",
@@ -1877,13 +1860,6 @@ fn assert_complete_active_matrix(workflow: &str, full: bool) {
                 ".github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-host --features induced-failure --test lockdown an_unreadable_subtree_is_withheld_and_marked_and_the_heal_reaches_ready -- --exact --include-ignored",
                 ".github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host folding_cost --nocapture --test-threads=1",
             ];
-        }
-        if !full && matches!(key, "build" | "host-functional" | "platform") {
-            // The PR jobs build the bundled SQLite at opt-level 3. The
-            // folding-root step runs through the lane script and keeps
-            // opt-level 0, as does every nightly lane.
-            owned = runs.iter().map(|run| pr_sqlite_flag(run)).collect();
-            runs = owned.iter().map(String::as_str).collect();
         }
         let lines = ci_job(workflow, key);
         let name = if full {

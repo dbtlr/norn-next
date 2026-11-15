@@ -85,24 +85,11 @@ jobs:
         run: |
           rustc --version
           cargo --version
-      # The key separates these jobs' caches from the ones saved before the flag,
-      # so the optimized SQLite object is saved.
       - uses: Swatinem/rust-cache@v2
-        with:
-          key: sqlite-opt3
-      # `--config profile.dev.package.libsqlite3-sys.opt-level=3` builds the bundled
-      # SQLite at opt-level 3, so functional tests run faster. Cargo does not read
-      # a per-package profile override from the environment, so the flag is how a
-      # single run sets it. The workflow reader and the shard check accept this
-      # one exact pair and no other `--config`. Every cargo step of the three
-      # Linux jobs carries the flag, so each of those jobs builds one variant. The
-      # macOS job builds two: its functional steps with the flag, then the
-      # folding-root step at opt-level 0, which rebuilds `libsqlite3-sys` and the
-      # crates above it.
       - name: Build
-        run: cargo build --locked --config profile.dev.package.libsqlite3-sys.opt-level=3 --workspace
+        run: cargo build --locked --workspace
       - name: Test
-        run: .github/scripts/flake-tripwire.sh cargo test --locked --config profile.dev.package.libsqlite3-sys.opt-level=3 --workspace --exclude norn-host --exclude norn-testkit --exclude norn-serve
+        run: .github/scripts/flake-tripwire.sh cargo test --locked --workspace --exclude norn-host --exclude norn-testkit --exclude norn-serve
 
   # `build and test (norn-host and norn-testkit)` is a required check in the `main` ruleset.
   # The named packages and catch-all exclusions must match exactly. Each package's
@@ -120,11 +107,9 @@ jobs:
         with:
           persist-credentials: false
       - uses: Swatinem/rust-cache@v2
-        with:
-          key: sqlite-opt3
       # cargo test builds every selected target before running tests and doctests.
       - name: Test
-        run: .github/scripts/flake-tripwire.sh cargo test --locked --config profile.dev.package.libsqlite3-sys.opt-level=3 -p norn-host -p norn-testkit -p norn-serve
+        run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-host -p norn-testkit -p norn-serve
 
   # `lint and document` is a required check in the `main` ruleset.
   # Its 30-minute timeout is a runaway guard, under the same doctrine above.
@@ -200,9 +185,17 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+      # The cache key separates this job's cache from the ones saved before the
+      # flag below, so the optimized SQLite object is saved.
       - uses: Swatinem/rust-cache@v2
         with:
           key: sqlite-opt3
+      # `--config profile.dev.package.libsqlite3-sys.opt-level=3` builds the bundled
+      # SQLite at opt-level 3 for this job's functional tests. Cargo does not read
+      # a per-package profile override from the environment, so the flag is how a
+      # single run sets it. The workflow reader accepts this one exact flag and
+      # value and no other `--config`. The other PR jobs do not pass it because it
+      # did not shorten them on hosted runners.
       - name: Host functional suite
         run: .github/scripts/flake-tripwire.sh cargo test --locked --config profile.dev.package.libsqlite3-sys.opt-level=3 -p norn-host --features induced-failure
 
@@ -238,38 +231,32 @@ jobs:
       - name: Assert architecture
         run: test "$(uname -m)" = arm64
       - uses: Swatinem/rust-cache@v2
-        with:
-          key: sqlite-opt3
       - name: Embedding determinism
-        run: .github/scripts/flake-tripwire.sh cargo test --locked --config profile.dev.package.libsqlite3-sys.opt-level=3 -p norn-embed --test determinism
+        run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-embed --test determinism
       - name: Filesystem contracts
-        run: .github/scripts/flake-tripwire.sh cargo test --locked --config profile.dev.package.libsqlite3-sys.opt-level=3 -p norn-fs
+        run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-fs
       # The measuring launcher's pre-main initializer and spawn path are
       # platform-specific; this runs its process tests on macOS on every PR.
       - name: Measuring launcher
-        run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked --config profile.dev.package.libsqlite3-sys.opt-level=3 -p norn-testkit --lib process
+        run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-testkit --lib process
       - name: Host library contracts
-        run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked --config profile.dev.package.libsqlite3-sys.opt-level=3 -p norn-host --features induced-failure --lib
+        run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-host --features induced-failure --lib
       # test-suite.sh judges one libtest target's summary, so each target is its own step.
       - name: Early host reads
-        run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked --config profile.dev.package.libsqlite3-sys.opt-level=3 -p norn-host --features induced-failure --test early_reads
+        run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-host --features induced-failure --test early_reads
       - name: Provisional host registration
-        run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked --config profile.dev.package.libsqlite3-sys.opt-level=3 -p norn-host --features induced-failure --test provisional_registration
+        run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-host --features induced-failure --test provisional_registration
       - name: Obsidian parity
-        run: .github/scripts/flake-tripwire.sh cargo test --locked --config profile.dev.package.libsqlite3-sys.opt-level=3 -p norn-host --features induced-failure --test obsidian_parity
+        run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-host --features induced-failure --test obsidian_parity
       # --exact alone succeeds on a typo. test-suite.sh rejects zero matches.
       - name: Case-only rename convergence
-        run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked --config profile.dev.package.libsqlite3-sys.opt-level=3 -p norn-host --features induced-failure --test churn a_case_flip_converges_on_a_build_from_zero -- --exact --include-ignored
+        run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-host --features induced-failure --test churn a_case_flip_converges_on_a_build_from_zero -- --exact --include-ignored
       - name: Parent rename over a save
-        run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked --config profile.dev.package.libsqlite3-sys.opt-level=3 -p norn-host --features induced-failure --test churn a_case_renamed_parent_over_a_save_converges_on_a_build_from_zero -- --exact --include-ignored
+        run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-host --features induced-failure --test churn a_case_renamed_parent_over_a_save_converges_on_a_build_from_zero -- --exact --include-ignored
       - name: Unreadable document recovery
-        run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked --config profile.dev.package.libsqlite3-sys.opt-level=3 -p norn-host --features induced-failure --test lockdown an_unreadable_document_is_marked_broken_and_the_heal_reaches_ready -- --exact --include-ignored
+        run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-host --features induced-failure --test lockdown an_unreadable_document_is_marked_broken_and_the_heal_reaches_ready -- --exact --include-ignored
       - name: Unreadable subtree is withheld and marked
-        run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked --config profile.dev.package.libsqlite3-sys.opt-level=3 -p norn-host --features induced-failure --test lockdown an_unreadable_subtree_is_withheld_and_marked_and_the_heal_reaches_ready -- --exact --include-ignored
-      # Left without the SQLite opt-level flag: this step runs through the lane
-      # script, which builds its own cargo command, and calls the build-profile
-      # guard, which cannot see a `--config` flag. Measurement lanes stay at
-      # opt-level 0.
+        run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-host --features induced-failure --test lockdown an_unreadable_subtree_is_withheld_and_marked_and_the_heal_reaches_ready -- --exact --include-ignored
       - name: Folding-root spelling bar
         run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host folding_cost --nocapture --test-threads=1
         env:

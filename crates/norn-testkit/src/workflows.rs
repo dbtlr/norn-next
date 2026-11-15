@@ -102,17 +102,17 @@ const LANE_SCRIPT_FILE: &str = "lane-suite.sh";
 const FLAKE_TRIPWIRE: &str = ".github/scripts/flake-tripwire.sh";
 
 /// The one cargo flag, and its one value, that compiles the bundled SQLite at
-/// opt-level 3 for a functional `cargo test` step. It changes how one C
+/// opt-level 3 for a PR functional `cargo test` step. It changes how one C
 /// dependency is built, not which tests run. Only this exact pair is read: any
 /// other `--config` could change what is built or run, and the build-profile
 /// guard cannot see a `--config` flag, so nothing wider is trusted. The lane
 /// script builds its own command and never passes it.
-pub(crate) const SQLITE_OPT_FLAG: &str = "--config";
+const SQLITE_OPT_FLAG: &str = "--config";
 
 /// The value [`SQLITE_OPT_FLAG`] may carry, and no other. Cargo loads a
 /// `--config` argument as a config file when a file of that name exists, so
 /// the workspace root must hold no entry named this; a test refuses one.
-pub(crate) const SQLITE_OPT_VALUE: &str = "profile.dev.package.libsqlite3-sys.opt-level=3";
+const SQLITE_OPT_VALUE: &str = "profile.dev.package.libsqlite3-sys.opt-level=3";
 
 /// The environment key a lane step names its cargo features through.
 pub(crate) const LANE_FEATURES: &str = "LANE_FEATURES";

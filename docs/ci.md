@@ -28,23 +28,23 @@ The whole feature-enabled
 `norn-host` package runs in `host functional (induced-failure)`, so current and
 future ordinary targets and cases join PR coverage automatically.
 
-The PR jobs build the bundled SQLite (`libsqlite3-sys`) at opt-level 3, so
-functional tests run faster. Each functional `cargo` command carries
-`--config profile.dev.package.libsqlite3-sys.opt-level=3` directly after
-`--locked`: both the `Build` and `Test` steps of `build and test`, the `Test`
-step of `build and test (norn-host and norn-testkit)`, the host functional suite
-step, and every `cargo test` step of the macOS platform job that runs before the
-folding-root spelling bar. Cargo does not read a per-package profile override from the
-environment, so the flag is how a single run sets it. Every cargo step of the
-three Linux jobs carries the flag, so each of those jobs builds one variant. The
-macOS job builds two: its functional steps with the flag, then the folding-root
-spelling bar at opt-level 0, which rebuilds `libsqlite3-sys` and the crates above
-it. Every nightly lane also runs without the flag, so every measurement stays at
-opt-level 0. The `rust-cache` step of the four jobs that carry the flag has the
-extra key `sqlite-opt3`, which separates their caches from the ones saved before
-the flag, so the optimized SQLite object is saved. Lane steps cannot carry the flag, because `lane-suite.sh` builds its own
-`cargo test` command. The workflow reader and the shard check accept this one
-exact flag and value and refuse every other `--config`.
+The host functional job builds the bundled SQLite (`libsqlite3-sys`) at
+opt-level 3 by passing `--config profile.dev.package.libsqlite3-sys.opt-level=3`
+to its `cargo test` command. Cargo does not read a per-package profile override
+from the environment, so the flag is how a single run sets it. The job's
+`rust-cache` step has the extra key `sqlite-opt3`, which separates its cache from
+the ones saved before the flag, so the optimized SQLite object is saved.
+
+The other PR jobs do not pass the flag. Measured on hosted runners over three
+warm runs each, it shortened the host functional job by about a quarter and left
+the two package shards within 2% of `main`. The macOS job, which would also have
+to build the crates above SQLite a second time for the folding-root spelling
+bar, was 7% slower.
+
+Every nightly lane runs without the flag, so every measurement stays at
+opt-level 0. Lane steps cannot carry it, because `lane-suite.sh` builds its own
+`cargo test` command. The workflow reader accepts this one exact flag and value
+and refuses every other `--config`.
 
 | PR job | Evidence |
 |---|---|
@@ -201,8 +201,8 @@ profile override, so a full gate runs without them.
 
 An ad-hoc run that executes no measurement suite can also pass
 `--config profile.dev.package.libsqlite3-sys.opt-level=3` to `cargo test` for
-faster functional tests. The build-profile guard cannot see a `--config` flag, so
-never pass it to a measurement suite.
+faster functional tests. The build-profile guard cannot see a `--config` flag,
+so never pass it to a measurement suite.
 
 The default macOS volume (APFS) folds case, so a walk or normalizer test with a
 wrong case-sensitive branch passes on a Mac and fails only on the hosted Linux
