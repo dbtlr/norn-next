@@ -702,6 +702,86 @@ mod tests {
         assert_ne!(link, file);
     }
 
+    /// Write `text` at `path`, owner-only, with no fsync: a write as fast as
+    /// the filesystem takes one, so two of them can land inside one tick.
+    #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // Harness scaffolding: the writes a hand rename-over makes.
+    fn write_private(path: &Path, text: &str) {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+            .and_then(|mut file| file.write_all(text.as_bytes()))
+            .unwrap_or_else(|e| panic!("writing {}: {e}", path.display()));
+    }
+
+    /// What `path` is, as the operating system reports it rather than as a
+    /// fingerprint reads it: its inode, its size, and its modification and
+    /// change times.
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: judging the file apart from the code under test.
+    fn stamp_of(path: &Path) -> (u64, u64, (i64, i64), (i64, i64)) {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = std::fs::symlink_metadata(path).expect("the file's metadata");
+        (
+            metadata.ino(),
+            metadata.size(),
+            (metadata.mtime(), metadata.mtime_nsec()),
+            (metadata.ctime(), metadata.ctime_nsec()),
+        )
+    }
+
+    /// A replacement renamed over the file, of the same size and stamped
+    /// inside the same timestamp tick, differs from it only by its inode —
+    /// and is seen by that. The case retries until the filesystem's clock
+    /// really did give the two the same times, and asserts that it did, so
+    /// what it pins is the inode rather than a tick that happened to turn.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: the rename a hand replacement makes.
+    fn a_same_size_replacement_within_one_tick_is_seen_by_its_inode() {
+        const ATTEMPTS: usize = 1_000;
+        let held_text = "version = 1\n\n[tokens.laptop]\nsecret = \"0a0a\"\ncreated = 1\n";
+        let next_text = "version = 1\n\n[tokens.laptop]\nsecret = \"0b0b\"\ncreated = 1\n";
+        assert_eq!(held_text.len(), next_text.len());
+
+        for _ in 0..ATTEMPTS {
+            let scratch = norn_testkit::scratch::Scratch::new("norn-config-fresh-inode");
+            let dirs = dirs_in(&scratch);
+            let path = dirs.tokens_file();
+            let next = dirs.config_dir().join("tokens.next");
+            write_private(&path, held_text);
+            write_private(&next, next_text);
+            let mut watched = WatchedTokens::read(&dirs);
+            let held = stamp_of(&path);
+            std::fs::rename(&next, &path).expect("renaming the replacement over the file");
+            let now = stamp_of(&path);
+
+            if (now.1, now.2, now.3) != (held.1, held.2, held.3) {
+                // A tick turned between the writes or at the rename: the
+                // times tell the two apart, and the case proves nothing.
+                continue;
+            }
+            assert_ne!(now.0, held.0, "the replacement is another inode");
+
+            let check = watched.check();
+            assert!(
+                check.read(),
+                "a replacement differing only by inode: {check:?}"
+            );
+            let secret = watched
+                .current()
+                .expect("a set")
+                .get(&label("laptop"))
+                .expect("a token")
+                .secret()
+                .to_vec();
+            assert_eq!(secret, [0x0b, 0x0b]);
+            return;
+        }
+        panic!("no attempt in {ATTEMPTS} landed both writes and the rename inside one tick");
+    }
+
     /// A secret in a log is a secret leaked, and the derived `Debug` is how it
     /// would get there.
     #[test]
