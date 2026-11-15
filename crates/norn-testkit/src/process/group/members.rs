@@ -9,11 +9,10 @@
 //! The leader question's answer is "yes" only when it is proved. Every doubt
 //! reads as "no", which keeps the full signal-delivery window: `/proc` was
 //! mounted for another pid namespace (its `self` link does not name this
-//! process), `/proc` cannot be
-//! listed or an entry of the listing cannot be read, a member's `stat` cannot be
-//! read for a reason other than the process having gone, a `stat` line does not
-//! parse, the leader is not in the listing as a zombie of the group, or any
-//! other process is in the group in any state.
+//! process), `/proc` cannot be listed or an entry of the listing cannot be
+//! read, a member's `stat` cannot be read for a reason other than the process
+//! having gone, a `stat` line does not parse, the leader is not in the listing
+//! as a zombie of the group, or any other process is in the group in any state.
 //!
 //! A zombie that is not the leader counts as a member, conservatively: it may be
 //! a member the group's `SIGKILL` did not reach, because `/proc` shows only its
@@ -319,6 +318,15 @@ mod tests {
                 "errno {refusal}"
             );
         }
+    }
+
+    // A member placed by `getpgid` does not end the walk: the members listed
+    // after it are still counted.
+    #[test]
+    fn counting_continues_past_a_permission_refused_member() {
+        let mut table = FixedTable::proving().with_other_refused(Ok(LEADER));
+        table.listing = Some(vec![Ok("self"), Ok("200"), Ok("100")]);
+        assert_eq!(count(&table, OWN_PID, LEADER).unwrap(), 2);
     }
 
     // The `getpgid` fallback is for permission refusals only: an EIO stat stays
