@@ -108,7 +108,7 @@ pub const MANDATORY_CASES: &[&str] = &[
 /// requires every dormant case at or below this layer to say why. Raising it is
 /// a reviewed edit made when the next layer starts landing, and it raises the
 /// bar on every case that was already sitting there.
-pub const LAYER_LANDING: u8 = 5;
+pub const LAYER_LANDING: u8 = 6;
 
 /// The layers a case's venue names, indexed by layer number.
 ///
@@ -3258,13 +3258,22 @@ fn a_carrier() {}
     }
 
     /// A registry that audits clean against [`scratch`] and [`index`]: the
-    /// pinned venue scale, the mandatory cases dormant above the landing
-    /// layer, one bound case, and one dormant layer-0 case with its reason.
+    /// pinned venue scale, the mandatory cases dormant at the landed layer on
+    /// a grounded reason, one bound case, and one dormant layer-0 case with
+    /// its reason.
     fn sound() -> Registry {
         let mut cases: Vec<Case> = MANDATORY_CASES
             .iter()
             .map(|name| {
-                let mut case = case(name, LAYER_LANDING + 1, dormant(None));
+                let mut case = case(
+                    name,
+                    LAYER_LANDING,
+                    grounded(
+                        "the surface this case waits on has no subject: crates/demo-surface is \
+                         not in the workspace",
+                        vec![Ground::Absent("crates/demo-surface".to_string())],
+                    ),
+                );
                 case.mandatory = true;
                 case
             })
@@ -3657,7 +3666,8 @@ fn a_carrier() {}
         }
         // Above the landed layer there is nothing to explain: the subject has
         // not been built, so neither a reason nor the grounds one stands on is
-        // asked for.
+        // asked for. The landing is the top of the scale now, so the one venue
+        // above it names no layer, and that is the only thing said of it.
         assert_eq!(
             problems(|registry| {
                 let case = find(registry, "a-dormant-layer-zero-case");
@@ -3665,8 +3675,20 @@ fn a_carrier() {}
                 case.binding.reason = None;
                 case.binding.grounds.clear();
             }),
-            Vec::<String>::new()
+            above_the_scale()
         );
+    }
+
+    /// The one problem a case placed past the top of the venue scale meets
+    /// while the landing is that top: its venue is not a layer.
+    fn above_the_scale() -> Vec<String> {
+        if usize::from(LAYER_LANDING) + 1 < VENUE_NAMES.len() {
+            return Vec::new();
+        }
+        vec![format!(
+            "`a-dormant-layer-zero-case` names venue {}, which is not a layer",
+            LAYER_LANDING + 1
+        )]
     }
 
     /// **The falsifiability gate.** A reason standing on a subject's absence
@@ -3855,7 +3877,8 @@ fn a_carrier() {}
             "which the workspace holds, while stating no grounds",
         );
         // A reason at the same venue naming no subject the tree holds is a case
-        // waiting on a layer nobody built, which owes nothing.
+        // waiting on a layer nobody built, which owes nothing beyond what its
+        // venue owes.
         assert_eq!(
             problems(|registry| {
                 let case = find(registry, "a-dormant-layer-zero-case");
@@ -3863,7 +3886,7 @@ fn a_carrier() {}
                 case.binding.reason = Some("no apply layer exists to contain".to_string());
                 case.binding.grounds.clear();
             }),
-            Vec::<String>::new()
+            above_the_scale()
         );
     }
 
