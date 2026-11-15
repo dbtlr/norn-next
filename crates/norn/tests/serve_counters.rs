@@ -8,7 +8,7 @@
 //! lookup of its own, which every expectation below names as `+ 1`.
 //!
 //! Every reading is taken on a settled token file: a fingerprint taken
-//! within 2 s of the file's last write is not trusted, and each check reads
+//! within 3 s of the file's last write is not trusted, and each check reads
 //! the file again until it is that old. So each case waits once, after its
 //! last write to the file, before the reading it asserts the steady state
 //! on; the first check after the wait may still read once, and it falls

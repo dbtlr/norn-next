@@ -352,7 +352,7 @@ fn is_file(path: &Path, file: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// RFC 4231's first test case, so the MAC is HMAC-SHA256 and not
@@ -387,8 +387,18 @@ mod tests {
             Ok(())
         })
         .expect("tokens");
-        let credentials = Credentials::new(&dirs, WatchedTokens::read(&dirs));
+        let credentials = Credentials::new(&dirs, settled(&dirs));
         (dirs, credentials)
+    }
+
+    /// The token set read under a clock a minute ahead, so every fingerprint
+    /// is settled: an unchanged file then costs a check one fingerprint and
+    /// no read, and the index is rebuilt only when the file changes. A
+    /// file's change time cannot be set back, so the clock is moved instead.
+    pub(crate) fn settled(dirs: &ConfigDirs) -> WatchedTokens {
+        WatchedTokens::read_with_clock(dirs, || {
+            std::time::SystemTime::now() + std::time::Duration::from_secs(60)
+        })
     }
 
     fn admit(credentials: &mut Credentials, header: &str) -> Admission {

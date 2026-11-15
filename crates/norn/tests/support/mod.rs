@@ -319,9 +319,9 @@ pub fn hello(port: u16, label: &str) -> Reply {
 }
 
 /// How long after a write the token file's times must be before a host
-/// holds its fingerprint as settled: `norn-config`'s 2 s window, and a margin
+/// holds its fingerprint as settled: `norn-config`'s 3 s window, and a margin
 /// for the filesystem's clock tick.
-pub const TOKEN_FILE_SETTLES_AFTER: Duration = Duration::from_millis(2200);
+pub const TOKEN_FILE_SETTLES_AFTER: Duration = Duration::from_millis(3200);
 
 /// Wait until the token file's later time, of its modification and change
 /// times, is [`TOKEN_FILE_SETTLES_AFTER`] old, so a fingerprint taken from

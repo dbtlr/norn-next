@@ -273,12 +273,13 @@ fn json(status: StatusCode, body: Vec<u8>) -> Answer {
 #[cfg(test)]
 mod tests {
     use norn_config::ConfigDirs;
-    use norn_config::machine::tokens::{self, TokenLabel, WatchedTokens};
+    use norn_config::machine::tokens::{self, TokenLabel};
     use norn_testkit::scratch::Scratch;
     use norn_wire::{HelloExpectation, Nonce};
 
     use super::*;
     use crate::credentials::mac_verifies;
+    use crate::credentials::tests::settled;
 
     const SECRET: &[u8] = b"a stored secret";
 
@@ -298,7 +299,7 @@ mod tests {
         })
         .expect("a token");
         let context = Context {
-            credentials: Mutex::new(Credentials::new(&dirs, WatchedTokens::read(&dirs))),
+            credentials: Mutex::new(Credentials::new(&dirs, settled(&dirs))),
             channel: HelloChannel::Dev,
             build: BuildIdentity::new("0.0.0+test"),
             launch: HelloLaunch::Explicit,
