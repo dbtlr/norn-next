@@ -252,16 +252,14 @@ fn a_changed_file_that_no_longer_reads_refuses_every_request_until_it_reads_agai
         assert_eq!(reply.code(), "serve/token-file-unreadable", "{reply:?}");
         assert!(!reply.body_text().contains("mac"), "{reply:?}");
     }
-    let warned: Vec<String> = served
-        .drain_lines()
-        .iter()
-        .filter(|line| line.starts_with("warning: the token file"))
-        .cloned()
-        .collect();
-    assert_eq!(warned.len(), 1, "logged once on entering: {warned:?}");
+    // The log line is written by the host and read here by another thread,
+    // so it is waited for rather than drained: a drain can run before the
+    // line has crossed the pipe. That it is logged only once is counted over
+    // the whole run, once the host has stopped.
+    let warned = served.line_starting("warning: the token file");
     assert!(
-        warned[0].contains(&path.display().to_string()) && warned[0].contains("chmod 600"),
-        "{warned:?}"
+        warned.contains(&path.display().to_string()) && warned.contains("chmod 600"),
+        "{warned}"
     );
 
     // No pause before the restore: while the host fails closed it reads the
@@ -270,5 +268,11 @@ fn a_changed_file_that_no_longer_reads_refuses_every_request_until_it_reads_agai
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
     assert_eq!(get(port, "/", Some(&bearer)).status, 404);
     assert_eq!(hello(port, "default").status, 200);
-    assert_eq!(served.terminate().0.code(), Some(0));
+    let (status, lines) = served.terminate();
+    assert_eq!(status.code(), Some(0));
+    let warnings = lines
+        .iter()
+        .filter(|line| line.starts_with("warning: the token file"))
+        .count();
+    assert_eq!(warnings, 1, "logged once on entering: {lines:?}");
 }
