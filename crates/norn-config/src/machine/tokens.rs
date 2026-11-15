@@ -67,6 +67,19 @@
 //! chosen over anything denser because it is decodable by inspection and its
 //! implementation is short enough to be read at a glance.
 //!
+//! # Freshness
+//!
+//! A long-lived holder serves from a [`WatchedTokens`], which compares a
+//! fingerprint of the file — device, inode, size, modification and change
+//! times — at every check and reads the file again only when that tells it
+//! to. A fingerprint vouches for the file only once the file's times stand
+//! 2 s before the moment it was taken, since a filesystem's clock ticks
+//! coarsely enough for two same-size edits to share every field of it. Until
+//! then it is racy and a check reads the file again, so a revocation is seen
+//! on the next check whatever tick it landed in: a check costs a second
+//! fingerprint and a read within 2 s of a change, and one fingerprint and no
+//! read once the file has settled.
+//!
 //! # What a rewrite preserves
 //!
 //! A key this build does not model — a scope, an expiry a newer build wrote —
@@ -541,22 +554,40 @@ impl fmt::Debug for WallClock {
 }
 
 /// The token set a long-lived holder serves from, kept fresh against the file
-/// by one fingerprint per check while the file is unchanged.
+/// by one fingerprint per check once the file has settled.
 ///
 /// **Dormant carrier.** The serving layer's bearer middleware and hello, and
 /// the dialer's held-lock wait, hold one of these and check it once per
 /// request or poll; neither is built yet, so nothing in the workspace reaches
 /// it but its suite.
 ///
-/// It holds the fingerprint it last took and the outcome of the read that
-/// followed it: the parsed [`Tokens`], or the refusal the read answered with.
-/// A [`check`](Self::check) takes the fingerprint once. Unchanged, with a set
-/// held, that is the whole cost. Changed — or not taken at all, since a stat
-/// that fails says nothing about the file being the one that was read — or
-/// with a refusal held, it takes the fingerprint again, then reads, and holds
-/// the second fingerprint with the read's outcome. Because the held fingerprint was taken before the read, an
-/// edit landing between the two differs from it, and the next check reads
-/// again: an edit is never hidden behind a fingerprint taken after it.
+/// It holds the fingerprint it last took, with the moment it took it, and the
+/// outcome of the read that followed: the parsed [`Tokens`], or the refusal
+/// the read answered with. A [`check`](Self::check) takes the fingerprint
+/// once. Unchanged and settled, with a set held, that is the whole cost.
+/// Changed — or not taken at all, since a stat that fails says nothing about
+/// the file being the one that was read — or racy, or with a refusal held, it
+/// takes the fingerprint again, then reads, and holds the second fingerprint
+/// with the read's outcome. Because the held fingerprint was taken before the
+/// read, an edit landing between the two differs from it, and the next check
+/// reads again: an edit is never hidden behind a fingerprint taken after it.
+///
+/// **A young fingerprint is read again.** A filesystem stamps a write with a
+/// coarse clock — one kernel tick, a few milliseconds, on ext4 — so a second
+/// same-size edit made in place inside the tick of the first, or a
+/// replacement renamed over the file that reuses its inode number, can leave
+/// every field of the fingerprint as the first change left it. A held
+/// fingerprint is therefore trusted only once it is **settled**: the file's
+/// later time, modification or change, stands at least 2 s before the moment
+/// the fingerprint was taken, the coarsest tick of a filesystem in common use.
+/// Until then it is **racy** — a time after that moment, from a clock stepped
+/// back or a time set ahead by hand, is racy too — and an unchanged racy
+/// fingerprint is treated as a change. Each such check holds a fingerprint
+/// taken later than the last, so a holder checked throughout returns to one
+/// fingerprint and no read about 2 s after the file's last change, and pays
+/// two fingerprints and a read per check within those 2 s. This is git's
+/// "racy timestamp" rule for its index, and it is decided at the check alone:
+/// nothing waits for the window to pass.
 ///
 /// **A changed file that no longer reads fails closed.** A TOML error, an
 /// illegal label, an empty secret, a mode reaching beyond the owner, a file
@@ -574,18 +605,17 @@ impl fmt::Debug for WallClock {
 /// two fingerprints and a read per check rather than one fingerprint, which is
 /// the price of a holder that cannot stay refused once nothing refuses.
 ///
-/// **Declared limits.** A filesystem whose timestamps are coarser than the
-/// interval between two changes can miss the second of two same-size changes
-/// within one tick, until the next change: an edit made in place, or a
-/// replacement renamed over the file that reuses the inode number of the file
-/// it replaced. A replacement with an inode of its own is seen by that, and
-/// the change time, which the kernel sets on every write and on any attempt to
-/// restore the modification time, catches an in-place, same-size edit and a
-/// restored modification time otherwise. And the fingerprint is the file's
-/// alone: a mode change on the config *directory* does not change it, so a
-/// directory loosened after a read is judged at the next change to the file,
-/// not before — and a directory tightened after a refused read is judged at
-/// the next check, since a held refusal is read again at every one.
+/// **Declared limits.** The racy rule trusts the file's times and the clock
+/// the moment is read from to be one clock: a change is missed until the next
+/// one when the two disagree — a filesystem whose times come from another
+/// machine's clock behind this one's, or the wall clock stepped back after a
+/// fingerprint settled, far enough that a later same-size edit is stamped
+/// with the earlier one's times — or on a filesystem whose times are coarser
+/// than 2 s. And the fingerprint is the file's alone: a mode change on the
+/// config *directory* does not change it, so a directory loosened after a read
+/// is judged at the next read of the file, not before — and a directory
+/// tightened after a refused read is judged at the next check, since a held
+/// refusal is read again at every one.
 #[derive(Debug)]
 pub struct WatchedTokens {
     dirs: ConfigDirs,
@@ -607,8 +637,9 @@ pub struct Check {
 }
 
 impl Check {
-    /// How many fingerprints the check took: 1 when nothing changed, 2 when
-    /// something did or a refusal was held.
+    /// How many fingerprints the check took: 1 when nothing changed and the
+    /// held fingerprint had settled, 2 when something changed, the held
+    /// fingerprint was racy, or a refusal was held.
     pub const fn fingerprints(self) -> u32 {
         self.fingerprints
     }
@@ -621,6 +652,12 @@ impl Check {
     /// Whether the held outcome — the set, or the refusal a holder fails
     /// closed on — was replaced: by every check that read, and by one whose
     /// fingerprint failed.
+    ///
+    /// A read that answers the set already held replaces it all the same, so
+    /// a holder checked while its fingerprint is racy reports a replacement at
+    /// every check of that window, about 2 s after a change. The set is not
+    /// compared: the rebuild a replacement asks for is over a handful of
+    /// tokens, and costs no more than the read that preceded it.
     pub const fn replaced(self) -> bool {
         self.replaced
     }
@@ -640,10 +677,9 @@ impl WatchedTokens {
     /// `clock` rather than the system clock.
     ///
     /// A suite's seam — this crate's, and the serving side's counter bar: a
-    /// file's change time cannot be set back, so a holder is shown a
-    /// [settled](Self#a-young-fingerprint-is-read-again) file by a clock set
-    /// forward rather than by waiting out the window, and a racy one by a
-    /// clock set behind.
+    /// file's change time cannot be set back, so a holder is shown a settled
+    /// file by a clock set forward rather than by waiting out the window, and
+    /// a racy one by a clock set behind.
     pub fn read_with_clock(
         dirs: &ConfigDirs,
         clock: impl Fn() -> SystemTime + Send + Sync + 'static,

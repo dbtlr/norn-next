@@ -1,6 +1,8 @@
 //! The token file's freshness: a holder of the parsed set sees every change to
-//! the file on its next check, pays one fingerprint and no read while nothing
-//! changed, and refuses everything while a changed file no longer reads.
+//! the file on its next check, reads the file again while its fingerprint is
+//! racy, pays one fingerprint and no read once the file has settled and
+//! nothing changed, and refuses everything while a changed file no longer
+//! reads.
 
 use std::io::{Seek, SeekFrom, Write};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -68,9 +70,10 @@ fn assert_reread(check: Check) {
 ///
 /// Linux stamps a write with a coarse clock, one scheduler tick wide (at most
 /// 10 ms), so two writes inside one tick can carry one modification and one
-/// change time — the declared limit of the fingerprint. A case about an
-/// in-place edit or a mode change, which keep the inode and the size, waits
-/// the tick out first so that what it pins is the fingerprint, not the clock.
+/// change time, which only the racy rule then tells apart. A case about an
+/// in-place edit or a mode change, which keep the inode and the size, and
+/// whose holder is [`settled`], waits the tick out first so that what it pins
+/// is the fingerprint, not the clock.
 fn past_a_tick() {
     std::thread::sleep(Duration::from_millis(30));
 }
