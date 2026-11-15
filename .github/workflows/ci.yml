@@ -185,9 +185,19 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+      # The cache key separates this job's cache from the ones saved before the
+      # flag below, so the optimized SQLite object is saved.
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: sqlite-opt3
+      # `--config profile.dev.package.libsqlite3-sys.opt-level=3` builds the bundled
+      # SQLite at opt-level 3 for this job's functional tests. Cargo does not read
+      # a per-package profile override from the environment, so the flag is how a
+      # single run sets it. The workflow reader accepts this one exact flag and
+      # value and no other `--config`. The other PR jobs do not pass it because it
+      # did not shorten them on hosted runners.
       - name: Host functional suite
-        run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-host --features induced-failure
+        run: .github/scripts/flake-tripwire.sh cargo test --locked --config profile.dev.package.libsqlite3-sys.opt-level=3 -p norn-host --features induced-failure
 
   # A targeted second-architecture gate. The two default test shards cover the
   # full workspace on Linux x86_64; this job holds contracts whose answers can

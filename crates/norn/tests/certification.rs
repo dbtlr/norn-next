@@ -1601,6 +1601,7 @@ fn assert_matrix_mapping_keys(workflow: &str, full: bool) {
                     [
                         "persist-credentials",
                         "args",
+                        "key",
                         "name",
                         "path",
                         "if-no-files-found"
@@ -1669,7 +1670,13 @@ fn assert_matrix_step_values(workflow: &str, job: &str, runs: &[&str], full: boo
     if job == "architecture" {
         expected.push("uses: docker://rhysd/actionlint:1.7.12\nargs: -color".to_string());
     }
-    expected.push("uses: Swatinem/rust-cache@v2".to_string());
+    // Only the PR host functional job builds the bundled SQLite at opt-level 3,
+    // so only its cache key is separated from the caches saved before the flag.
+    if !full && job == "host-functional" {
+        expected.push("uses: Swatinem/rust-cache@v2\nkey: sqlite-opt3".to_string());
+    } else {
+        expected.push("uses: Swatinem/rust-cache@v2".to_string());
+    }
     for command in runs {
         let command = if full {
             command.replace("cargo test --locked", "cargo test --locked --no-fail-fast")
@@ -1834,6 +1841,10 @@ fn assert_complete_active_matrix(workflow: &str, full: bool) {
         } else if key == "induced-failure" {
             key = "host-functional";
             name = "host functional (induced-failure)";
+            // The one PR job that builds the bundled SQLite at opt-level 3.
+            runs = vec![
+                ".github/scripts/flake-tripwire.sh cargo test --locked --config profile.dev.package.libsqlite3-sys.opt-level=3 -p norn-host --features induced-failure",
+            ];
         } else if key == "platform" {
             runs = vec![
                 ".github/scripts/flake-tripwire.sh cargo test --locked -p norn-embed --test determinism",
