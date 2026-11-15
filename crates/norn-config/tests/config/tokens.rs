@@ -608,3 +608,23 @@ fn a_token_file_that_does_not_read_never_quotes_its_secret() {
         );
     }
 }
+
+/// The read direction agrees with [`tokens::Tokens::add`]: an empty secret is
+/// matched by a request that presents nothing, so a file holding one is
+/// corrupt rather than a token set that authenticates everybody.
+#[test]
+fn a_stored_empty_secret_is_refused_on_read() {
+    let scratch = Scratch::new("tokens-empty-secret");
+    let dirs = scratch.dirs();
+    scratch.place_private(
+        &scratch.tokens_file(),
+        "version = 1\n\n[tokens.laptop]\nsecret = \"\"\ncreated = 1\n",
+    );
+    let error = tokens::read(dirs).expect_err("an empty secret");
+    let ConfigError::Corrupt { reason, .. } = &error else {
+        panic!("refused as something other than corrupt: {error}");
+    };
+    assert!(reason.contains("token `laptop`"), "{reason}");
+    assert!(reason.contains("`secret` is empty"), "{reason}");
+    assert!(tokens::WatchedTokens::read(dirs).current().is_err());
+}

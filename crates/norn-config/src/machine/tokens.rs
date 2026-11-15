@@ -302,6 +302,17 @@ impl Tokens {
                     format!("{context}: `{SECRET_KEY}` is not lowercase hexadecimal"),
                 )
             })?;
+            // The read direction of `add`'s refusal: an empty credential is
+            // matched by a request that presents none.
+            if secret.is_empty() {
+                return Err(corrupt(
+                    path,
+                    format!(
+                        "{context}: `{SECRET_KEY}` is empty, and an empty secret matches a \
+                         request that presents none"
+                    ),
+                ));
+            }
             let created = document::required_integer(path, &context, &table, CREATED_KEY)?;
             let created = u64::try_from(created).map_err(|_| {
                 corrupt(
