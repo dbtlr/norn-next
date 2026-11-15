@@ -465,7 +465,7 @@ pub(crate) fn fingerprint(dirs: &ConfigDirs) -> Result<Option<Fingerprint>, Conf
 }
 
 /// The token set a long-lived holder serves from, kept fresh against the file
-/// by one fingerprint per check.
+/// by one fingerprint per check while the file is unchanged.
 ///
 /// **Dormant carrier.** The serving layer's bearer middleware and hello, and
 /// the dialer's held-lock wait, hold one of these and check it once per
@@ -483,8 +483,9 @@ pub(crate) fn fingerprint(dirs: &ConfigDirs) -> Result<Option<Fingerprint>, Conf
 /// again: an edit is never hidden behind a fingerprint taken after it.
 ///
 /// **A changed file that no longer reads fails closed.** A TOML error, an
-/// illegal label, a mode reaching beyond the owner, a file over 1 MiB, or a
-/// FIFO, a device or a link at the name each leave [`current`](Self::current)
+/// illegal label, an empty secret, a mode reaching beyond the owner, a file
+/// over 1 MiB, or a FIFO, a device or a link at the name each leave
+/// [`current`](Self::current)
 /// answering the refusal, and a holder must refuse every request while it
 /// does. The old set is not kept: it would keep a revoked token working. A
 /// fingerprint that keeps failing fails closed the same way, with no read.
@@ -498,13 +499,17 @@ pub(crate) fn fingerprint(dirs: &ConfigDirs) -> Result<Option<Fingerprint>, Conf
 /// the price of a holder that cannot stay refused once nothing refuses.
 ///
 /// **Declared limits.** A filesystem whose timestamps are coarser than the
-/// interval between two edits can miss the second of two same-size edits made
-/// in place within one tick, until the next change; the change time, which
-/// the kernel sets on every write and on any attempt to restore the
-/// modification time, catches an in-place, same-size edit and a restored
-/// modification time otherwise. And the fingerprint is the file's alone: a mode
-/// change on the config *directory* does not change it, so a directory
-/// loosened after a read is judged at the next change to the file, not before.
+/// interval between two changes can miss the second of two same-size changes
+/// within one tick, until the next change: an edit made in place, or a
+/// replacement renamed over the file that reuses the inode number of the file
+/// it replaced. A replacement with an inode of its own is seen by that, and
+/// the change time, which the kernel sets on every write and on any attempt to
+/// restore the modification time, catches an in-place, same-size edit and a
+/// restored modification time otherwise. And the fingerprint is the file's
+/// alone: a mode change on the config *directory* does not change it, so a
+/// directory loosened after a read is judged at the next change to the file,
+/// not before — and a directory tightened after a refused read is judged at
+/// the next check, since a held refusal is read again at every one.
 #[derive(Debug)]
 pub struct WatchedTokens {
     dirs: ConfigDirs,
