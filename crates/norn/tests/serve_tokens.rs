@@ -258,10 +258,9 @@ fn a_changed_file_that_no_longer_reads_refuses_every_request_until_it_reads_agai
         "{warned:?}"
     );
 
-    // A mode change alters no size, so a restore inside the same coarse
-    // timestamp tick as the damage leaves the fingerprint as it was: the
-    // declared limit. Step past a tick so the restore is a change.
-    std::thread::sleep(std::time::Duration::from_millis(50));
+    // No pause before the restore: while the host fails closed it reads the
+    // file again on every request, so a restore inside the damage's own
+    // timestamp tick is still seen.
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
     assert_eq!(get(port, "/", Some(&bearer)).status, 404);
     assert_eq!(hello(port, "default").status, 200);
