@@ -271,7 +271,8 @@ impl Tokens {
     }
 
     /// The token labelled `label`, if there is one: one lookup, whatever the
-    /// number of tokens.
+    /// number of tokens. The host's hello is what asks — it looks the token
+    /// that keys its MAC up by the label the dialer sent.
     pub fn get(&self, label: &TokenLabel) -> Option<&Token> {
         self.tokens.get(label)
     }
@@ -429,8 +430,11 @@ pub fn mutate<T>(
 /// of fingerprint — and the read that follows refuses it. Two fingerprints are
 /// the same file in the same state exactly when they are equal; what that
 /// misses is [`WatchedTokens`]'s declared limit.
+///
+/// Crate-private: the serving side and the dialer reach freshness only through
+/// [`WatchedTokens`], which is the one place a fingerprint is compared.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Fingerprint {
+pub(crate) struct Fingerprint {
     device: u64,
     inode: u64,
     size: u64,
@@ -456,7 +460,7 @@ impl Fingerprint {
 /// One `lstat` of the name and nothing else: no open, no read, so it costs the
 /// same whatever the file holds. A stat that fails for any reason but absence
 /// is reported as itself.
-pub fn fingerprint(dirs: &ConfigDirs) -> Result<Option<Fingerprint>, ConfigError> {
+pub(crate) fn fingerprint(dirs: &ConfigDirs) -> Result<Option<Fingerprint>, ConfigError> {
     Ok(file::name_metadata(&dirs.tokens_file())?.map(|metadata| Fingerprint::of(&metadata)))
 }
 
@@ -655,6 +659,47 @@ mod tests {
             next.read(),
             "the held fingerprint predates the edit, so the next check reads: {next:?}"
         );
+    }
+
+    /// The token file at `scratch`'s config base, with the config directory
+    /// made: where a case arranges the file a fingerprint is taken of.
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: the bases a case's state lives under.
+    fn dirs_in(scratch: &norn_testkit::scratch::Scratch) -> ConfigDirs {
+        let dirs = ConfigDirs::new(scratch.join("config"), scratch.join("data"))
+            .expect("absolute scratch bases");
+        std::fs::create_dir_all(dirs.config_dir()).expect("a config directory");
+        std::fs::set_permissions(
+            dirs.config_dir(),
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )
+        .expect("an owner-only config directory");
+        dirs
+    }
+
+    /// A fingerprint names what is at the name, a link included, and nothing
+    /// at all is `None`.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: planting a file, then a link, at the token file's name.
+    fn a_fingerprint_names_what_is_at_the_name() {
+        let scratch = norn_testkit::scratch::Scratch::new("norn-config-fingerprint");
+        let dirs = dirs_in(&scratch);
+        let path = dirs.tokens_file();
+        assert_eq!(fingerprint(&dirs).expect("a fingerprint"), None);
+
+        std::fs::write(&path, "version = 1\n").expect("a token file");
+        let file = fingerprint(&dirs).expect("a fingerprint").expect("a file");
+        assert_eq!(
+            fingerprint(&dirs).expect("a fingerprint"),
+            Some(file),
+            "an untouched file fingerprints the same"
+        );
+
+        std::fs::remove_file(&path).expect("removing the file");
+        std::os::unix::fs::symlink(scratch.join("elsewhere"), &path).expect("planting a link");
+        let link = fingerprint(&dirs)
+            .expect("a fingerprint of a dangling link")
+            .expect("a link is something at the name");
+        assert_ne!(link, file);
     }
 
     /// A secret in a log is a secret leaked, and the derived `Debug` is how it

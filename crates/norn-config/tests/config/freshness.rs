@@ -386,35 +386,6 @@ fn a_mode_change_on_the_directory_alone_is_not_a_change_to_the_file() {
     set_mode(scratch.dirs().config_dir(), 0o700);
 }
 
-/// A fingerprint names what is at the name, a link included, and nothing at
-/// all is `None`.
-#[test]
-#[allow(clippy::disallowed_methods)] // Harness scaffolding: planting a link at the token file's name.
-fn a_fingerprint_names_what_is_at_the_name() {
-    let scratch = Scratch::new("fingerprint");
-    let dirs = scratch.dirs();
-    let path = scratch.tokens_file();
-    assert_eq!(tokens::fingerprint(dirs).expect("a fingerprint"), None);
-
-    scratch.place_private(&path, &one_token("0a"));
-    let file = tokens::fingerprint(dirs)
-        .expect("a fingerprint")
-        .expect("a file");
-    assert_eq!(
-        tokens::fingerprint(dirs).expect("a fingerprint"),
-        Some(file),
-        "an untouched file fingerprints the same"
-    );
-
-    remove(&path);
-    std::os::unix::fs::symlink(scratch.config_base().join("elsewhere"), &path)
-        .expect("planting a link");
-    let link = tokens::fingerprint(dirs)
-        .expect("a fingerprint of a dangling link")
-        .expect("a link is something at the name");
-    assert_ne!(link, file);
-}
-
 /// A refusal is not a state the file is in: it can lift with the file left as
 /// it is. While the holder fails closed every check reads again, so a config
 /// directory tightened after a refused read is served from on the next check,
