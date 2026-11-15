@@ -412,6 +412,33 @@ mod tests {
         assert_eq!(case.context.credentials().counters().lookups, 1);
     }
 
+    /// The MAC is keyed by the token the hello's label names, not by the
+    /// one a dialer would choose first.
+    #[test]
+    fn a_hellos_mac_is_keyed_by_the_labelled_token() {
+        let case = case("norn-serve-hello-labelled");
+        const LAPTOP: &[u8] = b"the laptop's secret";
+        tokens::mutate(&case.dirs, |tokens| {
+            tokens.add(&TokenLabel::new("laptop").unwrap(), LAPTOP)
+        })
+        .expect("a second token");
+        let (status, _, body) = send(
+            &case,
+            request(
+                Method::POST,
+                HELLO_PATH,
+                None,
+                &hello_body("laptop", &nonce().to_hex()),
+            ),
+        );
+        assert_eq!(status, StatusCode::OK);
+        let answer: HelloAnswer = serde_json::from_slice(&body).expect("an answer");
+        let input = answer.facts().mac_input(&nonce());
+        let mac = answer.mac().unwrap();
+        assert!(mac_verifies(LAPTOP, &input, &mac), "keyed by `laptop`");
+        assert!(!mac_verifies(SECRET, &input, &mac), "not by `default`");
+    }
+
     #[test]
     fn every_hello_refusal_answers_its_status_and_code() {
         let case = case("norn-serve-hello-refusals");
