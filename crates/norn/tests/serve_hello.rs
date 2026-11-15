@@ -29,7 +29,7 @@ use norn_config::machine::tokens::{self, TokenLabel, Tokens};
 use norn_wire::{
     BuildIdentity, HelloAnswer, HelloChannel, HelloFacts, HelloLaunch, HelloMismatch, HelloState,
 };
-use support::{Fixture, exchange, free_port, get};
+use support::{Fixture, bind_unissued, exchange, free_port, get};
 
 // The two dialers, behind one face.
 
@@ -403,7 +403,7 @@ fn the_hello_is_the_only_exchange_admitted_without_a_bearer() {
 fn a_peer_without_the_token_cannot_answer() {
     let fixture = Fixture::new("hello-forger");
     let tokens = with_token(&fixture, "default", &[2; 32]);
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = bind_unissued();
     let address = listener.local_addr().unwrap();
     let witness = forger(listener);
     for dialer in DIALERS {
@@ -440,7 +440,7 @@ fn a_relay_to_a_real_host_on_another_port_is_refused() {
     let port = free_port();
     let (served, _) = fixture.serve_on(port);
 
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = bind_unissued();
     let squatted = listener.local_addr().unwrap();
     let witness = Witness::default();
     let seen = witness.clone();
@@ -475,7 +475,7 @@ fn a_relay_to_a_host_that_later_binds_the_same_port(label: &str, second_address:
     for dialer in DIALERS {
         let fixture = Fixture::new(label);
         let tokens = with_token(&fixture, "default", &[4; 32]);
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener = bind_unissued();
         let port = listener.local_addr().unwrap().port();
         let witness = Witness::default();
         let seen = witness.clone();
@@ -690,7 +690,7 @@ fn each_dial_failure_is_distinguished() {
 fn an_answer_over_the_cap_is_refused_unread() {
     let fixture = Fixture::new("hello-oversized");
     let tokens = with_token(&fixture, "default", &[10; 32]);
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = bind_unissued();
     let address = listener.local_addr().unwrap();
     let witness = Witness::default();
     let seen = witness.clone();

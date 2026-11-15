@@ -11,11 +11,9 @@
 
 mod support;
 
-use std::net::TcpListener;
-
 use norn_config::machine::default_endpoint;
 use norn_testkit::process::{Run, RunStatus};
-use support::{Fixture, free_port, get};
+use support::{Fixture, bind_unissued, free_port, get};
 
 #[test]
 fn serve_listens_on_the_resolved_port_answers_404_and_stops_on_sigterm() {
@@ -74,7 +72,7 @@ fn a_second_start_while_the_first_holds_the_channel_lock_refuses() {
 #[test]
 fn a_port_another_process_holds_refuses_naming_the_port() {
     let fixture = Fixture::new("serve-port-held");
-    let squatter = TcpListener::bind("127.0.0.1:0").unwrap();
+    let squatter = bind_unissued();
     let port = squatter.local_addr().unwrap().port();
 
     let (status, stderr) = fixture.run(&["serve", "--port", &port.to_string()]);

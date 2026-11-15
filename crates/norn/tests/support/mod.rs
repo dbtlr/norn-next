@@ -8,11 +8,13 @@
 #![allow(dead_code)] // Each suite uses its own share of this module.
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)] // Harness scaffolding: the settings and token files a case arranges.
 
+use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::Mutex;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
 use std::time::{Duration, Instant};
 
@@ -226,11 +228,57 @@ impl Drop for Served {
     }
 }
 
-/// A port nothing listens on now, chosen by the kernel. Another process may
-/// take it before the test binds it; that race is accepted.
+/// Every port this process has been handed by `free_port` or `bind_unissued`.
+/// The kernel reuses a port as soon as its listener drops, so two cases in one
+/// test binary could otherwise be handed the same port: one case's host not
+/// yet bound, another's relay helper bound on the port the first dropped.
+static ISSUED_PORTS: Mutex<Option<HashSet<u16>>> = Mutex::new(None);
+
+/// Record `port` as issued; false when this process had issued it already.
+fn issue(port: u16) -> bool {
+    ISSUED_PORTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get_or_insert_with(HashSet::new)
+        .insert(port)
+}
+
+/// Ports issued from here, below the lowest platform ephemeral range (Linux
+/// starts at 32768, macOS at 49152). The kernel never hands such a port to an
+/// outgoing connection as its source port, so a port a case has freed cannot
+/// be taken by another case's dial before the host binds it. Kernel port 0
+/// cannot give that: it draws from the same pool outgoing connections do.
+const ISSUE_FROM: u16 = 20_000;
+const ISSUE_BELOW: u16 = 30_000;
+
+/// A listener on `127.0.0.1` at a port this process has not issued before,
+/// below the ephemeral range. Every loopback listener the process suites open
+/// for a port they will hand on goes through here.
+pub fn bind_unissued() -> TcpListener {
+    // Start at a per-process offset so concurrent test binaries mostly walk
+    // different ports; a port something else holds fails its bind and is
+    // skipped.
+    let span = u32::from(ISSUE_BELOW - ISSUE_FROM);
+    let start = std::process::id().wrapping_mul(2_654_435_761) % span;
+    for step in 0..span {
+        let port = ISSUE_FROM + ((start + step) % span) as u16;
+        if !issue(port) {
+            continue;
+        }
+        if let Ok(listener) = TcpListener::bind(("127.0.0.1", port)) {
+            return listener;
+        }
+    }
+    panic!("no unissued loopback port in {ISSUE_FROM}..{ISSUE_BELOW}");
+}
+
+/// A port nothing listens on now, never issued before in this process and
+/// below the ephemeral range, so neither two cases in one binary nor a case's
+/// outgoing connection can take it. Another process may still take it before
+/// the test binds it; that race is accepted.
 pub fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .and_then(|listener| listener.local_addr())
+    bind_unissued()
+        .local_addr()
         .expect("asking the kernel for a free port")
         .port()
 }
