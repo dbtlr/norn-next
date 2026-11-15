@@ -318,6 +318,31 @@ pub fn hello(port: u16, label: &str) -> Reply {
     exchange(port, "POST", "/v1/hello", None, body.as_bytes())
 }
 
+/// How long after a write the token file's times must be before a host
+/// holds its fingerprint as settled: `norn-config`'s 2 s window, and a margin
+/// for the filesystem's clock tick.
+pub const TOKEN_FILE_SETTLES_AFTER: Duration = Duration::from_millis(2200);
+
+/// Wait until the token file's later time, of its modification and change
+/// times, is [`TOKEN_FILE_SETTLES_AFTER`] old, so a fingerprint taken from
+/// now on is settled: an unchanged file then costs a request one fingerprint
+/// and no read. The change time cannot be set back, so the wait is real.
+pub fn settle_token_file(path: &Path) {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = std::fs::metadata(path).expect("the token file's times");
+    let at = |seconds: i64, nanos: i64| {
+        std::time::UNIX_EPOCH
+            + Duration::from_secs(u64::try_from(seconds).expect("a time after the epoch"))
+            + Duration::from_nanos(u64::try_from(nanos).expect("nanoseconds"))
+    };
+    let latest = at(metadata.mtime(), metadata.mtime_nsec())
+        .max(at(metadata.ctime(), metadata.ctime_nsec()));
+    let settled = latest + TOKEN_FILE_SETTLES_AFTER;
+    if let Ok(left) = settled.duration_since(std::time::SystemTime::now()) {
+        std::thread::sleep(left);
+    }
+}
+
 /// Wait, by a bounded poll, until `condition` holds.
 pub fn eventually(what: &str, mut condition: impl FnMut() -> bool) {
     let deadline = Instant::now() + START_WITHIN;

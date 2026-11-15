@@ -7,6 +7,13 @@
 //! second read is itself a bearer request: it costs one fingerprint and one
 //! lookup of its own, which every expectation below names as `+ 1`.
 //!
+//! Every reading is taken on a settled token file: a fingerprint taken
+//! within 2 s of the file's last write is not trusted, and each check reads
+//! the file again until it is that old. So each case waits once, after its
+//! last write to the file, before the reading it asserts the steady state
+//! on; the first check after the wait may still read once, and it falls
+//! before the reading.
+//!
 //! The host counts a lookup inside the held token set's two lookup methods,
 //! by digest and by label, so `serve.token_lookups` is the lookups made
 //! through the index. A walk over the tokens added beside the index makes no
@@ -19,7 +26,7 @@ mod support;
 use std::collections::BTreeMap;
 
 use norn_config::machine::tokens::{self, TokenLabel};
-use support::{Fixture, free_port, get, hello};
+use support::{Fixture, free_port, get, hello, settle_token_file};
 
 type Counters = BTreeMap<String, u64>;
 
@@ -60,7 +67,8 @@ const REQUESTS: u64 = 20;
 #[test]
 fn an_unchanged_file_costs_one_fingerprint_no_read_and_one_lookup_per_request() {
     for count in [1, 64] {
-        let (_fixture, served, port, bearer) = host_over("counters-unchanged", count);
+        let (fixture, served, port, bearer) = host_over("counters-unchanged", count);
+        settle_token_file(&fixture.tokens_file());
         let before = counters(port, &bearer);
         for _ in 0..REQUESTS {
             assert_eq!(get(port, "/", Some(&bearer)).status, 404);
@@ -77,7 +85,8 @@ fn an_unchanged_file_costs_one_fingerprint_no_read_and_one_lookup_per_request() 
 #[test]
 fn one_hello_costs_one_fingerprint_and_one_lookup() {
     for count in [1, 64] {
-        let (_fixture, served, port, bearer) = host_over("counters-hello", count);
+        let (fixture, served, port, bearer) = host_over("counters-hello", count);
+        settle_token_file(&fixture.tokens_file());
         let before = counters(port, &bearer);
         assert_eq!(hello(port, "default").status, 200);
         let measured = delta(&before, &counters(port, &bearer));
@@ -88,7 +97,9 @@ fn one_hello_costs_one_fingerprint_and_one_lookup() {
 }
 
 /// An edit costs one re-read, on the next request, and the request after
-/// reads nothing again. A changed check takes two fingerprints.
+/// reads nothing again. A changed check takes two fingerprints. The one wait
+/// falls between the edit and that request, so the fingerprint the re-read
+/// holds is settled.
 #[test]
 fn an_edit_costs_exactly_one_re_read_on_the_next_request() {
     let (fixture, served, port, bearer) = host_over("counters-edit", 1);
@@ -97,6 +108,7 @@ fn an_edit_costs_exactly_one_re_read_on_the_next_request() {
         tokens.add(&TokenLabel::new("laptop").unwrap(), &[9; 32])
     })
     .unwrap();
+    settle_token_file(&fixture.tokens_file());
     assert_eq!(get(port, "/", Some(&bearer)).status, 404);
     let measured = delta(&before, &counters(port, &bearer));
     eprintln!("one edit, one bearer request: [fingerprints, reads, lookups] = {measured:?}");
