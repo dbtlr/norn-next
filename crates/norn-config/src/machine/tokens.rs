@@ -460,11 +460,11 @@ pub fn fingerprint(dirs: &ConfigDirs) -> Result<Option<Fingerprint>, ConfigError
 ///
 /// It holds the fingerprint it last took and the outcome of the read that
 /// followed it: the parsed [`Tokens`], or the refusal the read answered with.
-/// A [`check`](Self::check) takes the fingerprint once. Unchanged, that is the
-/// whole cost. Changed — or not taken at all, since a stat that fails says
-/// nothing about the file being the one that was read — it takes the
-/// fingerprint again, then reads, and holds the second fingerprint with the
-/// read's outcome. Because the held fingerprint was taken before the read, an
+/// A [`check`](Self::check) takes the fingerprint once. Unchanged, with a set
+/// held, that is the whole cost. Changed — or not taken at all, since a stat
+/// that fails says nothing about the file being the one that was read — or
+/// with a refusal held, it takes the fingerprint again, then reads, and holds
+/// the second fingerprint with the read's outcome. Because the held fingerprint was taken before the read, an
 /// edit landing between the two differs from it, and the next check reads
 /// again: an edit is never hidden behind a fingerprint taken after it.
 ///
@@ -474,7 +474,14 @@ pub fn fingerprint(dirs: &ConfigDirs) -> Result<Option<Fingerprint>, ConfigError
 /// answering the refusal, and a holder must refuse every request while it
 /// does. The old set is not kept: it would keep a revoked token working. A
 /// fingerprint that keeps failing fails closed the same way, with no read.
-/// The holder recovers on the first check that reads the file again.
+///
+/// **A held refusal is read again at every check.** What a read refused can
+/// lift with the file left exactly as it was — a config directory tightened
+/// back to `0700`, a descriptor limit that was reached and is not now — so an
+/// unchanged fingerprint is no reason to keep refusing. The holder recovers on
+/// the first check whose read answers a set. Failing closed therefore costs
+/// two fingerprints and a read per check rather than one fingerprint, which is
+/// the price of a holder that cannot stay refused once nothing refuses.
 ///
 /// **Declared limits.** A filesystem whose timestamps are coarser than the
 /// interval between two edits can miss the second of two same-size edits made
@@ -505,7 +512,7 @@ pub struct Check {
 
 impl Check {
     /// How many fingerprints the check took: 1 when nothing changed, 2 when
-    /// something did.
+    /// something did or a refusal was held.
     pub const fn fingerprints(self) -> u32 {
         self.fingerprints
     }
@@ -516,7 +523,8 @@ impl Check {
     }
 
     /// Whether the held outcome — the set, or the refusal a holder fails
-    /// closed on — was replaced.
+    /// closed on — was replaced: by every check that read, and by one whose
+    /// fingerprint failed.
     pub const fn replaced(self) -> bool {
         self.replaced
     }
@@ -551,7 +559,11 @@ impl WatchedTokens {
     /// and before the read: the window an edit can land in.
     fn check_where(&mut self, between: impl FnOnce()) -> Check {
         let first = fingerprint(&self.dirs);
-        if let (Ok(held), Ok(now)) = (&self.fingerprint, &first)
+        // A held refusal is never an unchanged file: what it refused can lift
+        // with the file as it was — a directory tightened, a descriptor freed
+        // — so while it is held, every check reads again.
+        if self.outcome.is_ok()
+            && let (Ok(held), Ok(now)) = (&self.fingerprint, &first)
             && held == now
         {
             return Check {

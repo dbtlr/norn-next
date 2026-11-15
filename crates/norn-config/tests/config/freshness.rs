@@ -207,8 +207,8 @@ fn an_edit_whose_modification_time_is_restored_is_seen_by_the_change_time() {
 
 /// Every way a changed file can stop reading, and the repair each one takes.
 /// Each breaks the file after a good read; the holder must then fail closed
-/// rather than keep the old set, stay failed closed at one fingerprint per
-/// check while the file stays broken, and recover once the file reads again.
+/// rather than keep the old set, stay failed closed — reading again at every
+/// check — while the file stays broken, and recover once the file reads again.
 #[test]
 #[allow(clippy::disallowed_methods)] // Harness scaffolding: planting a link at the token file's name.
 fn a_changed_file_that_no_longer_reads_fails_closed_until_it_reads_again() {
@@ -260,9 +260,9 @@ fn a_changed_file_that_no_longer_reads_fails_closed_until_it_reads_again() {
             "{name}: the old set was kept after the file stopped reading"
         );
 
-        // Unchanged since it stopped reading: failing closed costs what
-        // serving does, and it does not quietly recover.
-        assert_unchanged(watched.check());
+        // Unchanged since it stopped reading: the check reads again, since a
+        // refusal can lift without a change, and this one has not.
+        assert_reread(watched.check());
         assert!(watched.current().is_err(), "{name}: recovered unchanged");
 
         past_a_tick();
@@ -308,15 +308,16 @@ fn a_removed_token_file_reads_as_no_tokens() {
 }
 
 /// A first read that refuses is held like a later one: the holder fails
-/// closed from the start, and recovers on the change that repairs the file.
+/// closed from the start, reads again at every check, and recovers on the
+/// change that repairs the file.
 #[test]
-fn a_first_read_that_refuses_fails_closed_until_the_file_changes() {
+fn a_first_read_that_refuses_fails_closed_until_the_file_reads() {
     let scratch = Scratch::new("fresh-first-refused");
     let path = scratch.tokens_file();
     scratch.place_private(&path, "version = 1\n[tokens\n");
     let mut watched = WatchedTokens::read(scratch.dirs());
     assert!(watched.current().is_err());
-    assert_unchanged(watched.check());
+    assert_reread(watched.check());
     assert!(watched.current().is_err());
 
     scratch.place_private(&path, &one_token("0e"));
@@ -412,4 +413,34 @@ fn a_fingerprint_names_what_is_at_the_name() {
         .expect("a fingerprint of a dangling link")
         .expect("a link is something at the name");
     assert_ne!(link, file);
+}
+
+/// A refusal is not a state the file is in: it can lift with the file left as
+/// it is. While the holder fails closed every check reads again, so a config
+/// directory tightened after a refused read is served from on the next check,
+/// with no edit to the file.
+#[test]
+fn a_refusal_that_lifts_without_a_change_to_the_file_is_recovered_from() {
+    let scratch = Scratch::new("fresh-directory-tightened");
+    let path = scratch.tokens_file();
+    scratch.place_private(&path, &one_token("0a"));
+    let mut watched = WatchedTokens::read(scratch.dirs());
+
+    set_mode(scratch.dirs().config_dir(), 0o750);
+    past_a_tick();
+    overwrite_in_place(&path, secret_offset(&one_token("0a")), b"0f");
+    assert_reread(watched.check());
+    assert!(
+        matches!(
+            watched.current(),
+            Err(ConfigError::InsecurePermissions { .. })
+        ),
+        "{:?}",
+        watched.current().map(|_| ())
+    );
+
+    set_mode(scratch.dirs().config_dir(), 0o700);
+    assert_reread(watched.check());
+    assert_eq!(laptop_secret(&watched), [0x0f]);
+    assert_unchanged(watched.check());
 }
