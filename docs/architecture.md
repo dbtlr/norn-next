@@ -2534,11 +2534,11 @@ moment (FAT's 2 s tick with a margin), or while that time is after it. An unchan
 and reads, and each holds a later moment, so the holder settles back to one fingerprint and
 no read about 3 s after the last change. Declared limit: the rule trusts the file's times
 and the clock the moment is read from to be one clock, so a change can be missed until the
-next one on a filesystem whose times are coarser than 3 s, after a store through a shared
-memory mapping of the file, which a filesystem need not stamp store by store, on one whose times come from
-another machine's clock behind this one's, or when the wall clock is stepped back far
+next one on a filesystem whose times are coarser than 3 s, on a filesystem whose times come
+from another machine's clock behind this one's, when the wall clock is stepped back far
 enough after a fingerprint settles that a later same-size edit is stamped with the earlier
-one's times. The fingerprint is the file's own, so a mode change on the
+one's times, or after a store through a shared memory mapping of the file, which a
+filesystem need not stamp store by store. The fingerprint is the file's own, so a mode change on the
 config directory alone is not a change: the directory's mode is judged at the next read.
 **A failed re-read fails closed**: when the file changed and no longer reads — a TOML
 error, an illegal label, an empty secret, a mode reaching beyond its owner, a file over

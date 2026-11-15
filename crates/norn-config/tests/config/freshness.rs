@@ -166,9 +166,11 @@ fn a_holder_reads_again_until_the_file_has_settled_then_stops() {
     let mut watched = WatchedTokens::read_with_clock(scratch.dirs(), move || {
         SystemTime::now() + Duration::from_secs(clock.load(Ordering::SeqCst))
     });
-    // The window is 3 s: FAT's 2 s tick with a margin. A clock 2 s ahead is
-    // still inside it, so a window shrunk to one FAT tick or less fails here.
-    let short_of_the_window = || ahead.store(2, Ordering::SeqCst);
+    // The window is 3 s: FAT's 2 s tick with a margin. A clock 1 s ahead is
+    // still inside it with 2 s to spare, so a stalled runner does not carry
+    // the case past the window; the window's own value is pinned to the
+    // nanosecond by the crate's unit test of the rule.
+    let short_of_the_window = || ahead.store(1, Ordering::SeqCst);
     let past_the_window = || ahead.store(4, Ordering::SeqCst);
     let at_the_system_clock = || ahead.store(0, Ordering::SeqCst);
 
