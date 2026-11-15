@@ -47,7 +47,9 @@
 //! the serving and client halves of one artifact read one value, and so are
 //! the two exchanges every build must keep answering for older ones: the
 //! hello — [`HelloRequest`] with its [`Nonce`], answered by [`HelloAnswer`],
-//! whose [`HelloFacts`] build the bytes its MAC is computed over — and the
+//! whose [`HelloFacts`] build the bytes its MAC is computed over, read from a
+//! [`HelloReply`] and checked by [`HelloAnswer::verify`] against a
+//! [`HelloExpectation`] or refused for a [`HelloMismatch`] — and the
 //! drain request, [`DrainRequest`] answered by [`DrainAnswer`]. The one
 //! lowercase [`hex`] codec a token's secret, a bearer, a nonce and a MAC are
 //! written in is here too.
@@ -651,8 +653,8 @@ pub use finding_row::{
 };
 pub use glob::{Binding, Captures, CaseFold, Pattern, PatternError, sets_share_a_document_path};
 pub use hello::{
-    HelloAnswer, HelloChannel, HelloFacts, HelloLaunch, HelloRequest, HelloState, Nonce,
-    normalize_socket_address,
+    HelloAnswer, HelloChannel, HelloExpectation, HelloFacts, HelloLaunch, HelloMismatch,
+    HelloReply, HelloRequest, HelloState, Nonce, is_dialable, normalize_socket_address,
 };
 pub use name::{IllegalVaultName, VaultName};
 pub use plan::advisory::{

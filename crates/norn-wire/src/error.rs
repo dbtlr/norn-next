@@ -65,8 +65,8 @@
 //! answered by the serving layer before any host verb runs. Each detail
 //! carries nothing: most of them reach a caller nobody has authenticated, so
 //! anything a detail held would be told to whoever asked. The serving layer's
-//! hello and bearer middleware raise them, and neither is built yet, so the
-//! call graph reaches none of them today.
+//! hello and bearer middleware raise them; `serve/bad-request`'s late-body arm
+//! waits on the body-arrival bound, a later task of the serving phase.
 //!
 //! The pairing between a code and its detail is structural rather than a rule
 //! constructors keep: [`ErrorEnvelope::new`] takes the code from the detail,
