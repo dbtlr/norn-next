@@ -343,7 +343,7 @@ unsafe fn launch(
     environment.push(std::ptr::null_mut());
 
     let Some(attributes) = SpawnAttributes::shielding() else {
-        return LAUNCHER_FAILED;
+        return launcher_failed(b"norn measuring launcher: signal shielding failed\n");
     };
     // SAFETY: `argc >= 3`, so `argv[2]` is the program and `argv + 2` is a
     // null-terminated argument vector beginning with it.
@@ -380,7 +380,7 @@ unsafe fn launch(
         }
         // EINTR is retried defensively; with no handler installed no test can provoke it.
         if io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
-            return LAUNCHER_FAILED;
+            return launcher_failed(b"norn measuring launcher: wait4 failed\n");
         }
     }
     finish(
@@ -466,6 +466,13 @@ impl Drop for SpawnAttributes {
     }
 }
 
+// The launcher runs before main, so diagnostics use only an async-signal-safe write.
+fn launcher_failed(message: &'static [u8]) -> c_int {
+    // SAFETY: the static message is readable for its full length; fd 2 is stderr.
+    unsafe { libc::write(2, message.as_ptr().cast(), message.len()) };
+    LAUNCHER_FAILED
+}
+
 /// Publish `report` at `path` and return the exit code that goes with it.
 ///
 /// **A report is complete or absent at `path`, never partial.** It is
@@ -480,7 +487,7 @@ fn finish(path: &CStr, report: &Report) -> c_int {
     partial.extend_from_slice(PARTIAL_SUFFIX);
     partial.push(0);
     let Ok(partial) = CStr::from_bytes_with_nul(&partial) else {
-        return LAUNCHER_FAILED;
+        return launcher_failed(b"norn measuring launcher: partial report path failed\n");
     };
     let written = write_new(partial, render_report(report).as_bytes());
     // SAFETY: both paths are null-terminated.
@@ -489,7 +496,7 @@ fn finish(path: &CStr, report: &Report) -> c_int {
     // failed write is removed with it.
     unsafe { libc::unlink(partial.as_ptr()) };
     if !published {
-        return LAUNCHER_FAILED;
+        return launcher_failed(b"norn measuring launcher: report publication failed\n");
     }
     match report {
         Report::Ended { .. } => REPORTED,
