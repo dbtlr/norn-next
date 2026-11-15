@@ -15,7 +15,7 @@ counters = []
 
 [dependencies]
 # The HTTP/1.1 server the routes are served by (ruling R2: hyper 1 on tokio,
-# inside this crate only; no async type reaches norn-host), and the low-level
+# and no async type reaches norn-host), and the low-level
 # HTTP/1.1 client the takeover dial speaks its hello over.
 hyper = { version = "1.11", features = ["client", "http1", "server"] }
 # The bridge from tokio's sockets to hyper's I/O traits.

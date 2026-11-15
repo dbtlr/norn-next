@@ -21,8 +21,11 @@
 //! watchdog are later tasks of the same phase, and each is named where its
 //! absence shows.
 //!
-//! **No async type reaches `norn-host`** (ruling R2): tokio and hyper live in
-//! this crate alone, and the host is built and dropped on ordinary threads.
+//! **No async type reaches `norn-host`** (ruling R2): the host is built,
+//! called and dropped on ordinary threads, and nothing it is handed is a
+//! tokio or hyper type. tokio and hyper run this crate's server and its
+//! takeover dial; `norn-client`'s hello dialer runs on them too, and the rule
+//! holds there the same way.
 //!
 //! **The server log is stderr**, one plain-text line per lifecycle event
 //! (the private `log` module). It is a diagnostic stream, not rendered output.
