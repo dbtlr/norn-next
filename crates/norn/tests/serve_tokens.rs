@@ -104,7 +104,10 @@ fn two_concurrent_starts_on_one_config_directory_leave_exactly_one_token() {
         let fixture = Fixture::new("serve-mint-race");
         let mut first = fixture.start(&["serve", "--port", &free_port().to_string()]);
         let mut second = fixture.start(&["serve", "--port", &free_port().to_string()]);
-        // One takes the channel lock and listens; the other refuses.
+        // One takes the channel lock and listens; the other refuses. The wait
+        // is bounded, so a channel lock that let both hosts start reports
+        // itself here, with both logs, rather than hanging the suite.
+        let deadline = std::time::Instant::now() + support::START_WITHIN;
         let (mut winner, mut loser) = loop {
             if first.child.try_wait().unwrap().is_some() {
                 break (second, first);
@@ -112,6 +115,13 @@ fn two_concurrent_starts_on_one_config_directory_leave_exactly_one_token() {
             if second.child.try_wait().unwrap().is_some() {
                 break (first, second);
             }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "round {round}: neither start refused within {:?}: first {:?}, second {:?}",
+                support::START_WITHIN,
+                first.drain_lines().to_vec(),
+                second.drain_lines().to_vec(),
+            );
             std::thread::sleep(std::time::Duration::from_millis(10));
         };
         winner.listening_port();
