@@ -8,8 +8,8 @@
 //!
 //! The leader question's answer is "yes" only when it is proved. Every doubt
 //! reads as "no", which keeps the full signal-delivery window: `/proc` was
-//! mounted for another pid
-//! namespace (its `self` link does not name this process), `/proc` cannot be
+//! mounted for another pid namespace (its `self` link does not name this
+//! process), `/proc` cannot be
 //! listed or an entry of the listing cannot be read, a member's `stat` cannot be
 //! read for a reason other than the process having gone, a `stat` line does not
 //! parse, the leader is not in the listing as a zombie of the group, or any
@@ -97,7 +97,7 @@ impl ProcessTable for KernelProcessTable {
 /// other `getpgid` failure, or an unparseable stat line returns `Err`.
 ///
 /// A `/proc` that hides other users' processes from the listing (`hidepid=2`)
-/// cannot show them, so such a process is not counted, as before this change.
+/// cannot show them, so such a process is not counted.
 pub(in crate::process) fn process_group_count(pgid: libc::pid_t) -> io::Result<usize> {
     let own_pid = libc::pid_t::try_from(std::process::id())
         .map_err(|_| io::Error::other("this process ID does not fit pid_t"))?;
