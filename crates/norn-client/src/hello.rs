@@ -10,9 +10,9 @@
 //! and the serving crate's takeover dial.
 //!
 //! **What the two dialers share is `norn-wire`'s**: the request, the reply's
-//! reading, the body cap, the loopback test and the comparison of the
-//! answer's facts with the connection. Only the transport and the HMAC check
-//! are this crate's.
+//! reading, the body cap, the loopback test, the comparison of the answer's
+//! facts with the connection, and the failure a dial reports
+//! (`HelloFailure`). Only the transport and the HMAC check are this crate's.
 //!
 //! **No bearer without its own verified hello.** [`dial`] opens one
 //! connection, sends the hello as its first exchange, and returns a
@@ -35,8 +35,8 @@ use hyper::{Method, Request, Response};
 use hyper_util::rt::TokioIo;
 use norn_config::machine::tokens::Tokens;
 use norn_wire::{
-    HELLO_BODY_BYTES, HelloAnswer, HelloChannel, HelloExpectation, HelloMismatch, HelloReply,
-    HelloRequest, Nonce, is_dialable,
+    HELLO_BODY_BYTES, HelloAnswer, HelloChannel, HelloExpectation, HelloFailure, HelloMismatch,
+    HelloReply, HelloRequest, Nonce, is_dialable,
 };
 use sha2::Sha256;
 use tokio::net::TcpSocket;
@@ -85,91 +85,25 @@ impl Verified {
     }
 }
 
-/// Why a dial returned no verified connection. No bearer was sent in any.
-#[derive(Debug)]
-pub enum HelloError {
-    /// The address is not a loopback address, so it is not dialed.
-    NotLoopback(SocketAddr),
-    /// The token set holds no token to run the hello with.
-    NoToken,
-    /// The connection could not be made.
-    Connect {
-        address: SocketAddr,
-        error: io::Error,
-    },
-    /// The connection failed during the hello.
-    Exchange { address: SocketAddr, error: String },
-    /// A listener at the address refused the hello (401
-    /// `serve/hello-refused`). Unverified: a refusal carries no MAC.
-    HelloRefused { address: SocketAddr },
-    /// A listener at the address said its token file is unreadable (500
-    /// `serve/token-file-unreadable`). Unverified, so it says nothing about
-    /// any file for certain.
-    ListenerSaysTokenFileUnreadable { address: SocketAddr },
-    /// The answer did not verify.
-    Verification {
-        address: SocketAddr,
-        mismatch: HelloMismatch,
-    },
-}
-
-impl fmt::Display for HelloError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            HelloError::NotLoopback(address) => {
-                write!(
-                    f,
-                    "{address} is not a loopback address; a dialer dials only loopback"
-                )
-            }
-            HelloError::NoToken => {
-                f.write_str("the token file holds no token to run the hello with")
-            }
-            HelloError::Connect { address, error } => {
-                write!(f, "connecting to {address} failed: {error}")
-            }
-            HelloError::Exchange { address, error } => {
-                write!(
-                    f,
-                    "the connection to {address} failed during the hello: {error}"
-                )
-            }
-            HelloError::HelloRefused { address } => write!(
-                f,
-                "a listener at {address} refused the hello; the token this dialer read may not be \
-                 one it holds"
-            ),
-            HelloError::ListenerSaysTokenFileUnreadable { address } => write!(
-                f,
-                "a listener at {address} said the token file is unreadable; the answer is \
-                 unverified"
-            ),
-            HelloError::Verification { address, mismatch } => write!(f, "{address}: {mismatch}"),
-        }
-    }
-}
-
-impl std::error::Error for HelloError {}
-
 /// Dial `address`, run the hello with the token [`Tokens::dialer_token`]
 /// chooses, and verify the answer against `channel` and this connection.
 pub async fn dial(
     address: SocketAddr,
     channel: HelloChannel,
     tokens: &Tokens,
-) -> Result<Verified, HelloError> {
+) -> Result<Verified, HelloFailure> {
     if !is_dialable(address) {
-        return Err(HelloError::NotLoopback(address));
+        return Err(HelloFailure::NotLoopback(address));
     }
-    let token = tokens.dialer_token().ok_or(HelloError::NoToken)?;
-    let connect = |error| HelloError::Connect { address, error };
+    let token = tokens.dialer_token().ok_or(HelloFailure::NoToken)?;
+    let connect = |error| HelloFailure::Connect { address, error };
     let stream = dialer_socket(address)
         .map_err(connect)?
         .connect(address)
         .await
         .map_err(connect)?;
     let local = stream.local_addr().map_err(connect)?;
-    let exchange = |error: hyper::Error| HelloError::Exchange {
+    let exchange = |error: hyper::Error| HelloFailure::Exchange {
         address,
         error: error.to_string(),
     };
@@ -180,7 +114,7 @@ pub async fn dial(
         let _ = connection.await;
     }));
 
-    let nonce = fresh_nonce().map_err(|error| HelloError::Exchange {
+    let nonce = fresh_nonce().map_err(|error| HelloFailure::Exchange {
         address,
         error: format!("drawing the nonce failed: {error}"),
     })?;
@@ -196,7 +130,7 @@ pub async fn dial(
         .expect("the hello request is well formed");
     let response = sender.send_request(request).await.map_err(exchange)?;
     let status = response.status().as_u16();
-    let verification = |mismatch| HelloError::Verification { address, mismatch };
+    let verification = |mismatch| HelloFailure::Verification { address, mismatch };
     // An answer over the cap is no hello answer; it is not read past it.
     let body = Limited::new(response.into_body(), HELLO_BODY_BYTES)
         .collect()
@@ -205,9 +139,9 @@ pub async fn dial(
         .to_bytes();
     let answer = match HelloReply::read(status, &body) {
         HelloReply::Answer(answer) => answer,
-        HelloReply::Refused => return Err(HelloError::HelloRefused { address }),
+        HelloReply::Refused => return Err(HelloFailure::HelloRefused { address }),
         HelloReply::TokenFileUnreadable => {
-            return Err(HelloError::ListenerSaysTokenFileUnreadable { address });
+            return Err(HelloFailure::ListenerSaysTokenFileUnreadable { address });
         }
         HelloReply::Unrecognized => return Err(verification(HelloMismatch::NotAnAnswer)),
     };

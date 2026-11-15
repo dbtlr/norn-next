@@ -2663,9 +2663,13 @@ under the token they read, first; and only then compare the facts with the conne
 through one `norn-wire` function (`HelloFacts::check_connection`): the channel, the host end
 against the address dialed, the client end against the dialer's own end, each normalized. A
 verified connection is the only way a dialer sends its bearer, and only on that connection;
-any failure closes it unsent. A 401 `serve/hello-refused` and a 500
-`serve/token-file-unreadable` are reported as what a listener at the endpoint said, since
-neither carries a MAC. Neither dialer sets a timeout; its caller bounds the dial.
+any failure closes it unsent. Both report a failed dial as one `norn-wire` type
+(`HelloFailure`), so its text is written once. A 401 `serve/hello-refused` carries no MAC,
+so it is reported as any other failed verification is: host verification failed, naming
+both causes without asserting either. The one exception is a 500
+`serve/token-file-unreadable`, reported as what a listener at the endpoint said — that the
+token file is unreadable — since it is unverified, and not as a verification failure.
+Neither dialer sets a timeout; its caller bounds the dial.
 
 The drain request is `{}` with the bearer, and a host that has begun to drain answers
 `{"version": 1, "draining": true}`.

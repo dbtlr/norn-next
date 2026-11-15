@@ -90,54 +90,32 @@ impl Dialer {
     fn dial(self, address: SocketAddr, tokens: &Tokens) -> Result<Conn, (Failure, String)> {
         let channel = channel_of_build();
         let runtime = runtime();
-        let verified = runtime.block_on(async {
-            match self {
-                Dialer::Client => {
-                    use norn_client::hello::HelloError as E;
-                    norn_client::hello::dial(address, channel, tokens)
+        let verified = runtime
+            .block_on(async {
+                match self {
+                    Dialer::Client => norn_client::hello::dial(address, channel, tokens)
                         .await
-                        .map(Verified::Client)
-                        .map_err(|error| {
-                            let kind = match &error {
-                                E::NotLoopback(_) => Failure::NotLoopback,
-                                E::NoToken => Failure::NoToken,
-                                E::Connect { .. } => Failure::Connect,
-                                E::Exchange { .. } => Failure::Exchange,
-                                E::HelloRefused { .. } => Failure::HelloRefused,
-                                E::ListenerSaysTokenFileUnreadable { .. } => {
-                                    Failure::ListenerSaysTokenFileUnreadable
-                                }
-                                E::Verification { mismatch, .. } => {
-                                    Failure::Verification(*mismatch)
-                                }
-                            };
-                            (kind, error.to_string())
-                        })
-                }
-                Dialer::Takeover => {
-                    use norn_serve::dial::DialError as E;
-                    norn_serve::dial::dial(address, channel, tokens)
+                        .map(Verified::Client),
+                    Dialer::Takeover => norn_serve::dial::dial(address, channel, tokens)
                         .await
-                        .map(Verified::Takeover)
-                        .map_err(|error| {
-                            let kind = match &error {
-                                E::NotLoopback(_) => Failure::NotLoopback,
-                                E::NoToken => Failure::NoToken,
-                                E::Connect { .. } => Failure::Connect,
-                                E::Exchange { .. } => Failure::Exchange,
-                                E::HelloRefused { .. } => Failure::HelloRefused,
-                                E::ListenerSaysTokenFileUnreadable { .. } => {
-                                    Failure::ListenerSaysTokenFileUnreadable
-                                }
-                                E::Verification { mismatch, .. } => {
-                                    Failure::Verification(*mismatch)
-                                }
-                            };
-                            (kind, error.to_string())
-                        })
+                        .map(Verified::Takeover),
                 }
-            }
-        })?;
+            })
+            .map_err(|error| {
+                use norn_wire::HelloFailure as E;
+                let kind = match &error {
+                    E::NotLoopback(_) => Failure::NotLoopback,
+                    E::NoToken => Failure::NoToken,
+                    E::Connect { .. } => Failure::Connect,
+                    E::Exchange { .. } => Failure::Exchange,
+                    E::HelloRefused { .. } => Failure::HelloRefused,
+                    E::ListenerSaysTokenFileUnreadable { .. } => {
+                        Failure::ListenerSaysTokenFileUnreadable
+                    }
+                    E::Verification { mismatch, .. } => Failure::Verification(*mismatch),
+                };
+                (kind, error.to_string())
+            })?;
         Ok(Conn { runtime, verified })
     }
 }
@@ -634,11 +612,20 @@ fn each_dial_failure_is_distinguished() {
             Failure::Connect,
             "{dialer:?}"
         );
-        assert_eq!(
-            failure(loopback(port), &unknown_label).0,
-            Failure::HelloRefused,
-            "{dialer:?}"
+        // A refusal carries no MAC, so it is a failed verification, both
+        // causes named.
+        let (refused, message) = failure(loopback(port), &unknown_label);
+        assert_eq!(refused, Failure::HelloRefused, "{dialer:?}");
+        assert!(message.contains("host verification failed"), "{message}");
+        assert!(
+            message.contains("the token changed since it was read"),
+            "{message}"
         );
+        assert!(
+            message.contains("something other than a norn host holds the port"),
+            "{message}"
+        );
+        assert!(message.contains("the bearer was not sent"), "{message}");
     }
 
     use std::os::unix::fs::PermissionsExt;
@@ -656,6 +643,7 @@ fn each_dial_failure_is_distinguished() {
                 && message.contains("said the token file is unreadable"),
             "{message}"
         );
+        assert!(!message.contains("verification failed"), "{message}");
     }
     assert_eq!(served.terminate().0.code(), Some(0));
 }

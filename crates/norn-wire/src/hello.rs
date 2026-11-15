@@ -23,11 +23,12 @@
 //! **The dialer's check is spelled here too**, crypto-free: what a reply's
 //! status and body say ([`HelloReply::read`]), whether an address may be
 //! dialed at all ([`is_dialable`]), how large a hello body may be
-//! ([`HELLO_BODY_BYTES`]), and how a MAC-verified answer's facts are compared
-//! with the dialer's connection ([`HelloFacts::check_connection`]). The two
-//! dialers — `norn-client`'s and the serving crate's takeover dial — keep
-//! only their transport and their HMAC check, so their comparisons cannot
-//! drift.
+//! ([`HELLO_BODY_BYTES`]), how a MAC-verified answer's facts are compared
+//! with the dialer's connection ([`HelloFacts::check_connection`]), and how a
+//! failed dial is reported ([`HelloFailure`]). The two dialers —
+//! `norn-client`'s and the serving crate's takeover dial — keep only their
+//! transport and their HMAC check, so neither their comparisons nor their
+//! reports can drift.
 //!
 //! The serving layer's hello route reads and writes these types, and so do
 //! both dialers.
@@ -516,11 +517,92 @@ impl fmt::Display for HelloMismatch {
                 "the answer's client address is not this end of the connection"
             }
         };
-        write!(
-            f,
-            "host verification failed: {what}. Either the token changed since it was read, or \
-             something other than a norn host holds the port; the bearer was not sent"
-        )
+        write!(f, "host verification failed: {what}. {BOTH_CAUSES}")
+    }
+}
+
+/// The two causes every failed verification names, asserting neither.
+const BOTH_CAUSES: &str = "Either the token changed since it was read, or something other than \
+                           a norn host holds the port; the bearer was not sent";
+
+/// Why a dial returned no verified connection. No bearer was sent in any.
+///
+/// Both dialers — `norn-client`'s and the serving crate's takeover dial —
+/// answer this one type, so a failure reads the same from either. It carries
+/// no transport type: a dialer writes its HTTP stack's error as text.
+///
+/// A refused hello and an answer that did not verify are both reported as a
+/// failed verification naming both causes, since a refusal carries no MAC.
+/// The one unverified answer reported for what it said is the fail-closed
+/// one, and it is reported as a listener's word, not as a fact about any
+/// file.
+#[derive(Debug)]
+pub enum HelloFailure {
+    /// The address is not a loopback address, so it is not dialed.
+    NotLoopback(SocketAddr),
+    /// The token set holds no token to run the hello with.
+    NoToken,
+    /// The connection could not be made.
+    Connect {
+        address: SocketAddr,
+        error: std::io::Error,
+    },
+    /// The connection failed during the hello.
+    Exchange { address: SocketAddr, error: String },
+    /// A listener at the address refused the hello (401
+    /// `serve/hello-refused`). Unverified: a refusal carries no MAC.
+    HelloRefused { address: SocketAddr },
+    /// A listener at the address said its token file is unreadable (500
+    /// `serve/token-file-unreadable`). Unverified, so it says nothing about
+    /// any file for certain.
+    ListenerSaysTokenFileUnreadable { address: SocketAddr },
+    /// The answer did not verify.
+    Verification {
+        address: SocketAddr,
+        mismatch: HelloMismatch,
+    },
+}
+
+impl fmt::Display for HelloFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            HelloFailure::NotLoopback(address) => write!(
+                f,
+                "{address} is not a loopback address; a dialer dials only loopback"
+            ),
+            HelloFailure::NoToken => {
+                f.write_str("the token file holds no token to run the hello with")
+            }
+            HelloFailure::Connect { address, error } => {
+                write!(f, "connecting to {address} failed: {error}")
+            }
+            HelloFailure::Exchange { address, error } => write!(
+                f,
+                "the connection to {address} failed during the hello: {error}"
+            ),
+            HelloFailure::HelloRefused { address } => write!(
+                f,
+                "{address}: host verification failed: a listener there refused the hello (401 \
+                 `serve/hello-refused`), which carries no MAC. {BOTH_CAUSES}"
+            ),
+            HelloFailure::ListenerSaysTokenFileUnreadable { address } => write!(
+                f,
+                "a listener at {address} said the token file is unreadable; the answer is \
+                 unverified"
+            ),
+            HelloFailure::Verification { address, mismatch } => {
+                write!(f, "{address}: {mismatch}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for HelloFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            HelloFailure::Connect { error, .. } => Some(error),
+            _ => None,
+        }
     }
 }
 
@@ -985,6 +1067,49 @@ mod tests {
                 "{text}"
             );
         }
+    }
+
+    /// A 401 carries no MAC, so a listener that refused the hello is no more
+    /// verified than one whose MAC failed: the failure reads the same.
+    #[test]
+    fn a_refused_hello_says_verification_failed_and_names_both_causes() {
+        let address = address("127.0.0.1:28472");
+        for failure in [
+            HelloFailure::HelloRefused { address },
+            HelloFailure::Verification {
+                address,
+                mismatch: HelloMismatch::Mac,
+            },
+        ] {
+            let text = failure.to_string();
+            assert!(text.starts_with("127.0.0.1:28472: "), "{text}");
+            assert!(text.contains("host verification failed"), "{text}");
+            assert!(
+                text.contains("the token changed since it was read"),
+                "{text}"
+            );
+            assert!(
+                text.contains("something other than a norn host holds the port"),
+                "{text}"
+            );
+            assert!(text.contains("the bearer was not sent"), "{text}");
+        }
+        let refused = HelloFailure::HelloRefused { address }.to_string();
+        assert!(refused.contains("serve/hello-refused"), "{refused}");
+    }
+
+    /// The one unverified answer reported for what it said rather than as a
+    /// failed verification.
+    #[test]
+    fn a_listener_saying_the_token_file_is_unreadable_is_reported_as_its_word() {
+        let address = address("127.0.0.1:28472");
+        let text = HelloFailure::ListenerSaysTokenFileUnreadable { address }.to_string();
+        assert!(
+            text.contains("a listener at 127.0.0.1:28472 said the token file is unreadable"),
+            "{text}"
+        );
+        assert!(text.contains("unverified"), "{text}");
+        assert!(!text.contains("verification failed"), "{text}");
     }
 
     #[test]
