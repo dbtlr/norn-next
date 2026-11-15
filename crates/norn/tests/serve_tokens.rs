@@ -6,7 +6,7 @@
 //! No route is served behind the bearer yet, so an authenticated request to
 //! any path answers 404 with an empty body, and that is the success signal;
 //! a refused one answers 401 `serve/unauthorized`.
-#![allow(clippy::disallowed_methods)] // Harness scaffolding: the token files a case arranges and damages.
+#![allow(clippy::disallowed_methods, clippy::disallowed_types)] // Harness scaffolding: the token files a case arranges and damages.
 
 mod support;
 
@@ -258,6 +258,10 @@ fn a_changed_file_that_no_longer_reads_refuses_every_request_until_it_reads_agai
         "{warned:?}"
     );
 
+    // A mode change alters no size, so a restore inside the same coarse
+    // timestamp tick as the damage leaves the fingerprint as it was: the
+    // declared limit. Step past a tick so the restore is a change.
+    std::thread::sleep(std::time::Duration::from_millis(50));
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
     assert_eq!(get(port, "/", Some(&bearer)).status, 404);
     assert_eq!(hello(port, "default").status, 200);

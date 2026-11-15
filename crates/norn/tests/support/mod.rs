@@ -6,7 +6,7 @@
 //! A host that outlives its test is killed by the pid the suite started, and
 //! by nothing wider.
 #![allow(dead_code)] // Each suite uses its own share of this module.
-#![allow(clippy::disallowed_methods)] // Harness scaffolding: the settings and token files a case arranges.
+#![allow(clippy::disallowed_methods, clippy::disallowed_types)] // Harness scaffolding: the settings and token files a case arranges.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};

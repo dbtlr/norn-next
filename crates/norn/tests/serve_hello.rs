@@ -64,6 +64,15 @@ enum Verified {
     Takeover(norn_serve::dial::Verified),
 }
 
+impl std::fmt::Debug for Conn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self.verified {
+            Verified::Client(_) => "a verified client connection",
+            Verified::Takeover(_) => "a verified takeover connection",
+        })
+    }
+}
+
 /// The channel this build is pinned to, as both dialers expect it.
 fn channel_of_build() -> HelloChannel {
     Channel::COMPILED.into()
@@ -384,7 +393,7 @@ fn a_peer_without_the_token_cannot_answer() {
     let address = listener.local_addr().unwrap();
     let witness = forger(listener);
     for dialer in DIALERS {
-        let (failure, message) = dialer.dial(address, &tokens).err().expect("a refusal");
+        let (failure, message) = dialer.dial(address, &tokens).expect_err("a refusal");
         assert_eq!(
             failure,
             Failure::Verification(HelloMismatch::Mac),
@@ -432,7 +441,7 @@ fn a_relay_to_a_real_host_on_another_port_is_refused() {
         }
     });
     for dialer in DIALERS {
-        let (failure, _) = dialer.dial(squatted, &tokens).err().expect("a refusal");
+        let (failure, _) = dialer.dial(squatted, &tokens).expect_err("a refusal");
         assert_eq!(
             failure,
             Failure::Verification(HelloMismatch::Host),
@@ -475,8 +484,7 @@ fn a_relay_to_a_host_that_later_binds_the_same_port(label: &str, second_address:
         let (failure, message) = answer
             .recv_timeout(support::START_WITHIN)
             .expect("the dial ends")
-            .err()
-            .expect("a refusal");
+            .expect_err("a refusal");
         assert_eq!(
             failure,
             Failure::Verification(HelloMismatch::Client),
@@ -519,10 +527,7 @@ fn a_listener_swapped_between_two_requests_never_receives_a_bearer() {
             conn.get("/").is_err(),
             "{dialer:?}: the closed connection is not reopened"
         );
-        let (failure, _) = dialer
-            .dial(loopback(port), &tokens)
-            .err()
-            .expect("a refusal");
+        let (failure, _) = dialer.dial(loopback(port), &tokens).expect_err("a refusal");
         assert_eq!(
             failure,
             Failure::Verification(HelloMismatch::Mac),
@@ -545,7 +550,7 @@ fn a_token_rotated_between_the_read_and_the_hello_fails_verification_and_names_b
     })
     .unwrap();
     for dialer in DIALERS {
-        let (failure, message) = dialer.dial(loopback(port), &held).err().expect("a refusal");
+        let (failure, message) = dialer.dial(loopback(port), &held).expect_err("a refusal");
         assert_eq!(
             failure,
             Failure::Verification(HelloMismatch::Mac),
@@ -592,8 +597,7 @@ fn the_host_listens_only_on_the_exact_resolved_loopback_address() {
                 SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, port)),
                 &tokens,
             )
-            .err()
-            .expect("no listener");
+            .expect_err("no listener");
         assert_eq!(failure, Failure::Connect, "{dialer:?}");
     }
     assert_eq!(served.terminate().0.code(), Some(0));
@@ -614,7 +618,7 @@ fn each_dial_failure_is_distinguished() {
     let (served, _) = fixture.serve_on(port);
 
     for dialer in DIALERS {
-        let failure = |address, tokens| dialer.dial(address, tokens).err().expect("a refusal");
+        let failure = |address, tokens| dialer.dial(address, tokens).expect_err("a refusal");
         assert_eq!(
             failure(loopback(port), &empty).0,
             Failure::NoToken,
@@ -641,10 +645,7 @@ fn each_dial_failure_is_distinguished() {
     let file = fixture.tokens_file();
     std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o640)).unwrap();
     for dialer in DIALERS {
-        let (failure, message) = dialer
-            .dial(loopback(port), &tokens)
-            .err()
-            .expect("a refusal");
+        let (failure, message) = dialer.dial(loopback(port), &tokens).expect_err("a refusal");
         assert_eq!(
             failure,
             Failure::ListenerSaysTokenFileUnreadable,
@@ -689,7 +690,7 @@ fn an_answer_over_the_cap_is_refused_unread() {
         }
     });
     for dialer in DIALERS {
-        let (failure, _) = dialer.dial(address, &tokens).err().expect("a refusal");
+        let (failure, _) = dialer.dial(address, &tokens).expect_err("a refusal");
         assert_eq!(
             failure,
             Failure::Verification(HelloMismatch::NotAnAnswer),

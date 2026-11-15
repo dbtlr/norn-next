@@ -24,8 +24,12 @@ fn counters(port: u16, bearer: &str) -> Counters {
 }
 
 fn delta(before: &Counters, after: &Counters) -> [u64; 3] {
-    ["serve.token_fingerprints", "serve.token_file_reads", "serve.token_lookups"]
-        .map(|name| after[name] - before[name])
+    [
+        "serve.token_fingerprints",
+        "serve.token_file_reads",
+        "serve.token_lookups",
+    ]
+    .map(|name| after[name] - before[name])
 }
 
 /// A host over `count` tokens, `default` among them.
@@ -56,7 +60,9 @@ fn an_unchanged_file_costs_one_fingerprint_no_read_and_one_lookup_per_request() 
             assert_eq!(get(port, "/", Some(&bearer)).status, 404);
         }
         let measured = delta(&before, &counters(port, &bearer));
-        eprintln!("{count} tokens, {REQUESTS} bearer requests: [fingerprints, reads, lookups] = {measured:?}");
+        eprintln!(
+            "{count} tokens, {REQUESTS} bearer requests: [fingerprints, reads, lookups] = {measured:?}"
+        );
         assert_eq!(measured, [REQUESTS + 1, 0, REQUESTS + 1], "{count} tokens");
         assert_eq!(served.terminate().0.code(), Some(0));
     }
