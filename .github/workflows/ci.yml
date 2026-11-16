@@ -232,8 +232,8 @@ jobs:
       - name: Host functional suite
         run: .github/scripts/flake-tripwire.sh cargo test --locked --config profile.dev.package.libsqlite3-sys.opt-level=3 -p norn-host --features induced-failure
 
-  # A targeted second-architecture gate. The two default test shards cover the
-  # full workspace on Linux x86_64; this job holds contracts whose answers can
+  # A targeted second-architecture gate. The three Linux test jobs above cover
+  # the full workspace on x86_64; this job holds contracts whose answers can
   # drift with architecture or filesystem behavior without duplicating the
   # complete host suite: embedding determinism, norn-fs contracts, Obsidian
   # parity, exact rename/refusal cases, and the folding-root spelling bar.
