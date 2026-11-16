@@ -4117,7 +4117,7 @@ mod tests {
             // One native backend at a time across the machine, and both
             // subscriptions below are this case's.
             let _lease = (!poll).then(|| {
-                norn_testkit::isolation::Lease::hold(
+                norn_testkit::isolation::Lease::hold_exclusive(
                     norn_testkit::isolation::REAL_WATCHER,
                     norn_testkit::isolation::acquisition_budget(watch_budget()),
                 )
@@ -4197,7 +4197,9 @@ mod tests {
     /// A native backend is one subscription to a service the machine runs once
     /// for everything on it, and that service answers a crowd by going silent
     /// rather than by going slow — so a case that installs one holds the
-    /// workspace's real-watcher lease for as long as its subscription lives.
+    /// workspace's real-watcher lease for as long as its subscription lives,
+    /// and holds it exclusively, because these cases state what the backend
+    /// itself publishes.
     /// Polling is this process's own thread and contends with nothing.
     ///
     /// Waiting for the boundary is the point rather than tidiness: the stream
@@ -4211,7 +4213,7 @@ mod tests {
         faults: WatchFaults,
     ) -> (Subscription, Option<norn_testkit::isolation::Lease>) {
         let lease = (!poll).then(|| {
-            norn_testkit::isolation::Lease::hold(
+            norn_testkit::isolation::Lease::hold_exclusive(
                 norn_testkit::isolation::REAL_WATCHER,
                 norn_testkit::isolation::acquisition_budget(watch_budget()),
             )

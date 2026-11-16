@@ -618,8 +618,10 @@ struct Fixture {
     // store and dies inside a changeset, and it never attaches.
     //
     // A case whose child attaches takes none up front: the child holds the
-    // machine's one live watcher while it runs, and the parent takes it back
-    // with [`Fixture::lease`] once the child is gone.
+    // lease while it runs, and off Linux, where an ordinary hold is
+    // exclusive, a parent holding one would leave the child waiting on it.
+    // The parent takes it back with [`Fixture::lease`] once the child is
+    // gone.
     _watcher_lease: Option<Lease>,
 }
 

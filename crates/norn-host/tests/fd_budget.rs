@@ -403,9 +403,9 @@ struct Fixture {
     vault: PathBuf,
     name: VaultName,
     // The probe attaches through production entry operations, and an
-    // attachment installs a real platform watcher. The lease makes this
-    // process's the only live one on the machine for as long as the fixture
-    // lasts, which is longer than any host it builds.
+    // attachment installs a real platform watcher. The lease, an ordinary
+    // hold, covers it for as long as the fixture lasts, which is longer than
+    // any host it builds.
     //
     // It is taken here rather than around each attach so that the descriptor
     // it costs is inside the baseline every delta below is measured against.

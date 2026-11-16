@@ -44,6 +44,10 @@ const fn budget() -> Budget {
 /// The bound on taking the real-watcher lease, derived from the window a case
 /// here holds it for.
 ///
+/// Every case here takes the lease exclusively: this target states what the
+/// platform watcher itself delivers, so no sibling's watcher runs beside one
+/// of its own, on Linux either.
+///
 /// The queue depth and the wall it is capped against are the isolation
 /// module's, because they are one machine's and not this target's: the cases
 /// queued ahead of one here are mostly in another crate.
@@ -159,9 +163,10 @@ struct Collector {
     subscription: Subscription,
     seen: Seen,
     // The platform serves every watcher on the machine from one service, and
-    // the lease is what keeps this case's watcher the only live one. It is
-    // held for as long as the subscription is, so the field outlives nothing
-    // and is dropped with it.
+    // the lease, held exclusively, is what keeps this case's watcher the only
+    // live one on every platform: this target states what the watcher itself
+    // delivers. It is held for as long as the subscription is, so the field
+    // outlives nothing and is dropped with it.
     _watcher_lease: Lease,
 }
 
@@ -193,7 +198,7 @@ impl Collector {
 
     /// The same start, over the backend `establish` selects.
     fn start_over(establish: Establish, vault: &Path, schema: &Path) -> Self {
-        let lease = Lease::hold(isolation::REAL_WATCHER, lease_budget());
+        let lease = Lease::hold_exclusive(isolation::REAL_WATCHER, lease_budget());
         Self::start_holding(lease, establish, vault, schema)
     }
 
@@ -363,7 +368,7 @@ fn a_change_behind_a_linked_folder_outside_the_vault_is_not_reported() {
     std::fs::create_dir_all(&outside).expect("a folder outside the vault");
     std::os::unix::fs::symlink(&outside, scratch.vault().join("linked"))
         .expect("an in-vault link to it");
-    let lease = Lease::hold(isolation::REAL_WATCHER, lease_budget());
+    let lease = Lease::hold_exclusive(isolation::REAL_WATCHER, lease_budget());
     norn_fs::watch::settle_prior_changes(scratch.tree.root(), budget().work())
         .expect("the link's creation has passed through the backend");
     let mut collector = Collector::start_holding(lease, watch, &scratch.vault(), &scratch.schema());
@@ -412,7 +417,7 @@ fn a_sync_catch_up_covers_every_path_across_settled_batches() {
 #[test]
 fn external_schema_changes_and_vault_root_loss_are_reported() {
     let scratch = Scratch::new("coverage");
-    let lease = Lease::hold(isolation::REAL_WATCHER, lease_budget());
+    let lease = Lease::hold_exclusive(isolation::REAL_WATCHER, lease_budget());
     norn_fs::watch::settle_prior_changes(scratch.tree.root(), budget().work())
         .expect("the fixture's schema write has passed through the backend");
     let schema = scratch.schema();
@@ -577,7 +582,7 @@ fn retargeting_a_symbolic_link_ancestor_ends_coverage(establish: Establish) {
 fn a_write_issued_before_synchronization_is_reported_for_its_own_path() {
     let scratch = Scratch::new("synchronization-race");
     let vault = scratch.vault();
-    let lease = Lease::hold(isolation::REAL_WATCHER, lease_budget());
+    let lease = Lease::hold_exclusive(isolation::REAL_WATCHER, lease_budget());
     let (subscription, _own_writes) =
         watch(&vault, &scratch.schema(), &[]).expect("watch coverage is active");
 
@@ -619,7 +624,7 @@ fn a_dot_led_write_is_dropped_and_a_control_file_beneath_one_reports() {
     let vault = scratch.vault();
     std::fs::create_dir_all(vault.join(".norn")).expect("the control folder");
     std::fs::create_dir_all(vault.join(".trash")).expect("a dot-led folder");
-    let lease = Lease::hold(isolation::REAL_WATCHER, lease_budget());
+    let lease = Lease::hold_exclusive(isolation::REAL_WATCHER, lease_budget());
     let (subscription, _own_writes) =
         watch(&vault, &scratch.schema(), &[Path::new(".norn/config.toml")])
             .expect("watch coverage is active");
@@ -681,7 +686,7 @@ fn a_plan_spanning_two_volumes_synchronizes_and_reports_from_both() {
     let schema = volume.mount().join("schema.toml");
     std::fs::write(&schema, b"version = 1\n").expect("a schema on the second volume");
 
-    let lease = Lease::hold(isolation::REAL_WATCHER, lease_budget());
+    let lease = Lease::hold_exclusive(isolation::REAL_WATCHER, lease_budget());
     norn_fs::watch::settle_prior_changes(volume.mount(), budget().work())
         .expect("the schema's first write has passed through the backend");
     let (subscription, _own_writes) =
@@ -737,19 +742,22 @@ fn a_vault_rescan_covers_the_canary_without_reporting_it() {
     );
 }
 
-/// **The bar on the hold window.** A collector holds the real-watcher lease for
-/// as long as it holds its subscription, and lets go with it.
+/// **The bar on the hold window.** A collector holds the real-watcher lease
+/// exclusively for as long as it holds its subscription, and lets go with it.
 ///
 /// The forbidden shape is the lease released early — at the end of the
-/// readiness phase, say, or anywhere else before the subscription is dropped.
-/// It costs nothing visible and it speeds this target up, because every case
-/// then runs its watcher beside every sibling's; what it buys is the starvation
-/// the lease exists to prevent, showing up somewhere else as paths that never
-/// arrived.
+/// readiness phase, say, or anywhere else before the subscription is dropped —
+/// or held shared. It costs nothing visible and it speeds this target up,
+/// because every case then runs its watcher beside every sibling's; what it
+/// buys is a delivery statement made about a crowd of watchers rather than
+/// about the one under test, showing up somewhere else as paths that never
+/// arrived. So the contest is an ordinary hold, which a shared hold would
+/// admit on Linux.
 ///
 /// The exclusion is read from this process, which is where a file lock excludes
 /// per open file description rather than per process. The reacquisition after
-/// the drop takes the ordinary queueing bound, because a sibling case is
+/// the drop is exclusive and takes the ordinary queueing bound: it lands only
+/// once every hold, the collector's included, has let go, and a sibling case is
 /// entitled to be next in line.
 #[test]
 fn a_collector_holds_the_watcher_lease_until_its_subscription_is_dropped() {
@@ -767,7 +775,10 @@ fn a_collector_holds_the_watcher_lease_until_its_subscription_is_dropped() {
     );
 
     drop(collector);
-    drop(Lease::hold(isolation::REAL_WATCHER, lease_budget()));
+    drop(Lease::hold_exclusive(
+        isolation::REAL_WATCHER,
+        lease_budget(),
+    ));
 }
 
 /// **Coverage carries the case behaviour it proved for the root it covers.**
@@ -777,7 +788,7 @@ fn a_collector_holds_the_watcher_lease_until_its_subscription_is_dropped() {
 fn a_subscription_reports_the_case_behaviour_its_root_proved() {
     let scratch = Scratch::new("case-behaviour");
     let vault = scratch.vault();
-    let _lease = Lease::hold(isolation::REAL_WATCHER, lease_budget());
+    let _lease = Lease::hold_exclusive(isolation::REAL_WATCHER, lease_budget());
     let (subscription, _own_writes) =
         watch(&vault, &scratch.schema(), &[]).expect("watch coverage is active");
     let proven = PathNormalizer::detect(subscription.covered_root())

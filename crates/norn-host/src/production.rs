@@ -7299,12 +7299,13 @@ mod tests {
         // The naming and the removal are the scratch helper's; what this
         // fixture adds is the vault tree inside and the lease beside it.
         root: Scratch,
-        // A case that attaches a real vault installs a real platform watcher.
-        // The lease makes this process's watcher the only live one on the
-        // machine, and it is held for the fixture's whole life because the
-        // attachment's is inside it. A case that stands its own reports up
-        // installs no watcher and takes no lease, so the machine's one live
-        // watcher stays available to the cases that need it.
+        // A case that attaches a real vault installs a real platform watcher,
+        // so it takes an ordinary hold on the real-watcher lease: shared with
+        // other host cases on Linux, the machine's one live watcher elsewhere,
+        // and on every platform kept out of a watcher-fidelity case's window.
+        // It is held for the fixture's whole life because the attachment's is
+        // inside it. A case that stands its own reports up installs no watcher
+        // and takes no lease, so it never queues behind a fidelity case.
         _watcher_lease: Option<norn_testkit::isolation::Lease>,
     }
     impl Fixture {
@@ -27852,31 +27853,48 @@ mod tests {
     /// for its whole life, which is longer than any attachment built on it.
     ///
     /// The forbidden shape is the lease released early — around the attach
-    /// alone, say, rather than around the fixture. It costs nothing visible and
-    /// it speeds this suite up, because every case then runs its watcher beside
-    /// every sibling's; what it buys is the starvation the lease exists to
-    /// prevent, showing up in some other case as changes that never arrived.
+    /// alone, say, rather than around the fixture — or not taken at all. It
+    /// costs nothing visible and it speeds this suite up; what it buys is this
+    /// case's watcher running inside a watcher-fidelity case's exclusive
+    /// window, and off Linux beside every sibling's, which is the starvation
+    /// the lease exists to prevent, showing up in some other case as changes
+    /// that never arrived.
     ///
-    /// The exclusion is read from this process, which is where a file lock
-    /// excludes per open file description rather than per process. The
-    /// reacquisition after the drop takes the ordinary queueing bound, because
-    /// a sibling case is entitled to be next in line.
+    /// The hold is ordinary, so what it excludes is per platform: on Linux an
+    /// exclusive hold, and elsewhere any other hold. The exclusion is read from
+    /// this process, which is where a file lock excludes per open file
+    /// description rather than per process. The reacquisition after the drop
+    /// is exclusive, so it lands only once every hold, the fixture's included,
+    /// has let go; it takes the ordinary queueing bound, because sibling cases
+    /// are entitled to finish first.
     #[test]
     fn a_fixture_holds_the_watcher_lease_for_as_long_as_it_lives() {
         let f = Fixture::new("lease-window");
+        let brief = Budget::new(Duration::from_millis(50), Duration::from_millis(250));
 
-        let contested = norn_testkit::isolation::Lease::try_hold(
+        let contested = norn_testkit::isolation::Lease::try_hold_exclusive(
             norn_testkit::isolation::REAL_WATCHER,
-            Budget::new(Duration::from_millis(50), Duration::from_millis(250)),
+            brief,
         );
         assert!(
             contested.is_err(),
-            "the lease was free while a fixture was alive, so any watcher it attaches runs beside \
-             every sibling's"
+            "an exclusive hold landed while a fixture was alive, so a watcher-fidelity case runs \
+             beside the watcher this fixture attaches"
         );
+        if !norn_testkit::isolation::ORDINARY_HOLDS_SHARE {
+            let contested = norn_testkit::isolation::Lease::try_hold(
+                norn_testkit::isolation::REAL_WATCHER,
+                brief,
+            );
+            assert!(
+                contested.is_err(),
+                "the lease was free while a fixture was alive, so any watcher it attaches runs \
+                 beside every sibling's"
+            );
+        }
 
         drop(f);
-        drop(norn_testkit::isolation::Lease::hold(
+        drop(norn_testkit::isolation::Lease::hold_exclusive(
             norn_testkit::isolation::REAL_WATCHER,
             lease_budget(),
         ));
