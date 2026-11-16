@@ -97,11 +97,12 @@ const RESUMED_DOCUMENT: &str = "resumed.md";
 /// **A vault root that stops being covered withdraws trust naming that root,
 /// prunes nothing, and does not put coverage back on its own.**
 ///
-/// The host attaches the vault through production entry operations over the
-/// machine's one real platform watcher, derives it, and serves it. Then the root
-/// directory is removed. Coverage over a vault is the tree *and the tree's own
-/// parent*, so what the backend reports is the root's name disappearing from the
-/// directory above it — and that is the one watcher fact about the registry
+/// The host attaches the vault through production entry operations over a real
+/// platform watcher, under an ordinary hold on the real-watcher lease (shared
+/// with other host cases on Linux, the machine's one live watcher elsewhere),
+/// derives it, and serves it. Then the root directory is removed. Coverage
+/// over a vault is the tree *and the tree's own parent*, so what the backend
+/// reports is the root's name disappearing from the directory above it — and that is the one watcher fact about the registry
 /// rather than about the vault's documents: the path the entry is registered at
 /// is not the path coverage was installed over any more.
 ///
@@ -336,8 +337,10 @@ fn wait_for_coverage_loss(
 /// directories, so it shares the documents and none of the derived state: it
 /// walks the tree from an empty database, which is what makes it an answer the
 /// first one can be judged against rather than a copy of it. The two are
-/// attached one at a time, because a machine runs one platform watcher service
-/// and this suite holds the lease over it for one attachment at a time.
+/// attached one at a time, because each host takes its own ordinary hold on the
+/// real-watcher lease and a lease is not reentrant: a second hold taken inside
+/// the first waits against it off Linux, and on Linux whenever an exclusive
+/// hold is waiting in the turnstile.
 fn assert_converged_from_zero(vault: &Vault, root: &Path, subject: &str) {
     let machine = root.join("from-zero");
     std::fs::create_dir_all(&machine).expect("a second machine's directories");

@@ -55,11 +55,14 @@
 //! **No bound on how many ordinary holders are live, beyond the runner's.** The
 //! count is the test threads of every binary running at once, and the limit it
 //! meets is the per-user inotify instance limit (`fs.inotify.max_user_instances`),
-//! whose kernel default is 128 and which GitHub's hosted Ubuntu runners raise
-//! to 1,280. One attached host installs one inotify instance, for its one
-//! subscription, so four test threads are four live instances per binary and
-//! twelve are twelve: a case that attaches a few vaults at once multiplies
-//! that by a few, and that product stays well inside the default. The watches
+//! whose kernel default is 128. A runner's limit is whatever its image sets,
+//! and `/proc/sys/fs/inotify/max_user_instances` on the runner reads it. One
+//! attached host installs one inotify instance, for its one subscription, so
+//! four test threads are four live instances per binary and twelve are
+//! twelve; with the runner's four binaries at once, that is at most sixteen
+//! at four threads and forty-eight at twelve. A case that attaches a few
+//! vaults at once multiplies that by a few: at four threads the product stays
+//! well inside the default, and at twelve it can reach it. The watches
 //! inside each instance, one per covered directory, count against
 //! `fs.inotify.max_user_watches`, and a test vault covers a handful.
 //!
@@ -79,6 +82,28 @@
 //! that oldest holder. An ordinary hold that is held at the turnstile names
 //! the same holders, because those are what it is queued behind, and says an
 //! exclusive hold is waiting ahead of it.
+//!
+//! # A stream of exclusive holders holds ordinary waiters out while it lasts
+//!
+//! The turnstile gives exclusive waiters priority and ordinary holders no turn
+//! of their own. While one exclusive hold holds and the next exclusive waiter
+//! stands in the turnstile behind it, no ordinary hold passes, so a stream of
+//! exclusive holds handing over to one another keeps every ordinary waiter out
+//! for as long as the stream lasts, however long that is.
+//!
+//! What bounds that wait is the acquisition wall alone. Every hand-over puts a
+//! different exclusive holder's record in front of the waiter, so
+//! [`HOLDER_PATIENCE`] re-arms at each one and never fires: the queue is
+//! moving, and the patience is for a holder that stopped. The wall's failure
+//! is reported against the wall the caller passed rather than the patience,
+//! says nothing about a holder that stopped, and names what was ahead at its
+//! last look: the exclusive holder, or, in the middle of a hand-over, the
+//! exclusive hold waiting in the turnstile.
+//!
+//! This is accepted rather than given a turn for ordinary holders. The
+//! exclusive holders are the watcher-fidelity cases: each holds for one case's
+//! watcher window, a stream needs one of them waiting while another holds, and
+//! the stream ends when the binaries running them do.
 //!
 //! # A holder records itself in a file of its own
 //!
@@ -227,9 +252,14 @@ pub const ORDINARY_HOLDS_SHARE: bool = cfg!(target_os = "linux");
 /// only for an exclusive holder, or for an exclusive waiter standing in the
 /// turnstile, and an exclusive hold waits for the exclusive waiters ahead of it
 /// and for the ordinary holders in flight when it reached the turnstile, which
-/// drain side by side in about one hold window. The queue ahead of a case on
-/// Linux is therefore shorter than this depth, and the wall the depth derives
-/// holds on both.
+/// drain side by side in about one hold window. The queue ahead of an
+/// exclusive hold on Linux is therefore shorter than this depth. The queue
+/// ahead of an ordinary hold there is every exclusive hold that keeps arriving
+/// while it waits, because the turnstile gives it no turn, and it lasts as long
+/// as that stream does; the module documentation says why that is accepted.
+/// That wait is the one this depth does not describe: the patience re-arms at
+/// every hand-over in the stream, so the wall the depth derives is all that
+/// ends it.
 ///
 /// **The first factor is a round figure for that census rather than a headcount
 /// of it**, and it can be: the number is a queue depth and not a measurement —
@@ -248,9 +278,14 @@ pub const QUEUED_HOLDERS: u32 = 160 * 4;
 ///
 /// **This is the bound that fires, and it is per holder rather than per
 /// acquisition.** A waiter blocked by several holders tracks the oldest of
-/// them, the one it has been behind longest: younger holders arriving or
-/// leaving beside it do not move that, so a stuck holder among working ones is
-/// still named. A look that finds a different oldest holder than the last one
+/// them, the one it has been behind longest, and younger holders leaving or
+/// arriving beside it do not move that. Once an exclusive waiter stands in the
+/// turnstile no holder arrives, so what moves beside a stuck holder is the
+/// working ones draining one by one; a waiter not yet in the turnstile can
+/// also see holders that arrived between two of its looks. Either way a stuck
+/// holder among working ones is named at this bound, rather than this bound
+/// after the last working one has gone. A look that finds a different oldest
+/// holder than the last one
 /// re-arms it, so a queue that is changing hands runs on under the wall alone;
 /// a record that has not moved for this long is a holder that stopped working
 /// rather than one working slowly.
@@ -352,8 +387,14 @@ pub const ACQUISITION_WALL: Duration = Duration::from_secs(15 * 60);
 /// queue — and [`ACQUISITION_WALL`]. At a fifteen-second hold window the first
 /// of those is hours and the ceiling is what binds; at a hold window short
 /// enough that the depth comes in under the ceiling, the depth binds instead.
-/// The same bound serves both kinds of hold and every platform, because the
-/// serial queue is the longest either kind meets anywhere.
+/// The same bound serves both kinds of hold and every platform. The serial
+/// queue is the longest a queue of holders that each wait their turn can be
+/// anywhere. An ordinary hold on Linux behind a stream of exclusive holds is
+/// in no such queue, because it gets no turn: it waits for as long as the stream
+/// lasts, the patience re-arms at every hand-over, and this bound is the only
+/// one that ends the wait. Its failure is reported against this bound and
+/// names the exclusive holder, or the exclusive hold in the turnstile, that was
+/// ahead at the last look.
 ///
 /// A probe makes a non-blocking lock attempt and reads the holder records.
 /// Its ten-second allowance is independent of the holder's own probes:
@@ -668,8 +709,8 @@ impl Drop for Lease {
 ///
 /// The oldest record is the holder; the count beside it and the turnstile are
 /// context. Only the oldest record is what the look tracker compares, so
-/// younger holders arriving and leaving do not re-arm the patience on a stuck
-/// one.
+/// younger holders leaving or arriving do not re-arm the patience on a stuck
+/// one; [`HOLDER_PATIENCE`] says when a waiter sees each.
 fn behind(oldest: &str, beside: usize, at_turnstile: bool) -> String {
     let mut named = oldest.to_owned();
     if beside > 0 {
@@ -1217,6 +1258,112 @@ mod tests {
         );
     }
 
+    /// **The bar on an ordinary waiter behind an exclusive stream.** Exclusive
+    /// holds handing over to one another keep an ordinary waiter out, and
+    /// what ends its wait is the wall: the failure is reported against the
+    /// wall rather than the patience, says nothing about a holder that
+    /// stopped, and names the exclusive holder or the exclusive hold waiting
+    /// in the turnstile.
+    ///
+    /// The stream is three threads taking exclusive holds back to back, each
+    /// held far longer than the gap a waiter at the turnstile leaves between
+    /// its looks, so the next one is in the turnstile before the last lets go.
+    /// Each holder rewrites its record to a line of its own, since holds taken
+    /// by one process in one second would otherwise all write the same line,
+    /// and the patience would join their standings into one. Every record
+    /// stands well inside the patience, and the wall is past it.
+    ///
+    /// The forbidden shape is a failure that misnames the wait: a patience
+    /// that fires on a stream that is moving, which names a working exclusive
+    /// holder as one that stopped, or a failure that names nothing ahead.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_exclusive_stream_holds_an_ordinary_waiter_out_until_the_wall() {
+        let key = PrivateKey::new("exclusive-stream");
+        let stop = Arc::new(AtomicBool::new(false));
+        let landed = Arc::new(AtomicUsize::new(0));
+        let stream: Vec<_> = (0..3)
+            .map(|_| {
+                let (key, stop, landed) = (
+                    key.as_str().to_owned(),
+                    Arc::clone(&stop),
+                    Arc::clone(&landed),
+                );
+                thread::spawn(move || {
+                    while !stop.load(Ordering::SeqCst) {
+                        let lease = Lease::hold_exclusive(&key, budget());
+                        let nth = landed.fetch_add(1, Ordering::SeqCst);
+                        let record = lease.record.as_ref().expect("a published record");
+                        write_record(
+                            &record.file,
+                            &format!(
+                                "pid {} holding {key} exclusively, hand-over {nth}",
+                                std::process::id()
+                            ),
+                        )
+                        .expect("a record of its own");
+                        thread::sleep(Duration::from_millis(150));
+                        drop(lease);
+                    }
+                })
+            })
+            .collect();
+
+        wait_until("the exclusive stream to be running", budget(), || {
+            if landed.load(Ordering::SeqCst) >= 2 {
+                Observed::Met(())
+            } else {
+                Observed::pending("the stream has not handed over yet")
+            }
+        })
+        .unwrap_or_else(|failure| panic!("{failure}"));
+
+        let patience = Duration::from_millis(500);
+        let wall = Budget::new(Duration::from_millis(1_200), Duration::from_millis(500));
+        let started = landed.load(Ordering::SeqCst);
+        let outcome =
+            Lease::try_hold_under(key.as_str(), Mode::ORDINARY, wall, Patience::Of(patience))
+                .map(drop);
+        let handed_over = landed.load(Ordering::SeqCst) - started;
+        stop.store(true, Ordering::SeqCst);
+        for holder in stream {
+            holder.join().expect("an exclusive holder");
+        }
+
+        let failure = outcome.expect_err("an ordinary hold landed inside an exclusive stream");
+        assert_eq!(
+            failure.kind,
+            FailureKind::Elapsed,
+            "the wait ended on a probe rather than a bound: {failure}"
+        );
+        assert_eq!(
+            failure.budget.work(),
+            wall.work(),
+            "the wait behind {handed_over} hand-overs ended at the {patience:?} patience instead \
+             of the wall: {failure}"
+        );
+        assert!(
+            !failure
+                .last_state
+                .contains("neither let go nor changed hands"),
+            "a stream that handed over {handed_over} times is reported as a holder that \
+             stopped: {failure}"
+        );
+        assert!(
+            failure.last_state.contains("exclusively")
+                || failure
+                    .last_state
+                    .contains("an exclusive hold waiting ahead in the turnstile"),
+            "the failure names nothing exclusive ahead of the ordinary waiter: {failure}"
+        );
+        assert!(
+            handed_over as u32 > wall.work().as_millis() as u32 / patience.as_millis() as u32,
+            "the stream handed over {handed_over} times, too few to outlive a {patience:?} \
+             patience inside a {:?} wall",
+            wall.work()
+        );
+    }
+
     /// A hold that cannot be taken inside its bound reports the holder rather
     /// than a bare timeout, and reports it as the wait's own failure, whichever
     /// kind of hold is waiting on whichever kind.
@@ -1489,43 +1636,69 @@ mod tests {
         drop(occupier);
     }
 
-    /// **The bar on a stuck holder in a crowd.** An exclusive waiter behind an
-    /// ordinary holder that never lets go names it at the patience, though
-    /// other ordinary holders keep arriving and leaving around it.
+    /// **The bar on a stuck holder among working ones.** An exclusive waiter
+    /// behind an ordinary holder that never lets go names it at the patience
+    /// while the working ordinary holders beside it are still leaving one by
+    /// one.
     ///
-    /// The forbidden shape is a crowd that hides a stuck holder: a waiter that
-    /// tracks the whole set, or the newest of it, re-arms on every arrival, and
-    /// the stuck holder is reported only at the acquisition wall, against a
-    /// bound that says the queue kept moving.
+    /// The waiter stands in the turnstile, so no holder arrives while it
+    /// waits: what moves beside the stuck holder is the working ones draining,
+    /// and they drain here more often than the patience, for longer than it.
+    /// The forbidden shape is a waiter that tracks the whole set rather than
+    /// its oldest record. Every departure re-arms it, and the stuck holder is
+    /// named only a patience after the last working holder has gone, with
+    /// nobody beside it.
     #[cfg(target_os = "linux")]
     #[test]
-    fn a_stuck_ordinary_holder_among_working_ones_is_named_at_the_patience_bound() {
-        let key = PrivateKey::new("stuck-in-a-crowd");
+    fn a_stuck_ordinary_holder_is_named_at_the_patience_while_working_ones_leave_beside_it() {
+        let key = PrivateKey::new("stuck-among-working");
         let stuck = Lease::hold(key.as_str(), budget());
+        let named = format!(
+            "pid {} holding {} shared, the stuck one",
+            std::process::id(),
+            key.as_str()
+        );
+        let record = stuck.record.as_ref().expect("a published record");
+        write_record(&record.file, &named).expect("the stuck holder's record");
+        // Taken after the stuck one, so each is younger than it.
+        let working: Vec<Lease> = (0..6)
+            .map(|_| Lease::hold(key.as_str(), budget()))
+            .collect();
+
+        // One working holder leaves every `apart`, well inside the patience,
+        // and the last leaves well past it.
+        let apart = Duration::from_millis(150);
+        let patience = Duration::from_millis(400);
         let stop = Arc::new(AtomicBool::new(false));
-        let crowd = {
-            let (key, stop) = (key.as_str().to_owned(), Arc::clone(&stop));
+        let drain = {
+            let stop = Arc::clone(&stop);
             thread::spawn(move || {
-                while !stop.load(Ordering::SeqCst) {
-                    let lease = Lease::hold(&key, budget());
-                    thread::sleep(Duration::from_millis(5));
+                for lease in working {
+                    thread::sleep(apart);
                     drop(lease);
+                    if stop.load(Ordering::SeqCst) {
+                        break;
+                    }
                 }
             })
         };
 
-        let patience = Duration::from_millis(300);
         let wall = Budget::new(Duration::from_secs(10), Duration::from_millis(500));
         let failure =
             Lease::try_hold_under(key.as_str(), Mode::Exclusive, wall, Patience::Of(patience))
                 .expect_err("a lease whose oldest holder never lets go");
         stop.store(true, Ordering::SeqCst);
-        crowd.join().expect("the crowd");
+        drain.join().expect("the working holders leaving");
 
         assert_stopped_holder_named(&failure, patience, wall);
         assert!(
-            failure.last_state.contains("shared"),
+            failure.last_state.contains(&named),
             "the failure does not name the ordinary holder that stopped: {failure}"
+        );
+        assert!(
+            failure.last_state.contains("more holding beside it"),
+            "the stuck holder was named only once every working holder had gone, so the \
+             waiter re-armed on their departures: {failure}"
         );
         drop(stuck);
     }
