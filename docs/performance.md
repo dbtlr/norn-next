@@ -406,3 +406,51 @@ the thresholds. A shift stays reported until it enters the reference window, and
 only while the latest run measures that clock. Skipped runs are ignored by both
 comparisons. Counters assume the frozen fixtures never change: a regenerated
 fixture moves every counter and reads as a work change.
+
+## Measure the serving process
+
+`provenance.py --serve` builds the release `norn` binary with the `counters`
+feature. Its receipt is separate from the in-process worker's receipt. Pass it
+as `record.py --engine serve --serve-build <receipt>`, over fixtures generated
+by a current-engine run. The default scales remain 2,000 and 10,000 background
+documents. `baseline.py --serve-build <receipt>` also adds the serving process
+to the current and legacy comparison.
+
+The serving engine uses its own port below the ephemeral range and private
+configuration and data directories. The quiet-host check includes resident
+`norn serve` processes. Warm calls retain one HTTP connection. Each call reads
+the counters route before and after its wire request. Instrumentation requests
+stand outside the round-trip clock. Serving overhead is the round trip minus
+`x-norn-host-time-us`, which includes readiness retries and admission and pool
+waits. Raw evidence retains the report size and the request counters beside
+each overhead reading. Deltas retain the final counters request's own bearer
+check, the same explicit extra lookup the serving counter bars account for.
+The authored p95 allowance is 6 ms plus 125 ns per
+report byte. Release calibration at 2,000 and 10,000 background documents
+measured a largest small-report p95 of 4.765 ms; the Get size pair added
+30.2 and 100.7 ns per added byte at those scales. Records retain the residual
+p95 and say whether it fits the allowance. An excess remains a measured result
+in the timing record and job summary.
+
+Each process starts with one configured registration and no derived directory.
+The subject starts as the CLI launches a host, `norn serve --auto-launched`, with
+its port in the private config's `[endpoint] port`, because the flag conflicts
+with `--port`. The config also sets `auto_exit_after` to its 24 h maximum, so
+the host's idle exit cannot end a run that waits for an idle detach.
+First-use clocks cover launch to the listening log, launch to the first Get
+answer (`first_answer_after_auto_launch`), a fresh TCP connection to its Get answer, and the first Get after an
+observed idle detach. Each retains hello, token-lookup and connection-attempt
+counts. Every connection the engine opens first runs a hello with a fresh random nonce and verifies the host's MAC, channel, host and client addresses before any bearer is sent, so a fresh connection includes that hello before its bearer request.
+Launch to listening also records registration and derived-directory
+counts. The engine waits for observed states under deadlines. Its fixed pools
+spawn eagerly and never retire, so resource sampling needs no keep-alive wait.
+RSS, peak RSS, descriptor and thread readings come from the process's `/proc`
+entries. The timing record keeps these beside the in-process and legacy engines.
+
+`nightly.py --output <new-directory>` builds both receipted subjects, freezes
+legacy 0.48.3 after checking its published archive digest, and records all three
+engines serially. Full regression runs it and retains receipts, records and
+worker logs in `evidence.tar.gz`. It writes a comparison table to the job
+summary. `--sizes 300 --processes 1 --samples 2 --warmups 0 --write-payoff 0`
+provides the smallest local measurement run. `--legacy <executable>` uses an
+already installed legacy binary.

@@ -36,3 +36,11 @@ norn-wire = { path = "../norn-wire" }
 # body the suite spelled wrong fails as that rather than as a host refusal.
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+# The serving bar compares request work with the same production host in
+# process. Its `evidence` readings come through `counters` (norn-serve's
+# feature turns norn-host's on), so a plain workspace build leaves it off, as
+# every CI shard does.
+norn-host = { path = "../norn-host" }
+# Parent-side fixture generation stays outside the measured serving process.
+norn-fixtures = { path = "../norn-fixtures" }

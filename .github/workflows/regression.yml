@@ -108,6 +108,16 @@ jobs:
       - name: Certification inventory reconciliation
         if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
         run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn certification
+      - name: Nightly performance engines
+        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
+        run: python3 scripts/performance/nightly.py --output "$RUNNER_TEMP/performance"
+      - name: Upload nightly performance
+        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: nightly-performance-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/performance/evidence.tar.gz
+          if-no-files-found: error
       - name: Upload candidate identity
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
@@ -449,6 +459,9 @@ jobs:
       - name: Host memory bars
         if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
         run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host memory --nocapture --test-threads=1
+      - name: Serving memory bars
+        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
+        run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn serve_memory --nocapture --test-threads=1
       - name: Upload candidate identity
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9

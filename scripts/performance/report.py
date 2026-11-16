@@ -7,6 +7,7 @@ from pathlib import Path
 
 from baseline import READS, WRITES
 from results import distribution
+from serve import OVERHEAD_FIXED_NS, OVERHEAD_PER_BYTE_NS
 
 
 LABELS = {
@@ -27,7 +28,7 @@ def summarize(metadata: dict, observations: list[dict]) -> list[dict]:
     for size in metadata["sizes"]:
         for scenario in scenarios:
             row = {"background_documents": size, "scenario": scenario}
-            for engine in ("current", "legacy"):
+            for engine in (("current", "legacy", "serve") if metadata.get("serve_build") else ("current", "legacy")):
                 selected = [item for item in observations if item["kind"] == "sample"
                             and item["background_documents"] == size and item["scenario"] == scenario
                             and item["engine"] == engine and not item["warmup"]]
@@ -46,12 +47,16 @@ def summarize(metadata: dict, observations: list[dict]) -> list[dict]:
                     result["round_medians_ms"].append(distribution(values)["median_ms"])
                 if scenario in WRITES:
                     result["write_and_readback"] = distribution([item["write_and_readback_ns"] for item in selected])
-                if engine == "current":
+                if engine in ("current", "serve"):
                     result["host"] = distribution([item["host_ns"] for item in selected])
                     result["counter_ranges"] = {
                         key: [min(item["counters"][key] for item in selected),
                               max(item["counters"][key] for item in selected)]
                         for key in selected[0]["counters"]}
+                if engine == "serve":
+                    result["serving_overhead"] = distribution([item["serving_overhead_ns"] for item in selected])
+                    result["bytes"] = [min(item["report_bytes"] for item in selected), max(item["report_bytes"] for item in selected)]
+                    result["overhead_allowance"] = {"fixed_ns": OVERHEAD_FIXED_NS, "per_byte_ns": OVERHEAD_PER_BYTE_NS}
                 row[engine] = result
             row["current_over_legacy"] = row["current"]["median_ms"] / row["legacy"]["median_ms"]
             rows.append(row)
@@ -80,6 +85,15 @@ def render(metadata, rows, observations):
                         '<th>Operation</th><th>Current · ms</th><th>Legacy · ms</th><th>Current vs legacy</th>'
                         '</tr></thead><tbody>' + ''.join(body) + '</tbody></table></div>')
 
+    if metadata.get("serve_build"):
+        body = []
+        for row in rows:
+            served = row["serve"]
+            body.append(f'<tr><td>{row["background_documents"]:,}</td><th>{esc(LABELS[row["scenario"]])}</th>'
+                        f'<td>{served["median_ms"]:.3f}</td><td>{served["serving_overhead"]["p95_ms"]:.3f}</td>'
+                        f'<td>{esc(str(served["bytes"]))}</td></tr>')
+        sections.append(f'<h2>Real norn serve</h2><p>Overhead allowance: {OVERHEAD_FIXED_NS / 1e6:g} ms + {OVERHEAD_PER_BYTE_NS} ns per report byte.</p><table><tr><th>Background documents</th><th>Operation</th>'
+                        '<th>Round trip ms</th><th>Overhead p95 ms</th><th>Report bytes</th></tr>' + ''.join(body) + '</table>')
     memory = []
     for item in observations:
         if item["kind"] != "end":

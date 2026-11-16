@@ -74,6 +74,7 @@ def main():
     parser.add_argument("--receipt", type=Path, required=True)
     parser.add_argument("--startup-profile", action="store_true",
                         help="include the host's harness-only startup timing and work readers")
+    parser.add_argument("--serve", action="store_true", help="build the real serving binary with counters")
     args = parser.parse_args()
     repo = Path(__file__).resolve().parents[2]
     outputs = (args.target_directory, args.receipt, args.receipt.with_suffix(".cargo.jsonl"),
@@ -90,6 +91,8 @@ def main():
     env.update(CARGO_ENCODED_RUSTFLAGS="", RUSTC=compiler, RUSTC_WRAPPER="", RUSTC_WORKSPACE_WRAPPER="")
     command = ["rustup", "run", toolchain, "cargo", "test", "--locked", "--release", "-p",
                "norn-host", "--test", "performance", "--no-run", "--message-format=json"]
+    if args.serve:
+        command = ["rustup", "run", toolchain, "cargo", "build", "--locked", "--release", "-p", "norn", "--features", "counters", "--message-format=json"]
     if args.startup_profile:
         command.extend(["--features", "induced-failure"])
     args.receipt.parent.mkdir(parents=True, exist_ok=True)
@@ -100,7 +103,7 @@ def main():
         raise ValueError("source or Cargo configuration changed during compilation")
     artifacts = [json.loads(line) for line in output.splitlines()]
     artifact = next(item for item in artifacts if item.get("reason") == "compiler-artifact"
-                    and item["target"]["name"] == "performance" and item.get("executable"))
+                    and item["target"]["name"] == ("norn" if args.serve else "performance") and item.get("executable"))
     receipt = {"executable": artifact["executable"], "sha256": sha256(Path(artifact["executable"])),
                "profile": artifact["profile"], "features": artifact["features"], "command": command,
                "rustc": subprocess.check_output([compiler, "-vV"], text=True, timeout=30),
@@ -108,6 +111,7 @@ def main():
                "cargo": subprocess.check_output(["rustup", "run", toolchain, "cargo", "--version"], text=True, timeout=30),
                "repository_head": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True, timeout=30).strip(),
                "repository_status": subprocess.check_output(["git", "status", "--porcelain"], cwd=repo, text=True, timeout=30),
+               "subject": "serve" if args.serve else "current",
                "worker_source_sha256": sha256(repo / "crates/norn-host/tests/performance.rs"),
                "cargo_lock_sha256": sha256(repo / "Cargo.lock"), "source_tree_sha256": source_hash,
                "cargo_configs": configs,

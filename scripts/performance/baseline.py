@@ -18,6 +18,7 @@ from fixture import COMMON, MISSING, RARE, prepare_probes, tree_digest
 from results import record, validate_first_get_content, validate_read, validate_write
 from provenance import sha256, verify_build
 from transport import Current, Legacy, environment, issue_root, resources
+from serve import Serve, other_servers
 
 
 READS = [
@@ -216,13 +217,15 @@ def first_answers(stages, manifest):
 
 
 def run_worker(args, engine, size, repetition, fixture, manifest, samples):
-    short = "c" if engine == "current" else "l"
+    short = {"current": "c", "legacy": "l", "serve": "s"}[engine]
     root = args.output / "work" / f"{size}-{repetition}-{short}"
     root.mkdir(parents=True)
     shutil.copytree(fixture / "vault", root / "vault")
     if tree_digest(root / "vault") != manifest["tree_sha256"]:
         raise ValueError("copied fixture differs from its frozen source")
-    cls, binary = (Current, args.current) if engine == "current" else (Legacy, args.legacy)
+    cls, binary = {"current": (Current, args.current), "legacy": (Legacy, getattr(args, "legacy", None)),
+                   "serve": (Serve, getattr(args, "serve", None))}[engine]
+    validation_engine = "current" if engine == "serve" else engine
     context = {"engine": engine, "background_documents": size, "repetition": repetition,
                "fixture_sha256": manifest["tree_sha256"], "document_count": manifest["document_count"]}
     state = probe_state(manifest)
@@ -246,7 +249,7 @@ def run_worker(args, engine, size, repetition, fixture, manifest, samples):
                       f"{answer['disposition']} in {answer['query_host_ns'] / 1e9:.3f}s from {read_from}", flush=True)
         # A control hello can precede lazy indexing. Readiness includes a real validated query.
         first, _ = worker.call({"op": "search", "query": COMMON})
-        validate_read(engine, {"op": "search", "query": COMMON}, first, manifest)
+        validate_read(validation_engine, {"op": "search", "query": COMMON}, first, manifest)
         startup = time.perf_counter_ns() - began
         append(samples, {**context, "kind": "startup", "first_validated_query_ns": startup,
                          "ready": worker.ready, "identity": getattr(worker, "identity", None),
@@ -258,7 +261,7 @@ def run_worker(args, engine, size, repetition, fixture, manifest, samples):
             before = resources(worker.process.pid)
             writes = []
             for iteration in range(args.warmups + args.samples):
-                call = verified_call(worker, engine, root, manifest, state, name, base_command, iteration,
+                call = verified_call(worker, validation_engine, root, manifest, state, name, base_command, iteration,
                                      wal=base_command is None and engine == "current")
                 command, response, elapsed = call["command"], call["response"], call["elapsed_ns"]
                 wal_before, wal_after = call["wal_before"], call["wal_after"]
@@ -275,6 +278,8 @@ def run_worker(args, engine, size, repetition, fixture, manifest, samples):
                                  "iteration": iteration, "warmup": iteration < args.warmups,
                                  "command": command, "round_trip_ns": elapsed,
                                  "host_ns": response.get("host_ns"),
+                                 "serving_overhead_ns": response.get("serving_overhead_ns"),
+                                 "report_bytes": response.get("report_bytes"),
                                  "advisories": response.get("answer", {}).get("advisories", []),
                                  "legacy_warnings": response.get("structuredContent", {}).get("report", {}).get("warnings", []),
                                  "counters": response.get("counters"),
@@ -288,6 +293,8 @@ def run_worker(args, engine, size, repetition, fixture, manifest, samples):
             append(samples, {**context, "kind": "resources", "scenario": name,
                              "before": before, "after": resources(worker.process.pid)})
             print(f"{engine} {size} round {repetition}: {name} verified", flush=True)
+        if engine == "serve":
+            append(samples, {**context, "kind": "first_use", "boundaries": worker.finish_first_use()})
         time.sleep(1)
         append(samples, {**context, "kind": "end", "resources": resources(worker.process.pid),
                          "final_tree_sha256": tree_digest(root / "vault")})
@@ -331,6 +338,7 @@ def generate_fixture(binary, root, size):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--current-build", type=Path, required=True, help="verified worker build receipt")
+    parser.add_argument("--serve-build", type=Path, help="verified release serving binary receipt")
     parser.add_argument("--legacy", type=Path, required=True, help="legacy executable")
     parser.add_argument("--output", type=Path, required=True, help="new, short absolute directory outside the repository")
     parser.add_argument("--fixtures", type=Path, help="previous run's frozen fixtures directory")
@@ -343,6 +351,12 @@ def main():
     args = parser.parse_args()
     args.output = args.output.expanduser().resolve()
     build = verify_build(args.current_build)
+    serve_build = verify_build(args.serve_build) if args.serve_build else None
+    if serve_build and (serve_build.get("subject") != "serve" or "counters" not in serve_build["features"]):
+        raise ValueError("serve requires its own counters build receipt")
+    args.serve = Path(serve_build["executable"]).resolve(strict=True) if serve_build else None
+    if other_servers():
+        raise ValueError(f"quiet-host check found other norn serve processes: {other_servers()}")
     args.current, args.legacy = Path(build["executable"]).resolve(strict=True), args.legacy.resolve(strict=True)
     if platform.system() != "Linux":
         parser.error("this initial process-resource collector requires Linux")
@@ -353,7 +367,7 @@ def main():
     args.output.mkdir(parents=True)
     binaries = args.output / "binaries"
     binaries.mkdir()
-    for name in ("current", "legacy"):
+    for name in (("current", "legacy", "serve") if serve_build else ("current", "legacy")):
         source = getattr(args, name)
         expected_hash = sha256(source)
         target = binaries / name
@@ -367,7 +381,7 @@ def main():
     metadata = {
         "workload_version": "runtime-baseline-v1", "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "current_sha256": sha256(args.current), "legacy_sha256": sha256(args.legacy),
-        "current_build": build,
+        "current_build": build, "serve_build": serve_build,
         "current_executable": str(args.current), "legacy_executable": str(args.legacy),
         "legacy_version": subprocess.check_output([str(args.legacy), "--version"], text=True).strip(),
         "repository_head": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip(),
@@ -394,7 +408,9 @@ def main():
         with (args.output / "samples.jsonl").open("w") as samples:
             for size, (fixture, manifest) in fixtures.items():
                 for repetition in range(args.repetitions):
-                    order = ("current", "legacy") if repetition % 2 == 0 else ("legacy", "current")
+                    order = ("current", "legacy", "serve") if serve_build else ("current", "legacy")
+                    if repetition % 2:
+                        order = tuple(reversed(order))
                     for engine in order:
                         run_worker(args, engine, size, repetition, fixture, manifest, samples)
         metadata["completed"] = True

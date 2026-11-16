@@ -169,6 +169,8 @@ jobs:
         run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn --features counters --test serve_wire
       - name: Wire host time
         run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-serve --features counters --lib http::tests::wire::every_wire_answer_carries_the_host_time_under_the_counters_feature -- --exact
+      - name: Serving memory bars
+        run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn serve_memory --nocapture --test-threads=1
       # rustdoc is its own compiler pass: a public doc that links a private
       # item, or an intra-doc link that resolves to nothing, is a warning only
       # this pass sees, and no lint above reads it. Denied here so the doc

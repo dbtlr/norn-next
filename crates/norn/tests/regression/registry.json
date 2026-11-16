@@ -63,12 +63,10 @@
       "sources": ["NRN-a59", "NRN-a61", "NRN-a58", "NRN-a60"],
       "binding": {
         "status": "dormant",
-        "reason": "the counter half is carried: crates/norn-host/tests/counter_gate.rs holds what a request costs in counts rather than in a clock — a warm read to zero, and the read shapes asked through the host verbs a client's request reaches, a bounded write, and a hub's delete and move previewed through the host, each the same at two vault scales. The clock half has no subject: where a clock is read, the asserted quantity is a ratio of a verb's served cost to a refusal stub's round-trip floor, and no verb round-trips a surface to set beside that floor, because the wire route now serves every verb — crates/norn-serve/src/wire.rs routes each to the host method that answers it, and the clock that sets a served verb's cost beside a refusal stub's round-trip floor is not read yet: the served counter bars at scale, which read the counters route's serve.* counters and the host's host.request.* tallies at two vault scales beside a growing control, are not written: crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault is not in the workspace. One clock is asserted as a ceiling meanwhile, in the soak lane: crates/norn-text/tests/frontmatter_cost.rs::a_block_at_the_bound_reads_inside_its_ceiling holds a parse at the block bound under a wall-clock sanity ceiling, which a binding has to reconcile with the property rather than cite past.",
+        "reason": "Native wire request work is held in logical counters by the serving growth bar. The whole property also requires a refusal-stub round-trip ratio and reconciliation of the frontmatter soak ceiling. MCP request budgeting has no adapter yet. The next surface is absent crates/norn-mcp (6.2); the native bar is crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault.",
         "grounds": [
-          { "present": "crates/norn-host/tests/counter_gate.rs" },
-          { "symbol-present": "crates/norn-text/tests/frontmatter_cost.rs::a_block_at_the_bound_reads_inside_its_ceiling" },
-          { "present": "crates/norn-serve/src/wire.rs" },
-          { "symbol-absent": "crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault" }
+          { "symbol-present": "crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault" },
+          { "absent": "crates/norn-mcp" }
         ]
       }
     },
@@ -181,12 +179,10 @@
       "sources": ["NRN-480", "NRN-522", "NRN-29"],
       "binding": {
         "status": "dormant",
-        "reason": "the comparison harness exists — crates/norn-testkit/src/equivalence.rs compares two derived stores field by field and crates/norn-testkit/src/fidelity.rs is the seam a verdict is recorded through — and no run's traffic can meet a resident service: a resident norn serve can now be running on the machine and the wire route now serves every verb — crates/norn-serve/src/wire.rs routes each to the host method that answers it, but every suite that serves starts its own host on its own port under its own directories, and the harness run that sends a served subject traffic beside a possibly resident host is the served benchmark the served counter bars bring: the served counter bars at scale, which read the counters route's serve.* counters and the host's host.request.* tallies at two vault scales beside a growing control, are not written: crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault is not in the workspace, so the self-check still has no served divergence to misattribute.",
+        "reason": "Native serving tests isolate their hosts by port and directories. They do not inject contaminated MCP comparison output and prove the self-check rejects it. The MCP comparison surface does not exist yet. The next surface is absent crates/norn-mcp (6.2); the native bar is crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault.",
         "grounds": [
-          { "present": "crates/norn-testkit/src/equivalence.rs" },
-          { "present": "crates/norn-testkit/src/fidelity.rs" },
-          { "present": "crates/norn-serve/src/wire.rs" },
-          { "symbol-absent": "crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault" }
+          { "symbol-present": "crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault" },
+          { "absent": "crates/norn-mcp" }
         ]
       }
     },
@@ -291,12 +287,10 @@
       "sources": ["NRN-a61", "NRN-a63", "NRN-457"],
       "binding": {
         "status": "dormant",
-        "reason": "the counters exist and a narrowing is already visible in them: crates/norn-store/src/counters.rs is scoped to one request, and crates/norn-host/tests/churn.rs brackets what maintenance after one edit costs against what the same bound would admit for a changed set of nothing. What the rule needs is a served operation a change could narrow, and the wire route now serves every verb — crates/norn-serve/src/wire.rs routes each to the host method that answers it, and the counters route answers what each served request cost; what is still missing is the served bar a narrowing would have to move: the served counter bars at scale, which read the counters route's serve.* counters and the host's host.request.* tallies at two vault scales beside a growing control, are not written: crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault is not in the workspace: no request path exists whose scoping win a counter would have to show.",
+        "reason": "The native serving growth bar compares request work at independent scales and repeats requests as a positive control. It does not establish that a narrowed MCP request is visible through translation overhead. The MCP adapter is the next surface. The next surface is absent crates/norn-mcp (6.2); the native bar is crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault.",
         "grounds": [
-          { "present": "crates/norn-store/src/counters.rs" },
-          { "present": "crates/norn-host/tests/churn.rs" },
-          { "present": "crates/norn-serve/src/wire.rs" },
-          { "symbol-absent": "crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault" }
+          { "symbol-present": "crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault" },
+          { "absent": "crates/norn-mcp" }
         ]
       }
     },
@@ -355,12 +349,10 @@
       "sources": ["NRN-a62"],
       "binding": {
         "status": "dormant",
-        "reason": "the substrate has one periodic leg now: crates/norn-host/src/production.rs verifies an attached entry's derived state on a declared interval, on the lifecycle worker pool and never on a caller's thread. The sweep this control is stated over has no subject — crates/norn-store/src/ddl/tombstones.rs keeps a death until something says otherwise and nothing decides when — and the request half has nothing to cost, because the wire route now serves every verb — crates/norn-serve/src/wire.rs routes each to the host method that answers it, and the request half is measurable through the counters route, but the served counter bars at scale, which read the counters route's serve.* counters and the host's host.request.* tallies at two vault scales beside a growing control, are not written: crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault is not in the workspace.",
+        "reason": "The native serving bar holds warm request work flat. It does not observe a daily retention sweep firing exactly once per period through the MCP surface; that surface is absent. The next surface is absent crates/norn-mcp (6.2); the native bar is crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault.",
         "grounds": [
-          { "present": "crates/norn-host/src/production.rs" },
-          { "present": "crates/norn-store/src/ddl/tombstones.rs" },
-          { "present": "crates/norn-serve/src/wire.rs" },
-          { "symbol-absent": "crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault" }
+          { "symbol-present": "crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault" },
+          { "absent": "crates/norn-mcp" }
         ]
       }
     },
@@ -430,15 +422,10 @@
       "sources": ["NRN-a61", "NRN-a62", "NRN-a60", "NRN-a58"],
       "binding": {
         "status": "dormant",
-        "reason": "the two lifetimes the property is stated over exist: crates/norn-store/src/increment.rs stamps one generation across every row a changeset writes, and crates/norn-host/src/lifecycle.rs holds an attachment across the work that reaches it. A query is compiled now, by the read builders: crates/norn-store/src/read/glob.rs parses a path glob once per statement and keeps it as the match function's auxiliary data for every row after the first, and crates/norn-store/src/read/conjunction.rs decides whether a key is in the field universe by a declaration lookup or one indexed existence seek. What has no subject is a served request to carry a compile across and the counters the property reads: nothing dispatches a query from a caller, because the wire route now serves every verb — crates/norn-serve/src/wire.rs routes each to the host method that answers it, and the served request now exists; what it still lacks is the bar over it: the served counter bars at scale, which read the counters route's serve.* counters and the host's host.request.* tallies at two vault scales beside a growing control, are not written: crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault is not in the workspace, and crates/norn-store/src/counters.rs counts derivation and statements, not a compile, an open or a parse.",
+        "reason": "Native serving request statements and filesystem work are measured. These counts do not count compilation, parsing or telemetry opens per MCP request generation. The MCP adapter that owns that generation is absent. The next surface is absent crates/norn-mcp (6.2); the native bar is crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault.",
         "grounds": [
-          { "present": "crates/norn-store/src/increment.rs" },
-          { "present": "crates/norn-host/src/lifecycle.rs" },
-          { "present": "crates/norn-store/src/read/glob.rs" },
-          { "present": "crates/norn-store/src/read/conjunction.rs" },
-          { "present": "crates/norn-store/src/counters.rs" },
-          { "present": "crates/norn-serve/src/wire.rs" },
-          { "symbol-absent": "crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault" }
+          { "symbol-present": "crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault" },
+          { "absent": "crates/norn-mcp" }
         ]
       }
     },
@@ -492,13 +479,10 @@
       "sources": ["NRN-a59", "NRN-a60", "NRN-a63"],
       "binding": {
         "status": "dormant",
-        "reason": "the schema declares its indexes and its plans are proven over emitted SQL: crates/norn-store/src/ddl/mod.rs designs the schema whole, and crates/norn-store/tests/store/pillars.rs asserts every findings-maintenance statement searches the index its parameters are bounds for. The reader half has nothing to reconcile against: the probe readers crates/norn-store/src/request/mod.rs offers are the range primitives the read builders of a higher layer compose, and the production plan roster that would name their callers is the served request path's, which has no route: the wire route now serves every verb — crates/norn-serve/src/wire.rs routes each to the host method that answers it, and every served verb is now a production caller, but the roster that names each reader's production callers is stated over the served bars, and the served counter bars at scale, which read the counters route's serve.* counters and the host's host.request.* tallies at two vault scales beside a growing control, are not written: crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault is not in the workspace.",
+        "reason": "The native route serves the wire vocabulary. A complete reconciliation of declared readers and indexes with production MCP plans still needs the MCP adapter and its captured plan roster, which are absent. The next surface is absent crates/norn-mcp (6.2); the native bar is crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault.",
         "grounds": [
-          { "present": "crates/norn-store/src/ddl/mod.rs" },
-          { "present": "crates/norn-store/tests/store/pillars.rs" },
-          { "present": "crates/norn-store/src/request/mod.rs" },
-          { "present": "crates/norn-serve/src/wire.rs" },
-          { "symbol-absent": "crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault" }
+          { "symbol-present": "crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault" },
+          { "absent": "crates/norn-mcp" }
         ]
       }
     },
@@ -563,14 +547,10 @@
       "sources": ["NRN-a60", "NRN-a62"],
       "binding": {
         "status": "dormant",
-        "reason": "the warm read exists and reads nothing off the vault: crates/norn-host/tests/reads.rs::every_read_verb_answers_with_no_file_read_on_its_thread holds every read verb to no document opened, no stat and no directory entry on its thread, through the per-thread count crates/norn-fs/src/reads.rs keeps in every build, and crates/norn-host/tests/counter_gate.rs holds a warm request, with the attachment gone and with it still live, to every derivation counter at zero. Trust is asserted by the coverage crates/norn-host/src/lifecycle.rs holds rather than re-proven per read, and no freshness baseline exists to load. What keeps the case dormant is the last clause: what the mechanism itself costs is stated over the served request path, and the wire route now serves every verb — crates/norn-serve/src/wire.rs routes each to the host method that answers it, and what the mechanism costs on that path is the served bars' subject: the served counter bars at scale, which read the counters route's serve.* counters and the host's host.request.* tallies at two vault scales beside a growing control, are not written: crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault is not in the workspace.",
+        "reason": "Native warm work is measured through the serving growth bar. This does not observe every freshness proof or generation invalidation on the MCP request path, whose adapter is absent. The next surface is absent crates/norn-mcp (6.2); the native bar is crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault.",
         "grounds": [
-          { "symbol-present": "crates/norn-host/tests/reads.rs::every_read_verb_answers_with_no_file_read_on_its_thread" },
-          { "present": "crates/norn-fs/src/reads.rs" },
-          { "present": "crates/norn-host/tests/counter_gate.rs" },
-          { "present": "crates/norn-host/src/lifecycle.rs" },
-          { "present": "crates/norn-serve/src/wire.rs" },
-          { "symbol-absent": "crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault" }
+          { "symbol-present": "crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault" },
+          { "absent": "crates/norn-mcp" }
         ]
       }
     },
@@ -677,16 +657,10 @@
       "sources": ["NRN-a60", "NRN-a63", "NRN-a61", "NRN-a58"],
       "binding": {
         "status": "dormant",
-        "reason": "the readers exist and a cost term is assertable over them: crates/norn-store/src/request/mod.rs pages every enumeration behind a cursor, and crates/norn-testkit/src/work.rs holds a drain of n rows under a line in n, so a reader that re-reads the rows ahead of its own position fails. The links column reads a page's links in a fixed number of statements: crates/norn-store/src/read/naming.rs reads what every link a find's page or a get's links page carries names in one set-valued statement over the link index's keys, and names every candidate in one more, so a request's statements do not grow with the links or the rows it returns, which crates/norn-store/tests/store/links.rs::a_pages_links_cost_a_fixed_number_of_statements holds. Link-impact for a moved document is carried now, for link health alone: crates/norn-store/tests/store/redecision.rs re-decides a rename through the old path's key and a hub's write through its stem's class alone, each as indexed seeks over the moved document's own neighborhood rather than a scan of every link, and the mass-delete case there bounds a key no link reaches to a small constant. What is still missing is a request surface to move the document through — the wire route now serves every verb — crates/norn-serve/src/wire.rs routes each to the host method that answers it, and move is served, but the bar holding a served move's statements to its own neighborhood is not written: the served counter bars at scale, which read the counters route's serve.* counters and the host's host.request.* tallies at two vault scales beside a growing control, are not written: crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault is not in the workspace — so no client-facing link-impact verb exists to bind the clause whole. The nested scan this class was mined from is inside one frontmatter block, where crates/norn-text/src/frontmatter/fields.rs now resolves the parsed mapping by key, and what bars it is a wall-clock ratio in a soak lane — not an evidence kind this stratum binds on.",
+        "reason": "The native growth bar varies unrelated vault dimensions for one bounded get. It does not vary every pair of request parameters, or prove served MCP move work follows its link neighborhood. The MCP adapter is the next absent surface. The next surface is absent crates/norn-mcp (6.2); the native bar is crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault.",
         "grounds": [
-          { "present": "crates/norn-store/src/request/mod.rs" },
-          { "present": "crates/norn-testkit/src/work.rs" },
-          { "present": "crates/norn-text/src/frontmatter/fields.rs" },
-          { "present": "crates/norn-store/src/read/naming.rs" },
-          { "present": "crates/norn-store/tests/store/redecision.rs" },
-          { "symbol-present": "crates/norn-store/tests/store/links.rs::a_pages_links_cost_a_fixed_number_of_statements" },
-          { "present": "crates/norn-serve/src/wire.rs" },
-          { "symbol-absent": "crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault" }
+          { "symbol-present": "crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault" },
+          { "absent": "crates/norn-mcp" }
         ]
       }
     },
@@ -864,12 +838,10 @@
       "sources": ["NRN-a60", "NRN-a61", "NRN-a62"],
       "binding": {
         "status": "dormant",
-        "reason": "the find builder takes its projection from the columns a request names: crates/norn-store/src/find/hydrate.rs reads the frontmatter projection, the head of the body and each nested collection only where a column names it, and crates/norn-wire/src/document.rs spells the row a find answers with. Neither boundary the property measures has a subject: peak resident set and wire bytes for a body-less verb need a served verb to be measured over, and the wire route now serves every verb — crates/norn-serve/src/wire.rs routes each to the host method that answers it, and wire bytes are counted per answer on the counters route, but the body-less verb's transport bytes over two body sizes, and the real-process peak resident set beside them, are the served bars at scale, and crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault is not in the workspace.",
+        "reason": "The native growth bar holds a fixed get report flat across document counts. It does not measure body-less MCP projections over independently growing body bytes and real-process RSS. The MCP projection surface is absent. The next surface is absent crates/norn-mcp (6.2); the native bar is crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault.",
         "grounds": [
-          { "present": "crates/norn-store/src/find/hydrate.rs" },
-          { "present": "crates/norn-wire/src/document.rs" },
-          { "present": "crates/norn-serve/src/wire.rs" },
-          { "symbol-absent": "crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault" }
+          { "symbol-present": "crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault" },
+          { "absent": "crates/norn-mcp" }
         ]
       }
     },
@@ -881,13 +853,10 @@
       "sources": ["NRN-a59", "NRN-a62"],
       "binding": {
         "status": "dormant",
-        "reason": "recovery exists and runs off every caller's thread: crates/norn-host/src/lifecycle.rs answers a recovery demand on the bounded lifecycle worker pool, and crates/norn-host/tests/kill_recovery.rs converges after a process died mid-increment. The billing has no subject: there is no request whose latency after an out-of-band change could be compared with warm and no pool to grow, because the wire route now serves every verb — crates/norn-serve/src/wire.rs routes each to the host method that answers it, and a served request after an out-of-band change can now be timed against warm, but the served counter bars at scale, which read the counters route's serve.* counters and the host's host.request.* tallies at two vault scales beside a growing control, are not written: crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault is not in the workspace, and a connection-open counter is not in crates/norn-store/src/counters.rs — that vocabulary counts derivation alone.",
+        "reason": "Native idle re-attach is observed by serve_wire, and fixed request work by the serving growth bar. Neither proves every out-of-band recovery latency ratio or MCP connection-open count. The MCP request surface is absent. The next surface is absent crates/norn-mcp (6.2); the native bar is crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault.",
         "grounds": [
-          { "present": "crates/norn-host/src/lifecycle.rs" },
-          { "present": "crates/norn-host/tests/kill_recovery.rs" },
-          { "present": "crates/norn-store/src/counters.rs" },
-          { "present": "crates/norn-serve/src/wire.rs" },
-          { "symbol-absent": "crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault" }
+          { "symbol-present": "crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault" },
+          { "absent": "crates/norn-mcp" }
         ]
       }
     },
@@ -962,17 +931,10 @@
       "sources": ["NRN-a60", "NRN-a63", "NRN-a59"],
       "binding": {
         "status": "dormant",
-        "reason": "the index and the targeted readers exist: crates/norn-store/src/ddl/documents.rs indexes the path and suffix keys, crates/norn-store/src/request/mod.rs answers one identifier with one bounded statement, and crates/norn-store/tests/store/pillars.rs proves those plans over the SQL the readers emitted. Resolving one string has a subject: crates/norn-store/src/get/mod.rs resolves a target by one seek of the suffix key its root probes, and crates/norn-store/tests/store/get.rs::a_gets_work_follows_its_document_not_the_vault holds its statements independent of vault size. Asking which documents link here has a subject too: crates/norn-store/src/ddl/facts.rs holds every link under the keys a links-to seek reads, a find's links-to part seeks them at the handful of keys one document is named by, and crates/norn-store/tests/store/links.rs::a_links_to_parts_work_follows_its_backlinks_not_the_vault holds its statements and steps independent of vault size. The rest of the re-entry points the property binds have none: k membership probes and every advisory uniqueness or collision check are served request paths, and the wire route now serves every verb — crates/norn-serve/src/wire.rs routes each to the host method that answers it, and the membership probes and advisory checks are served, but the served counter bars at scale, which read the counters route's serve.* counters and the host's host.request.* tallies at two vault scales beside a growing control, are not written: crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault is not in the workspace.",
+        "reason": "The native growth bar covers one bounded get at independent scales. It does not establish every MCP membership probe and advisory collision check is indexed. The MCP adapter that composes these requests is absent. The next surface is absent crates/norn-mcp (6.2); the native bar is crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault.",
         "grounds": [
-          { "present": "crates/norn-store/src/ddl/documents.rs" },
-          { "present": "crates/norn-store/src/request/mod.rs" },
-          { "present": "crates/norn-store/tests/store/pillars.rs" },
-          { "present": "crates/norn-store/src/get/mod.rs" },
-          { "symbol-present": "crates/norn-store/tests/store/get.rs::a_gets_work_follows_its_document_not_the_vault" },
-          { "present": "crates/norn-store/src/ddl/facts.rs" },
-          { "symbol-present": "crates/norn-store/tests/store/links.rs::a_links_to_parts_work_follows_its_backlinks_not_the_vault" },
-          { "present": "crates/norn-serve/src/wire.rs" },
-          { "symbol-absent": "crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault" }
+          { "symbol-present": "crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault" },
+          { "absent": "crates/norn-mcp" }
         ]
       }
     },
@@ -1349,12 +1311,10 @@
       "sources": ["NORN-a1", "NRN-a59", "NRN-a62"],
       "binding": {
         "status": "dormant",
-        "reason": "the derivation half of the bar runs today: crates/norn-host/tests/counter_gate.rs attaches a real host over a generated tree and reads every member of the vocabulary crates/norn-store/src/counters.rs declares back at zero on a warm read, once over the rows an attachment left behind and once under a live attachment. What the case still waits on is the verb. Every substrate input the handler does not read, and the round-trip floor a verb costs and nothing more, are stated over a served handler and its round trip, and the wire route now serves every verb — crates/norn-serve/src/wire.rs routes each to the host method that answers it, and the counters route reads a served request's host.request.* tallies and the host's job account, but the served counter bars at scale, which read the counters route's serve.* counters and the host's host.request.* tallies at two vault scales beside a growing control, are not written: crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault is not in the workspace, so there is no floor to measure a verb against and no closure whose unread inputs could be enumerated.",
+        "reason": "Native warm get work is held flat by the serving growth bar and idle re-attach derives zero in serve_wire. The full property also enumerates unread inputs and the round-trip floor of a no-state MCP handler. That MCP surface is absent. The next surface is absent crates/norn-mcp (6.2); the native bar is crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault.",
         "grounds": [
-          { "present": "crates/norn-host/tests/counter_gate.rs" },
-          { "present": "crates/norn-store/src/counters.rs" },
-          { "present": "crates/norn-serve/src/wire.rs" },
-          { "symbol-absent": "crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault" }
+          { "symbol-present": "crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault" },
+          { "absent": "crates/norn-mcp" }
         ]
       }
     },
