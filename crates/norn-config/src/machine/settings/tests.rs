@@ -45,7 +45,10 @@ fn each_bad_knob_warns_once_and_uses_its_default() {
         ("background_threads", vec!["0", "9", "false"]),
         ("background_turn_budget", vec!["'9ms'", "'1001ms'", "true"]),
         ("idle_after", vec!["'999ms'", "'0s'", "'8d'", "'1.5h'"]),
-        ("auto_exit_after", vec!["'999ms'", "'0s'", "'25h'", "'1h30m'"]),
+        (
+            "auto_exit_after",
+            vec!["'999ms'", "'0s'", "'25h'", "'1h30m'"],
+        ),
         ("ready_wait", vec!["'999ms'", "'301s'", "'-1s'"]),
         ("drain_bound", vec!["'0s'", "'21s'", "' 1s'"]),
         ("request_log", vec!["1", "'true'"]),
@@ -78,10 +81,7 @@ fn valid_settings_and_duration_units_are_used() {
 }
 #[test]
 fn idle_floors_are_one_second_and_the_maxima_are_unchanged() {
-    for (key, floor, max) in [
-        ("idle_after", "1s", "7d"),
-        ("auto_exit_after", "1s", "24h"),
-    ] {
+    for (key, floor, max) in [("idle_after", "1s", "7d"), ("auto_exit_after", "1s", "24h")] {
         for text in [floor, max] {
             let (s, w) = parse(
                 &format!("[serve]\n{key}='{text}'"),
@@ -100,7 +100,11 @@ fn idle_floors_are_one_second_and_the_maxima_are_unchanged() {
     }
     let (s, _) = parse("[serve]\nidle_after='1s'", Path::new("config.toml")).unwrap();
     assert_eq!(s.idle_after, Duration::from_secs(1));
-    let (s, _) = parse("[serve]\nauto_exit_after='1000ms'", Path::new("config.toml")).unwrap();
+    let (s, _) = parse(
+        "[serve]\nauto_exit_after='1000ms'",
+        Path::new("config.toml"),
+    )
+    .unwrap();
     assert_eq!(s.auto_exit_after, Duration::from_secs(1));
 }
 #[test]
