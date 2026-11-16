@@ -1,6 +1,7 @@
-//! Full regression adopts the compiled registry and inventory audits.
+//! Declared lanes for the compiled audits and serving-process memory bars.
 
 const LANE_BY_FILE_STEM: &[(&str, &str)] = &[
+    ("serve_memory", "memory-lane case:"),
     ("regression", "audit-lane case:"),
     ("certification", "audit-lane case:"),
 ];

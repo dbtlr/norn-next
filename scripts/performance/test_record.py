@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from record import acknowledge, fixture, measured, summarize
+from record import acknowledge, fixture, measured, overhead_rows, resource_rows, summarize
 
 
 def process(documents=2014, first_get=400_000_000, first_find=900_000_000, ready=3_000_000_000,
@@ -73,6 +73,33 @@ class SummaryTests(unittest.TestCase):
         metrics = {metric for _, metric in rows_by_metric(summarize([legacy]))}
         self.assertEqual(metrics, {"ready", "first_query", "warm.get_small.median", "warm.get_small.p95"})
 
+
+def serving(documents=2014, p95_ns=1_000_000, residual_ns=500_000, rss=100):
+    return {"documents": documents,
+            "overhead": {"get_small": {"p95_ns": p95_ns, "max_bytes": 4096, "residual_p95_ns": residual_ns,
+                                       "within_ceiling": residual_ns <= 2_000_000}},
+            "resources": {"VmRSS_bytes": rss, "VmHWM_bytes": rss, "open_fds": 12, "threads": 9}}
+
+
+class ServingRowTests(unittest.TestCase):
+    """Each measured process is evidence; each size and metric is one row, as a run is one point."""
+
+    def test_overhead_is_one_median_row_per_size_and_metric(self):
+        rows = overhead_rows([serving(p95_ns=1_000_000), serving(p95_ns=9_000_000, residual_ns=8_000_000),
+                              serving(p95_ns=2_000_000), serving(documents=10_000, p95_ns=3_000_000)])
+        keys = [(row["documents"], row["metric"]) for row in rows]
+        self.assertEqual(len(keys), len(set(keys)), "a metric repeated within one size")
+        by_metric = rows_by_metric(rows)
+        self.assertEqual(by_metric[(2014, "overhead.get_small.p95")]["value"], 2.0)
+        self.assertIn("2 of 3 processes within", by_metric[(2014, "overhead.get_small.p95")]["note"])
+        self.assertEqual(by_metric[(2014, "overhead.get_small.bytes")]["value"], 4096)
+        self.assertEqual(by_metric[(10_000, "overhead.get_small.p95")]["value"], 3.0)
+
+    def test_resources_are_one_median_row_per_size_and_reading(self):
+        rows = resource_rows([serving(rss=100), serving(rss=900), serving(rss=200)])
+        keys = [(row["documents"], row["metric"]) for row in rows]
+        self.assertEqual(len(keys), len(set(keys)), "a reading repeated within one size")
+        self.assertEqual(rows_by_metric(rows)[(2014, "resources.VmRSS_bytes")]["value"], 200)
 
 class SampleSelectionTests(unittest.TestCase):
     def test_reads_drop_their_warmups(self):

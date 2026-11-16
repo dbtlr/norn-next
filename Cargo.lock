@@ -612,6 +612,8 @@ dependencies = [
  "libc",
  "norn-client",
  "norn-config",
+ "norn-fixtures",
+ "norn-host",
  "norn-serve",
  "norn-testkit",
  "norn-wire",

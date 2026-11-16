@@ -1435,6 +1435,14 @@ fn full_regression_adopts_fault_and_audit_cases_with_their_features() {
                 .unwrap();
             }
         }
+        if package == "norn" {
+            lanes.push(("serve_memory", "memory-lane case:"));
+            std::fs::copy(
+                root.join("crates/norn/tests/serve_memory.rs"),
+                manifest.join("tests/serve_memory.rs"),
+            )
+            .unwrap();
+        }
         for target in targets {
             let source =
                 std::fs::read_to_string(root.join(format!("crates/{package}/tests/{target}.rs")))
@@ -1695,6 +1703,9 @@ fn assert_matrix_step_values(workflow: &str, job: &str, runs: &[&str], full: boo
         }
         expected.push(step);
     }
+    if full && job == "build" {
+        expected.push("uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9\nname: nightly-performance-${{ github.run_attempt }}\npath: ${{ runner.temp }}/performance/evidence.tar.gz\nif-no-files-found: error".to_string());
+    }
     if full {
         expected.push("uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9\nname: regression-${{ github.job }}-${{ github.run_attempt }}\npath: ${{ runner.temp }}/regression-identity.json\nif-no-files-found: error".to_string());
     }
@@ -1737,6 +1748,7 @@ fn assert_complete_active_matrix(workflow: &str, full: bool) {
     // and the full regression job both run them, after the counters route.
     const WIRE_COUNTER_BARS: &str = ".github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn --features counters --test serve_wire";
     const WIRE_HOST_TIME: &str = ".github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-serve --features counters --lib http::tests::wire::every_wire_answer_carries_the_host_time_under_the_counters_feature -- --exact";
+    const PR_MEMORY: &str = ".github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn serve_memory --nocapture --test-threads=1";
     let commands: &[(&str, &str, &[&str])] = &[
         (
             "build",
@@ -1755,6 +1767,7 @@ fn assert_complete_active_matrix(workflow: &str, full: bool) {
                 COUNTERS_ROUTE,
                 WIRE_COUNTER_BARS,
                 WIRE_HOST_TIME,
+                PR_MEMORY,
                 "cargo doc --locked --workspace --no-deps --document-private-items",
                 ".github/scripts/flake-tripwire.sh cargo test --locked --workspace",
             ],
@@ -1808,6 +1821,7 @@ fn assert_complete_active_matrix(workflow: &str, full: bool) {
                 ".github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-store count_memory --nocapture --test-threads=1",
                 ".github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-store heap --nocapture --test-threads=1",
                 ".github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host memory --nocapture --test-threads=1",
+                ".github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn serve_memory --nocapture --test-threads=1",
             ],
         ),
     ];
@@ -1817,10 +1831,14 @@ fn assert_complete_active_matrix(workflow: &str, full: bool) {
         }
         let mut runs = runs.to_vec();
         if full {
+            if key == "build" {
+                runs.retain(|command| *command != PR_MEMORY);
+            }
             match key {
                 "build" => runs.extend([
                     ".github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn regression",
                     ".github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn certification",
+                    "python3 scripts/performance/nightly.py --output \"$RUNNER_TEMP/performance\"",
                 ]),
                 "induced-failure" | "platform" => runs.extend([
                     ".github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host lockdown",
@@ -1841,6 +1859,7 @@ fn assert_complete_active_matrix(workflow: &str, full: bool) {
                         || *command == COUNTERS_ROUTE
                         || *command == WIRE_COUNTER_BARS
                         || *command == WIRE_HOST_TIME
+                        || *command == PR_MEMORY
                 })
                 .collect();
             let lint_lines = ci_job(workflow, "lint");

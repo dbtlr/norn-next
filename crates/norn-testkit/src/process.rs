@@ -320,6 +320,21 @@ impl<'a> Run<'a> {
     /// floor carried over from this process; the `measured` module says why.
     #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // Harness scaffolding: the run's own output files.
     pub fn wait(self) -> io::Result<Outcome> {
+        self.wait_inner(None::<fn(libc::pid_t)>)
+    }
+
+    /// Run a long-lived measured subject while `control` drives it. The
+    /// callback receives the owned process group, which it may signal once
+    /// its workload has finished. The launcher shields itself from SIGTERM
+    /// and still reaps the subject's peak. The workload deadline runs while
+    /// the callback runs, rather than starting after it returns.
+    #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // This run's output files.
+    pub fn wait_controlled(self, control: impl FnOnce(libc::pid_t)) -> io::Result<Outcome> {
+        self.wait_inner(Some(control))
+    }
+
+    #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // This run's output files.
+    fn wait_inner(self, control: Option<impl FnOnce(libc::pid_t)>) -> io::Result<Outcome> {
         let serial = self.sandbox.next_run();
         let out_path = self.sandbox.tree.join(format!("run-{serial}.stdout"));
         let err_path = self.sandbox.tree.join(format!("run-{serial}.stderr"));
@@ -360,7 +375,17 @@ impl<'a> Run<'a> {
             .stdout(Stdio::from(std::fs::File::create(&out_path)?))
             .stderr(Stdio::from(std::fs::File::create(&err_path)?));
 
-        let ended = group::OwnedProcessGroup::spawn(&mut command)?.wait(self.deadline)?;
+        let owned = group::OwnedProcessGroup::spawn(&mut command)?;
+        let ended = if let Some(control) = control {
+            let pgid = owned.pgid();
+            std::thread::scope(|scope| {
+                let waiter = scope.spawn(move || owned.wait(self.deadline));
+                control(pgid);
+                waiter.join().expect("the measured waiter did not panic")
+            })?
+        } else {
+            owned.wait(self.deadline)?
+        };
         let launcher = decoded(ended.pid, ended.status)?;
         let report = measured::read_report(&report_path)?;
         // A report that disagrees with how the measuring launcher ended is not

@@ -2718,6 +2718,21 @@ to the waiting thread, so a write verb is measured like a read. The tallies are 
 every build and read only under the feature; a `channel-live` artifact carries neither
 `counters` nor `evidence`.
 
+**The serving bars run on the real process.** `serve_counters` varies document,
+registration, token and idle-connection counts independently, repeats requests
+as a growing control, and compares read and apply request tallies with the
+same fixture through an in-process host composed from the production constants.
+Its cycle bar waits for idle detach and Ready re-attach, opens and closes
+connections and edits the token file, then compares the child's descriptor and
+thread counts at the same unattached phase with one cycle's. Both serving pools spawn eagerly and never
+retire, so there is no keep-alive to wait out. The wire suite retains the
+readiness-retry, no-walk, transport and unchanged re-attach evidence.
+`serve_memory` measures attach, read and plan peaks through the measuring
+launcher, subtracting the minimum of three null servers of the same binary,
+listening without registrations. Its 300- and 2,000-document pairs hold attach
+growth and reads over attach beside authored ceilings. Full regression's memory
+job adopts these cases and retains the in-process heap pairs.
+
 **External MCP clients read the token file and cannot verify the host.** An HTTP MCP
 client reads the secret from the channel's token file, whose path and format are a
 documented external contract and the named exception to invariant 11's one API, and sends a

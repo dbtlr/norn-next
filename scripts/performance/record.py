@@ -24,8 +24,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "live_mode"))
 from baseline import READS, WRITES, acknowledge, generate_fixture, probe_state, verified_call, write_json
 from fixture import COMMON, tree_digest
 from provenance import sha256, verify_build
-from results import validate_read
-from transport import Current, Legacy
+from results import validate_read, validate_first_get_content
+from transport import Current, Legacy, resources
+from serve import Serve, other_servers, OVERHEAD_FIXED_NS, OVERHEAD_PER_BYTE_NS
 
 RECORD_VERSION = 1
 LOADING = "operator-prefix-public"
@@ -85,12 +86,48 @@ def summarize(processes):
                             milliseconds(median(p95(values) for values in samples)), "ms"))
         for counter in group[0]["work"]:
             values = [process["work"][counter] for process in group]
-            unit = "bytes" if counter.endswith("bytes_written") else "count"
+            unit = "bytes" if counter.endswith(("bytes_written", "body_bytes_encoded", "report_bytes")) else "count"
             if len(set(values)) == 1:
                 rows.append(row(documents, f"work.{counter}", values[0], unit))
             else:
                 rows.append(row(documents, f"work.{counter}", median(values), unit, "unstable",
                                 "processes disagree: " + ", ".join(map(str, values))))
+    return rows
+
+
+def by_size(processes):
+    """The processes of each size, in ascending size."""
+    for documents in sorted({process["documents"] for process in processes}):
+        yield documents, [process for process in processes if process["documents"] == documents]
+
+
+def overhead_rows(processes):
+    """One row per size and serving-overhead metric: the median across processes.
+
+    Each process's own readings stay in the record's serving evidence. One row per
+    process would read to the timeline as one run each, so a single elevated process
+    could pass for a sustained shift.
+    """
+    rows = []
+    for documents, group in by_size(processes):
+        for name in group[0]["overhead"]:
+            readings = [process["overhead"][name] for process in group]
+            within = sum(reading["within_ceiling"] for reading in readings)
+            residual = median(reading["residual_p95_ns"] for reading in readings)
+            rows.append(row(documents, f"overhead.{name}.p95", milliseconds(median(reading["p95_ns"] for reading in readings)), "ms",
+                            note=f"{within} of {len(readings)} processes within {OVERHEAD_FIXED_NS / 1e6:g} ms + "
+                                 f"{OVERHEAD_PER_BYTE_NS} ns per report byte; median residual p95 {milliseconds(residual)} ms"))
+            rows.append(row(documents, f"overhead.{name}.bytes", median(reading["max_bytes"] for reading in readings), "bytes"))
+    return rows
+
+
+def resource_rows(processes):
+    """One row per size and resource reading: the median across processes."""
+    rows = []
+    for documents, group in by_size(processes):
+        for name in ("VmRSS_bytes", "VmHWM_bytes", "open_fds", "threads"):
+            rows.append(row(documents, f"resources.{name}", median(process["resources"][name] for process in group),
+                            "bytes" if name.endswith("bytes") else "count"))
     return rows
 
 
@@ -135,9 +172,10 @@ def measure_current(binary, root, manifest, args):
         work = {counter: evidence[counter] for counter in WORK}
         work["bytes_written"] = written
         timings = warm(worker, "current", root, manifest, args)
+        process_resources = resources(worker.process.pid)
     finally:
         worker.close()
-    return {"documents": manifest["document_count"], "cold": cold, "warm": timings, "work": work}
+    return {"documents": manifest["document_count"], "cold": cold, "warm": timings, "work": work, "resources": process_resources}
 
 
 def measure_legacy(binary, root, manifest, args):
@@ -148,9 +186,50 @@ def measure_legacy(binary, root, manifest, args):
         validate_read("legacy", {"op": "search", "query": COMMON}, first, manifest)
         cold = {"ready": worker.ready["attach_ns"], "first_query": time.perf_counter_ns() - began}
         timings = warm(worker, "legacy", root, manifest, args)
+        process_resources = resources(worker.process.pid)
     finally:
         worker.close()
-    return {"documents": manifest["document_count"], "cold": cold, "warm": timings, "work": {}}
+    return {"documents": manifest["document_count"], "cold": cold, "warm": timings, "work": {}, "resources": process_resources}
+
+
+def measure_serve(binary, root, manifest, args):
+    worker = Serve(binary, root)
+    try:
+        validate_first_get_content(worker.ready["first_answer"], manifest, first_index=True)
+        state = probe_state(manifest)
+        timings, overhead, work = {}, {}, {}
+        before_resources = resources(worker.process.pid)
+        for name, command in READS + [(name, None) for name in WRITES]:
+            calls = [verified_call(worker, "current", root, manifest, state, name, command, iteration)
+                     for iteration in range(args.warmups + args.samples)]
+            timings[name] = measured(name, [call["elapsed_ns"] for call in calls], warmups=args.warmups, write_payoff=args.write_payoff)
+            responses = measured(name, [call["response"] for call in calls], warmups=args.warmups, write_payoff=args.write_payoff)
+            overhead[name] = {"p95_ns": p95([response["serving_overhead_ns"] for response in responses]),
+                              "max_bytes": max(response["report_bytes"] for response in responses),
+                              "samples": [{"round_trip_ns": elapsed, "host_ns": response["host_ns"],
+                                           "overhead_ns": response["serving_overhead_ns"], "report_bytes": response["report_bytes"],
+                                           "counters": response["counters"]} for elapsed, response in zip(timings[name], responses)]}
+        for reading in overhead.values():
+            residual = p95([sample["overhead_ns"] - OVERHEAD_PER_BYTE_NS * sample["report_bytes"] for sample in reading["samples"]])
+            reading["residual_p95_ns"] = residual
+            reading["within_ceiling"] = residual <= OVERHEAD_FIXED_NS
+        after_resources = resources(worker.process.pid)
+        boundaries = worker.finish_first_use()
+        worker.wait_state("ready", 180)
+        cold = {item["boundary"]: item["elapsed_ns"] for item in boundaries}
+        for item in boundaries:
+            name = item["boundary"]
+            for key, value in item.get("counters", {}).items():
+                work[f"{name}.{key}"] = value
+            for key in ("hellos", "connection_attempts", "registrations", "derived_directories"):
+                if key in item:
+                    work[f"{name}.{key}"] = item[key]
+        cycle_resources = resources(worker.process.pid)
+    finally:
+        worker.close()
+    return {"documents": manifest["document_count"], "cold": cold, "warm": timings,
+            "work": work, "overhead": overhead, "resources_before": before_resources,
+            "resources": after_resources, "resources_after_idle_cycle": cycle_resources, "boundaries": boundaries}
 
 
 def fixture(binary, fixtures, size):
@@ -175,10 +254,12 @@ def fixture(binary, fixtures, size):
 
 def identity(args):
     """The executable under measurement, frozen into the run before it starts."""
-    if args.engine == "current":
-        build = verify_build(args.current_build)
-        if "induced-failure" not in build["features"]:
+    if args.engine in ("current", "serve"):
+        build = verify_build(args.serve_build if args.engine == "serve" else args.current_build)
+        if args.engine == "current" and "induced-failure" not in build["features"]:
             raise ValueError("the record mode needs a provenance.py --startup-profile build")
+        if args.engine == "serve" and (build.get("subject") != "serve" or "counters" not in build["features"]):
+            raise ValueError("serve requires its own release counters receipt")
         source = Path(build["executable"])
         compiler = next(line.split(":", 1)[1].strip() for line in build["rustc"].splitlines()
                         if line.startswith("release:"))
@@ -199,8 +280,9 @@ def identity(args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--engine", choices=["current", "legacy"], default="current")
+    parser.add_argument("--engine", choices=["current", "legacy", "serve"], default="current")
     parser.add_argument("--current-build", type=Path, help="provenance.py --startup-profile receipt")
+    parser.add_argument("--serve-build", type=Path, help="provenance.py --serve receipt")
     parser.add_argument("--legacy", type=Path, help="installed legacy executable")
     parser.add_argument("--fixtures", type=Path, required=True,
                         help="frozen fixture directory; a current run generates a missing size once")
@@ -214,6 +296,8 @@ def main():
     args = parser.parse_args()
     if args.engine == "current" and args.current_build is None:
         parser.error("--current-build is required for the current engine")
+    if args.engine == "serve" and args.serve_build is None:
+        parser.error("--serve-build is required for the serve engine")
     if args.engine == "legacy" and args.legacy is None:
         parser.error("--legacy is required for the legacy engine")
     if platform.system() != "Linux":
@@ -233,11 +317,13 @@ def main():
                 "sizes": args.sizes, "processes": args.processes, "samples": args.samples,
                 "warmups": args.warmups, "write_payoff": args.write_payoff}
     try:
+        if args.engine == "serve" and other_servers():
+            raise ValueError(f"quiet-host check found other norn serve processes: {other_servers()}")
         binary, built = identity(args)
         metadata.update(built)
         processes = []
         for size in args.sizes:
-            if args.engine == "legacy" and not (args.fixtures / str(size)).exists():
+            if args.engine != "current" and not (args.fixtures / str(size)).exists():
                 raise ValueError("only a current run generates fixtures; record the current engine first")
             source, manifest = fixture(binary, args.fixtures, size)
             for number in range(args.processes):
@@ -246,7 +332,9 @@ def main():
                 shutil.copytree(source / "vault", root / "vault")
                 if tree_digest(root / "vault") != manifest["tree_sha256"]:
                     raise ValueError("copied fixture differs from its frozen source")
-                measure = measure_current if args.engine == "current" else measure_legacy
+                if args.engine == "serve" and other_servers():
+                    raise ValueError(f"quiet-host check found other norn serve processes: {other_servers()}")
+                measure = {"current": measure_current, "legacy": measure_legacy, "serve": measure_serve}[args.engine]
                 processes.append(measure(binary, root, manifest, args))
                 print(f"{args.engine} {manifest['document_count']} documents, process {number}: verified", flush=True)
                 # Keep logs; the frozen fixture recreates every vault and store.
@@ -254,6 +342,11 @@ def main():
                     if (root / name).exists():
                         shutil.rmtree(root / name)
         metadata["rows"] = summarize(processes)
+        if args.engine == "serve":
+            metadata["serving_evidence"] = processes
+            metadata["serving_overhead_allowance"] = {"fixed_ns": OVERHEAD_FIXED_NS, "per_byte_ns": OVERHEAD_PER_BYTE_NS, "statistic": "p95 residual after per-byte allowance"}
+            metadata["rows"].extend(overhead_rows(processes))
+        metadata["rows"].extend(resource_rows(processes))
         metadata["completed"] = True
     except BaseException as problem:
         metadata["failure"] = repr(problem)
