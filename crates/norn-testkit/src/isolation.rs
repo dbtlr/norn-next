@@ -1035,7 +1035,7 @@ mod tests {
     #[cfg(not(target_os = "linux"))]
     #[test]
     fn off_linux_an_ordinary_hold_waits_for_the_one_live_holder() {
-        assert!(!ORDINARY_HOLDS_SHARE);
+        const { assert!(!ORDINARY_HOLDS_SHARE) };
         waits_for_the_first(ORDINARY, ORDINARY, "ordinary-ordinary");
     }
 
@@ -1048,7 +1048,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn on_linux_two_ordinary_holds_are_live_at_once() {
-        assert!(ORDINARY_HOLDS_SHARE);
+        const { assert!(ORDINARY_HOLDS_SHARE) };
         let key = PrivateKey::new("overlap");
         let first = Lease::hold(key.as_str(), budget());
         let second = Lease::try_hold(key.as_str(), brief()).unwrap_or_else(|failure| {
@@ -1086,7 +1086,9 @@ mod tests {
                 Some("exclusive") => Lease::try_hold_exclusive(&key, wall),
                 other => panic!("an unknown hold {other:?}"),
             };
-            println!(
+            // Stderr, beside the waiter's own notices; stdout is the
+            // runner's.
+            eprintln!(
                 "child {}",
                 if taken.is_ok() { "landed" } else { "excluded" }
             );
@@ -1109,12 +1111,16 @@ mod tests {
             .env(ISOLATION_ROOT, root())
             .output()
             .expect("the child runs");
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            assert!(output.status.success(), "the child failed: {stdout}");
+            let said = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                output.status.success(),
+                "the child failed: {said}{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
             ["child landed", "child excluded"]
                 .into_iter()
-                .find(|said| stdout.contains(said))
-                .unwrap_or_else(|| panic!("the child said neither: {stdout}"))
+                .find(|line| said.contains(line))
+                .unwrap_or_else(|| panic!("the child said neither: {said}"))
                 .to_owned()
         };
 
