@@ -200,6 +200,14 @@ jobs:
       - name: Host filesystem contracts
         if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
         run: .github/scripts/flake-tripwire.sh cargo test --locked --no-fail-fast -p norn-host --features induced-failure
+      # The host process's port probe on macOS's socket semantics, named
+      # exactly: test-suite.sh rejects a selection that executes nothing.
+      - name: Port probe on macOS
+        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
+        run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked --no-fail-fast -p norn-serve --lib -- --exact start::tests::the_probe_refuses_a_listener_on_loopback_or_the_wildcard start::tests::the_probe_passes_a_socket_in_time_wait
+      - name: Wildcard-held port refuses the start
+        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
+        run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked --no-fail-fast -p norn --test serve a_port_held_on_the_wildcard_address_refuses_the_start -- --exact
       # A plain feature-enabled package run skips these dedicated fault cases.
       # Adopt both targets' ignored cases with their required feature so full
       # regression retains the recovery evidence on this platform.

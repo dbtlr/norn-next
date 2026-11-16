@@ -101,7 +101,15 @@ impl Fixture {
 
     /// A host left running, read line by line.
     pub fn start(&self, args: &[&str]) -> Served {
-        let mut child = Command::new(&self.binary)
+        self.start_with(args, |_| {})
+    }
+
+    /// [`start`](Self::start), with `arrange` given the command before it is
+    /// spawned: a case that starts the host under an inherited disposition.
+    pub fn start_with(&self, args: &[&str], arrange: impl FnOnce(&mut Command)) -> Served {
+        let mut command = Command::new(&self.binary);
+        arrange(&mut command);
+        let mut child = command
             .args(args)
             .env_clear()
             .envs(self.sandbox.environment())
@@ -195,18 +203,34 @@ impl Served {
     }
 
     pub fn signal(mut self, signal: libc::c_int) -> (ExitStatus, Vec<String>) {
+        self.send(signal);
+        self.wait_within(STOP_WITHIN)
+    }
+
+    /// Send `signal`, and return at once.
+    pub fn send(&mut self, signal: libc::c_int) {
         let pid = libc::pid_t::try_from(self.child.id()).unwrap();
         // SAFETY: a plain signal to the child this suite spawned and has not
         // reaped, so the pid still names it.
         assert_eq!(unsafe { libc::kill(pid, signal) }, 0);
-        let deadline = Instant::now() + STOP_WITHIN;
+    }
+
+    /// Whether the process is still running.
+    pub fn running(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
+    }
+
+    /// Wait at most `within` for the process to exit, then answer its status
+    /// and every remaining log line.
+    pub fn wait_within(mut self, within: Duration) -> (ExitStatus, Vec<String>) {
+        let deadline = Instant::now() + within;
         let status = loop {
             if let Some(status) = self.child.try_wait().unwrap() {
                 break status;
             }
             assert!(
                 Instant::now() < deadline,
-                "norn serve did not stop within {STOP_WITHIN:?} of SIGTERM: {:?}",
+                "norn serve did not stop within {within:?}: {:?}",
                 self.seen
             );
             std::thread::sleep(Duration::from_millis(20));
@@ -316,10 +340,21 @@ impl Reply {
 
 /// One request on a connection of its own, with `Connection: close`.
 pub fn exchange(port: u16, method: &str, path: &str, bearer: Option<&str>, body: &[u8]) -> Reply {
+    exchange_within(port, method, path, bearer, body, Duration::from_secs(10))
+}
+
+/// [`exchange`], waiting at most `within` for the answer: a request whose
+/// host work is long, such as an apply of thousands of documents.
+pub fn exchange_within(
+    port: u16,
+    method: &str,
+    path: &str,
+    bearer: Option<&str>,
+    body: &[u8],
+    within: Duration,
+) -> Reply {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connecting to norn serve");
-    stream
-        .set_read_timeout(Some(Duration::from_secs(10)))
-        .unwrap();
+    stream.set_read_timeout(Some(within)).unwrap();
     let mut request = format!(
         "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nContent-Length: {}\r\n",
         body.len()
@@ -335,6 +370,15 @@ pub fn exchange(port: u16, method: &str, path: &str, bearer: Option<&str>, body:
     let mut answer = Vec::new();
     let _ = stream.read_to_end(&mut answer);
     parse_reply(&answer)
+}
+
+/// The reply in `answer`, or nothing where no whole HTTP head arrived: a
+/// connection the host closed unanswered.
+pub fn parse(answer: &[u8]) -> Option<Reply> {
+    answer
+        .windows(4)
+        .any(|window| window == b"\r\n\r\n")
+        .then(|| parse_reply(answer))
 }
 
 fn parse_reply(answer: &[u8]) -> Reply {

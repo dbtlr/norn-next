@@ -267,7 +267,7 @@ fn representatives() -> Vec<(ErrorDetail, StatusCode)> {
     ]
 }
 
-fn bearer() -> String {
+pub(super) fn bearer() -> String {
     norn_wire::hex::encode(SECRET)
 }
 
@@ -487,17 +487,17 @@ fn every_wire_answer_carries_the_host_time_under_the_counters_feature() {
 
 /// A served connection over a real loopback socket, its bounds short, on a
 /// runtime of its own thread.
-struct Socket {
+pub(super) struct Socket {
     port: u16,
 }
 
-const SHORT: Bounds = Bounds {
+pub(super) const SHORT: Bounds = Bounds {
     keep_alive: Duration::from_millis(600),
     header_read: Duration::from_millis(300),
     body_arrival: Duration::from_millis(300),
 };
 
-fn serving(case: Case) -> Socket {
+pub(super) fn serving(case: Case) -> Socket {
     let mut context = case.context;
     context.bounds = SHORT;
     let context = Arc::new(context);
@@ -523,12 +523,19 @@ fn serving(case: Case) -> Socket {
 }
 
 impl Socket {
+    /// A connection to the host, its reads bounded by `within`.
+    pub(super) fn connect(&self, within: Duration) -> std::net::TcpStream {
+        let stream = std::net::TcpStream::connect(("127.0.0.1", self.port)).unwrap();
+        stream.set_read_timeout(Some(within)).unwrap();
+        stream
+    }
+
     /// Write `bytes`, then read until the host closes the connection or
     /// `within` passes, answering what arrived, whether it closed, and when.
     /// The clock starts before the connect: the host's header bound runs from
     /// its accept, so a clock started after the write could read a bound that
     /// fired on time as early.
-    fn exchange(&self, bytes: &[u8], within: Duration) -> (String, bool, Duration) {
+    pub(super) fn exchange(&self, bytes: &[u8], within: Duration) -> (String, bool, Duration) {
         let started = std::time::Instant::now();
         let mut stream = std::net::TcpStream::connect(("127.0.0.1", self.port)).unwrap();
         stream.write_all(bytes).unwrap();
@@ -626,6 +633,42 @@ fn an_idle_connection_is_kept_alive_then_closed() {
     );
 }
 
+/// **The keep-alive bound runs from an answer's flush, not from the route
+/// returning it.** A large answer its client reads slowly is still being
+/// written well past the keep-alive bound, and it arrives whole.
+#[test]
+fn a_slowly_read_answer_outlasting_the_keep_alive_arrives_whole() {
+    // Far past what loopback socket buffers hold, so the answer cannot
+    // finish writing until the client reads it.
+    const REPORT_BYTES: usize = 32 << 20;
+    let case = case("norn-serve-slow-reader");
+    case.answers
+        .push(Dispatched::Report(vec![b' '; REPORT_BYTES]));
+    let socket = serving(case);
+    let mut stream = socket.connect(Duration::from_secs(5));
+    let wire = format!(
+        "POST /v1/wire/find HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {}\r\nContent-Length: \
+         2\r\n\r\n{{}}",
+        bearer()
+    );
+    stream.write_all(wire.as_bytes()).unwrap();
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") {
+        assert_eq!(stream.read(&mut byte).unwrap(), 1, "the head ended early");
+        head.push(byte[0]);
+    }
+    assert!(head.starts_with(b"HTTP/1.1 200"));
+    // The client reads nothing for twice the keep-alive bound: the answer is
+    // stalled mid-write the whole time. This sleep is the slow reader itself,
+    // not a synchronisation.
+    std::thread::sleep(SHORT.keep_alive * 2);
+    let mut body = vec![0; REPORT_BYTES];
+    stream
+        .read_exact(&mut body)
+        .expect("the answer was cut short mid-write");
+}
+
 /// A host that holds every call until released, and records how many ran at
 /// once.
 struct Gate {
@@ -684,13 +727,14 @@ fn a_disconnect_while_a_mutation_runs_keeps_the_vaults_turn_until_its_call_retur
     });
     let mut case = case("norn-serve-wire-disconnect");
     case.context.wire = Arc::new(Wire {
-        admission: Arc::default(),
+        admission: case.context.lifecycle.admission(),
         semaphores: Arc::default(),
         reads: crate::pool::Pool::new("test-read", 2).unwrap(),
         mutations: crate::pool::Pool::new("test-mutation", 2).unwrap(),
         dispatcher: Arc::clone(&gate) as Arc<dyn crate::request::Dispatch>,
         ready_wait: Duration::from_secs(10),
         counters: Arc::default(),
+        drain: Arc::clone(&case.context.lifecycle.drain),
     });
     let wire = Arc::clone(&case.context.wire);
     let socket = serving(case);
@@ -726,4 +770,124 @@ fn a_disconnect_while_a_mutation_runs_keeps_the_vaults_turn_until_its_call_retur
         1,
         "two mutations of one vault ran at once"
     );
+}
+
+/// What `send` logged, with the request's own `send` and the log's lines
+/// captured on this thread.
+fn logged(case: &Case, request: Request<Full<Bytes>>) -> (StatusCode, Vec<String>) {
+    let ((status, _, _), lines) = crate::log::capture::lines_of(|| send(case, request));
+    (status, lines)
+}
+
+/// The elapsed field is a duration, not a fixed value: `<n>us`.
+fn assert_request_line(line: &str, expected_prefix: &str) {
+    let elapsed = line
+        .strip_prefix(expected_prefix)
+        .unwrap_or_else(|| panic!("{line:?} does not start {expected_prefix:?}"));
+    let micros = elapsed
+        .strip_suffix("us")
+        .unwrap_or_else(|| panic!("{line:?} does not end in `us`"));
+    micros
+        .parse::<u64>()
+        .unwrap_or_else(|_| panic!("{line:?} has no integer elapsed"));
+}
+
+/// **With `request_log` on, each authenticated request writes exactly one
+/// line, after its answer**: the verb from the route table, the status, `ok`
+/// or the refusal's reason code, and the elapsed microseconds. The drain
+/// request is `control/drain`, a hello is not logged, and nothing about the
+/// peer's bearer or body reaches a line.
+#[test]
+fn a_request_writes_one_line_when_request_log_is_on_and_none_when_off() {
+    let mut case = case("norn-serve-request-log");
+    case.context.request_log = true;
+    let (status, lines) = logged(
+        &case,
+        request(Method::POST, "/v1/wire/find", Some(&bearer()), b"{}"),
+    );
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert_request_line(&lines[0], "request: find 200 ok ");
+
+    // An unauthenticated request is not logged.
+    let (status, lines) = logged(
+        &case,
+        request(Method::POST, "/v1/wire/find", Some("a wrong bearer"), b"{}"),
+    );
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(lines.is_empty(), "an unauthenticated request: {lines:?}");
+
+    let (status, lines) = logged(
+        &case,
+        request(
+            Method::POST,
+            DRAIN_PATH,
+            Some(&bearer()),
+            b"{\"secret\": \"vault content\"}",
+        ),
+    );
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert_request_line(&lines[0], "request: control/drain 409 serve/drain-refused ");
+    for peer_text in ["secret", "vault content", &bearer()] {
+        assert!(!lines[0].contains(peer_text), "{}", lines[0]);
+    }
+
+    let (_, lines) = logged(
+        &case,
+        request(
+            Method::POST,
+            HELLO_PATH,
+            None,
+            &hello_body("default", &nonce().to_hex()),
+        ),
+    );
+    assert!(lines.is_empty(), "a hello is not logged: {lines:?}");
+
+    case.context.request_log = false;
+    let (status, lines) = logged(
+        &case,
+        request(Method::POST, "/v1/wire/find", Some(&bearer()), b"{}"),
+    );
+    assert_eq!(status, StatusCode::OK);
+    assert!(lines.is_empty(), "request_log is off: {lines:?}");
+}
+
+/// **A path that matched no route logs only `unrouted`**, whatever the peer
+/// put in it: control characters and newlines never reach the log.
+#[test]
+fn an_unrouted_path_with_control_characters_logs_only_unrouted() {
+    let mut case = case("norn-serve-request-log-unrouted");
+    case.context.request_log = true;
+    for path in [
+        "/v1/wire/nope",
+        "/v1/wire/fi%0Ad%0D%1B[2J",
+        "/v1/wire/%0Aforged:%20line",
+        "/v1/wire/%07bell",
+        "/v1/wire/find%00",
+    ] {
+        let (status, lines) = logged(&case, request(Method::POST, path, Some(&bearer()), b"{}"));
+        assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+        assert_eq!(lines.len(), 1, "{path}: {lines:?}");
+        assert_request_line(&lines[0], "request: unrouted 404 serve/unknown-verb ");
+        assert!(
+            !lines[0].contains(['\n', '\r', '\u{1b}', '\u{7}', '\0']),
+            "{path}"
+        );
+    }
+}
+
+/// The counters route is `debug/counters` in the request log.
+#[cfg(feature = "counters")]
+#[test]
+fn the_counters_request_logs_as_debug_counters() {
+    let mut case = case("norn-serve-request-log-counters");
+    case.context.request_log = true;
+    let (status, lines) = logged(
+        &case,
+        request(Method::GET, "/v1/debug/counters", Some(&bearer()), b""),
+    );
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert_request_line(&lines[0], "request: debug/counters 200 ok ");
 }

@@ -3,9 +3,20 @@
 //!
 //! `POST /v1/hello` is the one exchange answered without a bearer. Every
 //! other request passes the bearer middleware first. Behind it stand the wire
-//! route, `POST /v1/wire/{verb}` (`wire.rs`, run by `request.rs`), and under
-//! the `counters` feature `GET /v1/debug/counters`; any other path is 404
-//! `serve/unknown-verb`.
+//! route, `POST /v1/wire/{verb}` (`wire.rs`, run by `request.rs`), the drain
+//! request, `POST /v1/control/drain`, and under the `counters` feature
+//! `GET /v1/debug/counters`; any other path is 404 `serve/unknown-verb`.
+//!
+//! **The drain request, v1.** An auto-launched host sets `draining`, closes
+//! its listener, and only then answers 202 `{"version": 1, "draining": true}`
+//! on the request's connection, so by the time the dialer reads the 202 no
+//! new connection can reach it; then it drains. An explicit host answers 409
+//! `serve/drain-refused` and keeps serving — its own guard, beside the
+//! dialer's check of `launch`. A host already draining answers 503
+//! `serve/draining`. The request is exempt from the in-flight bound, its body
+//! is bounded at 4 KiB, and its token work — the bearer middleware's one
+//! fingerprint, and a read only when it changed — runs inline on the I/O
+//! thread, so a busy host can still be retired.
 //!
 //! **Every refusal's status is its fault class's**, through [`status_of`], an
 //! exhaustive match over `norn_wire::FaultClass`; every refusal is an
@@ -33,14 +44,18 @@ use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use norn_wire::{
-    BuildIdentity, ErrorDetail, ErrorEnvelope, FaultClass, HELLO_BODY_BYTES, HelloAnswer,
-    HelloChannel, HelloFacts, HelloLaunch, HelloRequest, HelloState, Verb,
+    BuildIdentity, DrainAnswer, DrainRequest, ErrorDetail, ErrorEnvelope, FaultClass,
+    HELLO_BODY_BYTES, HelloAnswer, HelloChannel, HelloFacts, HelloLaunch, HelloRequest, HelloState,
+    Verb,
 };
 use tokio::net::TcpStream;
 
-use crate::connection::{Bounds, Paced};
+use crate::connection::{Bounds, Closes, Paced};
 use crate::credentials::{Admission, Credentials, Keyed};
+use crate::lifecycle::{Began, Lifecycle, Stage, StopReason};
+use crate::log::log;
 use crate::request::{Dispatched, Ended, Lane, Wire};
+use crate::start::DRAIN_PATH;
 use crate::stop::Stopper;
 use crate::wire;
 
@@ -69,7 +84,11 @@ pub(crate) struct Context {
     pub(crate) launch: HelloLaunch,
     pub(crate) wire: Arc<Wire>,
     pub(crate) stopper: Arc<Stopper>,
+    pub(crate) lifecycle: Arc<Lifecycle>,
     pub(crate) bounds: Bounds,
+    /// Whether each authenticated request is logged after its answer
+    /// (`[serve] request_log`).
+    pub(crate) request_log: bool,
     /// The host's own cumulative readings, named as the counters route
     /// answers them.
     #[cfg(feature = "counters")]
@@ -97,14 +116,27 @@ pub(crate) async fn answer(stream: TcpStream, context: Arc<Context>) {
     let (Ok(local), Ok(peer)) = (stream.local_addr(), stream.peer_addr()) else {
         return;
     };
-    let (paced, phase) = Paced::new(stream, context.bounds);
+    let (paced, phase) = Paced::new(stream, context.bounds, Arc::clone(&context.lifecycle.drain));
     let service = service_fn(move |request| {
         let context = Arc::clone(&context);
         let phase = Arc::clone(&phase);
         async move {
             phase.busy();
-            let answer = route(request, &context, local, peer).await;
-            phase.idle();
+            let mut answer = route(request, &context, local, peer).await;
+            // Every answer given once the drain began tells its client to
+            // close, a request that began before the drain included. Whether
+            // an answer closes is decided here, once: its flush half-closes
+            // exactly the answers that carry the header (`connection.rs`), so
+            // an answer without it, however late its flush, leaves the
+            // connection readable for the `serve/draining` the next request
+            // is owed. The drain begins in two writes, the stage turning
+            // `draining` and then the deadline being set; the stage is read
+            // as well, so an answer given between them (a hello reporting
+            // `draining`, a `serve/draining` refusal) is not left kept alive.
+            if context.lifecycle.drain.has_begun() || context.lifecycle.stage() == Stage::Draining {
+                answer = closing(answer);
+            }
+            phase.idle(closes(&answer));
             Ok::<_, Infallible>(answer)
         }
     });
@@ -152,8 +184,76 @@ where
     }
 }
 
-/// What stands behind the bearer middleware.
+/// What stands behind the bearer middleware, and the request line the
+/// server log carries for it when `request_log` is set.
+///
+/// **The line is `request: <route> <status> <reason> <elapsed>us`**, written
+/// after the answer is made, through the bounded log queue so a stderr nobody
+/// reads cannot hold the answer. Every field is the host's own vocabulary: the
+/// route is a verb the route table names, `control/drain`, `debug/counters`,
+/// or `unrouted` for any path that matched none, so a peer's path, bearer,
+/// body or vault content never reaches the line. The hello is not logged.
 async fn authenticated<B>(request: Request<B>, context: &Context) -> Answer
+where
+    B: Body<Data = Bytes>,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    if !context.request_log {
+        return dispatch_authenticated(request, context).await;
+    }
+    let route = route_label(&request);
+    let started = std::time::Instant::now();
+    let answer = dispatch_authenticated(request, context).await;
+    log(format_args!(
+        "{}",
+        request_line(route, &answer, started.elapsed())
+    ));
+    answer
+}
+
+/// The name the request log gives the route `request` matches, by the same
+/// tests `dispatch_authenticated` routes by: a verb the route table serves,
+/// the drain request, the counters route where compiled in, or `unrouted`.
+fn route_label<B>(request: &Request<B>) -> &'static str {
+    let path = request.uri().path();
+    #[cfg(feature = "counters")]
+    if request.method() == Method::GET && path == "/v1/debug/counters" {
+        return "debug/counters";
+    }
+    if request.method() == Method::POST {
+        if path == DRAIN_PATH {
+            return "control/drain";
+        }
+        if let Some(name) = path.strip_prefix(WIRE_PREFIX)
+            && let Ok(verb) = Verb::try_from(name)
+            && wire::lane(verb).is_some()
+        {
+            return verb.as_str();
+        }
+    }
+    "unrouted"
+}
+
+/// The request line: its route, the answer's status, `ok` or the refusal's
+/// reason code, and the microseconds the request took.
+fn request_line(route: &str, answer: &Answer, elapsed: std::time::Duration) -> String {
+    let reason = answer
+        .extensions()
+        .get::<ReasonLabel>()
+        .map_or("ok", |label| label.0.as_str());
+    format!(
+        "request: {route} {} {reason} {}us",
+        answer.status().as_u16(),
+        elapsed.as_micros()
+    )
+}
+
+/// The reason code a refusal answered with, carried on its answer so the
+/// request log can name it without parsing the body.
+#[derive(Clone)]
+struct ReasonLabel(String);
+
+async fn dispatch_authenticated<B>(request: Request<B>, context: &Context) -> Answer
 where
     B: Body<Data = Bytes>,
     B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
@@ -161,6 +261,9 @@ where
     #[cfg(feature = "counters")]
     if request.method() == Method::GET && request.uri().path() == "/v1/debug/counters" {
         return counters(context);
+    }
+    if request.method() == Method::POST && request.uri().path() == DRAIN_PATH {
+        return drain_request(request, context).await;
     }
     if request.method() == Method::POST
         && let Some(name) = request.uri().path().strip_prefix(WIRE_PREFIX)
@@ -205,7 +308,14 @@ where
             ErrorDetail::busy(),
         ));
     };
-    let body = match arriving_body(request, WIRE_BODY_BYTES, context.bounds).await {
+    // A body still arriving when the drain begins is answered without the
+    // rest being read, and the connection closed.
+    let arriving = arriving_body(request, WIRE_BODY_BYTES, context.bounds);
+    let body = match tokio::select! {
+        biased;
+        body = arriving => body,
+        () = context.lifecycle.drain.begun() => return closing(draining()),
+    } {
         Ok(body) => body,
         Err(Unread::TooLarge) => return closing(too_large("the request's body is over 256 MiB")),
         Err(Unread::Late) => return closing(late_body()),
@@ -220,9 +330,10 @@ where
         },
         _ => Lane::Read,
     };
+    let at_bound = wire::at_bound(verb, &body);
     // The body crosses to the pool as it arrived, uncopied; the slot goes
     // with it, held until the request's last job lets go.
-    let run = wire_state.serve(verb, lane, body, slot).await;
+    let run = wire_state.serve(verb, lane, at_bound, body, slot).await;
     #[cfg(feature = "counters")]
     let host_time = run.dispatched_at.elapsed();
     let answer = match run.ended {
@@ -247,6 +358,7 @@ where
             ErrorDetail::busy(),
         ),
         Ended::Lost => outcome_unknown(),
+        Ended::StillRunningAtBound => refusal(still_running(verb), ErrorDetail::outcome_unknown()),
     };
     #[cfg(feature = "counters")]
     let answer = {
@@ -310,8 +422,60 @@ fn outcome_unknown() -> Answer {
     )
 }
 
+/// The `serve/outcome-unknown` message for a synchronous mutation still
+/// running when the drain reached its bound: whether it took effect is not
+/// known, and what a resend answers says which it was, or a read-back does.
+fn still_running(verb: Verb) -> &'static str {
+    match verb {
+        Verb::VaultRegister => {
+            "the host stopped while this registration was running, so whether it took effect is \
+             not known; send it again — a resend answering host/already-served means the \
+             earlier one took effect — or read it back with vault list"
+        }
+        Verb::VaultUnregister => {
+            "the host stopped while this unregistration was running, so whether it took effect \
+             is not known; send it again — a resend answering host/unknown-vault means the \
+             earlier one took effect — or read it back with vault list"
+        }
+        Verb::VaultSet => {
+            "the host stopped while this change to the registration was running, so whether it \
+             took effect is not known; send it again, which sets the same values, or read it \
+             back with vault list"
+        }
+        Verb::Init => {
+            "the host stopped while this init was running, so whether it took effect is not \
+             known; send it again — a resend answering already_set_up means the earlier one \
+             wrote the schema — or read the vault's state back with vault status"
+        }
+        Verb::VaultMigrate => {
+            "the host stopped while this migration was running, so whether it took effect is not \
+             known; send it again — a resend answering already_current means nothing is left \
+             to migrate — or read the vault's state back with vault status"
+        }
+        Verb::VaultReload => {
+            "the host stopped while this reload was running, so whether it took effect is not \
+             known; send it again, which reloads the same control files, or read the vault's \
+             state back with vault status"
+        }
+        _ => {
+            "the host stopped while this request was running, so whether it took effect is not \
+             known; read the state back, or send the request again"
+        }
+    }
+}
+
+/// Whether `answer` tells its client to close the connection.
+fn closes(answer: &Answer) -> Closes {
+    let close = answer
+        .headers()
+        .get_all(CONNECTION)
+        .iter()
+        .any(|value| value.as_bytes().eq_ignore_ascii_case(b"close"));
+    if close { Closes::Yes } else { Closes::No }
+}
+
 /// An answer after which the connection carries no further request: the
-/// body was not read, or did not arrive in time.
+/// body was not read, or did not arrive in time, or the drain has begun.
 fn closing(mut answer: Answer) -> Answer {
     answer
         .headers_mut()
@@ -397,12 +561,16 @@ where
     let Ok(hello) = serde_json::from_slice::<HelloRequest>(&body) else {
         return bad_hello();
     };
+    context.lifecycle.drain.touch();
+    let state = match context.lifecycle.stage() {
+        Stage::Draining => HelloState::Draining,
+        Stage::Starting | Stage::Serving => HelloState::Serving,
+    };
     let facts = HelloFacts::new(
         context.channel,
         context.build,
         context.launch,
-        // Draining arrives with the bounded drain, a later task.
-        HelloState::Serving,
+        state,
         local,
         peer,
     );
@@ -422,6 +590,54 @@ where
         }
         Keyed::Refused => refusal("the hello was refused", ErrorDetail::hello_refused()),
         Keyed::FailedClosed => token_file_unreadable(),
+    }
+}
+
+/// `POST /v1/control/drain`, behind the bearer: retire an auto-launched
+/// host. Its body, `{}`, is read under the hello's cap and the body-arrival
+/// bound.
+async fn drain_request<B>(request: Request<B>, context: &Context) -> Answer
+where
+    B: Body<Data = Bytes>,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    if declared_length(&request).is_some_and(|length| length > HELLO_BODY_BYTES as u64) {
+        return closing(too_large("the drain request's body is over 4 KiB"));
+    }
+    let body = match arriving_body(request, HELLO_BODY_BYTES, context.bounds).await {
+        Ok(body) => body,
+        Err(Unread::TooLarge) => {
+            return closing(too_large("the drain request's body is over 4 KiB"));
+        }
+        Err(Unread::Late) => return closing(late_body()),
+        Err(Unread::Failed) => return bad_request("the drain request's body did not arrive whole"),
+    };
+    if serde_json::from_slice::<DrainRequest>(&body).is_err() {
+        return bad_request("the drain request's body is not a JSON object");
+    }
+    if context.lifecycle.stage() == Stage::Draining {
+        return draining();
+    }
+    if context.launch == HelloLaunch::Explicit {
+        return refusal(
+            "this host was started explicitly, and an explicit host is never asked to drain; \
+             stop it with SIGTERM or its service manager",
+            ErrorDetail::drain_refused(),
+        );
+    }
+    match context.lifecycle.begin_drain(StopReason::DrainRequest) {
+        Began::Drain => {
+            context.lifecycle.until_listener_closed().await;
+            let mut answer = json(
+                StatusCode::ACCEPTED,
+                serde_json::to_vec(&DrainAnswer::draining()).expect("a drain answer serializes"),
+            );
+            answer
+                .headers_mut()
+                .insert(CONNECTION, HeaderValue::from_static("close"));
+            answer
+        }
+        Began::AlreadyDraining | Began::NotListening => draining(),
     }
 }
 
@@ -480,10 +696,14 @@ fn refusal(message: &str, detail: ErrorDetail) -> Answer {
 }
 
 fn envelope_answer(envelope: &ErrorEnvelope) -> Answer {
-    json(
+    let mut answer = json(
         status_of(envelope.fault_class()),
         serde_json::to_vec(envelope).expect("an error envelope serializes"),
-    )
+    );
+    if let Ok(serde_json::Value::String(code)) = serde_json::to_value(envelope.code()) {
+        answer.extensions_mut().insert(ReasonLabel(code));
+    }
+    answer
 }
 
 fn json(status: StatusCode, body: Vec<u8>) -> Answer {
@@ -493,6 +713,48 @@ fn json(status: StatusCode, body: Vec<u8>) -> Answer {
         .headers_mut()
         .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     response
+}
+
+/// A host's serving state over `dirs`'s token file, as `launch` started it,
+/// for the cases that dial a host: its hello, its bearer and its drain request
+/// are real, and its wire route answers an empty report.
+#[cfg(test)]
+pub(crate) fn context_for_tests(
+    dirs: &norn_config::ConfigDirs,
+    launch: HelloLaunch,
+    lifecycle: Arc<Lifecycle>,
+) -> Context {
+    struct Nothing;
+    impl crate::request::Dispatch for Nothing {
+        fn dispatch(&self, _: Verb, _: &[u8]) -> Dispatched {
+            Dispatched::Report(b"{}".to_vec())
+        }
+    }
+    Context {
+        credentials: Mutex::new(Credentials::new(
+            dirs,
+            norn_config::machine::tokens::WatchedTokens::read(dirs),
+        )),
+        channel: HelloChannel::Dev,
+        build: BuildIdentity::new("0.0.0+test"),
+        launch,
+        wire: Arc::new(Wire {
+            admission: lifecycle.admission(),
+            semaphores: Arc::default(),
+            reads: crate::pool::Pool::new("test-read", 1).expect("a pool"),
+            mutations: crate::pool::Pool::new("test-mutation", 1).expect("a pool"),
+            dispatcher: Arc::new(Nothing),
+            ready_wait: std::time::Duration::from_secs(1),
+            counters: Arc::default(),
+            drain: Arc::clone(&lifecycle.drain),
+        }),
+        stopper: Arc::default(),
+        lifecycle,
+        bounds: Bounds::SERVING,
+        request_log: false,
+        #[cfg(feature = "counters")]
+        readings: Box::new(Vec::new),
+    }
 }
 
 #[cfg(test)]
@@ -509,6 +771,10 @@ mod tests {
     /// The wire route's cases: statuses, admission, bounds, and the
     /// stopped-worker answer.
     mod wire;
+
+    /// The drain request, the hello's `draining`, and what a drain does to
+    /// a connection.
+    mod drain;
 
     const SECRET: &[u8] = b"a stored secret";
 
@@ -535,22 +801,27 @@ mod tests {
         })
         .expect("a token");
         let answers = Arc::new(Answers::default());
+        let drain = Arc::new(crate::drain::Drain::new(std::time::Duration::from_secs(2)));
+        let admission = Arc::new(crate::admission::Admission::default());
         let context = Context {
             credentials: Mutex::new(Credentials::new(&dirs, settled(&dirs))),
             channel: HelloChannel::Dev,
             build: BuildIdentity::new("0.0.0+test"),
             launch: HelloLaunch::Explicit,
             wire: Arc::new(Wire {
-                admission: Arc::default(),
+                admission: Arc::clone(&admission),
                 semaphores: Arc::default(),
                 reads: crate::pool::Pool::new("test-read", 2).unwrap(),
                 mutations: crate::pool::Pool::new("test-mutation", 2).unwrap(),
                 dispatcher: Arc::clone(&answers) as Arc<dyn crate::request::Dispatch>,
                 ready_wait,
                 counters: Arc::default(),
+                drain: Arc::clone(&drain),
             }),
             stopper: Arc::default(),
+            lifecycle: crate::lifecycle::serving_for_tests(drain, admission),
             bounds: Bounds::SERVING,
+            request_log: false,
             #[cfg(feature = "counters")]
             readings: Box::new(|| vec![("host.request.requests".to_string(), 7)]),
         };

@@ -2,18 +2,24 @@
 //! home, config and data directory, on a port chosen free for each test and
 //! never a channel's default.
 //!
-//! What is held here is the start and the plain stop: the settings precedence
-//! and refusals, the channel lock, the bind, `listening`, a 404 for every
-//! authenticated request while no route is served behind the bearer, and
-//! `stopped` with status 0 on SIGTERM. The token mint, the bearer and the
-//! hello are held in `serve_tokens.rs` and `serve_hello.rs`.
+//! What is held here is the start and the stop: the settings precedence and
+//! refusals, the channel lock and the takeover, the port probe, the bind,
+//! `listening`, a 404 for every authenticated request to a path no route
+//! serves, the start-bound watchdog, the signals and the drain they begin,
+//! the lock-name recheck, and an auto-launched host's idle exit. The token
+//! mint, the bearer and the hello are held in `serve_tokens.rs` and
+//! `serve_hello.rs`; the drain's answers to running writes in
+//! `serve_drain.rs`; a host killed outright in `serve_kill.rs`.
 #![allow(clippy::disallowed_methods)] // Harness scaffolding: the settings files a start reads.
 
 mod support;
 
+use std::time::Duration;
+
+use norn_config::ChannelLock;
 use norn_config::machine::default_endpoint;
 use norn_testkit::process::{Run, RunStatus};
-use support::{Fixture, bind_unissued, free_port, get};
+use support::{Fixture, bind_unissued, free_port, get, hello};
 
 #[test]
 fn serve_listens_on_the_resolved_port_answers_an_unrouted_path_404_and_stops_on_sigterm() {
@@ -50,21 +56,28 @@ fn serve_listens_on_the_resolved_port_answers_an_unrouted_path_404_and_stops_on_
     );
 }
 
+/// **An explicit start over a held lock with an explicit host exits 1 at
+/// once**: the hello verifies the host at the endpoint, and an explicit host
+/// is never displaced.
 #[test]
-fn a_second_start_while_the_first_holds_the_channel_lock_refuses() {
+fn a_second_start_while_an_explicit_host_serves_the_channel_exits_1_at_once() {
     let fixture = Fixture::new("serve-lock-held");
     let port = free_port();
     let mut first = fixture.start(&["serve", "--port", &port.to_string()]);
     first.listening_port();
 
-    let other = free_port();
-    let (status, stderr) = fixture.run(&["serve", "--port", &other.to_string()]);
+    let started = std::time::Instant::now();
+    let (status, stderr) = fixture.run(&["serve", "--port", &port.to_string()]);
     assert_eq!(status, RunStatus::Exited(1), "{stderr}");
     assert!(
-        stderr.contains("a norn host already holds this channel's lock"),
+        stderr.contains("a norn host already serves this channel"),
         "{stderr}"
     );
     assert!(!stderr.contains("listening"), "{stderr}");
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "the start waited on a host it had verified"
+    );
 
     let (status, lines) = first.terminate();
     assert_eq!(status.code(), Some(0), "{lines:?}");
@@ -252,35 +265,386 @@ fn a_registry_fifo_refuses_naming_the_file() {
     assert!(stderr.contains("not a regular file"), "{stderr}");
 }
 
+/// **A signal before listening ends the start with exit 1**, naming it. The
+/// suite holds the channel lock, so the start is in its held-lock wait — past
+/// exec and the signal mask, and before listening — when the signal lands.
 #[test]
 fn signals_during_start_refuse_with_a_log_line() {
-    for signal in [libc::SIGTERM, libc::SIGINT].into_iter().cycle().take(8) {
+    for signal in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
         let fixture = Fixture::new("serve-early-signal");
-        // A long settings diagnostic stream keeps startup in the settings
-        // step. Its first line proves the child has executed, avoiding the
-        // unhandleable interval between spawn and the program entry.
-        let mut settings = String::new();
-        for n in 0..10_000 {
-            settings.push_str(&format!("unknown_{n} = true\n"));
-        }
-        fixture.write_settings(&settings);
+        fixture.config_dir();
+        let _held = ChannelLock::try_take(&fixture.dirs())
+            .unwrap()
+            .expect("a free lock");
         let mut served = fixture.start(&["serve", "--port", &free_port().to_string()]);
-        served.line_starting("warning:");
+        served.line_starting("the channel lock in");
         let (status, lines) = served.signal(signal);
         assert_eq!(status.code(), Some(1), "{status}: {lines:?}");
+        let name = match signal {
+            libc::SIGTERM => "SIGTERM",
+            libc::SIGINT => "SIGINT",
+            _ => "SIGHUP",
+        };
         assert!(
-            lines.iter().any(|line| line
-                == &format!(
-                    "refused: {} arrived before the host was listening",
-                    if signal == libc::SIGTERM {
-                        "SIGTERM"
-                    } else {
-                        "SIGINT"
-                    }
-                )),
-            "no early-signal refusal in {} log lines",
-            lines.len()
+            lines
+                .iter()
+                .any(|line| line
+                    == &format!("refused: {name} arrived before the host was listening")),
+            "{lines:?}"
         );
         assert!(!lines.iter().any(|line| line.starts_with("listening:")));
     }
+}
+
+/// An auto-launched host on `port`, by the settings file, since the marker
+/// refuses `--port`.
+fn auto_launched(fixture: &Fixture, port: u16, settings: &str) -> support::Served {
+    fixture.write_settings(&format!("[endpoint]\nport = {port}\n{settings}"));
+    let mut served = fixture.start(&["serve", "--auto-launched"]);
+    assert_eq!(served.listening_port(), port);
+    served
+}
+
+/// **An explicit start takes over a verified auto-launched host**: it drains
+/// it, the drained host exits 0, and the explicit start takes the lock it
+/// freed and listens on the same port.
+#[test]
+fn an_explicit_start_takes_over_a_verified_auto_launched_host() {
+    let fixture = Fixture::new("serve-takeover");
+    let port = free_port();
+    let auto = auto_launched(&fixture, port, "");
+    let mut explicit = fixture.start(&["serve"]);
+    assert_eq!(explicit.listening_port(), port);
+    assert!(
+        explicit
+            .seen
+            .iter()
+            .any(|line| line.contains("asked to drain")),
+        "{:?}",
+        explicit.seen
+    );
+    let (status, lines) = auto.wait_within(support::STOP_WITHIN);
+    assert_eq!(status.code(), Some(0), "{lines:?}");
+    assert!(
+        lines.iter().any(|line| line == "stopped: a drain request"),
+        "{lines:?}"
+    );
+    assert_eq!(hello(port, "default").status, 200);
+    assert_eq!(explicit.terminate().0.code(), Some(0));
+}
+
+/// **A launched start meeting a verified serving host exits 10**, at once.
+#[test]
+fn a_launched_start_meeting_a_verified_host_exits_10() {
+    let fixture = Fixture::new("serve-launch-race");
+    let port = free_port();
+    fixture.write_settings(&format!("[endpoint]\nport = {port}\n"));
+    let mut explicit = fixture.start(&["serve"]);
+    assert_eq!(explicit.listening_port(), port);
+    let (status, stderr) = fixture.run(&["serve", "--auto-launched"]);
+    assert_eq!(status, RunStatus::Exited(10), "{stderr}");
+    assert!(!stderr.contains("listening"), "{stderr}");
+    assert_eq!(explicit.terminate().0.code(), Some(0));
+}
+
+/// **A launched start meeting a held lock with no verified answer exits 11**
+/// once the release bound has passed, with the facts it observed and nothing
+/// more.
+#[test]
+fn a_launched_start_over_a_held_lock_with_no_verified_answer_exits_11() {
+    let fixture = Fixture::new("serve-launch-held");
+    fixture.write_settings(&format!("[endpoint]\nport = {}\n", free_port()));
+    let _held = ChannelLock::try_take(&fixture.dirs())
+        .unwrap()
+        .expect("a free lock");
+    let started = std::time::Instant::now();
+    let outcome = Run::new(&fixture.sandbox, &fixture.binary)
+        .args(["serve", "--auto-launched"])
+        .deadline(Duration::from_secs(120))
+        .wait()
+        .expect("running norn");
+    let stderr = outcome.stderr_text();
+    assert_eq!(outcome.status, RunStatus::Exited(11), "{stderr}");
+    assert!(started.elapsed() >= Duration::from_secs(40), "{stderr}");
+    assert!(
+        stderr.contains("the channel lock is held and nothing verified answers"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("deleting serve.lock does not stop"),
+        "{stderr}"
+    );
+    for unobserved in ["verification", "drain request", "draining"] {
+        assert!(!stderr.contains(unobserved), "{unobserved}: {stderr}");
+    }
+}
+
+/// **The probe refuses a port another process holds on the wildcard
+/// address**, which a loopback bind alone would pass beside on BSD.
+#[test]
+fn a_port_held_on_the_wildcard_address_refuses_the_start() {
+    let fixture = Fixture::new("serve-port-wildcard");
+    let port = free_port();
+    let squatter = std::net::TcpListener::bind(("0.0.0.0", port)).expect("the wildcard");
+    let (status, stderr) = fixture.run(&["serve", "--port", &port.to_string()]);
+    assert_eq!(status, RunStatus::Exited(1), "{stderr}");
+    assert!(stderr.contains("is held by another process"), "{stderr}");
+    drop(squatter);
+}
+
+/// **A restart on the port a stopped host served listens at once**: the
+/// stop's connections leave sockets in TIME_WAIT on the port, and the probe
+/// passes them.
+#[test]
+fn a_restart_on_the_port_a_host_just_left_listens() {
+    let fixture = Fixture::new("serve-time-wait");
+    let port = free_port();
+    let mut first = fixture.start(&["serve", "--port", &port.to_string()]);
+    first.listening_port();
+    // A kept-alive connection the host closes first at its stop.
+    let mut open = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    let body = serde_json::json!({ "label": "default", "nonce": "ab".repeat(32) }).to_string();
+    use std::io::{Read, Write};
+    write!(
+        open,
+        "POST /v1/hello HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    )
+    .unwrap();
+    let mut answer = [0u8; 16];
+    open.read_exact(&mut answer).unwrap();
+    assert_eq!(first.terminate().0.code(), Some(0));
+    let mut rest = Vec::new();
+    let _ = open.read_to_end(&mut rest);
+    drop(open);
+
+    let mut second = fixture.start(&["serve", "--port", &port.to_string()]);
+    assert_eq!(second.listening_port(), port);
+    assert_eq!(second.terminate().0.code(), Some(0));
+}
+
+/// **A deleted `serve.lock` is re-taken without a drain**: within a recheck
+/// the host holds a lock at the name again, and it keeps serving.
+#[test]
+fn a_deleted_channel_lock_is_taken_again_and_the_host_keeps_serving() {
+    let fixture = Fixture::new("serve-lock-deleted");
+    let port = free_port();
+    let mut served = fixture.start(&["serve", "--port", &port.to_string()]);
+    served.listening_port();
+    let lock = fixture.dirs().config_dir().join("serve.lock");
+    std::fs::remove_file(&lock).unwrap();
+    served.line_starting("the channel lock file in");
+    assert!(
+        ChannelLock::try_take(&fixture.dirs()).unwrap().is_none(),
+        "the re-made lock is not held"
+    );
+    assert!(served.running());
+    assert_eq!(hello(port, "default").status, 200);
+    let (status, lines) = served.terminate();
+    assert_eq!(status.code(), Some(0), "{lines:?}");
+    assert!(
+        !lines
+            .iter()
+            .any(|line| line.starts_with("draining: another")),
+        "{lines:?}"
+    );
+}
+
+/// **The start-bound watchdog**: a start that holds the lock and cannot reach
+/// listening within the start bound exits 1, and the last thing it logged
+/// names what it was waiting on. The suite holds the token file's lock, so
+/// the mint waits.
+#[test]
+#[allow(clippy::disallowed_types)] // Harness scaffolding: the token file's lock, held as another start would.
+fn a_start_that_passes_its_start_bound_exits_1_naming_its_wait() {
+    use std::os::unix::io::AsRawFd;
+    let fixture = Fixture::new("serve-watchdog");
+    let dir = fixture.config_dir();
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join(".tokens.toml.lock"))
+        .unwrap();
+    // SAFETY: a plain advisory lock on a descriptor this case owns.
+    assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
+    let started = std::time::Instant::now();
+    let (status, stderr) = fixture.run(&["serve", "--port", &free_port().to_string()]);
+    assert_eq!(status, RunStatus::Exited(1), "{stderr}");
+    assert!(started.elapsed() >= Duration::from_secs(10), "{stderr}");
+    assert_eq!(
+        stderr.lines().last(),
+        Some("starting: taking the token file's lock to mint or read the token"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("listening"), "{stderr}");
+}
+
+/// **SIGHUP drains and exits 0** — a closed terminal.
+#[test]
+fn sighup_drains_and_exits_0() {
+    let fixture = Fixture::new("serve-sighup");
+    let (served, _) = fixture.serve_on(free_port());
+    let (status, lines) = served.signal(libc::SIGHUP);
+    assert_eq!(status.code(), Some(0), "{lines:?}");
+    assert!(
+        lines.iter().any(|line| line == "stopped: SIGHUP"),
+        "{lines:?}"
+    );
+}
+
+/// **A SIGHUP inherited as ignored stays ignored**, as `nohup` arranges: the
+/// host keeps serving through it, and SIGTERM still drains.
+#[test]
+fn an_inherited_ignored_sighup_stays_ignored() {
+    use std::os::unix::process::CommandExt;
+    let fixture = Fixture::new("serve-nohup");
+    let port = free_port();
+    let mut served = fixture.start_with(&["serve", "--port", &port.to_string()], |command| {
+        // SAFETY: `signal` is async-signal-safe, and nothing else runs in the
+        // child between fork and exec.
+        unsafe {
+            command.pre_exec(|| {
+                libc::signal(libc::SIGHUP, libc::SIG_IGN);
+                Ok(())
+            });
+        }
+    });
+    served.listening_port();
+    served.send(libc::SIGHUP);
+    served.send(libc::SIGHUP);
+    assert_eq!(hello(port, "default").status, 200);
+    assert!(served.running());
+    let (status, lines) = served.terminate();
+    assert_eq!(status.code(), Some(0), "{lines:?}");
+    assert!(
+        lines.iter().any(|line| line == "stopped: SIGTERM"),
+        "{lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.contains("SIGHUP")),
+        "{lines:?}"
+    );
+}
+
+/// **An auto-launched host exits 0 after `auto_exit_after` without
+/// activity; an explicit host never idle-exits.** Both are started with the
+/// shortest idle exit; the explicit one is still serving after the
+/// auto-launched one has gone.
+#[test]
+fn an_auto_launched_host_idles_out_and_an_explicit_one_does_not() {
+    let auto_fixture = Fixture::new("serve-idle-auto");
+    let explicit_fixture = Fixture::new("serve-idle-explicit");
+    let explicit_port = free_port();
+    explicit_fixture.write_settings(&format!(
+        "[endpoint]\nport = {explicit_port}\n[serve]\nauto_exit_after = \"1m\"\n"
+    ));
+    let mut explicit = explicit_fixture.start(&["serve"]);
+    explicit.listening_port();
+    let started = std::time::Instant::now();
+    let auto = auto_launched(
+        &auto_fixture,
+        free_port(),
+        "[serve]\nauto_exit_after = \"1m\"\n",
+    );
+    let (status, lines) = auto.wait_within(Duration::from_secs(120));
+    assert_eq!(status.code(), Some(0), "{lines:?}");
+    assert!(started.elapsed() >= Duration::from_secs(60), "{lines:?}");
+    assert!(
+        lines.iter().any(|line| line == "stopped: the idle exit"),
+        "{lines:?}"
+    );
+    assert!(explicit.running(), "the explicit host idled out");
+    assert_eq!(hello(explicit_port, "default").status, 200);
+    assert_eq!(explicit.terminate().0.code(), Some(0));
+}
+
+/// **A second SIGINT during a drain `_exit`s 1 at once.** A connection that
+/// pipelines hellos and reads none of the answers keeps one answer unflushed,
+/// so a request stays in flight and the first SIGINT's drain has its whole
+/// bound to run; the second ends it.
+///
+/// No server-side reading shows that a hello is admitted and its answer
+/// unflushed — a build without `counters` serves no counters, and the hello
+/// is not in the request log — so the first SIGINT can land before the
+/// filled connection has left an answer unflushed. That attempt's drain
+/// finds nothing in flight and exits 0, well inside the drain bound, which a
+/// host that ignored the second SIGINT could not; it proves nothing, and is
+/// made again on a fresh host, within a bound on attempts.
+#[test]
+fn a_second_sigint_during_a_drain_exits_1_at_once() {
+    const ATTEMPTS: usize = 5;
+    for attempt in 1..=ATTEMPTS {
+        let fixture = Fixture::new(&format!("serve-second-sigint-{attempt}"));
+        let port = free_port();
+        fixture.write_settings(&format!(
+            "[endpoint]\nport = {port}\n[serve]\ndrain_bound = \"20s\"\n"
+        ));
+        let mut served = fixture.start(&["serve"]);
+        served.listening_port();
+        let stuck = unread_answers(port);
+        served.send(libc::SIGINT);
+        served.line_starting("draining: SIGINT");
+        let second = std::time::Instant::now();
+        served.send(libc::SIGINT);
+        // Within half the drain bound: a host held by an unflushed answer
+        // that ignored the second SIGINT would still be draining.
+        let (status, lines) = served.wait_within(Duration::from_secs(10));
+        drop(stuck);
+        if status.code() == Some(0) {
+            eprintln!("attempt {attempt}: the drain had nothing in flight: {lines:?}");
+            continue;
+        }
+        assert_eq!(status.code(), Some(1), "{lines:?}");
+        assert!(second.elapsed() < Duration::from_secs(5), "{lines:?}");
+        return;
+    }
+    panic!("in {ATTEMPTS} attempts no drain had an unflushed answer in flight");
+}
+
+/// A connection that pipelines hellos to `port` with a receive buffer of a
+/// few kilobytes and reads nothing, written until the host stops reading it:
+/// the host is then blocked flushing an answer.
+fn unread_answers(port: u16) -> std::net::TcpStream {
+    use std::io::Write;
+    use std::os::unix::io::AsRawFd;
+    let stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    let small: libc::c_int = 4096;
+    // SAFETY: a valid descriptor and a pointer to a live `c_int` of the
+    // length given.
+    let set = unsafe {
+        libc::setsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_RCVBUF,
+            (&small as *const libc::c_int).cast(),
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    assert_eq!(set, 0);
+    stream.set_nonblocking(true).unwrap();
+    let body = serde_json::json!({ "label": "default", "nonce": "ab".repeat(32) }).to_string();
+    let request = format!(
+        "POST /v1/hello HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    let request = request.as_bytes();
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let mut writer = &stream;
+    // Where the next write resumes in the repeating request stream: a short
+    // write leaves the rest of its request to go first, so every request
+    // the host reads is whole.
+    let mut offset = 0;
+    loop {
+        match writer.write(&request[offset..]) {
+            Ok(written) => offset = (offset + written) % request.len(),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(error) => panic!("pipelining hellos failed: {error}"),
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the host kept reading a connection whose answers nobody reads"
+        );
+    }
+    stream
 }

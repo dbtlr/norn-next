@@ -651,7 +651,7 @@ pub use document::{
     LinkHealth, LinkRow, Span, TagRow, TagSource, TargetGap, TotalBelowHead, UnknownReason,
     VAULT_PROTOCOL,
 };
-pub use drain::{DrainAnswer, DrainRequest};
+pub use drain::{DrainAnswer, DrainReply, DrainRequest};
 pub use error::{
     AnswerShape, ErrorDetail, ErrorEnvelope, MaintainerIdentity, NameSet, ReadFailure, ReasonCode,
     RequestBound, RequestPart, TooFewNames,

@@ -1,25 +1,39 @@
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 //! The HTTP surface and the host process it runs in.
 //!
 //! `norn serve` is the one way a host process starts (ADR 0053), and [`run`]
-//! is its entry: the composition root parses and hands it the `serve` arguments
-//! once its signal handlers are installed
+//! is its entry: the composition root hands it the `serve` arguments to parse
 //! and runs it in its own process — a process entry, not a request.
 //!
-//! **What runs is the start, the credential and a plain stop.** [`run`] reads
-//! the serving settings, takes the channel lock before any other start-up
-//! work, mints the bearer token where the file holds none (the private `mint`
-//! module), reads the registry, constructs the host, binds the exact resolved
-//! loopback address and logs `listening`; SIGTERM or SIGINT then logs
-//! `stopped` and exits 0. In front of every route stand the hello and the
-//! bearer middleware (`http.rs`, over the credential state in
-//! `credentials.rs`); behind them an authenticated request is answered 404
-//! until the wire route lands, its dispatch reserved in `wire.rs`, and under
-//! the `counters` feature `GET /v1/debug/counters` answers the `serve.*`
-//! counters. The [`dial`] module is the takeover dial's hello. The takeover
-//! of a held lock, the port probe, the bounded drain and the start-bound
-//! watchdog are later tasks of the same phase, and each is named where its
-//! absence shows.
+//! **The process, in order.** [`run`] blocks the stop signals in the main
+//! thread before anything else (`signals.rs`), so every thread spawned after
+//! inherits the mask; starts the log thread (`log.rs`), the hard-exit timer
+//! (`exit.rs`) and the signal thread; parses the arguments and reads the
+//! serving settings; then runs the start sequence (`start.rs`): the channel
+//! lock, waited for and taken over where an auto-launched host holds it, the
+//! start-bound watchdog, the token minted where the file holds none (the
+//! private `mint` module), the registry read and the host built over it, the
+//! port probe, the bind and `listening`. It serves the hello and the bearer
+//! middleware in front of every route (`http.rs`, over the credential state in
+//! `credentials.rs`), the wire route (`wire.rs`, run by `request.rs`), the
+//! drain request and, under the `counters` feature, `GET /v1/debug/counters`.
+//! While it serves it rechecks its lock's name every 5 s (`lock_watch.rs`),
+//! and an auto-launched host exits after `auto_exit_after` idle.
+//!
+//! **Every stop is one bounded drain** (`lifecycle.rs`, `drain.rs`): the
+//! listener closes, new requests are refused, in-flight ones get
+//! `drain_bound` to finish, the ones still running are answered by kind, every
+//! answer is flushed and its connection half-closed, the host is dropped on a
+//! helper thread, and the process exits when that drop finishes or at
+//! `drain_bound` + the shutdown margin at the latest, by the timer thread's
+//! `_exit`. The kernel frees `serve.lock` and every maintainer lock with the
+//! process, and a store left mid-write recovers through the heal path.
+//!
+//! **Exit statuses.** 0 after a drain a signal, a drain request or the idle
+//! exit began; 1 for a refused start or an abnormal stop; 2 for a usage error
+//! (clap's); and, for a launched start only, 10 when a verified host serves
+//! this channel and 11 when the channel lock is held and no verified host
+//! answers at this endpoint.
 //!
 //! **No async type reaches `norn-host`** (ruling R2): the host is built,
 //! called and dropped on ordinary threads, and nothing it is handed is a
@@ -29,34 +43,47 @@
 //!
 //! **The server log is stderr**, one plain-text line per lifecycle event
 //! (the private `log` module). It is a diagnostic stream, not rendered output.
+//!
+//! **`unsafe` lives in one module**, `sys.rs`: the signal mask, `sigwait`, a
+//! signal's inherited disposition and `_exit`, which the standard library
+//! does not name. Every other module is denied it.
 
 use std::fmt;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use norn_config::machine::settings::{ServingSettings, SettingsSource};
 use norn_config::machine::tokens::WatchedTokens;
-use norn_config::{Channel, ChannelLock, ConfigDirs};
+use norn_config::{Channel, ConfigDirs};
 use norn_host::{Host, ProductionEntryOps, RegistryRead};
-use norn_wire::{BuildIdentity, HelloLaunch};
+use norn_wire::{BuildIdentity, HelloChannel, HelloLaunch};
 use tokio::net::{TcpListener, TcpSocket};
-use tokio::signal::unix::{Signal, SignalKind, signal};
 
 mod admission;
+mod bounds;
 mod connection;
 mod credentials;
 pub mod dial;
+mod drain;
+mod exit;
 mod http;
+mod lifecycle;
+mod lock_watch;
 mod log;
 mod mint;
 mod policy;
 mod pool;
 mod request;
+mod signals;
+mod start;
 mod stop;
+mod sys;
 mod wire;
 
+use exit::HardExit;
+use lifecycle::{Lifecycle, REFUSED, StopReason};
 use log::log;
 
 /// What `norn serve` was asked to do.
@@ -97,46 +124,38 @@ impl fmt::Display for Launch {
     }
 }
 
-/// The status a start that refused, or a host that stopped abnormally, exits
-/// with.
-const REFUSED: u8 = 1;
-
 /// How long the accept loop rests after a failed accept, so a condition that
 /// fails every accept (descriptor exhaustion) is not a busy loop.
 const ACCEPT_RETRY_PAUSE: Duration = Duration::from_millis(100);
 
-/// A start that cannot go on: what refused it and how to resolve it, as the
-/// one log line the refusal is.
-#[derive(Debug)]
-struct Refusal(String);
+/// The longest the process waits for its last log lines to be written before
+/// it exits: best effort, and never a hold on the exit.
+const LAST_LINES_WAIT: Duration = Duration::from_millis(200);
 
-/// What ended a serving host.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Stop {
-    Terminate,
-    Interrupt,
-    /// The host's worker stopped, so it can no longer serve: the process
-    /// exits 1, to be started again.
-    WorkerStopped,
+/// A start that cannot go on: the status it exits with, and what refused it
+/// and how to resolve it, as the one log line the refusal is.
+#[derive(Debug)]
+struct Refusal {
+    status: u8,
+    reason: String,
 }
 
-impl Stop {
-    /// The status the process exits with after this stop.
-    fn status(self) -> u8 {
-        match self {
-            Stop::Terminate | Stop::Interrupt => 0,
-            Stop::WorkerStopped => REFUSED,
+impl Refusal {
+    /// A refusal exiting 1.
+    fn new(reason: String) -> Refusal {
+        Refusal {
+            status: REFUSED,
+            reason,
         }
     }
 }
 
-impl fmt::Display for Stop {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Stop::Terminate => "SIGTERM",
-            Stop::Interrupt => "SIGINT",
-            Stop::WorkerStopped => "the host's worker stopped",
-        })
+impl From<start::Ended> for Refusal {
+    fn from(ended: start::Ended) -> Self {
+        Refusal {
+            status: ended.status,
+            reason: ended.line,
+        }
     }
 }
 
@@ -147,61 +166,90 @@ const CONNECTION_BOUND: usize = 512;
 /// The listen backlog connects wait in while accept is paused.
 const LISTEN_BACKLOG: u32 = 64;
 
-/// Run the host process for this channel until a signal stops it.
+/// Run the host process for this channel until a drain stops it, and answer
+/// the status it exits with (the module doc's exit statuses).
 ///
-/// Exits 0 after a signal stopped a listening host, and 1 for every refused
-/// start: a bad settings file, a held or refused channel lock, an unreadable
-/// token file, an unreadable registry, a held port, or a signal before
-/// listening.
-///
-/// The build identity is captured by the bin. Argument parsing is deferred
-/// until signal handlers are installed.
+/// The build identity is captured by the bin. The arguments are parsed only
+/// once the stop signals are blocked and the signal thread waits for them.
 pub fn run(build: &'static str, arguments: impl FnOnce() -> Serve) -> ExitCode {
-    match serve_channel(BuildIdentity::new(build), arguments) {
-        Ok(stop) => {
-            log(format_args!("stopped: {stop}"));
-            ExitCode::from(stop.status())
+    // First, before any thread exists: every thread spawned from here on
+    // inherits the mask.
+    let mask = match signals::block() {
+        Ok(mask) => mask,
+        Err(error) => return refused(&Refusal::new(format!("blocking signals failed: {error}"))),
+    };
+    if let Err(error) = log::start() {
+        return refused(&Refusal::new(format!(
+            "starting the log thread failed: {error}"
+        )));
+    }
+    let exits = match HardExit::start() {
+        Ok(exits) => exits,
+        Err(error) => {
+            return refused(&Refusal::new(format!(
+                "starting the exit timer failed: {error}"
+            )));
         }
-        Err(Refusal(reason)) => {
-            log(format_args!("refused: {reason}"));
-            ExitCode::from(REFUSED)
+    };
+    let target = signals::Target::default();
+    if let Err(error) = signals::start(mask, Arc::clone(&target)) {
+        return refused(&Refusal::new(format!(
+            "starting the signal thread failed: {error}"
+        )));
+    }
+    match serve_channel(BuildIdentity::new(build), arguments, exits, &target) {
+        Ok(reason) => {
+            log(format_args!("stopped: {reason}"));
+            log::flush_within(LAST_LINES_WAIT);
+            ExitCode::from(reason.status())
         }
+        Err(refusal) => refused(&refusal),
     }
 }
 
-fn serve_channel(build: BuildIdentity, arguments: impl FnOnce() -> Serve) -> Result<Stop, Refusal> {
+fn refused(refusal: &Refusal) -> ExitCode {
+    log(format_args!("refused: {}", refusal.reason));
+    log::flush_within(LAST_LINES_WAIT);
+    ExitCode::from(refusal.status)
+}
+
+fn serve_channel(
+    build: BuildIdentity,
+    arguments: impl FnOnce() -> Serve,
+    exits: Arc<HardExit>,
+    target: &signals::Target,
+) -> Result<StopReason, Refusal> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
         .build()
-        .map_err(|error| Refusal(format!("starting the I/O runtime failed: {error}")))?;
+        .map_err(|error| Refusal::new(format!("starting the I/O runtime failed: {error}")))?;
     let stopped = runtime.block_on(async {
-        // Install before argv parsing or any filesystem startup work.
-        let mut terminate = stop_signal(SignalKind::terminate())?;
-        let mut interrupt = stop_signal(SignalKind::interrupt())?;
         let serve = arguments();
         let settings_args = serve.clone();
-        let preparation = tokio::task::spawn_blocking(move || {
+        let (dirs, settings) = tokio::task::spawn_blocking(move || {
             let dirs = ConfigDirs::from_environment().map_err(|error| {
-                Refusal(format!(
+                Refusal::new(format!(
                     "{error}; set HOME, or XDG_CONFIG_HOME and XDG_DATA_HOME, to absolute paths"
                 ))
             })?;
             let settings = settings(&dirs, &settings_args)?;
             Ok::<_, Refusal>((dirs, settings))
-        });
-        let (dirs, settings) = tokio::select! {
-            biased;
-            _ = terminate.recv() => return Err(before_listening(Stop::Terminate)),
-            _ = interrupt.recv() => return Err(before_listening(Stop::Interrupt)),
-            prepared = preparation => prepared
-                .map_err(|error| Refusal(format!("reading settings failed: {error}")))??,
-        };
-        serve_on_runtime(build, &serve, dirs, settings, terminate, interrupt).await
+        })
+        .await
+        .map_err(|error| Refusal::new(format!("reading settings failed: {error}")))??;
+        let lifecycle = Arc::new(Lifecycle::new(
+            Arc::new(drain::Drain::new(bounds::drain_bound(settings.drain_bound))),
+            Arc::default(),
+            exits,
+        ));
+        // From here a signal reaches the start through the lifecycle, which
+        // still ends it at once until the host listens.
+        let _ = target.set(Arc::clone(&lifecycle));
+        serve_on_runtime(build, &serve, dirs, settings, lifecycle).await
     });
-    // A host construction a signal cut off is still running on its blocking
-    // thread, holding the channel lock; it is not waited for. The process
-    // exits next, and the kernel frees the lock.
+    // A host construction the watchdog or a signal cut off ends the process
+    // from its own thread; nothing here waits for it.
     runtime.shutdown_background();
     stopped
 }
@@ -214,7 +262,7 @@ fn settings(dirs: &ConfigDirs, serve: &Serve) -> Result<ServingSettings, Refusal
         .as_deref()
         .map_or(SettingsSource::ChannelDefault, SettingsSource::Explicit);
     let (settings, warnings) = ServingSettings::read(dirs, source, serve.port)
-        .map_err(|error| Refusal(error.to_string()))?;
+        .map_err(|error| Refusal::new(error.to_string()))?;
     for warning in warnings {
         log(format_args!(
             "warning: {}: {}",
@@ -229,45 +277,99 @@ async fn serve_on_runtime(
     serve: &Serve,
     dirs: ConfigDirs,
     settings: ServingSettings,
-    mut terminate: Signal,
-    mut interrupt: Signal,
-) -> Result<Stop, Refusal> {
+    lifecycle: Arc<Lifecycle>,
+) -> Result<StopReason, Refusal> {
     let endpoint = settings.endpoint;
-    let settings_for_wire = WireSettings {
+    let channel: HelloChannel = Channel::COMPILED.into();
+    // Steps 2 to 4.
+    let lock = start::take_channel(&start::Start {
+        dirs: &dirs,
+        endpoint: endpoint.address(),
+        channel,
+        launch: serve.launch,
+    })
+    .await
+    .map_err(Refusal::from)?;
+
+    // Step 5: the start bound runs from the lock to listening. Its end is the
+    // timer thread's `_exit(1)`; what the start was waiting on was logged
+    // when it was entered.
+    lifecycle
+        .exits()
+        .arm(Instant::now() + bounds::START_BOUND, REFUSED);
+    let wire_settings = WireSettings {
         read_connections: settings.read_connections,
         ready_wait: settings.ready_wait,
     };
-    let construction = {
+    let auto_exit_after = settings.auto_exit_after;
+    let request_log = settings.request_log;
+    let (host, watched) = {
         let dirs = dirs.clone();
         tokio::task::spawn_blocking(move || construct(dirs, &settings))
-    };
-    let (lock, host, watched) = tokio::select! {
-        biased;
-        _ = terminate.recv() => return Err(before_listening(Stop::Terminate)),
-        _ = interrupt.recv() => return Err(before_listening(Stop::Interrupt)),
-        built = construction => built
-            .map_err(|error| Refusal(format!("constructing the host failed: {error}")))??,
+            .await
+            .map_err(|error| Refusal::new(format!("constructing the host failed: {error}")))??
     };
 
-    let route = Arc::new(wire::HostRoute { host });
+    // Step 5.3: a process holding the port, unless it is a verified host of
+    // this channel whose lock file was removed.
+    entering(format_args!("checking port {}", endpoint.port()));
+    if let Err(error) = start::probe(endpoint.address()) {
+        if error.kind() != std::io::ErrorKind::AddrInUse {
+            return Err(Refusal::new(format!(
+                "checking port {} failed: {error}",
+                endpoint.port()
+            )));
+        }
+        if start::verified_host_at(endpoint.address(), channel, &watched).await {
+            return Err(Refusal {
+                status: match serve.launch {
+                    Launch::Auto => start::HOST_SERVES,
+                    Launch::Explicit => REFUSED,
+                },
+                reason: format!(
+                    "a norn host already serves this channel at {endpoint}, and its lock file in \
+                     {} was removed; stop that host before starting another",
+                    dirs.config_dir().display()
+                ),
+            });
+        }
+        return Err(port_held(serve, &dirs, endpoint));
+    }
+    // Step 5.4.
+    entering(format_args!("binding {endpoint}"));
+    let listener = bind(endpoint.address()).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::AddrInUse {
+            port_held(serve, &dirs, endpoint)
+        } else {
+            Refusal::new(format!("binding {endpoint} failed: {error}"))
+        }
+    })?;
+
+    let route = Arc::new(wire::HostRoute {
+        host,
+        drain: Arc::clone(&lifecycle.drain),
+    });
     let stopper = Arc::new(stop::Stopper::default());
     let wire_state = wire_state(
-        &settings_for_wire,
+        &wire_settings,
         Arc::clone(&route) as Arc<dyn request::Dispatch>,
+        &lifecycle,
     )
     .map_err(|error| {
-        Refusal(format!(
+        Refusal::new(format!(
             "starting the host's request threads failed: {error}"
         ))
     })?;
     let context = Arc::new(http::Context {
         credentials: Mutex::new(credentials::Credentials::new(&dirs, watched)),
-        channel: Channel::COMPILED.into(),
+        channel,
         build,
         launch: serve.launch.into(),
         wire: Arc::new(wire_state),
         stopper: Arc::clone(&stopper),
+        lifecycle: Arc::clone(&lifecycle),
         bounds: connection::Bounds::SERVING,
+        request_log,
         #[cfg(feature = "counters")]
         readings: {
             let route = Arc::clone(&route);
@@ -276,97 +378,155 @@ async fn serve_on_runtime(
     });
     drop(route);
 
-    let result = async {
-        let listener = bind(endpoint.address()).map_err(|error| {
-            if error.kind() == std::io::ErrorKind::AddrInUse {
-                Refusal(format!(
-                    "port {} on {} is held by another process; choose another with `--port N`, or \
-                 with `[endpoint] port` in {}",
-                    endpoint.port(),
-                    endpoint.address().ip(),
-                    settings_file_named(serve, &dirs),
-                ))
-            } else {
-                Refusal(format!("binding {endpoint} failed: {error}"))
-            }
-        })?;
-        log(format_args!(
-            "listening: channel {}, port {}, {} start, build {build}",
-            Channel::COMPILED.app_directory(),
-            endpoint.port(),
-            serve.launch,
+    // Step 5.5: disarm the watchdog, then listen. A signal that ended the
+    // start first has exited the process already.
+    lifecycle.exits().disarm();
+    if !lifecycle.listening() {
+        return Err(Refusal::new(
+            "a stop arrived before the host was listening".into(),
         ));
-
-        let open = Arc::new(tokio::sync::Semaphore::new(CONNECTION_BOUND));
-        let mut connections = tokio::task::JoinSet::new();
-        let stop = loop {
-            tokio::select! {
-                (slot, accepted) = accept_under(&listener, &open) => match accepted {
-                    Ok((stream, _)) => {
-                        let context = Arc::clone(&context);
-                        connections.spawn(async move {
-                            http::answer(stream, context).await;
-                            drop(slot);
-                        });
-                    }
-                    Err(error) => {
-                        log(format_args!("warning: accepting a connection failed: {error}"));
-                        tokio::time::sleep(ACCEPT_RETRY_PAUSE).await;
-                    }
-                },
-                Some(_) = connections.join_next(), if !connections.is_empty() => {}
-                _ = terminate.recv() => break Stop::Terminate,
-                _ = interrupt.recv() => break Stop::Interrupt,
-                // The stopped-worker trigger takes the plain stop a signal
-                // takes; the bounded drain routes it through itself.
-                () = stopper.requested() => break Stop::WorkerStopped,
-            }
-        };
-        // A plain stop: the listener closes and every connection with it, and
-        // the host's own destruction joins its workers. The bounded drain that
-        // answers what is still in flight is a later task of this phase.
-        drop(listener);
-        connections.shutdown().await;
-        Ok(stop)
     }
-    .await;
-    // Destruction joins the request threads and the host's workers, including
-    // on a bind refusal. Keep the lock until the host has gone, and leave the
-    // I/O thread free for signals.
-    tokio::task::spawn_blocking(move || {
-        drop(context);
-        drop(lock);
-    })
-    .await
-    .map_err(|error| Refusal(format!("stopping the host failed: {error}")))?;
-    result
+    log(format_args!(
+        "listening: channel {}, port {}, {} start, build {build}",
+        Channel::COMPILED.app_directory(),
+        endpoint.port(),
+        serve.launch,
+    ));
+    let lock = Arc::new(Mutex::new(lock));
+    lock_watch::start(dirs.clone(), Arc::clone(&lock), Arc::clone(&lifecycle))
+        .map_err(|error| Refusal::new(format!("starting the lock recheck failed: {error}")))?;
+
+    let open = Arc::new(tokio::sync::Semaphore::new(CONNECTION_BOUND));
+    let mut connections = tokio::task::JoinSet::new();
+    let idle_exit = serve.launch == Launch::Auto;
+    loop {
+        // Reap every finished connection before the next accept. The select
+        // is biased toward accepting, so under a steady stream of
+        // short-lived connections its `join_next` arm may never be reached,
+        // and the finished tasks' entries would pile up in the set past the
+        // connection bound, which counts only open connections. No test
+        // drives this: the set's length is not observable from outside the
+        // loop, and a load test that showed the growth would be neither
+        // cheap nor deterministic.
+        while connections.try_join_next().is_some() {}
+        tokio::select! {
+            biased;
+            () = lifecycle.stopping() => break,
+            () = stopper.requested() => {
+                lifecycle.begin_drain(StopReason::WorkerStopped);
+            }
+            () = idle_for(&lifecycle.drain, auto_exit_after), if idle_exit => {
+                lifecycle.begin_drain(StopReason::Idle);
+            }
+            (slot, accepted) = accept_under(&listener, &open) => match accepted {
+                Ok((stream, _)) => {
+                    lifecycle.drain.touch();
+                    let context = Arc::clone(&context);
+                    connections.spawn(async move {
+                        http::answer(stream, context).await;
+                        drop(slot);
+                    });
+                }
+                Err(error) => {
+                    log(format_args!("warning: accepting a connection failed: {error}"));
+                    tokio::time::sleep(ACCEPT_RETRY_PAUSE).await;
+                }
+            },
+            Some(_) = connections.join_next(), if !connections.is_empty() => {}
+        }
+    }
+
+    // The drain. Step 1: the stage is `draining` already; close the listener.
+    drop(listener);
+    lifecycle.listener_closed();
+    let reason = lifecycle
+        .reason()
+        .expect("the serving loop ends only once a drain has begun");
+    let deadline = lifecycle
+        .drain
+        .deadline()
+        .expect("a drain that has begun has a deadline");
+    // Step 3: every in-flight request gets the drain bound to finish and
+    // flush. Step 4 happens in each request's own task at the bound; the
+    // margin's end is the timer thread's exit, whatever is left.
+    if !lifecycle.drain.settle_by(deadline).await {
+        lifecycle
+            .drain
+            .settle_by(deadline + bounds::SHUTDOWN_MARGIN)
+            .await;
+    }
+    // Step 5: every answer is flushed, and each that told its client to
+    // close is half-closed. The rest close now, and the host is dropped on a
+    // helper thread; the lock is held until it has gone. A kept-alive
+    // connection with no request in flight closes here and no sooner, so a
+    // request its client sends during the drain is answered
+    // `serve/draining`. One the client sent that the host has not yet read
+    // when the drain settles meets the close instead: the race every
+    // kept-alive connection has with its server's close, which no answer
+    // can cover, and which nothing in flight means no outcome is lost to.
+    connections.abort_all();
+    while connections.join_next().await.is_some() {}
+    let (dropped, gone) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("norn-host-drop".into())
+        .spawn(move || {
+            drop(context);
+            let _ = dropped.send(());
+        })
+        .map_err(|error| Refusal::new(format!("stopping the host failed: {error}")))?;
+    let _ = gone.recv();
+    drop(lock);
+    Ok(reason)
 }
 
-/// Step 2 and the first half of step 5: the channel lock, the token minted
-/// where the file holds none and the set read, then the registry read and the
-/// host built over it. The host's startup sweep runs inside `Host::new`.
+/// Completes once the host has seen no activity for `after`: no connection
+/// accepted, no hello answered and no request in flight.
+async fn idle_for(drain: &drain::Drain, after: Duration) {
+    loop {
+        match drain.idle_since() {
+            Some(since) if since.elapsed() >= after => return,
+            Some(since) => {
+                tokio::time::sleep_until(tokio::time::Instant::from_std(since + after)).await;
+            }
+            // A request in flight: idle no sooner than `after` past its end.
+            None => tokio::time::sleep(after).await,
+        }
+    }
+}
+
+/// Log what the start is waiting on as it enters it, best effort: the
+/// watchdog's `_exit` writes nothing, so this line is what names the wait.
+fn entering(what: fmt::Arguments<'_>) {
+    log(format_args!("starting: {what}"));
+}
+
+/// A port another process holds, as a start refuses over it.
+fn port_held(
+    serve: &Serve,
+    dirs: &ConfigDirs,
+    endpoint: norn_config::machine::Endpoint,
+) -> Refusal {
+    Refusal::new(format!(
+        "port {} on {} is held by another process; choose another with `--port N`, or with \
+         `[endpoint] port` in {}",
+        endpoint.port(),
+        endpoint.address().ip(),
+        settings_file_named(serve, dirs),
+    ))
+}
+
+/// Steps 5.1 and 5.2: the token minted where the file holds none and the set
+/// read, then the registry read and the host built over it. The host's
+/// startup sweep runs inside `Host::new`.
 fn construct(
     dirs: ConfigDirs,
     settings: &ServingSettings,
-) -> Result<(ChannelLock, Host<ProductionEntryOps>, WatchedTokens), Refusal> {
-    let lock = match ChannelLock::try_take(&dirs) {
-        Ok(Some(lock)) => lock,
-        // Waiting out the holder and taking over an auto-launched one is a
-        // later task; until it lands a held lock refuses.
-        Ok(None) => {
-            return Err(Refusal(format!(
-                "a norn host already holds this channel's lock in {}; stop that host before \
-                 starting another (deleting the lock file does not stop it)",
-                dirs.config_dir().display()
-            )));
-        }
-        Err(error) => {
-            return Err(Refusal(format!(
-                "the channel lock could not be taken: {error}"
-            )));
-        }
-    };
+) -> Result<(Host<ProductionEntryOps>, WatchedTokens), Refusal> {
+    entering(format_args!(
+        "taking the token file's lock to mint or read the token"
+    ));
     let watched = mint_and_read(&dirs)?;
+    entering(format_args!("reading the registry"));
     let registry = RegistryRead::load(&dirs).map_err(|error| {
         // An error that already names the file is not prefixed with it again.
         let path = dirs.config_dir().join("registry.toml");
@@ -376,19 +536,20 @@ fn construct(
         } else {
             format!("{}: {error}", path.display())
         };
-        Refusal(format!(
+        Refusal::new(format!(
             "{named}; repair the registry file, or move it aside to start with no vaults"
         ))
     })?;
     let production = policy::production(settings)
-        .map_err(|error| Refusal(format!("the serving settings are not usable: {error}")))?;
+        .map_err(|error| Refusal::new(format!("the serving settings are not usable: {error}")))?;
+    entering(format_args!("constructing the host"));
     let host = Host::new(
         registry,
         ProductionEntryOps::new(dirs, production),
         policy::lifecycle(settings),
     )
-    .map_err(|error| Refusal(format!("the serving settings are not usable: {error}")))?;
-    Ok((lock, host, watched))
+    .map_err(|error| Refusal::new(format!("the serving settings are not usable: {error}")))?;
+    Ok((host, watched))
 }
 
 /// Step 5.1: mint a `default` token if the file holds none, then read the set
@@ -400,7 +561,7 @@ fn construct(
 fn mint_and_read(dirs: &ConfigDirs) -> Result<WatchedTokens, Refusal> {
     let file = credentials::tokens_file(dirs);
     let secret = mint::random_secret().map_err(|error| {
-        Refusal(format!(
+        Refusal::new(format!(
             "drawing a token from the operating system's random source failed: {error}"
         ))
     })?;
@@ -410,7 +571,7 @@ fn mint_and_read(dirs: &ConfigDirs) -> Result<WatchedTokens, Refusal> {
         Ok(mint::Mint::MintedUnconfirmed(error)) => log(format_args!(
             "minted the `default` token into {file}; warning: {error}"
         )),
-        Err(error) => return Err(Refusal(credentials::unreadable(&file, &error))),
+        Err(error) => return Err(Refusal::new(credentials::unreadable(&file, &error))),
     }
     readable(dirs, WatchedTokens::read(dirs))
 }
@@ -420,7 +581,7 @@ fn mint_and_read(dirs: &ConfigDirs) -> Result<WatchedTokens, Refusal> {
 fn readable(dirs: &ConfigDirs, watched: WatchedTokens) -> Result<WatchedTokens, Refusal> {
     if let Err(error) = watched.current() {
         let file = credentials::tokens_file(dirs);
-        return Err(Refusal(credentials::unreadable(&file, error)));
+        return Err(Refusal::new(credentials::unreadable(&file, error)));
     }
     Ok(watched)
 }
@@ -460,9 +621,10 @@ struct WireSettings {
 fn wire_state(
     settings: &WireSettings,
     dispatcher: Arc<dyn request::Dispatch>,
+    lifecycle: &Lifecycle,
 ) -> std::io::Result<request::Wire> {
     Ok(request::Wire {
-        admission: Arc::default(),
+        admission: lifecycle.admission(),
         semaphores: Arc::default(),
         reads: pool::Pool::new(
             "norn-read",
@@ -472,6 +634,7 @@ fn wire_state(
         dispatcher,
         ready_wait: settings.ready_wait,
         counters: Arc::default(),
+        drain: Arc::clone(&lifecycle.drain),
     })
 }
 
@@ -526,14 +689,6 @@ fn host_readings(evidence: norn_host::HostEvidence) -> Vec<(String, u64)> {
     .collect()
 }
 
-fn stop_signal(kind: SignalKind) -> Result<Signal, Refusal> {
-    signal(kind).map_err(|error| Refusal(format!("installing a signal handler failed: {error}")))
-}
-
-fn before_listening(stop: Stop) -> Refusal {
-    Refusal(format!("{stop} arrived before the host was listening"))
-}
-
 /// The settings file a port refusal points at, as a person would find it.
 fn settings_file_named(serve: &Serve, dirs: &ConfigDirs) -> String {
     match &serve.config {
@@ -545,15 +700,6 @@ fn settings_file_named(serve: &Serve, dirs: &ConfigDirs) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A stopped worker ends the process 1, to be started again; a signal's
-    /// stop ends it 0.
-    #[test]
-    fn a_stopped_worker_exits_1_and_a_signal_exits_0() {
-        assert_eq!(Stop::WorkerStopped.status(), 1);
-        assert_eq!(Stop::Terminate.status(), 0);
-        assert_eq!(Stop::Interrupt.status(), 0);
-    }
 
     /// A start whose read of the token file refuses, after a mint that read
     /// it, refuses the start rather than serving fail-closed: an unreadable
@@ -578,7 +724,7 @@ mod tests {
 
         let file = credentials::tokens_file(&dirs);
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o640)).unwrap();
-        let Err(Refusal(reason)) = readable(&dirs, WatchedTokens::read(&dirs)) else {
+        let Err(Refusal { reason, .. }) = readable(&dirs, WatchedTokens::read(&dirs)) else {
             panic!("a token file that does not read refused no start");
         };
         assert!(

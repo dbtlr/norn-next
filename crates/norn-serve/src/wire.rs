@@ -21,6 +21,28 @@
 //! host's worker is gone — carries no wire code. It is answered
 //! `serve/outcome-unknown`, since whether the reload took effect is not known,
 //! and it stops the process (`stop.rs`).
+//!
+//! **An apply waits in slices of the drain's deadline.** The mutation-pool
+//! thread an apply runs on waits for its answer at most 100 ms at a time,
+//! reading the process-wide drain deadline between slices; once that has
+//! passed it abandons the apply ([`PendingApply::abandon`]) with a
+//! `serve/draining` cause, and answers what the abandonment returns: the
+//! answer that arrived, `host/apply-outcome-unknown` with the plan once
+//! publication began, or `host/apply-not-run` with the plan where planning
+//! finished. The abandoned mark and the job's check before publication are
+//! one lock's two holds, so an apply answered not run never publishes.
+//!
+//! **Nothing reaches the vault before that check.** An apply plans and stages
+//! first: staging writes each target's shadow in the shadow home, which is
+//! the derived directory's own temporary directory, or — where the data
+//! directory sits on another filesystem — a dot-directory beneath the vault
+//! root that the walk excludes wholesale and no reading surface shows. The
+//! folders a create needs are made at publication, after the check. An apply
+//! that stands down at the check removes every shadow it staged; a removal
+//! that fails leaves an inert shadow to the shadow home's sweep. So "not run"
+//! is also "no document and no folder was written".
+
+use std::time::Instant;
 
 use norn_host::{Host, HostError, PendingApply, ProductionEntryOps};
 use norn_wire::{
@@ -33,7 +55,9 @@ use norn_wire::{
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
-use crate::request::{Dispatch, Dispatched};
+use crate::bounds::APPLY_WAIT_SLICE;
+use crate::drain::Drain;
+use crate::request::{AtBound, Dispatch, Dispatched};
 
 /// The verbs the wire route does not serve in this phase: the
 /// installation-scoped verbs (the token commands, `service`, `self-update`,
@@ -85,6 +109,47 @@ pub(crate) fn lane(verb: Verb) -> Option<Runs> {
     }
 }
 
+/// What the drain does with `verb` still running at its bound: a read's
+/// connection closes with the process, an apply is abandoned, and a
+/// synchronous mutation — the registration verbs, `init`, `vault migrate`
+/// and an activating `vault reload` — is answered `serve/outcome-unknown`. A
+/// dry-run reload and a `init` or `vault migrate` preview change nothing, so
+/// each is cut off as a read is.
+pub(crate) fn at_bound(verb: Verb, body: &[u8]) -> AtBound {
+    #[derive(Deserialize)]
+    struct DryRun {
+        #[serde(default)]
+        dry_run: bool,
+    }
+    #[derive(Deserialize)]
+    struct Mode {
+        mode: Option<String>,
+    }
+    match lane(verb) {
+        Some(Runs::Read) | None => AtBound::CloseWithProcess,
+        Some(Runs::Mutation) => match verb {
+            Verb::Init | Verb::VaultMigrate => {
+                if serde_json::from_slice::<Mode>(body)
+                    .is_ok_and(|params| params.mode.as_deref() == Some("preview"))
+                {
+                    AtBound::CloseWithProcess
+                } else {
+                    AtBound::OutcomeUnknown
+                }
+            }
+            Verb::VaultRegister | Verb::VaultUnregister | Verb::VaultSet => AtBound::OutcomeUnknown,
+            Verb::VaultReload => {
+                if serde_json::from_slice::<DryRun>(body).is_ok_and(|reload| reload.dry_run) {
+                    AtBound::CloseWithProcess
+                } else {
+                    AtBound::OutcomeUnknown
+                }
+            }
+            _ => AtBound::Abandon,
+        },
+    }
+}
+
 /// The vault a mutation's turn is taken on, read off its body before the
 /// body is parsed whole: the address a vault verb names, the plan's address
 /// for an apply, the registration's name for the registration verbs.
@@ -126,7 +191,13 @@ pub(crate) fn mutation_vault(verb: Verb, body: &[u8]) -> Result<VaultName, Strin
 
 /// **The route table**: parse `body` as `verb`'s params, call the host method
 /// that answers it, and encode what it answered.
-pub(crate) fn dispatch(host: &Host<ProductionEntryOps>, verb: Verb, body: &[u8]) -> Dispatched {
+pub(crate) fn dispatch(
+    host: &Host<ProductionEntryOps>,
+    verb: Verb,
+    body: &[u8],
+    drain: &Drain,
+) -> Dispatched {
+    let applied = |pending| applied(pending, drain);
     match verb {
         Verb::Find => call(body, |params: FindParams| answered(host.find(&params))),
         Verb::Search => call(body, |params: SearchParams| answered(host.search(&params))),
@@ -211,8 +282,32 @@ fn answered<R: serde::Serialize, W>(
 
 /// An apply's answer, waited for on this thread: the mutation pool's, which
 /// holds the vault's turn while it waits.
-fn applied(pending: Result<PendingApply, ErrorEnvelope>) -> Dispatched {
-    encoded(pending.and_then(PendingApply::wait))
+fn applied(pending: Result<PendingApply, ErrorEnvelope>, drain: &Drain) -> Dispatched {
+    encoded(pending.and_then(|pending| within_the_drain(pending, drain)))
+}
+
+/// Wait for `pending` in slices, abandoning it once the drain's deadline has
+/// passed.
+fn within_the_drain(
+    mut pending: PendingApply,
+    drain: &Drain,
+) -> Result<norn_wire::VaultAnswer<norn_wire::ApplyReport>, ErrorEnvelope> {
+    loop {
+        let now = Instant::now();
+        let deadline = drain.deadline();
+        if deadline.is_some_and(|deadline| now >= deadline) {
+            return pending.abandon(ErrorEnvelope::new(
+                "the host stopped before this apply could run, and drained without running it",
+                norn_wire::ErrorDetail::draining(),
+            ));
+        }
+        let slice = now + APPLY_WAIT_SLICE;
+        let until = deadline.map_or(slice, |deadline| slice.min(deadline));
+        match pending.wait_until(until) {
+            Ok(answer) => return answer,
+            Err(waiting) => pending = waiting,
+        }
+    }
 }
 
 /// An answer behind a host-death error.
@@ -228,6 +323,8 @@ fn host_answered<R: serde::Serialize>(
 /// The production dispatcher: the route table over this process's host.
 pub(crate) struct HostRoute {
     pub(crate) host: Host<ProductionEntryOps>,
+    /// The drain whose deadline an apply's wait reads.
+    pub(crate) drain: std::sync::Arc<Drain>,
 }
 
 impl Dispatch for HostRoute {
@@ -235,9 +332,12 @@ impl Dispatch for HostRoute {
         // Under the counters feature each call is measured alone on the
         // thread that runs it, into the host's request totals.
         #[cfg(feature = "counters")]
-        return self.host.tallied(|| dispatch(&self.host, verb, body)).0;
+        return self
+            .host
+            .tallied(|| dispatch(&self.host, verb, body, &self.drain))
+            .0;
         #[cfg(not(feature = "counters"))]
-        dispatch(&self.host, verb, body)
+        dispatch(&self.host, verb, body, &self.drain)
     }
 }
 
@@ -287,6 +387,55 @@ mod tests {
                 Verb::VaultMigrate,
             ]
         );
+    }
+
+    /// Every verb's kind at the drain's bound: reads close with the process,
+    /// the write verbs and `repair` are abandoned, and the synchronous
+    /// mutations are answered `serve/outcome-unknown`, a dry-run reload
+    /// aside.
+    #[test]
+    fn each_verb_is_answered_at_the_drain_bound_by_its_kind() {
+        for verb in Verb::ALL {
+            let kind = at_bound(verb, b"{}");
+            let expected = match verb {
+                Verb::Init
+                | Verb::VaultRegister
+                | Verb::VaultUnregister
+                | Verb::VaultSet
+                | Verb::VaultMigrate
+                | Verb::VaultReload => AtBound::OutcomeUnknown,
+                Verb::Apply
+                | Verb::Set
+                | Verb::Edit
+                | Verb::New
+                | Verb::Move
+                | Verb::Delete
+                | Verb::RewriteWikilink
+                | Verb::Repair => AtBound::Abandon,
+                _ => AtBound::CloseWithProcess,
+            };
+            assert_eq!(kind, expected, "{verb}");
+        }
+        assert_eq!(
+            at_bound(Verb::VaultReload, br#"{"vault":{},"dry_run":true}"#),
+            AtBound::CloseWithProcess
+        );
+        assert_eq!(
+            at_bound(Verb::VaultReload, br#"{"vault":{},"dry_run":false}"#),
+            AtBound::OutcomeUnknown
+        );
+        for verb in [Verb::Init, Verb::VaultMigrate] {
+            assert_eq!(
+                at_bound(verb, br#"{"vault":{},"mode":"preview"}"#),
+                AtBound::CloseWithProcess,
+                "{verb} preview"
+            );
+            assert_eq!(
+                at_bound(verb, br#"{"vault":{},"mode":"apply"}"#),
+                AtBound::OutcomeUnknown,
+                "{verb} apply"
+            );
+        }
     }
 
     /// A mutation's vault is read off each shape a mutation's params take.

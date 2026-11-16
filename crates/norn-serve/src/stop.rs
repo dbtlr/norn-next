@@ -7,10 +7,9 @@
 //! stop, which exits 1. The trigger is one-shot: the first request to meet
 //! the stopped worker logs and triggers, and the rest only answer.
 //!
-//! **The seam the bounded drain takes over.** Today the serving loop meets the
-//! trigger with the plain stop every signal takes, and the drain that answers
-//! what is still in flight is a later task: that task routes
-//! [`Stopper::requested`] through it, and nothing here changes.
+//! **The trigger runs the drain.** The serving loop meets [`Stopper::requested`]
+//! by beginning the one bounded drain every stop runs (`lifecycle.rs`), whose
+//! reason exits 1.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 

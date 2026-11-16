@@ -26,15 +26,22 @@ hyper = { version = "1.11", features = ["client", "http1", "server"] }
 hyper-util = { version = "0.1.21", features = ["tokio"] }
 # The bodies a route answers with, and the capped read of a request's body.
 http-body-util = "0.1.5"
-# One current-thread runtime for the listener and its connections, its signal
-# streams, the timers that pace a failing accept, bound each connection and
-# body, and pace the readiness retry, and the blocking thread the host is
-# constructed on. Host calls run on this crate's own fixed pools, never on
-# tokio's blocking pool.
+# One current-thread runtime for the listener and its connections, the timers
+# that pace a failing accept, bound each connection and body, pace the
+# readiness retry and the held-lock wait, and end the drain, and the blocking
+# thread the host is constructed on. Host calls run on this crate's own fixed
+# pools, never on tokio's blocking pool. Signals are not tokio's: a thread of
+# this crate's own takes them by `sigwait` (`libc` below).
 # `sync` holds the per-vault mutation semaphores, the one-shot channel a pool
 # thread hands a host call's answer back on, and the drain's and the stop
 # trigger's wake-ups.
-tokio = { version = "1.52", features = ["macros", "net", "rt", "signal", "sync", "time"] }
+tokio = { version = "1.52", features = ["macros", "net", "rt", "sync", "time"] }
+# The four calls the process lifecycle needs and the standard library does not
+# name, in `sys.rs` alone: the thread signal mask set before any thread is
+# spawned, `sigwait` on the signal thread, reading SIGHUP's inherited
+# disposition so `nohup` keeps ignoring it, and `_exit`, which a hard deadline
+# fires without writing anything or running a destructor.
+libc = { workspace = true }
 # The operating system's random source: the 32 bytes of the token minted at a
 # first start, and the takeover dial's hello nonce. This crate is the one mint
 # site; nothing else in the workspace draws a credential.

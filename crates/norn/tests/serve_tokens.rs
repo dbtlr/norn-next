@@ -102,8 +102,11 @@ fn a_start_over_a_held_token_mints_none() {
 fn two_concurrent_starts_on_one_config_directory_leave_exactly_one_token() {
     for round in 0..3 {
         let fixture = Fixture::new("serve-mint-race");
-        let mut first = fixture.start(&["serve", "--port", &free_port().to_string()]);
-        let mut second = fixture.start(&["serve", "--port", &free_port().to_string()]);
+        // One port: the start that loses the channel lock verifies the one
+        // that took it at the endpoint, and refuses at once.
+        let port = free_port().to_string();
+        let mut first = fixture.start(&["serve", "--port", &port]);
+        let mut second = fixture.start(&["serve", "--port", &port]);
         // One takes the channel lock and listens; the other refuses. The wait
         // is bounded, so a channel lock that let both hosts start reports
         // itself here, with both logs, rather than hanging the suite.
