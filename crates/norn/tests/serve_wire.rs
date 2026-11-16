@@ -569,12 +569,17 @@ mod counted {
     #[test]
     fn an_idle_detach_is_answered_within_ready_wait_and_nothing_follows_the_answer() {
         let (fixture, served, port, bearer) =
-            host("serve-wire-idle-detach", "[serve]\nidle_after = \"1m\"\n");
+            host("serve-wire-idle-detach", "[serve]\nidle_after = \"1s\"\n");
         let root = a_vault(&fixture, "notes");
         assert_eq!(register(port, &bearer, "notes", &root).status, 200);
         assert_eq!(get_alpha(port, &bearer).status, 200);
 
-        let detached_by = Instant::now() + Duration::from_secs(150);
+        // One second is the setting's floor. Nothing below depends on the
+        // vault staying attached: the detach is waited for, and the read
+        // after it is answered by attaching a vault that stays detached
+        // until asked for. The deadline is the idle time plus the 90 s that
+        // bounded detach scheduling and a stalled runner when it was a minute.
+        let detached_by = Instant::now() + Duration::from_secs(1 + 90);
         while state_of(port, &bearer) != "unattached" {
             assert!(
                 Instant::now() < detached_by,
