@@ -687,13 +687,21 @@ pub struct GateStep {
 ///
 /// A job is Linux when its `runs-on` is a string beginning `ubuntu-`, so a job
 /// added with that runner joins and a macOS job stays out without any list of
-/// names. A step with no `run` (a `uses:` step) is skipped. A step a local run
-/// cannot honor is an error rather than a silent difference from CI: one
-/// holding `if`, `continue-on-error`, `working-directory` or a `shell` other
-/// than `bash`, a job holding `if`, `continue-on-error`, `container`,
-/// `services`, `strategy`, `needs` or `defaults.run` (as the workflow may),
-/// a `runs-on` that is not a plain string, one whose command or environment holds a `${{ }}` expression,
-/// and one whose `env` cannot be read whole.
+/// names. A step with no `run` (a `uses:` step) is skipped.
+///
+/// What a local run cannot honor is an error rather than a silent difference
+/// from CI:
+///
+/// - a step holding `if`, `continue-on-error`, `working-directory` or `shell`.
+///   The gate runs every step as CI runs one that names no shell, and a named
+///   shell runs under other options, `bash` included;
+/// - a job holding `if`, `continue-on-error`, `container`, `services`,
+///   `strategy`, `needs` or `defaults.run`, and a workflow holding
+///   `defaults.run`;
+/// - a job whose `runs-on` is missing or is not a plain string, because it
+///   cannot be placed on either side of the Linux line;
+/// - a command or an environment value holding a `${{ }}` expression, and an
+///   `env` that cannot be read whole.
 pub fn linux_run_steps(workflow: &str) -> Result<Vec<GateStep>, String> {
     let document: Value =
         serde_yaml::from_str(workflow).map_err(|e| format!("not a YAML document: {e}"))?;
@@ -720,13 +728,14 @@ pub fn linux_run_steps(workflow: &str) -> Result<Vec<GateStep>, String> {
         if !job.is_mapping() {
             return Err(format!("job `{key}` is not a mapping"));
         }
-        // A runner that is not a plain string (a list, a matrix expression)
-        // cannot be placed on either side of the Linux line, so it is refused
-        // rather than dropped from the gate.
+        // A runner that is not a plain string (a list, a matrix expression) and
+        // a job that names none (a call to a reusable workflow) cannot be
+        // placed on either side of the Linux line, so each is refused rather
+        // than dropped from the gate.
         let runner = match job.get("runs-on") {
             Some(Value::String(runner)) if !runner.contains("${{") => runner,
             Some(_) => return Err(format!("job `{key}`'s `runs-on` is not a plain string")),
-            None => continue,
+            None => return Err(format!("job `{key}` names no `runs-on`")),
         };
         if !runner.starts_with("ubuntu-") {
             continue;
@@ -771,18 +780,12 @@ pub fn linux_run_steps(workflow: &str) -> Result<Vec<GateStep>, String> {
                 str::to_string,
             );
             let at = format!("step `{name}` of job `{key}`");
-            for unhonored in ["if", "continue-on-error", "working-directory"] {
+            for unhonored in ["if", "continue-on-error", "working-directory", "shell"] {
                 if step.get(unhonored).is_some() {
                     return Err(format!(
                         "{at} holds `{unhonored}`, which a local run cannot honor"
                     ));
                 }
-            }
-            if step
-                .get("shell")
-                .is_some_and(|shell| shell.as_str() != Some("bash"))
-            {
-                return Err(format!("{at} names a `shell` other than `bash`"));
             }
             let env = layered(Some(&job_env), step.get("env"))
                 .ok_or_else(|| format!("{at} has an `env` that cannot be read whole"))?;
@@ -1216,6 +1219,9 @@ mod tests {
             "continue-on-error: true",
             "working-directory: sub",
             "shell: python",
+            // CI runs a step that names `bash` under other options than one
+            // that names no shell, so the gate cannot run it as it runs the rest.
+            "shell: bash",
             "env: ${{ fromJSON(x) }}",
             "env: {X: '${{ github.sha }}'}",
         ] {
@@ -1235,6 +1241,7 @@ mod tests {
             "if: github.event_name == 'push'",
             "continue-on-error: true",
             "container: rust:1",
+            "services: {db: {image: postgres}}",
             "needs: other",
             "strategy: {matrix: {a: [1]}}",
             "defaults: {run: {shell: python}}",
@@ -1258,6 +1265,10 @@ mod tests {
                 "`{runner}` was dropped"
             );
         }
+        // Nor is a job that names no runner: a call to a reusable workflow.
+        let workflow = "jobs:\n  j:\n    uses: ./.github/workflows/other.yml\n";
+        let error = linux_run_steps(workflow).unwrap_err();
+        assert!(error.contains("runs-on"), "{error}");
         // A step that is not a mapping is an error, not a skipped step.
         let workflow = "jobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - echo hi\n";
         assert!(linux_run_steps(workflow).is_err());

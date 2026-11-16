@@ -23,13 +23,15 @@
 #   --job       run only the steps of one job, by its key under `jobs`
 #   --step      run only one step: its number in the --list output, or its
 #               exact name (with --job, the number counts within that job)
-#   --workflow  read another workflow file (default .github/workflows/ci.yml)
+#   --workflow  read another workflow file, as a path from the repository root
 #
 # Every step runs to completion even after an earlier one fails. Each prints its
 # job and name, then PASS or FAIL with its exit status and wall time, and the
 # gate ends with a summary of every step and exits non-zero if any failed. A
-# step runs in its own `bash -eo pipefail` with only its own workflow
-# environment added to the caller's, so nothing leaks from one step to the next.
+# step runs in its own `bash -e`, which is how CI runs a step that names no
+# shell, with only its own workflow environment added to the caller's, so
+# nothing leaks from one step to the next. A step that names a shell is refused
+# by the reader, because CI runs it under other options.
 #
 # Machine policy belongs to the caller, not to this script. It writes no
 # absolute path and takes no lock. The caller supplies CARGO_TARGET_DIR, TMPDIR,
@@ -41,9 +43,9 @@
 #
 # What a caller should know. No step of the Linux PR gate runs the build-profile
 # guard (crates/norn-testkit/src/build_subject/): only the ignored lanes of
-# regression.yml and the macOS job reach it, and the gate runs neither. So a
-# caller may set CARGO_PROFILE_DEV_DEBUG and CARGO_PROFILE_TEST_DEBUG to
-# line-tables-only here. The guard itself refuses any CARGO_PROFILE_* variable,
+# regression.yml and certify.yml and the macOS job reach it, and the gate runs
+# none of them. So a caller may set CARGO_PROFILE_DEV_DEBUG and
+# CARGO_PROFILE_TEST_DEBUG to line-tables-only here. The guard itself refuses any CARGO_PROFILE_* variable,
 # an optimization flag in RUSTFLAGS or CARGO_ENCODED_RUSTFLAGS, a profile table
 # in a cargo config or the workspace Cargo.toml, and a relative or unresolved
 # CARGO_HOME; keep those out of a shell that runs the ignored lanes.
@@ -63,9 +65,21 @@ usage() {
 while [ "$#" -gt 0 ]; do
   case $1 in
     --list) list_only=1 ;;
-    --job) only_job=${2-}; shift ;;
-    --step) only_step=${2-}; shift ;;
-    --workflow) workflow=${2-}; shift ;;
+    --job | --step | --workflow)
+      # A missing value would select every step, and a mistyped command would
+      # start the whole gate.
+      if [ -z "${2-}" ]; then
+        echo "gate: $1 needs a value" >&2
+        usage
+        exit 2
+      fi
+      case $1 in
+        --job) only_job=$2 ;;
+        --step) only_step=$2 ;;
+        --workflow) workflow=$2 ;;
+      esac
+      shift
+      ;;
     -h | --help) usage; exit 0 ;;
     *) echo "gate: unknown argument: $1" >&2; usage; exit 2 ;;
   esac
@@ -103,8 +117,10 @@ while [ "$at" -lt "${#fields[@]}" ]; do
   at=$((at + 5 + env_count))
 done
 
-# The steps this invocation selects, numbered as --list numbers them.
+# The steps this invocation selects. Each keeps the number --step selects it
+# by, so a list narrowed to one step still prints that step's own number.
 selected=()
+numbers=()
 within_job=0
 for i in "${!starts[@]}"; do
   [ -z "$only_job" ] || [ "${jobs[i]}" = "$only_job" ] || continue
@@ -116,6 +132,7 @@ for i in "${!starts[@]}"; do
     esac
   fi
   selected+=("$i")
+  numbers+=("$within_job")
 done
 
 if [ "${#selected[@]}" -eq 0 ]; then
@@ -131,10 +148,9 @@ show_command() {
 }
 
 if [ "$list_only" -eq 1 ]; then
-  number=0
-  for i in "${selected[@]}"; do
-    number=$((number + 1))
-    printf '%d. %s (%s) / %s\n' "$number" "${jobs[i]}" "${job_names[i]}" "${names[i]}"
+  for at in "${!selected[@]}"; do
+    i=${selected[at]}
+    printf '%d. %s (%s) / %s\n' "${numbers[at]}" "${jobs[i]}" "${job_names[i]}" "${names[i]}"
     start=${starts[i]}
     for ((e = 0; e < fields[start + 3]; e++)); do
       printf '    env %s\n' "${fields[start + 4 + e]}"
@@ -161,7 +177,7 @@ for i in "${selected[@]}"; do
   began=$SECONDS
   # A subshell-free `env` keeps the step's variables out of this shell and of
   # every later step.
-  env "${assignments[@]}" bash --noprofile --norc -eo pipefail -c "$command"
+  env "${assignments[@]}" bash --noprofile --norc -e -c "$command"
   status=$?
   took=$((SECONDS - began))
   if [ "$status" -eq 0 ]; then
