@@ -214,9 +214,14 @@ from the workflow when the script runs, through the `norn-gate-steps` binary of
 guards' env layering. A step added to `ci.yml` therefore joins the gate with no
 edit to the script. Each step runs under `bash -e`, as CI runs a step that
 names no shell. What the script cannot honor as CI does stops it with an error:
-a step with an `if:`, a `working-directory`, a `shell` or a `${{ }}`
-expression, and a job with `container`, `services`, `needs`, `strategy`, or a
-`runs-on` that is missing or is not a plain string.
+
+- a step with an `if:`, `continue-on-error`, a `working-directory`, a `shell`,
+  or a `${{ }}` expression in its command or environment;
+- a job with an `if:`, `continue-on-error`, `container`, `services`, `needs`,
+  `strategy` or `defaults.run`, or a `runs-on` that is missing or is not a plain
+  string;
+- a workflow with `defaults.run`, and an `env` at any level that cannot be read
+  whole.
 
 Each step prints its job and name, then PASS or FAIL with its exit status and
 wall time. The gate keeps going after a failure, ends with a summary of every
