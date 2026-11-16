@@ -668,9 +668,107 @@ fn is_count(text: &str) -> bool {
     text.chars().all(|c| c.is_ascii_digit()) && text.chars().any(|c| c != '0')
 }
 
+/// One `run:` step of a Linux job, as a local gate executes it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GateStep {
+    /// The job's key under `jobs`, which a caller selects a job by.
+    pub job: String,
+    /// The job's display `name`, or its key where it has none.
+    pub job_name: String,
+    /// The step's `name`, or the first line of its command where it has none.
+    pub name: String,
+    /// The workflow's, the job's and the step's `env`, the nearer winning.
+    pub env: BTreeMap<String, String>,
+    /// The parsed value of `run`, which may span several lines.
+    pub command: String,
+}
+
+/// The `run:` steps of every Linux job in `workflow`, in file order.
+///
+/// A job is Linux when its `runs-on` is a string beginning `ubuntu-`, so a job
+/// added with that runner joins and a macOS job stays out without any list of
+/// names. A step with no `run` (a `uses:` step) is skipped. A step a local run
+/// cannot honor is an error rather than a silent difference from CI: one
+/// holding `if`, `continue-on-error`, `working-directory` or a `shell` other
+/// than `bash`, one whose command or environment holds a `${{ }}` expression,
+/// and one whose `env` cannot be read whole.
+pub fn linux_run_steps(workflow: &str) -> Result<Vec<GateStep>, String> {
+    let document: Value =
+        serde_yaml::from_str(workflow).map_err(|e| format!("not a YAML document: {e}"))?;
+    let workflow_env = layered(Some(&BTreeMap::new()), document.get("env"))
+        .ok_or_else(|| "the workflow's `env` cannot be read whole".to_string())?;
+    let Some(jobs) = document.get("jobs") else {
+        return Ok(Vec::new());
+    };
+    let jobs = jobs
+        .as_mapping()
+        .ok_or_else(|| "`jobs` is not a mapping".to_string())?;
+    let mut steps = Vec::new();
+    for (key, job) in jobs {
+        let key = key.as_str().unwrap_or("?");
+        let is_linux = job
+            .get("runs-on")
+            .and_then(Value::as_str)
+            .is_some_and(|runner| runner.starts_with("ubuntu-"));
+        if !is_linux {
+            continue;
+        }
+        let job_name = job.get("name").and_then(Value::as_str).unwrap_or(key);
+        let job_env = layered(Some(&workflow_env), job.get("env"))
+            .ok_or_else(|| format!("job `{key}`'s `env` cannot be read whole"))?;
+        let Some(declared) = job.get("steps") else {
+            continue;
+        };
+        let declared = declared
+            .as_sequence()
+            .ok_or_else(|| format!("job `{key}`'s `steps` is not a sequence"))?;
+        for step in declared {
+            let Some(command) = step.get("run").and_then(Value::as_str) else {
+                continue;
+            };
+            let name = step.get("name").and_then(Value::as_str).map_or_else(
+                || command.lines().next().unwrap_or_default().to_string(),
+                str::to_string,
+            );
+            let at = format!("step `{name}` of job `{key}`");
+            for unhonored in ["if", "continue-on-error", "working-directory"] {
+                if step.get(unhonored).is_some() {
+                    return Err(format!(
+                        "{at} holds `{unhonored}`, which a local run cannot honor"
+                    ));
+                }
+            }
+            if step
+                .get("shell")
+                .is_some_and(|shell| shell.as_str() != Some("bash"))
+            {
+                return Err(format!("{at} names a `shell` other than `bash`"));
+            }
+            let env = layered(Some(&job_env), step.get("env"))
+                .ok_or_else(|| format!("{at} has an `env` that cannot be read whole"))?;
+            if command.contains("${{") || env.values().any(|value| value.contains("${{")) {
+                return Err(format!(
+                    "{at} holds an expression, which a local run cannot expand"
+                ));
+            }
+            steps.push(GateStep {
+                job: key.to_string(),
+                job_name: job_name.to_string(),
+                name,
+                env,
+                command: command.to_string(),
+            });
+        }
+    }
+    Ok(steps)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{FeaturedRun, Invocation, LANE_FEATURES, Step, invocation, steps_in};
+    use super::{
+        FeaturedRun, GateStep, Invocation, LANE_FEATURES, Step, invocation, linux_run_steps,
+        steps_in,
+    };
     use crate::regression::Target;
     use serde_yaml::Value;
     use std::collections::{BTreeMap, BTreeSet};
@@ -988,6 +1086,109 @@ mod tests {
         for command in commands {
             assert_eq!(invocation(&command), None, "`{command}` was read");
         }
+    }
+
+    /// **The gate's steps are the `run:` steps of the Linux jobs**, in file
+    /// order, selected by runner and not by name, each with the environment
+    /// the workflow layers over it; `uses:` steps and other runners are out.
+    #[test]
+    fn the_gate_reads_the_run_steps_of_every_linux_job_in_file_order() {
+        let workflow = [
+            "env:",
+            "  FROM_WORKFLOW: w",
+            "  SHARED: workflow",
+            "jobs:",
+            "  first:",
+            "    name: First job",
+            "    runs-on: ubuntu-latest",
+            "    env:",
+            "      SHARED: job",
+            "    steps:",
+            "      - uses: actions/checkout@v7",
+            "      - name: Show",
+            "        run: |",
+            "          rustc --version",
+            "          cargo --version",
+            "      - run: cargo build --locked",
+            "        env:",
+            "          STEP: s",
+            "  mac:",
+            "    runs-on: macos-15",
+            "    steps:",
+            "      - run: echo mac",
+            "  added:",
+            "    runs-on: ubuntu-24.04",
+            "    steps:",
+            "      - name: New",
+            "        run: echo new",
+        ]
+        .join("\n");
+        let read = linux_run_steps(&workflow).unwrap();
+        let shown: Vec<(&str, &str, &str, &str)> = read
+            .iter()
+            .map(|s| {
+                (
+                    s.job.as_str(),
+                    s.job_name.as_str(),
+                    s.name.as_str(),
+                    s.command.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            vec![
+                (
+                    "first",
+                    "First job",
+                    "Show",
+                    "rustc --version\ncargo --version\n"
+                ),
+                (
+                    "first",
+                    "First job",
+                    "cargo build --locked",
+                    "cargo build --locked"
+                ),
+                ("added", "added", "New", "echo new"),
+            ]
+        );
+        let env = |step: &GateStep| {
+            step.env
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(env(&read[0]), vec!["FROM_WORKFLOW=w", "SHARED=job"]);
+        assert_eq!(
+            env(&read[1]),
+            vec!["FROM_WORKFLOW=w", "SHARED=job", "STEP=s"]
+        );
+        assert_eq!(env(&read[2]), vec!["FROM_WORKFLOW=w", "SHARED=workflow"]);
+    }
+
+    /// **A step a local run cannot honor is an error**, not a quiet difference
+    /// from CI, and so is a command whose text a runner would expand.
+    #[test]
+    fn the_gate_refuses_a_linux_step_it_cannot_honor() {
+        for extra in [
+            "if: github.ref == 'refs/heads/main'",
+            "continue-on-error: true",
+            "working-directory: sub",
+            "shell: python",
+            "env: ${{ fromJSON(x) }}",
+        ] {
+            let workflow = format!(
+                "jobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - run: x\n        {extra}\n"
+            );
+            assert!(linux_run_steps(&workflow).is_err(), "`{extra}` was read");
+        }
+        let workflow = "jobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ${{ github.sha }}\n";
+        assert!(linux_run_steps(workflow).is_err());
+        // The same step on a macOS job is out of scope and so is not refused.
+        let workflow =
+            "jobs:\n  j:\n    runs-on: macos-15\n    steps:\n      - run: x\n        if: true\n";
+        assert_eq!(linux_run_steps(workflow), Ok(Vec::new()));
     }
 
     /// The steps of a workflow as the reader reports them.

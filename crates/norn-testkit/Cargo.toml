@@ -12,6 +12,10 @@ name = "norn-process"
 path = "src/bin/norn-process.rs"
 
 [[bin]]
+name = "norn-gate-steps"
+path = "src/bin/norn-gate-steps.rs"
+
+[[bin]]
 name = "norn-obsidian-probe"
 path = "src/bin/norn-obsidian-probe.rs"
 

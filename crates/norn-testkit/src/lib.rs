@@ -143,4 +143,4 @@ pub mod shards;
 pub mod volume;
 pub mod wait;
 pub mod work;
-mod workflows;
+pub mod workflows;
