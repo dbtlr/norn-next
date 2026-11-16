@@ -1,7 +1,11 @@
-//! The package-shard certification: each PR test shard builds every test unit
-//! with the features a whole-workspace `cargo test` would.
+//! The package-shard certification: every package's ordinary tests run in
+//! exactly one PR job, and each package shard builds every test unit with the
+//! features a whole-workspace `cargo test` would.
 //!
-//! CI splits `cargo test` into two package shards (see `docs/ci.md`). Cargo
+//! CI splits `cargo test` across three PR jobs (see `docs/ci.md`): two package
+//! shards, and a job that selects a package with a feature of its own and
+//! whose command carries a build flag the shards never do. The partition rule
+//! covers all three. The feature rule covers the two package shards. Cargo
 //! unifies features across the packages one invocation selects, so a
 //! dev-dependency in a package one shard leaves out can switch a feature on in
 //! another package, and the shard without it then builds that package's tests
@@ -24,8 +28,20 @@ use std::process::Command;
 
 use serde_yaml::Value;
 
-/// The jobs of `ci.yml` that are the two package shards.
+/// The jobs of `ci.yml` that are the two package shards. Their commands carry
+/// package selectors only, and each must build with the whole-workspace
+/// feature set.
 pub const SHARD_JOBS: [&str; 2] = ["build", "build-host"];
+
+/// The jobs of `ci.yml` that select packages and also set a feature (and one
+/// build-profile flag) of their own. A package they select is tested there
+/// and in no other PR job; the features they set are the job's own, so they
+/// are not compared with the whole-workspace set.
+pub const FEATURE_JOBS: [&str; 1] = ["host-functional"];
+
+/// The one `--config` value a PR job may pass: it builds the bundled SQLite at
+/// opt-level 3 and changes no package, feature or target.
+const SQLITE_OPT_CONFIG: &str = "profile.dev.package.libsqlite3-sys.opt-level=3";
 
 /// The flags of one `cargo tree` that select packages.
 pub type Selection = Vec<String>;
@@ -115,47 +131,57 @@ impl TreeReading {
 pub struct Shard {
     pub job: String,
     pub selection: Selection,
+    /// Whether the job must build with the whole-workspace feature set.
+    pub feature_certified: bool,
 }
 
-/// The shard selections `workflow` (the text of `ci.yml`) runs.
+/// The package selections `workflow` (the text of `ci.yml`) runs on pull
+/// requests: the package shards, then the feature jobs.
 ///
-/// Each shard job must hold exactly one `cargo test` step, and its command may
-/// carry only `--locked` and the package selectors the guard understands; any
-/// other flag could change what is built, so it is refused rather than
-/// ignored.
+/// Each job must hold exactly one `cargo test` step. A package shard's command
+/// may carry only `--locked` and the package selectors the guard understands.
+/// A feature job's command may also carry `--features <list>` and the one
+/// SQLite `--config` value. Any other flag could change what is built, so it
+/// is refused rather than ignored.
 pub fn shards_in(workflow: &str) -> Result<Vec<Shard>, String> {
     let document: Value =
         serde_yaml::from_str(workflow).map_err(|e| format!("ci.yml is not YAML: {e}"))?;
-    SHARD_JOBS
+    let jobs = SHARD_JOBS
         .iter()
-        .map(|job| {
-            let steps = document
-                .get("jobs")
-                .and_then(|jobs| jobs.get(*job))
-                .and_then(|job| job.get("steps"))
-                .and_then(Value::as_sequence)
-                .ok_or_else(|| format!("ci.yml has no job `{job}` with steps"))?;
-            let commands: Vec<&str> = steps
-                .iter()
-                .filter_map(|step| step.get("run").and_then(Value::as_str))
-                .filter(|run| run.contains("cargo test"))
-                .collect();
-            let [command] = commands[..] else {
-                return Err(format!(
-                    "job `{job}` must run exactly one `cargo test` step, found {}",
-                    commands.len()
-                ));
-            };
-            Ok(Shard {
-                job: (*job).to_string(),
-                selection: selection_of(command)?,
-            })
+        .map(|job| (*job, true))
+        .chain(FEATURE_JOBS.iter().map(|job| (*job, false)));
+    jobs.map(|(job, feature_certified)| {
+        let steps = document
+            .get("jobs")
+            .and_then(|jobs| jobs.get(job))
+            .and_then(|job| job.get("steps"))
+            .and_then(Value::as_sequence)
+            .ok_or_else(|| format!("ci.yml has no job `{job}` with steps"))?;
+        let commands: Vec<&str> = steps
+            .iter()
+            .filter_map(|step| step.get("run").and_then(Value::as_str))
+            .filter(|run| run.contains("cargo test"))
+            .collect();
+        let [command] = commands[..] else {
+            return Err(format!(
+                "job `{job}` must run exactly one `cargo test` step, found {}",
+                commands.len()
+            ));
+        };
+        Ok(Shard {
+            job: job.to_string(),
+            selection: selection_of(command, !feature_certified)?,
+            feature_certified,
         })
-        .collect()
+    })
+    .collect()
 }
 
-/// The package-selecting flags of one `cargo test` command line.
-fn selection_of(command: &str) -> Result<Selection, String> {
+/// The package-selecting flags of one `cargo test` command line. With
+/// `allow_build_flags`, `--features` and the SQLite `--config` are read and
+/// left out of the selection: the job's own build flags do not choose
+/// packages.
+fn selection_of(command: &str, allow_build_flags: bool) -> Result<Selection, String> {
     let mut words = command.split_whitespace();
     let is_cargo_test = words.by_ref().any(|word| word == "cargo") && words.next() == Some("test");
     if !is_cargo_test {
@@ -165,6 +191,18 @@ fn selection_of(command: &str) -> Result<Selection, String> {
     while let Some(word) = words.next() {
         match word {
             "--locked" => {}
+            "--features" if allow_build_flags => {
+                words
+                    .next()
+                    .ok_or_else(|| format!("`{command}` ends after `{word}`"))?;
+            }
+            "--config" if allow_build_flags => {
+                if words.next() != Some(SQLITE_OPT_CONFIG) {
+                    return Err(format!(
+                        "`{command}` carries a `--config` other than `{SQLITE_OPT_CONFIG}`"
+                    ));
+                }
+            }
             "--workspace" => selection.push(word.to_string()),
             "-p" | "--package" | "--exclude" => {
                 let name = words
@@ -182,10 +220,10 @@ fn selection_of(command: &str) -> Result<Selection, String> {
     Ok(selection)
 }
 
-/// Everything the shards fail to certify, as sentences naming the package and
-/// the feature: a package in no shard or in both, and any package in a shard's
-/// graph, selected root or dependency, built with other features than the
-/// whole-workspace run gives it.
+/// Everything the PR jobs fail to certify, as sentences naming the package and
+/// the feature: a package in no job or in two, and any package in a
+/// feature-certified shard's graph, selected root or dependency, built with
+/// other features than the whole-workspace run gives it.
 pub fn violations(whole: &TreeReading, shards: &[(Shard, TreeReading)]) -> Vec<String> {
     let mut found = Vec::new();
     for package in &whole.selected {
@@ -196,7 +234,7 @@ pub fn violations(whole: &TreeReading, shards: &[(Shard, TreeReading)]) -> Vec<S
             .collect();
         if holders.len() != 1 {
             found.push(format!(
-                "package `{package}` is tested by {} shards ({}); it must be in exactly one",
+                "package `{package}` is tested by {} PR jobs ({}); it must be in exactly one",
                 holders.len(),
                 holders.join(", ")
             ));
@@ -208,6 +246,9 @@ pub fn violations(whole: &TreeReading, shards: &[(Shard, TreeReading)]) -> Vec<S
                 "shard `{}` selects `{package}`, which the whole workspace does not hold",
                 shard.job
             ));
+        }
+        if !shard.feature_certified {
+            continue;
         }
         for package in &reading.packages {
             let role = if reading.selected.contains(package) {
@@ -259,6 +300,7 @@ mod tests {
         Shard {
             job: job.to_string(),
             selection: Vec::new(),
+            feature_certified: true,
         }
     }
 
@@ -357,7 +399,10 @@ jobs:
       - run: .github/scripts/flake-tripwire.sh cargo test --locked --workspace --exclude norn-host --exclude norn-testkit
   build-host:
     steps:
-      - run: cargo test --locked -p norn-host -p norn-testkit
+      - run: cargo test --locked -p norn-testkit
+  host-functional:
+    steps:
+      - run: cargo test --locked --config profile.dev.package.libsqlite3-sys.opt-level=3 -p norn-host --features induced-failure
 ";
 
     #[test]
@@ -368,9 +413,45 @@ jobs:
             selections,
             [
                 "--workspace --exclude norn-host --exclude norn-testkit",
-                "-p norn-host -p norn-testkit"
+                "-p norn-testkit",
+                "-p norn-host"
             ]
         );
+        let certified: Vec<bool> = shards.iter().map(|s| s.feature_certified).collect();
+        assert_eq!(certified, [true, true, false]);
+    }
+
+    #[test]
+    fn a_package_shard_may_not_carry_a_build_flag_a_feature_job_may() {
+        let workflow = WORKFLOW.replace(
+            "cargo test --locked -p norn-testkit",
+            "cargo test --locked --features x -p norn-testkit",
+        );
+        let error = shards_in(&workflow).expect_err("a feature flag on a shard");
+        assert!(error.contains("--features"), "{error}");
+    }
+
+    #[test]
+    fn a_feature_job_refuses_any_config_but_the_sqlite_one() {
+        let workflow = WORKFLOW.replace("libsqlite3-sys.opt-level=3", "dev.opt-level=3");
+        let error = shards_in(&workflow).expect_err("another config");
+        assert!(error.contains("--config"), "{error}");
+    }
+
+    #[test]
+    fn a_feature_job_joins_the_partition_but_not_the_feature_comparison() {
+        let whole = reading(&["a", "b"], &[("a", "x")]);
+        let mut featured = shard("two");
+        featured.feature_certified = false;
+        let shards = [
+            (shard("one"), reading(&["a"], &[("a", "x")])),
+            (featured, reading(&["b"], &[("b", "own")])),
+        ];
+        assert_eq!(violations(&whole, &shards), Vec::<String>::new());
+        let neither = [(shard("one"), reading(&["a"], &[("a", "x")]))];
+        let found = violations(&whole, &neither);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].contains("`b`"), "{found:?}");
     }
 
     #[test]

@@ -8,25 +8,40 @@ Clocks and trends belong to the dormant soak tier under
 ## PR and full-regression coverage
 
 `ci.yml` runs six jobs on PRs, main pushes and manual runs. Ordinary default
-workspace tests and doctests split by package between `build and test` (everything
-except `norn-host`, `norn-testkit` and `norn-serve`) and
-`build and test (norn-host and norn-testkit)`, whose required name predates
-`norn-serve` joining it. The named shard uses `-p norn-host -p norn-testkit -p norn-serve`;
-the catch-all uses `--workspace --exclude norn-host --exclude norn-testkit --exclude norn-serve`.
+workspace tests and doctests split by package across three of them. `build and test`
+runs everything except `norn-host`, `norn-testkit` and `norn-serve`.
+`build and test (norn-host and norn-testkit)`, whose required name predates the
+current package list, runs `-p norn-testkit -p norn-serve`. `host functional
+(induced-failure)` runs `-p norn-host --features induced-failure`. The catch-all uses
+`--workspace --exclude norn-host --exclude norn-testkit --exclude norn-serve`, so new
+crates join it. The package lists must match exactly, and every package's ordinary tests
+and doctests run on PRs in exactly one of the three jobs.
 `norn-serve` sits in the named shard because its tokio and hyper switch features on in
 `mio` and `smallvec`, which `norn-host`'s graph links.
-Their package lists must match exactly, so new crates join the catch-all and
-every package's doctests run exactly once through ordinary `cargo test`.
-The shard pair preserves whole-workspace test membership, and each shard builds
-tests with the whole-workspace feature set. The architecture job enforces both
-claims with `cargo test -p norn-testkit --test shards`: it reads each shard's
-selection from `ci.yml`, resolves features with `cargo tree` (normal,
-development and build edges, host target) for the whole workspace and for each
-shard, and fails naming the shard, package and feature when a shard builds any package
-in its graph, selected root or dependency, with a different feature set, or when the shards do not partition the workspace.
-The whole feature-enabled
-`norn-host` package runs in `host functional (induced-failure)`, so current and
-future ordinary targets and cases join PR coverage automatically.
+
+`norn-host` runs once on PRs, with `induced-failure` on. Every case its
+default-feature run executes also runs with the feature (2,197 cases in both runs,
+none only in the default run), and its `compile_fail` doctests do not depend on the
+feature. The feature-off build stays proven on every PR by compilation: the build job
+builds the shipped graph, and the workspace clippy compiles `norn-host`'s targets with
+the feature off. The nightly `regression.yml` still runs the default-feature suite for
+the whole workspace, `norn-host` included, so a break only the feature-off run shows is
+caught within a day.
+
+The two package shards, `build` and `build-host`, each build tests with the
+whole-workspace feature set. `norn-host`'s development dependencies switch on the fault
+features of `norn-fs`, `norn-store` and, through the store, `norn-db`, and the named shard
+no longer selects `norn-host`. `norn-serve` therefore names `norn-fs` (`test-support`,
+`induced-failure`) and `norn-store` (`induced-failure`) as development dependencies, so
+the shard builds those packages with the set the whole-workspace run gives them. The architecture job enforces both claims with
+`cargo test -p norn-testkit --test shards`: it reads each job's selection from `ci.yml`,
+resolves features with `cargo tree` (normal, development and build edges, host target)
+for the whole workspace and for each job, and fails naming the job and package when a
+package is selected in no PR job or in two, and naming the shard, package and feature
+when a package shard builds any package in its graph, selected root or dependency, with
+a different feature set. The host functional job joins the first check only: it
+sets `induced-failure` on purpose, and its command may carry only `--features` and the
+one SQLite `--config` value below.
 
 The host functional job builds the bundled SQLite (`libsqlite3-sys`) at
 opt-level 3 by passing `--config profile.dev.package.libsqlite3-sys.opt-level=3`
@@ -48,10 +63,10 @@ and refuses every other `--config`.
 
 | PR job | Evidence |
 |---|---|
-| Build and test | Workspace build, default tests and doctests except norn-host and norn-testkit, cheap registry structure and dormancy checks |
-| Build and test (norn-host and norn-testkit) | Default norn-host and norn-testkit tests and doctests; cargo test builds its selected targets |
+| Build and test | Workspace build, default tests and doctests except norn-host, norn-testkit and norn-serve, cheap registry structure and dormancy checks |
+| Build and test (norn-host and norn-testkit) | Default norn-testkit and norn-serve tests and doctests; cargo test builds its selected targets |
 | Lint and document | Format, all six clippy contexts, performance-harness unit tests, the token counter bar and the counters route's unit test under `counters`, denied-warning rustdoc |
-| Host functional (induced-failure) | Complete ordinary feature-enabled host suite, including churn and rolling-heal correctness and work counters |
+| Host functional (induced-failure) | The only PR run of norn-host's ordinary tests and doctests, feature-enabled, including churn and rolling-heal correctness and work counters |
 | macOS platform | Embedding determinism, filesystem contracts, Obsidian parity, exact case-rename and unreadable-document/subtree cases, folding-root spelling bar |
 | Architecture | Actionlint, the architecture gate and the shard certification |
 

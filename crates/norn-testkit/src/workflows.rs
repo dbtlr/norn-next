@@ -798,7 +798,7 @@ mod tests {
     }
 
     #[test]
-    fn the_package_shards_are_complementary() {
+    fn the_pr_test_jobs_are_complementary() {
         let workflow = include_str!("../../../.github/workflows/ci.yml");
         let mut document: Value = serde_yaml::from_str(workflow).unwrap();
         document
@@ -806,7 +806,12 @@ mod tests {
             .unwrap()
             .as_mapping_mut()
             .unwrap()
-            .retain(|key, _| matches!(key.as_str(), Some("build" | "build-host")));
+            .retain(|key, _| {
+                matches!(
+                    key.as_str(),
+                    Some("build" | "build-host" | "host-functional")
+                )
+            });
         let workflow = serde_yaml::to_string(&document).unwrap();
         // Certification pins both complete commands; derive only their package selections here.
         let packages = |selector| -> BTreeSet<String> {
