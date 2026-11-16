@@ -117,7 +117,7 @@ pub enum Lane {
     /// without asserting. **Covered only by a run on a folding volume**; a run
     /// on a case-sensitive one passes the case and certifies nothing about it.
     FoldingVolume,
-    /// The machine's one real platform watcher, held under a cross-process
+    /// A real platform watcher, held under the cross-process real-watcher
     /// lease: the case attaches a production host, so it contends with every
     /// other binary the runner started rather than only with its own threads.
     RealWatcher,
