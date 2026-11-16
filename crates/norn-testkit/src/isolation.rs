@@ -669,6 +669,11 @@ impl Lease {
                 Observed::pending(format!("held by {behind}; the oldest for {unmoved:?}"))
             }
         })??;
+        // The record is published before the turnstile is let go. An ordinary
+        // waiter that looks while an exclusive hold is landing therefore still
+        // stops at the turnstile, so it never reads a taken lease that has
+        // neither a record nor a hold waiting ahead to name.
+        let record = Record::publish(&files.holders, key, mode);
         drop(turnstile);
 
         if queued {
@@ -680,7 +685,7 @@ impl Lease {
         Ok(Lease {
             key: key.to_owned(),
             file,
-            record: Record::publish(&files.holders, key, mode),
+            record,
         })
     }
 
