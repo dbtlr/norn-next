@@ -72,6 +72,14 @@ norn-wire = { path = "../norn-wire" }
 # dev-dependency, and this package's shard must build its tests with the same
 # set (`norn-testkit --test shards`).
 norn-config = { path = "../norn-config", features = ["test-support"] }
+# A whole-workspace run builds `norn-fs`, `norn-store` and, through
+# `norn-store`, `norn-db` with their fault features on: `norn-host`'s
+# dev-dependencies name them, and each of the two crates names itself. This
+# package's shard runs without `norn-host`'s tests selected, so these two
+# entries keep that same set for it (`norn-testkit --test shards`). Nothing in
+# this crate's suites arms a fault.
+norn-fs = { path = "../norn-fs", features = ["test-support", "induced-failure"] }
+norn-store = { path = "../norn-store", features = ["induced-failure"] }
 # The scratch directories the mint's and the credential state's unit suites
 # keep a token file in. A development edge: the allowlist does not describe
 # it, and the architecture gate reads and discards it.
