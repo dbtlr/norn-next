@@ -1749,6 +1749,11 @@ fn assert_complete_active_matrix(workflow: &str, full: bool) {
     const WIRE_COUNTER_BARS: &str = ".github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn --features counters --test serve_wire";
     const WIRE_HOST_TIME: &str = ".github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-serve --features counters --lib http::tests::wire::every_wire_answer_carries_the_host_time_under_the_counters_feature -- --exact";
     const PR_MEMORY: &str = ".github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn serve_memory --nocapture --test-threads=1";
+    // The host process's port probe, pinned on macOS in the PR platform job and
+    // the full one: BSD socket semantics differ from Linux's, and sys.rs builds
+    // only on a Unix host. Named exactly so a rename is a run of no case.
+    const PROBE_LIB: &str = ".github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-serve --lib -- --exact start::tests::the_probe_refuses_a_listener_on_loopback_or_the_wildcard start::tests::the_probe_passes_a_socket_in_time_wait";
+    const PROBE_WILDCARD: &str = ".github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn --test serve a_port_held_on_the_wildcard_address_refuses_the_start -- --exact";
     let commands: &[(&str, &str, &[&str])] = &[
         (
             "build",
@@ -1840,7 +1845,13 @@ fn assert_complete_active_matrix(workflow: &str, full: bool) {
                     ".github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn certification",
                     "python3 scripts/performance/nightly.py --output \"$RUNNER_TEMP/performance\"",
                 ]),
-                "induced-failure" | "platform" => runs.extend([
+                "platform" => runs.extend([
+                    PROBE_LIB,
+                    PROBE_WILDCARD,
+                    ".github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host lockdown",
+                    ".github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host kill_recovery",
+                ]),
+                "induced-failure" => runs.extend([
                     ".github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host lockdown",
                     ".github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host kill_recovery",
                 ]),
@@ -1897,6 +1908,8 @@ fn assert_complete_active_matrix(workflow: &str, full: bool) {
                 ".github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-host --features induced-failure --test churn a_case_renamed_parent_over_a_save_converges_on_a_build_from_zero -- --exact --include-ignored",
                 ".github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-host --features induced-failure --test lockdown an_unreadable_document_is_marked_broken_and_the_heal_reaches_ready -- --exact --include-ignored",
                 ".github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-host --features induced-failure --test lockdown an_unreadable_subtree_is_withheld_and_marked_and_the_heal_reaches_ready -- --exact --include-ignored",
+                PROBE_LIB,
+                PROBE_WILDCARD,
                 ".github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host folding_cost --nocapture --test-threads=1",
             ];
         }

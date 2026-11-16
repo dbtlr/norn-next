@@ -1,13 +1,11 @@
 //! The takeover dial's hello: this crate's own dialer half.
 //!
-//! **A dormant carrier for the takeover.** A start that finds its channel's
-//! lock held dials the endpoint, verifies whatever answers by the hello, and
-//! drains a verified auto-launched host over the same connection. That wait
-//! and that drain are a later task of the serving phase, so nothing in the
-//! shipped binary calls [`dial`] yet. It is here now because the takeover
-//! must verify a host exactly as every other dialer does, and the `norn`
-//! package's process suite runs one relay matrix against this dialer and
-//! `norn-client`'s.
+//! **The takeover's dialer.** A start that finds its channel's lock held
+//! dials the endpoint, verifies whatever answers by the hello, and drains a
+//! verified auto-launched host over the same connection (`start.rs`); the
+//! port check dials once the same way. The takeover verifies a host exactly
+//! as every other dialer does, and the `norn` package's process suite runs
+//! one relay matrix against this dialer and `norn-client`'s.
 //!
 //! **This crate has no edge to `norn-client`, by design**, so the dialer is
 //! written twice. What the two must agree on is `norn-wire`'s: the request,

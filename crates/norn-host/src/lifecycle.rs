@@ -940,7 +940,9 @@ impl<A: SnapshotSource> ProgressReporter<A> {
 
     /// Answer whether an apply this job runs may begin publishing, and mark
     /// `progress` publishing where it may: the job's leg still stands at the
-    /// entry's epoch. Both are read and written in one gate hold, so a
+    /// entry's epoch, and its caller has not abandoned it
+    /// ([`PendingApply::abandon`](crate::PendingApply::abandon)), which the
+    /// progress record reads and marks in one hold of its own lock. Both are read and written in one gate hold, so a
     /// teardown that moves the entry past the leg is either seen here, and the
     /// apply stops with nothing published, or comes after the mark, and the
     /// apply finishes its publication and its changeset.
@@ -952,8 +954,7 @@ impl<A: SnapshotSource> ProgressReporter<A> {
         if !state.claim.stands_at(self.epoch) {
             return false;
         }
-        progress.publishing();
-        true
+        progress.begin_publishing()
     }
 
     /// Enter Lane 1 warming after a reload candidate passes core validation,

@@ -1943,3 +1943,174 @@ fn an_apply_healing_over_a_park_is_healed_by_the_attach_that_serves_again() {
     assert_eq!(stored_hash("other.md"), hash_of(b"other\n"));
     drop((again, lease, host));
 }
+
+/// The cause a serving layer abandons an apply with: the host is stopping.
+fn stopping() -> ErrorEnvelope {
+    ErrorEnvelope::new("the host is stopping", ErrorDetail::draining())
+}
+
+/// **An apply abandoned before publication began is answered not run, with
+/// the given cause and the plan it resolved, and it never publishes.** The
+/// apply has planned and waits at its check before publication; the caller
+/// abandons it. When the job reaches the check it stands down, and the entry
+/// takes the next apply as it would have.
+#[test]
+fn an_apply_abandoned_before_publication_is_answered_not_run_and_stands_down() {
+    let ops = Arc::new(FakeOps::default());
+    let (host, name, lease) = a_ready_vault(&ops);
+    ops.block_apply.store(true, Ordering::SeqCst);
+    let pending = host.admit_apply(&name, a_plan(&name)).expect("admitted");
+    wait_for_flag("apply_started", &ops.apply_started);
+
+    let refused = pending
+        .abandon(stopping())
+        .expect_err("an abandoned apply answered as applied");
+    match refused.detail() {
+        ErrorDetail::ApplyNotRun {
+            cause,
+            plan: Some(plan),
+            ..
+        } => {
+            assert_eq!(cause, &stopping());
+            assert_eq!(plan, &the_plan(&name));
+        }
+        other => panic!("the abandoned apply answered {other:?}"),
+    }
+    ops.apply_release.store(true, Ordering::SeqCst);
+    wait_until(
+        "the abandoned apply to stand down",
+        lifecycle_wait_budget(),
+        || match ops.applies_stood_down.load(Ordering::SeqCst) {
+            1 => Observed::Met(()),
+            stood => Observed::pending(format!("{stood} stood down")),
+        },
+    )
+    .unwrap_or_else(|failure| panic!("{failure}"));
+
+    ops.block_apply.store(false, Ordering::SeqCst);
+    applied(answer_of(
+        host.admit_apply(&name, a_plan(&name)).expect("admitted"),
+    ));
+    assert_eq!(ops.applies_stood_down.load(Ordering::SeqCst), 1);
+    drop((lease, host));
+}
+
+/// **An apply abandoned once publication began is answered unknown, with its
+/// plan, and finishes.** Abandoning reads the publishing mark the job set; it
+/// stops nothing.
+#[test]
+fn an_apply_abandoned_after_publication_began_is_answered_unknown_and_finishes() {
+    let ops = Arc::new(FakeOps::default());
+    let (host, name, lease) = a_ready_vault(&ops);
+    ops.block_apply_publishing.store(true, Ordering::SeqCst);
+    let pending = host.admit_apply(&name, a_plan(&name)).expect("admitted");
+    wait_for_flag("apply_publishing_started", &ops.apply_publishing_started);
+
+    let refused = pending
+        .abandon(stopping())
+        .expect_err("a publishing apply answered as applied");
+    match refused.detail() {
+        ErrorDetail::ApplyOutcomeUnknown { plan, .. } => assert_eq!(plan, &the_plan(&name)),
+        other => panic!("the abandoned apply answered {other:?}"),
+    }
+    assert_eq!(refused.code(), &ReasonCode::HostApplyOutcomeUnknown);
+    ops.apply_publishing_release.store(true, Ordering::SeqCst);
+    let entry = host.shared.entries.get(&name).unwrap();
+    wait_until(
+        "the publishing apply to finish and give the claim back",
+        lifecycle_wait_budget(),
+        || {
+            if entry.gate.lock().unwrap().claim.is_held() {
+                Observed::pending("the claim is held")
+            } else {
+                Observed::Met(())
+            }
+        },
+    )
+    .unwrap_or_else(|failure| panic!("{failure}"));
+    assert_eq!(ops.applies_ran.lock().unwrap().len(), 1);
+    assert_eq!(ops.applies_stood_down.load(Ordering::SeqCst), 0);
+    drop((lease, host));
+}
+
+/// **A queued apply abandoned before its job takes it is answered not run
+/// with no plan**, and when its job runs it stands down at its check.
+#[test]
+fn a_queued_apply_abandoned_is_answered_not_run_without_a_plan() {
+    let ops = Arc::new(FakeOps::default());
+    let (host, name, lease) = a_ready_vault(&ops);
+    ops.block_apply.store(true, Ordering::SeqCst);
+    let running = host.admit_apply(&name, a_plan(&name)).expect("admitted");
+    wait_for_flag("apply_started", &ops.apply_started);
+    let queued = host.admit_apply(&name, a_plan(&name)).expect("admitted");
+
+    let refused = queued
+        .abandon(stopping())
+        .expect_err("a queued apply answered as applied");
+    match refused.detail() {
+        ErrorDetail::ApplyNotRun {
+            cause, plan: None, ..
+        } => assert_eq!(cause, &stopping()),
+        other => panic!("the abandoned queued apply answered {other:?}"),
+    }
+    ops.block_apply.store(false, Ordering::SeqCst);
+    ops.apply_release.store(true, Ordering::SeqCst);
+    applied(answer_of(running));
+    wait_until(
+        "the abandoned queued apply to stand down",
+        lifecycle_wait_budget(),
+        || match ops.applies_stood_down.load(Ordering::SeqCst) {
+            1 => Observed::Met(()),
+            stood => Observed::pending(format!("{stood} stood down")),
+        },
+    )
+    .unwrap_or_else(|failure| panic!("{failure}"));
+    drop((lease, host));
+}
+
+/// **An apply answered before it is abandoned is answered with that
+/// answer.** Abandoning reads the reply first.
+#[test]
+fn an_apply_answered_before_it_is_abandoned_keeps_its_answer() {
+    let ops = Arc::new(FakeOps::default());
+    let (host, name, lease) = a_ready_vault(&ops);
+    let mut pending = host.admit_apply(&name, a_plan(&name)).expect("admitted");
+    wait_for_an_apply(&ops);
+    // The job gives its claim back before it sends the reply, so the claim
+    // is no sign the answer has arrived: wait for the reply itself.
+    pending.await_reply();
+    applied(pending.abandon(stopping()));
+    drop((lease, host));
+}
+
+/// **`wait_until` hands the handle back at its deadline**, and a later wait
+/// on it takes the answer: the slices a serving layer waits in lose nothing.
+#[test]
+fn wait_until_hands_the_handle_back_at_its_deadline_and_a_later_wait_takes_the_answer() {
+    let ops = Arc::new(FakeOps::default());
+    let (host, name, lease) = a_ready_vault(&ops);
+    ops.block_apply.store(true, Ordering::SeqCst);
+    let pending = host.admit_apply(&name, a_plan(&name)).expect("admitted");
+    wait_for_flag("apply_started", &ops.apply_started);
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(20);
+    let Err(pending) = pending.wait_until(deadline) else {
+        panic!("a blocked apply answered before its release");
+    };
+    assert!(std::time::Instant::now() >= deadline);
+    ops.apply_release.store(true, Ordering::SeqCst);
+    let mut pending = pending;
+    let budget = std::time::Instant::now() + lifecycle_wait_budget().work();
+    let answer = loop {
+        match pending.wait_until(std::time::Instant::now() + std::time::Duration::from_millis(100))
+        {
+            Ok(answer) => break answer,
+            Err(again) => {
+                assert!(std::time::Instant::now() < budget, "no answer in budget");
+                pending = again;
+            }
+        }
+    };
+    applied(answer);
+    drop((lease, host));
+}

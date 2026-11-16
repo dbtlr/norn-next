@@ -6,14 +6,53 @@
 //! at first release, so a newer build can retire an older host. A reader
 //! ignores a field it does not know.
 //!
-//! **Dormant carrier.** The serving layer's drain route and the takeover dial
-//! read and write these types; neither is built yet, so nothing in the
-//! workspace reaches them but their tests.
+//! The serving layer's drain route writes these types, and its takeover dial
+//! reads a reply by [`DrainReply::read`], so a newer build's dialer reads an
+//! older host's answer through one spelling.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
+use crate::error::{ErrorEnvelope, ReasonCode};
 use crate::object::read_object;
+
+/// A reply to the drain request, read from its status and body.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DrainReply {
+    /// A 202 whose body is a drain answer: the host set `draining` and closed
+    /// its listener before it answered.
+    Draining,
+    /// A 503 `serve/draining`: the host had already begun to drain.
+    AlreadyDraining,
+    /// A 409 `serve/drain-refused`: the host was started explicitly and keeps
+    /// serving.
+    Refused,
+    /// Anything else — a 401 after the token set changed between the hello
+    /// and the drain, a 500 `serve/token-file-unreadable`, or a body no host
+    /// answers with — which says nothing verified about the host.
+    Unrecognized,
+}
+
+impl DrainReply {
+    /// Read a reply from its HTTP status code and its body.
+    pub fn read(status: u16, body: &[u8]) -> Self {
+        match status {
+            202 => match serde_json::from_slice::<DrainAnswer>(body) {
+                Ok(answer) if answer.is_draining() => DrainReply::Draining,
+                _ => DrainReply::Unrecognized,
+            },
+            409 | 503 => match serde_json::from_slice::<ErrorEnvelope>(body) {
+                Ok(envelope) => match (status, envelope.code()) {
+                    (409, ReasonCode::ServeDrainRefused) => DrainReply::Refused,
+                    (503, ReasonCode::ServeDraining) => DrainReply::AlreadyDraining,
+                    _ => DrainReply::Unrecognized,
+                },
+                Err(_) => DrainReply::Unrecognized,
+            },
+            _ => DrainReply::Unrecognized,
+        }
+    }
+}
 
 /// The drain request's body: `{}`.
 ///
@@ -135,6 +174,51 @@ mod tests {
                 serde_json::from_str::<DrainAnswer>(not_an_answer).is_err(),
                 "`{not_an_answer}` read as a drain answer"
             );
+        }
+    }
+
+    /// Only a 503 whose code is `serve/draining` reads as draining, and only
+    /// a 409 whose code is `serve/drain-refused` as a refusal: any other 503
+    /// or 409, and every other status, is no verified answer.
+    #[test]
+    fn a_drain_reply_is_read_by_its_status_and_its_code() {
+        use crate::error::ErrorDetail;
+        let envelope = |detail| {
+            serde_json::to_vec(&ErrorEnvelope::new("refused", detail)).expect("an envelope")
+        };
+        let answer = serde_json::to_vec(&DrainAnswer::draining()).expect("an answer");
+        let cases: [(u16, Vec<u8>, DrainReply); 8] = [
+            (202, answer.clone(), DrainReply::Draining),
+            (
+                202,
+                br#"{"version":1,"draining":false}"#.to_vec(),
+                DrainReply::Unrecognized,
+            ),
+            (200, answer, DrainReply::Unrecognized),
+            (
+                503,
+                envelope(ErrorDetail::draining()),
+                DrainReply::AlreadyDraining,
+            ),
+            (503, envelope(ErrorDetail::busy()), DrainReply::Unrecognized),
+            (
+                409,
+                envelope(ErrorDetail::drain_refused()),
+                DrainReply::Refused,
+            ),
+            (
+                401,
+                envelope(ErrorDetail::unauthorized()),
+                DrainReply::Unrecognized,
+            ),
+            (
+                500,
+                envelope(ErrorDetail::token_file_unreadable()),
+                DrainReply::Unrecognized,
+            ),
+        ];
+        for (status, body, expected) in cases {
+            assert_eq!(DrainReply::read(status, &body), expected, "{status}");
         }
     }
 

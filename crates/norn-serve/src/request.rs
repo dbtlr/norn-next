@@ -14,6 +14,14 @@
 //! building, healing or bringing its coverage back, so the host ran nothing —
 //! after 50 ms, doubling to a 1 s cap. `Unattached` and every other answer
 //! pass through at once, and nothing is dispatched after an answer.
+//!
+//! **At the drain's bound each request still running is answered by its
+//! kind** ([`AtBound`]), each answer the drain's `started → answered`: an
+//! apply answers from its abandonment, which its own pool thread makes within
+//! one wait slice (`wire.rs`); a synchronous mutation is answered
+//! `serve/outcome-unknown` by the route, and the answer its host call gives
+//! later is discarded; a read is not answered — its connection closes with
+//! the process — and is marked cut off, so the drain does not wait for it.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -26,6 +34,7 @@ use tokio::sync::oneshot;
 use tokio::time::Instant;
 
 use crate::admission::{Admission, Admitted, Claim, ClaimState, InFlight, Semaphores, Turn};
+use crate::drain::Drain;
 use crate::pool::Pool;
 
 /// The readiness retry's first pause.
@@ -63,6 +72,19 @@ pub(crate) enum Lane {
     Mutation(VaultName),
 }
 
+/// What the drain does with a request still running at its bound.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AtBound {
+    /// A read: its connection closes with the process.
+    CloseWithProcess,
+    /// An apply holding a `PendingApply`: its pool thread abandons it and
+    /// answers from the record.
+    Abandon,
+    /// A synchronous mutation, which holds nothing the route can abandon:
+    /// answered `serve/outcome-unknown`.
+    OutcomeUnknown,
+}
+
 /// How a request ended, for the route to answer.
 #[derive(Debug)]
 pub(crate) enum Ended {
@@ -79,6 +101,9 @@ pub(crate) enum Ended {
     /// The call was taken up and its answer never came: the host call
     /// unwound. Whether it took effect is not known.
     Lost,
+    /// A synchronous mutation still running at the drain's bound: whether it
+    /// took effect is not known.
+    StillRunningAtBound,
 }
 
 /// The route's cumulative counts, read by the counters route.
@@ -109,6 +134,7 @@ pub(crate) struct Wire {
     pub(crate) dispatcher: Arc<dyn Dispatch>,
     pub(crate) ready_wait: Duration,
     pub(crate) counters: Arc<WireCounters>,
+    pub(crate) drain: Arc<Drain>,
 }
 
 /// One request's run, from admission to its one answer, and when its first
@@ -168,11 +194,19 @@ impl Drop for Unanswered {
 
 impl Wire {
     /// Serve one request whose body has arrived whole, under the in-flight
-    /// `slot` it was admitted with.
-    pub(crate) async fn serve(&self, verb: Verb, lane: Lane, body: Bytes, slot: InFlight) -> Run {
+    /// `slot` it was admitted with; `at_bound` says how the drain answers it
+    /// if it is still running at the drain's bound.
+    pub(crate) async fn serve(
+        &self,
+        verb: Verb,
+        lane: Lane,
+        at_bound: AtBound,
+        body: Bytes,
+        slot: InFlight,
+    ) -> Run {
         let dispatched_at = Instant::now();
         let deadline = dispatched_at + self.ready_wait;
-        let ended = self.run(verb, lane, body, slot, deadline).await;
+        let ended = self.run(verb, lane, at_bound, body, slot, deadline).await;
         Run {
             ended,
             dispatched_at,
@@ -183,6 +217,7 @@ impl Wire {
         &self,
         verb: Verb,
         lane: Lane,
+        at_bound: AtBound,
         body: Bytes,
         slot: InFlight,
         deadline: Instant,
@@ -238,7 +273,7 @@ impl Wire {
                 return ended;
             }
             let answer = match self
-                .attempt(pool, &held, swept, deadline, attempts > 0)
+                .attempt(pool, &held, swept, deadline, attempts > 0, at_bound)
                 .await
             {
                 Attempt::Answered(answer) => answer,
@@ -306,9 +341,10 @@ impl Wire {
         }
     }
 
-    /// One dispatch: queue the call, and wait for its answer, the deadline or
-    /// the drain's sweep, whichever ends the wait first. `swept` was made
-    /// before the re-check that preceded this dispatch read the flag.
+    /// One dispatch: queue the call, and wait for its answer, the deadline,
+    /// the drain's sweep or the drain's bound, whichever ends the wait first.
+    /// `swept` was made before the re-check that preceded this dispatch read
+    /// the flag.
     async fn attempt(
         &self,
         pool: &Pool,
@@ -316,6 +352,7 @@ impl Wire {
         swept: Notified<'_>,
         deadline: Instant,
         retry: bool,
+        at_bound: AtBound,
     ) -> Attempt {
         let claim = &held.admitted.claim;
         let (answer, answered) = oneshot::channel();
@@ -323,10 +360,22 @@ impl Wire {
             let held = Arc::clone(held);
             let dispatcher = Arc::clone(&self.dispatcher);
             let counters = Arc::clone(&self.counters);
+            let deadline = deadline.into_std();
             pool.submit(Box::new(move || {
-                // A claim the sweep, the timer or its request's going moved
-                // first has been answered already, or has no one to answer,
-                // and its call runs nothing.
+                // A job taken up past its deadline expires its claim itself:
+                // the timer that would have can fire late, and the request
+                // then answers as the `expired` row says. Only one of this
+                // and the timer wins `waiting → expired`, and either way
+                // nothing runs.
+                if std::time::Instant::now() >= deadline {
+                    held.admitted
+                        .claim
+                        .shift(ClaimState::Waiting, ClaimState::Expired);
+                }
+                // A claim the sweep, the timer, this job's own deadline check
+                // or its request's going moved first has been answered
+                // already, or has no one to answer, and its call runs
+                // nothing.
                 if !held
                     .admitted
                     .claim
@@ -351,10 +400,15 @@ impl Wire {
         let mut answered = answered;
         tokio::pin!(swept);
         let mut timed = true;
+        let mut bound_met = false;
+        // A read cut off at the drain's bound, which the drain does not wait
+        // for while it is held; given back if the read answers after all.
+        let mut cut_off = None;
         loop {
             tokio::select! {
                 biased;
                 result = &mut answered => {
+                    drop(cut_off.take());
                     return match result {
                         Ok(dispatched) => Attempt::Answered(dispatched),
                         // The call was taken up, or the claim is no longer
@@ -372,14 +426,26 @@ impl Wire {
                     }
                     // In flight: the sweep passes a started call by. A fresh
                     // wait would only wake for a second drain, which there is
-                    // not, so this arm is spent.
+                    // not, so this arm is spent, and the wait goes on for the
+                    // answer or the drain's bound.
                     swept.set(self.admission.swept());
-                    if claim.state() != ClaimState::Waiting {
-                        let result = (&mut answered).await;
-                        return match result {
-                            Ok(dispatched) => Attempt::Answered(dispatched),
-                            Err(_) => Attempt::Ended(Ended::Lost),
-                        };
+                }
+                () = self.drain.bound_passed(), if !bound_met => {
+                    bound_met = true;
+                    match at_bound {
+                        // The drain's `started → answered`: the host's later
+                        // answer goes to a receiver no one reads, and the
+                        // job's share of the request's hold lasts until that
+                        // call returns.
+                        AtBound::OutcomeUnknown => {
+                            if claim.shift(ClaimState::Started, ClaimState::Answered) {
+                                return Attempt::Ended(Ended::StillRunningAtBound);
+                            }
+                        }
+                        AtBound::CloseWithProcess => cut_off = Some(self.drain.cut_off()),
+                        // The pool thread answers from the abandonment within
+                        // one wait slice.
+                        AtBound::Abandon => {}
                     }
                 }
                 () = tokio::time::sleep_until(deadline), if timed => {
@@ -512,6 +578,7 @@ mod tests {
             dispatcher,
             ready_wait,
             counters: Arc::new(WireCounters::default()),
+            drain: Arc::new(Drain::new(Duration::from_secs(10))),
         }
     }
 
@@ -519,10 +586,22 @@ mod tests {
         Bytes::from_static(b"{}")
     }
 
-    /// Serve `verb` on `lane` with an empty body, under a slot of its own.
+    /// Serve `verb` on `lane` with an empty body, under a slot of its own:
+    /// a read closes with the process at the drain's bound, and a mutation
+    /// is an apply.
     async fn ask(wire: &Wire, verb: Verb, lane: Lane) -> Run {
+        let at_bound = match lane {
+            Lane::Read => AtBound::CloseWithProcess,
+            Lane::Mutation(_) => AtBound::Abandon,
+        };
+        ask_at(wire, verb, lane, at_bound).await
+    }
+
+    /// Serve `verb` on `lane` as [`ask`] does, answered as `at_bound` says
+    /// at the drain's bound.
+    async fn ask_at(wire: &Wire, verb: Verb, lane: Lane, at_bound: AtBound) -> Run {
         let slot = wire.admission.enter().expect("a slot under the bound");
-        wire.serve(verb, lane, body(), slot).await
+        wire.serve(verb, lane, at_bound, body(), slot).await
     }
 
     fn counts(wire: &Wire) -> (u64, u64) {
@@ -653,6 +732,57 @@ mod tests {
             1,
             "the expired call ran nothing"
         );
+        assert_eq!(counts(&wire).0, 1);
+    }
+
+    /// **A queued call that a thread takes up after its deadline runs
+    /// nothing**, even when the deadline's timer has not yet fired: the job
+    /// itself moves the claim to `expired`, and the request is answered
+    /// `serve/busy`. The runtime thread is blocked past the deadline so the
+    /// timer cannot fire first.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_queued_call_taken_up_after_its_deadline_runs_nothing() {
+        let host = Scripted::new([]);
+        let (release, held) = std::sync::mpsc::channel();
+        *host.hold.lock().unwrap() = Some(held);
+        let ready_wait = Duration::from_millis(100);
+        let wire = Arc::new(wire(host.clone(), ready_wait, 1));
+        let first = {
+            let wire = Arc::clone(&wire);
+            tokio::spawn(async move { ask(&wire, Verb::Find, Lane::Read).await })
+        };
+        while host.calls.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        // Poll the second request once: its call is queued behind the held
+        // thread, and its wait is pending.
+        let second = ask(&wire, Verb::Find, Lane::Read);
+        tokio::pin!(second);
+        tokio::select! {
+            biased;
+            run = &mut second => panic!("answered before its call was taken up: {:?}", run.ended),
+            () = std::future::ready(()) => {}
+        }
+        // Past the deadline with the runtime blocked, so no timer has run.
+        std::thread::sleep(ready_wait + Duration::from_millis(50));
+        // A second release, so a call that wrongly runs is not held.
+        release.send(()).unwrap();
+        release.send(()).unwrap();
+        // The pool is first in, first out: once this job runs, the second
+        // request's job has been taken up and has returned.
+        let (ran, taken) = std::sync::mpsc::channel();
+        wire.reads.submit(Box::new(move || ran.send(()).unwrap()));
+        taken
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the pool ran the queued jobs");
+        assert_eq!(
+            host.calls.load(Ordering::SeqCst),
+            1,
+            "a call taken up past its deadline ran"
+        );
+        let run = second.await;
+        assert!(matches!(run.ended, Ended::Busy), "{:?}", run.ended);
+        assert!(matches!(first.await.unwrap().ended, Ended::Dispatched(_)));
         assert_eq!(counts(&wire).0, 1);
     }
 
@@ -1011,5 +1141,120 @@ mod tests {
         };
         assert!(is_warming(&envelope));
         assert!(matches!(find.await.unwrap().ended, Ended::Dispatched(_)));
+        taken_up(&wire.reads).await;
+        assert_eq!(
+            host.gets.load(Ordering::SeqCst),
+            1,
+            "the expired re-dispatch ran"
+        );
+    }
+
+    fn draining_wire(dispatcher: Arc<dyn Dispatch>, bound: Duration) -> Wire {
+        Wire {
+            drain: Arc::new(Drain::new(bound)),
+            ..wire(dispatcher, Duration::from_secs(10), 2)
+        }
+    }
+
+    /// **A synchronous mutation still running at the drain's bound is
+    /// answered there**, by the drain's `started → answered`, and the answer
+    /// its host call gives later is discarded. Its vault's turn and its
+    /// registration with the sweep last until that call returns.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_synchronous_mutation_running_at_the_bound_is_answered_and_its_late_answer_dropped() {
+        let host = Scripted::new([]);
+        let wire = Arc::new(draining_wire(host.clone(), Duration::from_millis(50)));
+        // Made after the wire, so a failing case closes the hold before the
+        // pools' drop joins a thread a call holds.
+        let (release, held) = std::sync::mpsc::channel();
+        *host.hold.lock().unwrap() = Some(held);
+        let notes = VaultName::new("notes").unwrap();
+        let running = {
+            let wire = Arc::clone(&wire);
+            tokio::spawn(async move {
+                ask_at(
+                    &wire,
+                    Verb::VaultRegister,
+                    Lane::Mutation(notes),
+                    AtBound::OutcomeUnknown,
+                )
+                .await
+            })
+        };
+        until("the mutation runs", || {
+            host.calls.load(Ordering::SeqCst) == 1
+        })
+        .await;
+        wire.admission.begin_drain();
+        let deadline = wire.drain.begin();
+        let ended = running.await.unwrap().ended;
+        assert!(matches!(ended, Ended::StillRunningAtBound), "{ended:?}");
+        assert!(std::time::Instant::now() >= deadline);
+        assert_eq!(wire.semaphores.held(), 1, "the turn went with the answer");
+        assert_eq!(wire.admission.registered(), 1);
+        release.send(()).unwrap();
+        drop(release);
+        until("the call returns and lets go", || {
+            wire.semaphores.held() == 0 && wire.admission.registered() == 0
+        })
+        .await;
+        assert_eq!(host.calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// **A read still running at the bound is not answered**: it is cut off,
+    /// so the drain does not wait for it, and if it answers after all it is
+    /// answered and waited for again.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_read_running_at_the_bound_is_cut_off_and_not_answered() {
+        let host = Scripted::new([]);
+        let wire = Arc::new(draining_wire(host.clone(), Duration::from_millis(30)));
+        // Made after the wire, so a failing case closes the hold before the
+        // pools' drop joins a thread a call holds.
+        let (release, held) = std::sync::mpsc::channel();
+        *host.hold.lock().unwrap() = Some(held);
+        // The connection's count, which the route's cut-off offsets.
+        wire.drain.request_started();
+        let running = spawned(&wire, Verb::Find, Lane::Read);
+        until("the read runs", || host.calls.load(Ordering::SeqCst) == 1).await;
+        wire.admission.begin_drain();
+        let deadline = wire.drain.begin();
+        assert!(
+            wire.drain
+                .settle_by(deadline + Duration::from_secs(5))
+                .await,
+            "the drain waited for a read cut off at its bound"
+        );
+        assert!(!running.is_finished(), "a cut-off read was answered");
+        release.send(()).unwrap();
+        let ended = running.await.unwrap().ended;
+        assert!(matches!(ended, Ended::Dispatched(_)), "{ended:?}");
+        assert!(
+            !wire.drain.settled(),
+            "an answered read is waited for until it flushes"
+        );
+    }
+
+    /// An apply at the bound is answered by its own pool thread's
+    /// abandonment, so the route only waits for it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_apply_at_the_bound_waits_for_its_pool_threads_answer() {
+        let host = Scripted::new([]);
+        let wire = Arc::new(draining_wire(host.clone(), Duration::from_millis(20)));
+        // Made after the wire, so a failing case closes the hold before the
+        // pools' drop joins a thread a call holds.
+        let (release, held) = std::sync::mpsc::channel();
+        *host.hold.lock().unwrap() = Some(held);
+        let notes = VaultName::new("notes").unwrap();
+        let running = spawned(&wire, Verb::Set, Lane::Mutation(notes));
+        until("the apply runs", || host.calls.load(Ordering::SeqCst) == 1).await;
+        wire.admission.begin_drain();
+        let deadline = wire.drain.begin();
+        tokio::time::sleep_until(
+            tokio::time::Instant::from_std(deadline) + Duration::from_millis(30),
+        )
+        .await;
+        assert!(!running.is_finished());
+        release.send(()).unwrap();
+        assert!(matches!(running.await.unwrap().ended, Ended::Dispatched(_)));
     }
 }

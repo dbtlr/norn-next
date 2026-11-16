@@ -26,10 +26,11 @@
 //! attempt starts; and it is either expired by the timer, which fires after the
 //! claim is `waiting`, or sees the deadline passed.
 //!
-//! **The drain itself is a later task's.** What stands here is what it calls:
-//! [`Admission::begin_drain`] sets the flag, sweeps every waiting claim to
-//! `refused` and wakes the requests standing on them, each of which answers
-//! `serve/draining`; a request arriving after it is refused before admission.
+//! **What the drain calls.** [`Admission::begin_drain`] sets the flag, sweeps
+//! every waiting claim to `refused` and wakes the requests standing on them,
+//! each of which answers `serve/draining`; a request arriving after it is
+//! refused before admission. The drain (`lifecycle.rs`) calls it once, as it
+//! begins.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
@@ -183,9 +184,7 @@ impl Admission {
     /// **Begin the drain:** set the flag, then sweep every claim that is
     /// `waiting` when the sweep reaches it to `refused`, then wake the requests
     /// standing on them, each of which answers `serve/draining`. Answers how
-    /// many claims the sweep refused. The later task that builds the drain
-    /// calls this; nothing in this one does outside its tests.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// many claims the sweep refused.
     pub(crate) fn begin_drain(&self) -> usize {
         self.draining.store(true, Ordering::SeqCst);
         let claims: Vec<Arc<Claim>> = self.claims().values().filter_map(Weak::upgrade).collect();
