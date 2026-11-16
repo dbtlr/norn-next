@@ -8,10 +8,10 @@
 # `uses:` steps (checkout, the cache, the actionlint container) are skipped, and
 # so is every job on another runner, the macOS job among them. No command is
 # written in this script: the `norn-gate-steps` binary of norn-testkit reads the
-# workflow through the reader the CI guards use, so a step added to or removed
+# workflow with a reader that shares the CI guards' env layering, so a step added to or removed
 # from ci.yml changes what runs here with no edit to this file. A Linux step the
 # gate cannot honor as CI does (an `if:`, a `working-directory`, a `${{ }}`
-# expression) stops the gate with an error rather than running differently.
+# expression, a job `container`, `needs` or `strategy`) stops the gate with an error rather than running differently.
 #
 # It does not run the nightly lanes (counter_gate, the compiled audits, the
 # fault lanes): regression.yml owns them. See docs/ci.md, "Local runs".
@@ -39,18 +39,14 @@
 # The helper that reads the workflow is built with cargo under that same
 # environment.
 #
-# What a caller must not set. The measurement suites inside the gate (the lint
-# job's counter bars and serve_memory lane, and the baselines of the host and
-# fixture suites) refuse a build that is not the opt-level 0 subject their bars
-# were authored on. See crates/norn-testkit/src/build_subject/. So the caller
-# sets none of:
-#   - any CARGO_PROFILE_* variable, including CARGO_PROFILE_DEV_DEBUG and
-#     CARGO_PROFILE_TEST_DEBUG, which the gate refuses at start;
-#   - RUSTFLAGS or CARGO_ENCODED_RUSTFLAGS carrying an optimization flag;
-#   - a `--config` argument or a cargo config file holding a profile table
-#     (the one `--config` the host functional step carries comes from the
-#     workflow and is the build-profile guard's accepted exception);
-#   - a relative CARGO_HOME, or a RUSTC_WRAPPER that alters code generation.
+# What a caller should know. No step of the Linux PR gate runs the build-profile
+# guard (crates/norn-testkit/src/build_subject/): only the ignored lanes of
+# regression.yml and the macOS job reach it, and the gate runs neither. So a
+# caller may set CARGO_PROFILE_DEV_DEBUG and CARGO_PROFILE_TEST_DEBUG to
+# line-tables-only here. The guard itself refuses any CARGO_PROFILE_* variable,
+# an optimization flag in RUSTFLAGS or CARGO_ENCODED_RUSTFLAGS, a profile table
+# in a cargo config or the workspace Cargo.toml, and a relative or unresolved
+# CARGO_HOME; keep those out of a shell that runs the ignored lanes.
 # CARGO_INCREMENTAL=0 is safe and shrinks the target directory.
 
 set -uo pipefail
@@ -82,15 +78,6 @@ if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4))); 
 fi
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 2
-
-if [ "$list_only" -eq 0 ]; then
-  profile_overrides=$(compgen -e | grep '^CARGO_PROFILE_' || true)
-  if [ -n "$profile_overrides" ]; then
-    echo "gate: the measurement suites refuse a profile override; unset:" >&2
-    echo "$profile_overrides" >&2
-    exit 2
-  fi
-fi
 
 # The workflow's steps, as NUL-delimited records (see norn-gate-steps).
 records=$(mktemp) || exit 2
@@ -147,7 +134,7 @@ if [ "$list_only" -eq 1 ]; then
   number=0
   for i in "${selected[@]}"; do
     number=$((number + 1))
-    printf '%s (%s) / %s\n' "${jobs[i]}" "${job_names[i]}" "${names[i]}"
+    printf '%d. %s (%s) / %s\n' "$number" "${jobs[i]}" "${job_names[i]}" "${names[i]}"
     start=${starts[i]}
     for ((e = 0; e < fields[start + 3]; e++)); do
       printf '    env %s\n' "${fields[start + 4 + e]}"

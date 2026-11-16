@@ -690,13 +690,24 @@ pub struct GateStep {
 /// names. A step with no `run` (a `uses:` step) is skipped. A step a local run
 /// cannot honor is an error rather than a silent difference from CI: one
 /// holding `if`, `continue-on-error`, `working-directory` or a `shell` other
-/// than `bash`, one whose command or environment holds a `${{ }}` expression,
+/// than `bash`, a job holding `if`, `continue-on-error`, `container`,
+/// `services`, `strategy`, `needs` or `defaults.run` (as the workflow may),
+/// a `runs-on` that is not a plain string, one whose command or environment holds a `${{ }}` expression,
 /// and one whose `env` cannot be read whole.
 pub fn linux_run_steps(workflow: &str) -> Result<Vec<GateStep>, String> {
     let document: Value =
         serde_yaml::from_str(workflow).map_err(|e| format!("not a YAML document: {e}"))?;
     let workflow_env = layered(Some(&BTreeMap::new()), document.get("env"))
         .ok_or_else(|| "the workflow's `env` cannot be read whole".to_string())?;
+    if document
+        .get("defaults")
+        .is_some_and(|d| d.get("run").is_some())
+    {
+        return Err(
+            "the workflow's `defaults.run` sets a shell or directory a local run cannot honor"
+                .to_string(),
+        );
+    }
     let Some(jobs) = document.get("jobs") else {
         return Ok(Vec::new());
     };
@@ -706,12 +717,38 @@ pub fn linux_run_steps(workflow: &str) -> Result<Vec<GateStep>, String> {
     let mut steps = Vec::new();
     for (key, job) in jobs {
         let key = key.as_str().unwrap_or("?");
-        let is_linux = job
-            .get("runs-on")
-            .and_then(Value::as_str)
-            .is_some_and(|runner| runner.starts_with("ubuntu-"));
-        if !is_linux {
+        if !job.is_mapping() {
+            return Err(format!("job `{key}` is not a mapping"));
+        }
+        // A runner that is not a plain string (a list, a matrix expression)
+        // cannot be placed on either side of the Linux line, so it is refused
+        // rather than dropped from the gate.
+        let runner = match job.get("runs-on") {
+            Some(Value::String(runner)) if !runner.contains("${{") => runner,
+            Some(_) => return Err(format!("job `{key}`'s `runs-on` is not a plain string")),
+            None => continue,
+        };
+        if !runner.starts_with("ubuntu-") {
             continue;
+        }
+        for unhonored in [
+            "if",
+            "continue-on-error",
+            "container",
+            "services",
+            "strategy",
+            "needs",
+        ] {
+            if job.get(unhonored).is_some() {
+                return Err(format!(
+                    "job `{key}` holds `{unhonored}`, which a local run cannot honor"
+                ));
+            }
+        }
+        if job.get("defaults").is_some_and(|d| d.get("run").is_some()) {
+            return Err(format!(
+                "job `{key}` holds `defaults.run`, which a local run cannot honor"
+            ));
         }
         let job_name = job.get("name").and_then(Value::as_str).unwrap_or(key);
         let job_env = layered(Some(&workflow_env), job.get("env"))
@@ -723,6 +760,9 @@ pub fn linux_run_steps(workflow: &str) -> Result<Vec<GateStep>, String> {
             .as_sequence()
             .ok_or_else(|| format!("job `{key}`'s `steps` is not a sequence"))?;
         for step in declared {
+            if !step.is_mapping() {
+                return Err(format!("a step of job `{key}` is not a mapping"));
+            }
             let Some(command) = step.get("run").and_then(Value::as_str) else {
                 continue;
             };
@@ -1177,6 +1217,7 @@ mod tests {
             "working-directory: sub",
             "shell: python",
             "env: ${{ fromJSON(x) }}",
+            "env: {X: '${{ github.sha }}'}",
         ] {
             let workflow = format!(
                 "jobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - run: x\n        {extra}\n"
@@ -1184,6 +1225,41 @@ mod tests {
             assert!(linux_run_steps(&workflow).is_err(), "`{extra}` was read");
         }
         let workflow = "jobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ${{ github.sha }}\n";
+        assert!(linux_run_steps(workflow).is_err());
+        // A job-level scalar env expression is refused through the merged env.
+        let workflow = "jobs:\n  j:\n    runs-on: ubuntu-latest\n    env:\n      X: ${{ github.sha }}\n    steps:\n      - run: x\n";
+        let error = linux_run_steps(workflow).unwrap_err();
+        assert!(error.contains("expression"), "{error}");
+        // A job or workflow construct that changes what runs is refused too.
+        for job_extra in [
+            "if: github.event_name == 'push'",
+            "continue-on-error: true",
+            "container: rust:1",
+            "needs: other",
+            "strategy: {matrix: {a: [1]}}",
+            "defaults: {run: {shell: python}}",
+        ] {
+            let workflow = format!(
+                "jobs:\n  j:\n    runs-on: ubuntu-latest\n    {job_extra}\n    steps:\n      - run: x\n"
+            );
+            assert!(
+                linux_run_steps(&workflow).is_err(),
+                "`{job_extra}` was read"
+            );
+        }
+        let workflow = "defaults:\n  run:\n    working-directory: sub\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - run: x\n";
+        assert!(linux_run_steps(workflow).is_err());
+        // A runner that is a list or an expression is not silently dropped.
+        for runner in ["[ubuntu-latest]", "${{ matrix.os }}"] {
+            let workflow =
+                format!("jobs:\n  j:\n    runs-on: {runner}\n    steps:\n      - run: x\n");
+            assert!(
+                linux_run_steps(&workflow).is_err(),
+                "`{runner}` was dropped"
+            );
+        }
+        // A step that is not a mapping is an error, not a skipped step.
+        let workflow = "jobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - echo hi\n";
         assert!(linux_run_steps(workflow).is_err());
         // The same step on a macOS job is out of scope and so is not refused.
         let workflow =

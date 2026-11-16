@@ -210,10 +210,11 @@ comments outside the diff.
 step. It skips `uses:` steps (checkout, the cache, the actionlint container) and
 every job on another runner, so the macOS job is not run. The commands come
 from the workflow when the script runs, through the `norn-gate-steps` binary of
-`norn-testkit`, which reads the workflow with the reader the CI guards use. A
+`norn-testkit`, which reads the workflow with a reader that shares the CI guards' env layering. A
 step added to `ci.yml` therefore joins the gate with no edit to the script. A
 Linux step the script cannot honor as CI does (one with an `if:`, a
-`working-directory` or a `${{ }}` expression) stops it with an error.
+`working-directory` or a `${{ }}` expression, or a job with `container`, `needs`,
+`strategy` or a `runs-on` that is not a plain string) stops it with an error.
 
 Each step prints its job and name, then PASS or FAIL with its exit status and
 wall time. The gate keeps going after a failure, ends with a summary of every
@@ -225,12 +226,13 @@ can be checked without a full run.
 The script holds no machine policy: it writes no absolute path and takes no
 lock. The caller supplies `CARGO_TARGET_DIR`, `TMPDIR`, `CARGO_BUILD_JOBS`, the
 toolchain on `PATH` and any lock that serializes heavy cargo runs, for example
-`flock <lockfile> scripts/gate.sh`. The measurement suites inside the gate (the
-counter bars and the `serve_memory` lane of the lint job, and the host and
-fixture baselines) refuse a profile override, so the caller sets no
-`CARGO_PROFILE_*` variable, no optimization flag in `RUSTFLAGS`, no cargo config
-holding a profile table and no relative `CARGO_HOME`; the script refuses to
-start with a `CARGO_PROFILE_*` variable set. The script's header lists these.
+`flock <lockfile> scripts/gate.sh`. No step of the Linux gate runs the build-profile guard: only the ignored lanes
+of `regression.yml` and the macOS job reach it. A caller may therefore set
+`CARGO_PROFILE_DEV_DEBUG` and `CARGO_PROFILE_TEST_DEBUG` to `line-tables-only`
+for the gate. The guard itself refuses any `CARGO_PROFILE_*` variable, an
+optimization flag in `RUSTFLAGS` or `CARGO_ENCODED_RUSTFLAGS`, a profile table
+in a cargo config or the workspace `Cargo.toml`, and a relative or unresolved
+`CARGO_HOME`; keep those out of any shell that runs the ignored lanes.
 
 The gate does not run the nightly lanes: `counter_gate`, the compiled registry
 and inventory audits, and the `lockdown` and `kill_recovery` fault lanes run in
