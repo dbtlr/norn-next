@@ -155,7 +155,8 @@ jobs:
       # the token counter bar into the `norn` package's tests; with it off,
       # both compile to nothing, so neither the lint above nor the build job
       # reads them. These three steps are the lane that does: the lint, the
-      # bar, and norn-serve's unit test of the counters route, named exactly.
+      # bar, the wire route's counter bars and its host-time header, and
+      # norn-serve's unit tests of the counters route, named exactly.
       # test-suite.sh rejects a run that executes no case, which is what a
       # missing feature or a renamed test would produce.
       - name: Lint the counters build
@@ -164,6 +165,10 @@ jobs:
         run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn --features counters --test serve_counters
       - name: Counters route
         run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-serve --features counters --lib http::tests::the_counters_route_answers_the_token_counters_behind_the_bearer -- --exact
+      - name: Wire counter bars
+        run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn --features counters --test serve_wire
+      - name: Wire host time
+        run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-serve --features counters --lib http::tests::wire::every_wire_answer_carries_the_host_time_under_the_counters_feature -- --exact
       # rustdoc is its own compiler pass: a public doc that links a private
       # item, or an intra-doc link that resolves to nothing, is a warning only
       # this pass sees, and no lint above reads it. Denied here so the doc

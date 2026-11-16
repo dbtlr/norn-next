@@ -11,7 +11,11 @@ publish.workspace = true
 # `GET /v1/debug/counters`: the server's cumulative `serve.*` counters behind
 # the bearer, for the counter bars a test or nightly build of the binary reads.
 # Off by default, so no shipped build serves it.
-counters = []
+#
+# It also turns on `norn-host`'s `evidence` feature, so the route answers the
+# host's per-request tallies and job account beside its own counters, and every
+# wire answer carries `x-norn-host-time-us`.
+counters = ["norn-host/evidence"]
 
 [dependencies]
 # The HTTP/1.1 server the routes are served by (ruling R2: hyper 1 on tokio,
@@ -23,9 +27,14 @@ hyper-util = { version = "0.1.21", features = ["tokio"] }
 # The bodies a route answers with, and the capped read of a request's body.
 http-body-util = "0.1.5"
 # One current-thread runtime for the listener and its connections, its signal
-# streams, the timer that paces a failing accept, and the blocking thread the
-# host is constructed on.
-tokio = { version = "1.52", features = ["macros", "net", "rt", "signal", "time"] }
+# streams, the timers that pace a failing accept, bound each connection and
+# body, and pace the readiness retry, and the blocking thread the host is
+# constructed on. Host calls run on this crate's own fixed pools, never on
+# tokio's blocking pool.
+# `sync` holds the per-vault mutation semaphores, the one-shot channel a pool
+# thread hands a host call's answer back on, and the drain's and the stop
+# trigger's wake-ups.
+tokio = { version = "1.52", features = ["macros", "net", "rt", "signal", "sync", "time"] }
 # The operating system's random source: the 32 bytes of the token minted at a
 # first start, and the takeover dial's hello nonce. This crate is the one mint
 # site; nothing else in the workspace draws a credential.
@@ -39,8 +48,12 @@ sha2 = { workspace = true }
 # The constant-time comparison of a presented bearer with the stored secret
 # its digest found, so the time a refusal takes says nothing about the secret.
 subtle = "2.6"
-# The hello's and the refusals' JSON bodies, and the counters route's object.
+# The hello's and the refusals' JSON bodies, the counters route's object, and
+# each wire verb's params and report.
 serde_json = { workspace = true }
+# The one-field readers a mutation's vault is read off its body with, before
+# the body is parsed whole on the mutation pool.
+serde = { workspace = true }
 norn-config = { path = "../norn-config" }
 norn-host = { path = "../norn-host" }
 norn-wire = { path = "../norn-wire" }

@@ -44,12 +44,17 @@ use norn_wire::{BuildIdentity, HelloLaunch};
 use tokio::net::{TcpListener, TcpSocket};
 use tokio::signal::unix::{Signal, SignalKind, signal};
 
+mod admission;
+mod connection;
 mod credentials;
 pub mod dial;
 mod http;
 mod log;
 mod mint;
 mod policy;
+mod pool;
+mod request;
+mod stop;
 mod wire;
 
 use log::log;
@@ -106,10 +111,23 @@ const ACCEPT_RETRY_PAUSE: Duration = Duration::from_millis(100);
 struct Refusal(String);
 
 /// What ended a serving host.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Stop {
     Terminate,
     Interrupt,
+    /// The host's worker stopped, so it can no longer serve: the process
+    /// exits 1, to be started again.
+    WorkerStopped,
+}
+
+impl Stop {
+    /// The status the process exits with after this stop.
+    fn status(self) -> u8 {
+        match self {
+            Stop::Terminate | Stop::Interrupt => 0,
+            Stop::WorkerStopped => REFUSED,
+        }
+    }
 }
 
 impl fmt::Display for Stop {
@@ -117,9 +135,17 @@ impl fmt::Display for Stop {
         f.write_str(match self {
             Stop::Terminate => "SIGTERM",
             Stop::Interrupt => "SIGINT",
+            Stop::WorkerStopped => "the host's worker stopped",
         })
     }
 }
+
+/// Open connections at once; past it accept pauses, and further connects wait
+/// in the listen backlog, then the kernel refuses them.
+const CONNECTION_BOUND: usize = 512;
+
+/// The listen backlog connects wait in while accept is paused.
+const LISTEN_BACKLOG: u32 = 64;
 
 /// Run the host process for this channel until a signal stops it.
 ///
@@ -134,7 +160,7 @@ pub fn run(build: &'static str, arguments: impl FnOnce() -> Serve) -> ExitCode {
     match serve_channel(BuildIdentity::new(build), arguments) {
         Ok(stop) => {
             log(format_args!("stopped: {stop}"));
-            ExitCode::SUCCESS
+            ExitCode::from(stop.status())
         }
         Err(Refusal(reason)) => {
             log(format_args!("refused: {reason}"));
@@ -207,6 +233,10 @@ async fn serve_on_runtime(
     mut interrupt: Signal,
 ) -> Result<Stop, Refusal> {
     let endpoint = settings.endpoint;
+    let settings_for_wire = WireSettings {
+        read_connections: settings.read_connections,
+        ready_wait: settings.ready_wait,
+    };
     let construction = {
         let dirs = dirs.clone();
         tokio::task::spawn_blocking(move || construct(dirs, &settings))
@@ -219,12 +249,32 @@ async fn serve_on_runtime(
             .map_err(|error| Refusal(format!("constructing the host failed: {error}")))??,
     };
 
+    let route = Arc::new(wire::HostRoute { host });
+    let stopper = Arc::new(stop::Stopper::default());
+    let wire_state = wire_state(
+        &settings_for_wire,
+        Arc::clone(&route) as Arc<dyn request::Dispatch>,
+    )
+    .map_err(|error| {
+        Refusal(format!(
+            "starting the host's request threads failed: {error}"
+        ))
+    })?;
     let context = Arc::new(http::Context {
         credentials: Mutex::new(credentials::Credentials::new(&dirs, watched)),
         channel: Channel::COMPILED.into(),
         build,
         launch: serve.launch.into(),
+        wire: Arc::new(wire_state),
+        stopper: Arc::clone(&stopper),
+        bounds: connection::Bounds::SERVING,
+        #[cfg(feature = "counters")]
+        readings: {
+            let route = Arc::clone(&route);
+            Box::new(move || host_readings(route.host.evidence()))
+        },
     });
+    drop(route);
 
     let result = async {
         let listener = bind(endpoint.address()).map_err(|error| {
@@ -247,32 +297,44 @@ async fn serve_on_runtime(
             serve.launch,
         ));
 
+        let open = Arc::new(tokio::sync::Semaphore::new(CONNECTION_BOUND));
+        let mut connections = tokio::task::JoinSet::new();
         let stop = loop {
             tokio::select! {
-                accepted = listener.accept() => match accepted {
+                (slot, accepted) = accept_under(&listener, &open) => match accepted {
                     Ok((stream, _)) => {
-                        tokio::spawn(http::answer(stream, Arc::clone(&context)));
+                        let context = Arc::clone(&context);
+                        connections.spawn(async move {
+                            http::answer(stream, context).await;
+                            drop(slot);
+                        });
                     }
                     Err(error) => {
                         log(format_args!("warning: accepting a connection failed: {error}"));
                         tokio::time::sleep(ACCEPT_RETRY_PAUSE).await;
                     }
                 },
+                Some(_) = connections.join_next(), if !connections.is_empty() => {}
                 _ = terminate.recv() => break Stop::Terminate,
                 _ = interrupt.recv() => break Stop::Interrupt,
+                // The stopped-worker trigger takes the plain stop a signal
+                // takes; the bounded drain routes it through itself.
+                () = stopper.requested() => break Stop::WorkerStopped,
             }
         };
-        // A plain stop: the listener closes, and the host's own destruction joins
-        // its workers. The bounded drain that answers what is still in flight is
-        // a later task of this phase.
+        // A plain stop: the listener closes and every connection with it, and
+        // the host's own destruction joins its workers. The bounded drain that
+        // answers what is still in flight is a later task of this phase.
         drop(listener);
+        connections.shutdown().await;
         Ok(stop)
     }
     .await;
-    // Destruction joins workers, including on a bind refusal. Keep the lock
-    // until the host has gone, and leave the I/O thread free for signals.
+    // Destruction joins the request threads and the host's workers, including
+    // on a bind refusal. Keep the lock until the host has gone, and leave the
+    // I/O thread free for signals.
     tokio::task::spawn_blocking(move || {
-        drop(host);
+        drop(context);
         drop(lock);
     })
     .await
@@ -370,7 +432,98 @@ fn bind(address: std::net::SocketAddr) -> std::io::Result<TcpListener> {
     let socket = TcpSocket::new_v4()?;
     socket.set_reuseaddr(true)?;
     socket.bind(address)?;
-    socket.listen(1024)
+    socket.listen(LISTEN_BACKLOG)
+}
+
+/// The next connection, once an open slot is free: accept pauses at the
+/// connection bound. Cancel-safe, as a select arm must be: a slot taken and
+/// not used goes back where the future is dropped.
+async fn accept_under(
+    listener: &TcpListener,
+    open: &Arc<tokio::sync::Semaphore>,
+) -> (
+    Option<tokio::sync::OwnedSemaphorePermit>,
+    std::io::Result<(tokio::net::TcpStream, std::net::SocketAddr)>,
+) {
+    let slot = Arc::clone(open).acquire_owned().await.ok();
+    (slot, listener.accept().await)
+}
+
+/// The serving settings the wire route reads.
+struct WireSettings {
+    read_connections: usize,
+    ready_wait: Duration,
+}
+
+/// The wire route's state over `dispatcher`: its two fixed pools, its
+/// admission and its counters.
+fn wire_state(
+    settings: &WireSettings,
+    dispatcher: Arc<dyn request::Dispatch>,
+) -> std::io::Result<request::Wire> {
+    Ok(request::Wire {
+        admission: Arc::default(),
+        semaphores: Arc::default(),
+        reads: pool::Pool::new(
+            "norn-read",
+            settings.read_connections + pool::READ_POOL_MARGIN,
+        )?,
+        mutations: pool::Pool::new("norn-mutation", pool::MUTATION_POOL_THREADS)?,
+        dispatcher,
+        ready_wait: settings.ready_wait,
+        counters: Arc::default(),
+    })
+}
+
+/// The host's readings, named as the counters route answers them: the
+/// per-request tallies under `host.request.*`, and the job account of the
+/// work no one request owns — attach, re-attach, heal, background turns —
+/// under `host.jobs.*`.
+#[cfg(feature = "counters")]
+fn host_readings(evidence: norn_host::HostEvidence) -> Vec<(String, u64)> {
+    let requests = evidence.requests;
+    let jobs = evidence.jobs;
+    [
+        ("host.request.requests", requests.requests),
+        ("host.request.statements", requests.tally.statements),
+        ("host.request.vm_steps", requests.tally.vm_steps),
+        ("host.request.fs_reads", requests.tally.fs_reads),
+        (
+            "host.request.registrations_visited",
+            requests.tally.registrations_visited,
+        ),
+        (
+            "host.request.entries_visited",
+            requests.tally.entries_visited,
+        ),
+        ("host.jobs.document_opens", jobs.document_opens),
+        (
+            "host.jobs.documents_read_by_build",
+            jobs.documents_read_by_build,
+        ),
+        ("host.jobs.stats", jobs.stats),
+        ("host.jobs.walk_dirents", jobs.walk_dirents),
+        ("host.jobs.documents_derived", jobs.documents_derived),
+        ("host.jobs.changesets_applied", jobs.changesets_applied),
+        ("host.jobs.documents_upserted", jobs.documents_upserted),
+        ("host.jobs.documents_deleted", jobs.documents_deleted),
+        ("host.jobs.content_rows_written", jobs.content_rows_written),
+        (
+            "host.jobs.structure_rows_written",
+            jobs.structure_rows_written,
+        ),
+        ("host.jobs.findings_written", jobs.findings_written),
+        (
+            "host.jobs.full_text_rows_indexed",
+            jobs.full_text_rows_indexed,
+        ),
+        ("host.jobs.recoveries_run", jobs.recoveries_run),
+        ("host.jobs.rebuilds_run", jobs.rebuilds_run),
+        ("host.jobs.from_zero_builds", jobs.from_zero_builds),
+    ]
+    .into_iter()
+    .map(|(name, value)| (name.to_string(), value))
+    .collect()
 }
 
 fn stop_signal(kind: SignalKind) -> Result<Signal, Refusal> {
@@ -392,6 +545,15 @@ fn settings_file_named(serve: &Serve, dirs: &ConfigDirs) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A stopped worker ends the process 1, to be started again; a signal's
+    /// stop ends it 0.
+    #[test]
+    fn a_stopped_worker_exits_1_and_a_signal_exits_0() {
+        assert_eq!(Stop::WorkerStopped.status(), 1);
+        assert_eq!(Stop::Terminate.status(), 0);
+        assert_eq!(Stop::Interrupt.status(), 0);
+    }
 
     /// A start whose read of the token file refuses, after a mint that read
     /// it, refuses the start rather than serving fail-closed: an unreadable

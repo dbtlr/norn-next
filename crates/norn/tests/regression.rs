@@ -87,7 +87,7 @@ const CASE_TOTAL: usize = 119;
 /// the constant, which is the moment the edit becomes a thing a reviewer
 /// looked at. This is the fixture generator's contract digest applied to a
 /// registry.
-const CONTRACT_DIGEST: &str = "618dfa8f3c5f1597bf88cd2f94ff612ee116972fd83022125333df1ae62e0f79";
+const CONTRACT_DIGEST: &str = "8ba3232b7a390eb8ccf5ca4128e91b0199f107150d1e3769fbeb7992e38b2115";
 
 /// The cases carried by tests today, by name.
 ///
@@ -106,6 +106,7 @@ const BOUND_CASES: &[&str] = &[
     "a-page-continues-at-the-successor-of-its-last-row",
     "a-repair-fixes-a-list-by-its-elements",
     "a-sidecar-is-keyed-by-its-own-model-and-scoped-by-the-store-epoch",
+    "barriers-fail-closed",
     "cache-identity-is-total",
     "cache-is-authoritative-for-content",
     "cascade-preserves-link-syntax",
@@ -120,6 +121,7 @@ const BOUND_CASES: &[&str] = &[
     "error-variant-matches-the-operation-reported",
     "every-filesystem-effect-is-planned-and-forecast",
     "existence-probes-and-per-request-allocation-are-bounded",
+    "failure-is-carried-in-the-protocols-native-channel",
     "finding-candidates-are-capped-with-a-total",
     "fixtures-carry-real-content-volume",
     "forecast-and-apply-are-one-classifier",

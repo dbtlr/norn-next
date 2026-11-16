@@ -1732,6 +1732,11 @@ fn assert_complete_active_matrix(workflow: &str, full: bool) {
     // And norn-serve's one unit test behind the same feature, named exactly
     // so a rename is a run of no case, which test-suite.sh rejects.
     const COUNTERS_ROUTE: &str = ".github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-serve --features counters --lib http::tests::the_counters_route_answers_the_token_counters_behind_the_bearer -- --exact";
+    // The wire route's counter bars over a real host, and its host-time
+    // header's unit test, named exactly for the same reason. The PR lint job
+    // and the full regression job both run them, after the counters route.
+    const WIRE_COUNTER_BARS: &str = ".github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn --features counters --test serve_wire";
+    const WIRE_HOST_TIME: &str = ".github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-serve --features counters --lib http::tests::wire::every_wire_answer_carries_the_host_time_under_the_counters_feature -- --exact";
     let commands: &[(&str, &str, &[&str])] = &[
         (
             "build",
@@ -1748,6 +1753,8 @@ fn assert_complete_active_matrix(workflow: &str, full: bool) {
                 "cargo clippy --locked --workspace --all-targets --features norn/counters -- -D warnings",
                 TOKEN_COUNTER_BAR,
                 COUNTERS_ROUTE,
+                WIRE_COUNTER_BARS,
+                WIRE_HOST_TIME,
                 "cargo doc --locked --workspace --no-deps --document-private-items",
                 ".github/scripts/flake-tripwire.sh cargo test --locked --workspace",
             ],
@@ -1832,6 +1839,8 @@ fn assert_complete_active_matrix(workflow: &str, full: bool) {
                         || command.starts_with("python3")
                         || *command == TOKEN_COUNTER_BAR
                         || *command == COUNTERS_ROUTE
+                        || *command == WIRE_COUNTER_BARS
+                        || *command == WIRE_HOST_TIME
                 })
                 .collect();
             let lint_lines = ci_job(workflow, "lint");

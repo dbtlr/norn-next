@@ -16,7 +16,7 @@ use norn_testkit::process::{Run, RunStatus};
 use support::{Fixture, bind_unissued, free_port, get};
 
 #[test]
-fn serve_listens_on_the_resolved_port_answers_404_and_stops_on_sigterm() {
+fn serve_listens_on_the_resolved_port_answers_an_unrouted_path_404_and_stops_on_sigterm() {
     let fixture = Fixture::new("serve-lifecycle");
     let port = free_port();
     fixture.write_settings(&format!("[endpoint]\nport = {port}\n"));
@@ -31,13 +31,14 @@ fn serve_listens_on_the_resolved_port_answers_404_and_stops_on_sigterm() {
         )),
         "{listening}"
     );
-    // No route is served behind the bearer yet: an authenticated request
-    // anywhere is a 404, and the same request without the bearer a 401.
+    // An authenticated `GET` names no route — the wire route is `POST` — so
+    // it is 404 `serve/unknown-verb`, and the same request without the bearer
+    // a 401.
     let bearer = fixture.default_bearer();
     for path in ["/", "/v1/hello", "/v1/wire/find"] {
         let answer = get(port, path, Some(&bearer));
         assert_eq!(answer.status, 404, "{path}: {answer:?}");
-        assert!(answer.body.is_empty(), "{path}: {answer:?}");
+        assert_eq!(answer.code(), "serve/unknown-verb", "{path}: {answer:?}");
         assert_eq!(get(port, path, None).status, 401, "{path}");
     }
 

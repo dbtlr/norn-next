@@ -63,11 +63,12 @@
       "sources": ["NRN-a59", "NRN-a61", "NRN-a58", "NRN-a60"],
       "binding": {
         "status": "dormant",
-        "reason": "the counter half is carried: crates/norn-host/tests/counter_gate.rs holds what a request costs in counts rather than in a clock — a warm read to zero, and the read shapes asked through the host verbs a client's request reaches, a bounded write, and a hub's delete and move previewed through the host, each the same at two vault scales. The clock half has no subject: where a clock is read, the asserted quantity is a ratio of a verb's served cost to a refusal stub's round-trip floor, and no verb round-trips a surface to set beside that floor, because norn serve answers every request 404 and dispatches no verb until the wire route's dispatch, crates/norn-serve/src/wire.rs::dispatch, lands. One clock is asserted as a ceiling meanwhile, in the soak lane: crates/norn-text/tests/frontmatter_cost.rs::a_block_at_the_bound_reads_inside_its_ceiling holds a parse at the block bound under a wall-clock sanity ceiling, which a binding has to reconcile with the property rather than cite past.",
+        "reason": "the counter half is carried: crates/norn-host/tests/counter_gate.rs holds what a request costs in counts rather than in a clock — a warm read to zero, and the read shapes asked through the host verbs a client's request reaches, a bounded write, and a hub's delete and move previewed through the host, each the same at two vault scales. The clock half has no subject: where a clock is read, the asserted quantity is a ratio of a verb's served cost to a refusal stub's round-trip floor, and no verb round-trips a surface to set beside that floor, because the wire route now serves every verb — crates/norn-serve/src/wire.rs routes each to the host method that answers it, and the clock that sets a served verb's cost beside a refusal stub's round-trip floor is not read yet: the served counter bars at scale, which read the counters route's serve.* counters and the host's host.request.* tallies at two vault scales beside a growing control, are not written: crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault is not in the workspace. One clock is asserted as a ceiling meanwhile, in the soak lane: crates/norn-text/tests/frontmatter_cost.rs::a_block_at_the_bound_reads_inside_its_ceiling holds a parse at the block bound under a wall-clock sanity ceiling, which a binding has to reconcile with the property rather than cite past.",
         "grounds": [
           { "present": "crates/norn-host/tests/counter_gate.rs" },
-          { "symbol-absent": "crates/norn-serve/src/wire.rs::dispatch" },
-          { "symbol-present": "crates/norn-text/tests/frontmatter_cost.rs::a_block_at_the_bound_reads_inside_its_ceiling" }
+          { "symbol-present": "crates/norn-text/tests/frontmatter_cost.rs::a_block_at_the_bound_reads_inside_its_ceiling" },
+          { "present": "crates/norn-serve/src/wire.rs" },
+          { "symbol-absent": "crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault" }
         ]
       }
     },
@@ -180,11 +181,12 @@
       "sources": ["NRN-480", "NRN-522", "NRN-29"],
       "binding": {
         "status": "dormant",
-        "reason": "the comparison harness exists — crates/norn-testkit/src/equivalence.rs compares two derived stores field by field and crates/norn-testkit/src/fidelity.rs is the seam a verdict is recorded through — and no run's traffic can meet a resident service: a resident norn serve can now be running on the machine, but norn serve answers every request 404 and dispatches no verb until the wire route's dispatch, crates/norn-serve/src/wire.rs::dispatch, lands, so no harness run sends it a request whose answer a contaminated subject could change, and the self-check has no divergence to misattribute.",
+        "reason": "the comparison harness exists — crates/norn-testkit/src/equivalence.rs compares two derived stores field by field and crates/norn-testkit/src/fidelity.rs is the seam a verdict is recorded through — and no run's traffic can meet a resident service: a resident norn serve can now be running on the machine and the wire route now serves every verb — crates/norn-serve/src/wire.rs routes each to the host method that answers it, but every suite that serves starts its own host on its own port under its own directories, and the harness run that sends a served subject traffic beside a possibly resident host is the served benchmark the served counter bars bring: the served counter bars at scale, which read the counters route's serve.* counters and the host's host.request.* tallies at two vault scales beside a growing control, are not written: crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault is not in the workspace, so the self-check still has no served divergence to misattribute.",
         "grounds": [
           { "present": "crates/norn-testkit/src/equivalence.rs" },
           { "present": "crates/norn-testkit/src/fidelity.rs" },
-          { "symbol-absent": "crates/norn-serve/src/wire.rs::dispatch" }
+          { "present": "crates/norn-serve/src/wire.rs" },
+          { "symbol-absent": "crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault" }
         ]
       }
     },
@@ -227,10 +229,11 @@
       "sources": ["NRN-a59"],
       "binding": {
         "status": "dormant",
-        "reason": "there is no request surface to enroll: norn serve answers every request 404 and dispatches no verb until the wire route's dispatch, crates/norn-serve/src/wire.rs::dispatch, lands, and crates/norn-mcp is not in the workspace, so the roster has no member to hold to a named executable property.",
+        "reason": "there is no request surface to enroll: the wire route now serves every verb — crates/norn-serve/src/wire.rs routes each to the host method that answers it, and the shipped request surfaces a person reaches, MCP's crates/norn-mcp and the CLI's crates/norn-console, are not in the workspace, so the roster has no shipped member to hold to a named executable property, and crates/norn-mcp is not in the workspace, so the roster has no member to hold to a named executable property.",
         "grounds": [
-          { "symbol-absent": "crates/norn-serve/src/wire.rs::dispatch" },
-          { "absent": "crates/norn-mcp" }
+          { "absent": "crates/norn-mcp" },
+          { "present": "crates/norn-serve/src/wire.rs" },
+          { "absent": "crates/norn-console" }
         ]
       }
     },
@@ -288,11 +291,12 @@
       "sources": ["NRN-a61", "NRN-a63", "NRN-457"],
       "binding": {
         "status": "dormant",
-        "reason": "the counters exist and a narrowing is already visible in them: crates/norn-store/src/counters.rs is scoped to one request, and crates/norn-host/tests/churn.rs brackets what maintenance after one edit costs against what the same bound would admit for a changed set of nothing. What the rule needs is a served operation a change could narrow, and norn serve answers every request 404 and dispatches no verb until the wire route's dispatch, crates/norn-serve/src/wire.rs::dispatch, lands: no request path exists whose scoping win a counter would have to show.",
+        "reason": "the counters exist and a narrowing is already visible in them: crates/norn-store/src/counters.rs is scoped to one request, and crates/norn-host/tests/churn.rs brackets what maintenance after one edit costs against what the same bound would admit for a changed set of nothing. What the rule needs is a served operation a change could narrow, and the wire route now serves every verb — crates/norn-serve/src/wire.rs routes each to the host method that answers it, and the counters route answers what each served request cost; what is still missing is the served bar a narrowing would have to move: the served counter bars at scale, which read the counters route's serve.* counters and the host's host.request.* tallies at two vault scales beside a growing control, are not written: crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault is not in the workspace: no request path exists whose scoping win a counter would have to show.",
         "grounds": [
           { "present": "crates/norn-store/src/counters.rs" },
           { "present": "crates/norn-host/tests/churn.rs" },
-          { "symbol-absent": "crates/norn-serve/src/wire.rs::dispatch" }
+          { "present": "crates/norn-serve/src/wire.rs" },
+          { "symbol-absent": "crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault" }
         ]
       }
     },
@@ -351,11 +355,12 @@
       "sources": ["NRN-a62"],
       "binding": {
         "status": "dormant",
-        "reason": "the substrate has one periodic leg now: crates/norn-host/src/production.rs verifies an attached entry's derived state on a declared interval, on the lifecycle worker pool and never on a caller's thread. The sweep this control is stated over has no subject — crates/norn-store/src/ddl/tombstones.rs keeps a death until something says otherwise and nothing decides when — and the request half has nothing to cost, because norn serve answers every request 404 and dispatches no verb until the wire route's dispatch, crates/norn-serve/src/wire.rs::dispatch, lands.",
+        "reason": "the substrate has one periodic leg now: crates/norn-host/src/production.rs verifies an attached entry's derived state on a declared interval, on the lifecycle worker pool and never on a caller's thread. The sweep this control is stated over has no subject — crates/norn-store/src/ddl/tombstones.rs keeps a death until something says otherwise and nothing decides when — and the request half has nothing to cost, because the wire route now serves every verb — crates/norn-serve/src/wire.rs routes each to the host method that answers it, and the request half is measurable through the counters route, but the served counter bars at scale, which read the counters route's serve.* counters and the host's host.request.* tallies at two vault scales beside a growing control, are not written: crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault is not in the workspace.",
         "grounds": [
           { "present": "crates/norn-host/src/production.rs" },
           { "present": "crates/norn-store/src/ddl/tombstones.rs" },
-          { "symbol-absent": "crates/norn-serve/src/wire.rs::dispatch" }
+          { "present": "crates/norn-serve/src/wire.rs" },
+          { "symbol-absent": "crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault" }
         ]
       }
     },
@@ -425,14 +430,15 @@
       "sources": ["NRN-a61", "NRN-a62", "NRN-a60", "NRN-a58"],
       "binding": {
         "status": "dormant",
-        "reason": "the two lifetimes the property is stated over exist: crates/norn-store/src/increment.rs stamps one generation across every row a changeset writes, and crates/norn-host/src/lifecycle.rs holds an attachment across the work that reaches it. A query is compiled now, by the read builders: crates/norn-store/src/read/glob.rs parses a path glob once per statement and keeps it as the match function's auxiliary data for every row after the first, and crates/norn-store/src/read/conjunction.rs decides whether a key is in the field universe by a declaration lookup or one indexed existence seek. What has no subject is a served request to carry a compile across and the counters the property reads: nothing dispatches a query from a caller, because norn serve answers every request 404 and dispatches no verb until the wire route's dispatch, crates/norn-serve/src/wire.rs::dispatch, lands, and crates/norn-store/src/counters.rs counts derivation and statements, not a compile, an open or a parse.",
+        "reason": "the two lifetimes the property is stated over exist: crates/norn-store/src/increment.rs stamps one generation across every row a changeset writes, and crates/norn-host/src/lifecycle.rs holds an attachment across the work that reaches it. A query is compiled now, by the read builders: crates/norn-store/src/read/glob.rs parses a path glob once per statement and keeps it as the match function's auxiliary data for every row after the first, and crates/norn-store/src/read/conjunction.rs decides whether a key is in the field universe by a declaration lookup or one indexed existence seek. What has no subject is a served request to carry a compile across and the counters the property reads: nothing dispatches a query from a caller, because the wire route now serves every verb — crates/norn-serve/src/wire.rs routes each to the host method that answers it, and the served request now exists; what it still lacks is the bar over it: the served counter bars at scale, which read the counters route's serve.* counters and the host's host.request.* tallies at two vault scales beside a growing control, are not written: crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault is not in the workspace, and crates/norn-store/src/counters.rs counts derivation and statements, not a compile, an open or a parse.",
         "grounds": [
           { "present": "crates/norn-store/src/increment.rs" },
           { "present": "crates/norn-host/src/lifecycle.rs" },
           { "present": "crates/norn-store/src/read/glob.rs" },
           { "present": "crates/norn-store/src/read/conjunction.rs" },
           { "present": "crates/norn-store/src/counters.rs" },
-          { "symbol-absent": "crates/norn-serve/src/wire.rs::dispatch" }
+          { "present": "crates/norn-serve/src/wire.rs" },
+          { "symbol-absent": "crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault" }
         ]
       }
     },
@@ -444,12 +450,14 @@
       "sources": ["norn-legacy engineering learnings"],
       "binding": {
         "status": "dormant",
-        "reason": "crates/norn-serve/src/lib.rs carries the serving entry. The dialer half has landed: both dialers set their one per-connection option, SO_REUSEADDR, once, on a socket no other descriptor holds, before it connects, and each holds a named test of that option-setting, cited as a present symbol because a dormant case names no tests: crates/norn-client/src/hello.rs::the_dialer_sets_reuseaddr_once_before_connecting and crates/norn-serve/src/dial.rs::the_dialer_sets_reuseaddr_once_before_connecting. The case stays dormant on its server half: the per-connection bounds the served request path sets on an accepted connection wait on crates/norn-serve/src/wire.rs::dispatch, which is not implemented, and binding the case then names those tests beside the dialers'.",
+        "reason": "crates/norn-serve/src/lib.rs carries the serving entry. The dialer half has landed: both dialers set their one per-connection option, SO_REUSEADDR, once, on a socket no other descriptor holds, before it connects, and each holds a named test of that option-setting, cited as a present symbol because a dormant case names no tests: crates/norn-client/src/hello.rs::the_dialer_sets_reuseaddr_once_before_connecting and crates/norn-serve/src/dial.rs::the_dialer_sets_reuseaddr_once_before_connecting. The server half sets no socket option on an accepted connection at all: the wire route now serves every verb — crates/norn-serve/src/wire.rs routes each to the host method that answers it, and the bounds an accepted connection is held to are timers in crates/norn-serve/src/connection.rs rather than socket options. The case stays dormant on the client's connections that carry those requests, which the CLI opens through crates/norn-console, not in the workspace, and binding the case then names their option-setting test beside the dialers'.",
         "grounds": [
           { "present": "crates/norn-serve/src/lib.rs" },
           { "symbol-present": "crates/norn-client/src/hello.rs::the_dialer_sets_reuseaddr_once_before_connecting" },
           { "symbol-present": "crates/norn-serve/src/dial.rs::the_dialer_sets_reuseaddr_once_before_connecting" },
-          { "symbol-absent": "crates/norn-serve/src/wire.rs::dispatch" }
+          { "present": "crates/norn-serve/src/wire.rs" },
+          { "present": "crates/norn-serve/src/connection.rs" },
+          { "absent": "crates/norn-console" }
         ]
       }
     },
@@ -484,12 +492,13 @@
       "sources": ["NRN-a59", "NRN-a60", "NRN-a63"],
       "binding": {
         "status": "dormant",
-        "reason": "the schema declares its indexes and its plans are proven over emitted SQL: crates/norn-store/src/ddl/mod.rs designs the schema whole, and crates/norn-store/tests/store/pillars.rs asserts every findings-maintenance statement searches the index its parameters are bounds for. The reader half has nothing to reconcile against: the probe readers crates/norn-store/src/request/mod.rs offers are the range primitives the read builders of a higher layer compose, and the production plan roster that would name their callers is the served request path's, which has no route: norn serve answers every request 404 and dispatches no verb until the wire route's dispatch, crates/norn-serve/src/wire.rs::dispatch, lands.",
+        "reason": "the schema declares its indexes and its plans are proven over emitted SQL: crates/norn-store/src/ddl/mod.rs designs the schema whole, and crates/norn-store/tests/store/pillars.rs asserts every findings-maintenance statement searches the index its parameters are bounds for. The reader half has nothing to reconcile against: the probe readers crates/norn-store/src/request/mod.rs offers are the range primitives the read builders of a higher layer compose, and the production plan roster that would name their callers is the served request path's, which has no route: the wire route now serves every verb — crates/norn-serve/src/wire.rs routes each to the host method that answers it, and every served verb is now a production caller, but the roster that names each reader's production callers is stated over the served bars, and the served counter bars at scale, which read the counters route's serve.* counters and the host's host.request.* tallies at two vault scales beside a growing control, are not written: crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault is not in the workspace.",
         "grounds": [
           { "present": "crates/norn-store/src/ddl/mod.rs" },
           { "present": "crates/norn-store/tests/store/pillars.rs" },
           { "present": "crates/norn-store/src/request/mod.rs" },
-          { "symbol-absent": "crates/norn-serve/src/wire.rs::dispatch" }
+          { "present": "crates/norn-serve/src/wire.rs" },
+          { "symbol-absent": "crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault" }
         ]
       }
     },
@@ -554,13 +563,14 @@
       "sources": ["NRN-a60", "NRN-a62"],
       "binding": {
         "status": "dormant",
-        "reason": "the warm read exists and reads nothing off the vault: crates/norn-host/tests/reads.rs::every_read_verb_answers_with_no_file_read_on_its_thread holds every read verb to no document opened, no stat and no directory entry on its thread, through the per-thread count crates/norn-fs/src/reads.rs keeps in every build, and crates/norn-host/tests/counter_gate.rs holds a warm request, with the attachment gone and with it still live, to every derivation counter at zero. Trust is asserted by the coverage crates/norn-host/src/lifecycle.rs holds rather than re-proven per read, and no freshness baseline exists to load. What keeps the case dormant is the last clause: what the mechanism itself costs is stated over the served request path, and norn serve answers every request 404 and dispatches no verb until the wire route's dispatch, crates/norn-serve/src/wire.rs::dispatch, lands.",
+        "reason": "the warm read exists and reads nothing off the vault: crates/norn-host/tests/reads.rs::every_read_verb_answers_with_no_file_read_on_its_thread holds every read verb to no document opened, no stat and no directory entry on its thread, through the per-thread count crates/norn-fs/src/reads.rs keeps in every build, and crates/norn-host/tests/counter_gate.rs holds a warm request, with the attachment gone and with it still live, to every derivation counter at zero. Trust is asserted by the coverage crates/norn-host/src/lifecycle.rs holds rather than re-proven per read, and no freshness baseline exists to load. What keeps the case dormant is the last clause: what the mechanism itself costs is stated over the served request path, and the wire route now serves every verb — crates/norn-serve/src/wire.rs routes each to the host method that answers it, and what the mechanism costs on that path is the served bars' subject: the served counter bars at scale, which read the counters route's serve.* counters and the host's host.request.* tallies at two vault scales beside a growing control, are not written: crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault is not in the workspace.",
         "grounds": [
           { "symbol-present": "crates/norn-host/tests/reads.rs::every_read_verb_answers_with_no_file_read_on_its_thread" },
           { "present": "crates/norn-fs/src/reads.rs" },
           { "present": "crates/norn-host/tests/counter_gate.rs" },
           { "present": "crates/norn-host/src/lifecycle.rs" },
-          { "symbol-absent": "crates/norn-serve/src/wire.rs::dispatch" }
+          { "present": "crates/norn-serve/src/wire.rs" },
+          { "symbol-absent": "crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault" }
         ]
       }
     },
@@ -667,7 +677,7 @@
       "sources": ["NRN-a60", "NRN-a63", "NRN-a61", "NRN-a58"],
       "binding": {
         "status": "dormant",
-        "reason": "the readers exist and a cost term is assertable over them: crates/norn-store/src/request/mod.rs pages every enumeration behind a cursor, and crates/norn-testkit/src/work.rs holds a drain of n rows under a line in n, so a reader that re-reads the rows ahead of its own position fails. The links column reads a page's links in a fixed number of statements: crates/norn-store/src/read/naming.rs reads what every link a find's page or a get's links page carries names in one set-valued statement over the link index's keys, and names every candidate in one more, so a request's statements do not grow with the links or the rows it returns, which crates/norn-store/tests/store/links.rs::a_pages_links_cost_a_fixed_number_of_statements holds. Link-impact for a moved document is carried now, for link health alone: crates/norn-store/tests/store/redecision.rs re-decides a rename through the old path's key and a hub's write through its stem's class alone, each as indexed seeks over the moved document's own neighborhood rather than a scan of every link, and the mass-delete case there bounds a key no link reaches to a small constant. What is still missing is a request surface to move the document through — norn serve answers every request 404 and dispatches no verb until the wire route's dispatch, crates/norn-serve/src/wire.rs::dispatch, lands — so no client-facing link-impact verb exists to bind the clause whole. The nested scan this class was mined from is inside one frontmatter block, where crates/norn-text/src/frontmatter/fields.rs now resolves the parsed mapping by key, and what bars it is a wall-clock ratio in a soak lane — not an evidence kind this stratum binds on.",
+        "reason": "the readers exist and a cost term is assertable over them: crates/norn-store/src/request/mod.rs pages every enumeration behind a cursor, and crates/norn-testkit/src/work.rs holds a drain of n rows under a line in n, so a reader that re-reads the rows ahead of its own position fails. The links column reads a page's links in a fixed number of statements: crates/norn-store/src/read/naming.rs reads what every link a find's page or a get's links page carries names in one set-valued statement over the link index's keys, and names every candidate in one more, so a request's statements do not grow with the links or the rows it returns, which crates/norn-store/tests/store/links.rs::a_pages_links_cost_a_fixed_number_of_statements holds. Link-impact for a moved document is carried now, for link health alone: crates/norn-store/tests/store/redecision.rs re-decides a rename through the old path's key and a hub's write through its stem's class alone, each as indexed seeks over the moved document's own neighborhood rather than a scan of every link, and the mass-delete case there bounds a key no link reaches to a small constant. What is still missing is a request surface to move the document through — the wire route now serves every verb — crates/norn-serve/src/wire.rs routes each to the host method that answers it, and move is served, but the bar holding a served move's statements to its own neighborhood is not written: the served counter bars at scale, which read the counters route's serve.* counters and the host's host.request.* tallies at two vault scales beside a growing control, are not written: crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault is not in the workspace — so no client-facing link-impact verb exists to bind the clause whole. The nested scan this class was mined from is inside one frontmatter block, where crates/norn-text/src/frontmatter/fields.rs now resolves the parsed mapping by key, and what bars it is a wall-clock ratio in a soak lane — not an evidence kind this stratum binds on.",
         "grounds": [
           { "present": "crates/norn-store/src/request/mod.rs" },
           { "present": "crates/norn-testkit/src/work.rs" },
@@ -675,7 +685,8 @@
           { "present": "crates/norn-store/src/read/naming.rs" },
           { "present": "crates/norn-store/tests/store/redecision.rs" },
           { "symbol-present": "crates/norn-store/tests/store/links.rs::a_pages_links_cost_a_fixed_number_of_statements" },
-          { "symbol-absent": "crates/norn-serve/src/wire.rs::dispatch" }
+          { "present": "crates/norn-serve/src/wire.rs" },
+          { "symbol-absent": "crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault" }
         ]
       }
     },
@@ -727,11 +738,12 @@
       "sources": ["NRN-76", "NRN-202", "NRN-131", "NRN-117", "NRN-134"],
       "binding": {
         "status": "dormant",
-        "reason": "the predicate and the matcher exist and are one: crates/norn-fs/src/exclusion.rs decides membership on normalized identity through the vault root's own normalizer, so a walk rooted at a subdirectory excludes what a walk of the whole vault excludes, and crates/norn-fs/src/walk.rs is the only walker. The clauses about verbs have no subject — every verb agreeing that a path is addressable, and a refusal naming configuration rather than asserting non-existence, both need a served verb and a refusal surface, and norn serve answers every request 404 and dispatches no verb until the wire route's dispatch, crates/norn-serve/src/wire.rs::dispatch, lands — and the membership configuration is not configured: the excluded roots are handed to a walk rather than read from a file.",
+        "reason": "the predicate and the matcher exist and are one: crates/norn-fs/src/exclusion.rs decides membership on normalized identity through the vault root's own normalizer, so a walk rooted at a subdirectory excludes what a walk of the whole vault excludes, and crates/norn-fs/src/walk.rs is the only walker. The clauses about verbs have no subject — every verb agreeing that a path is addressable, and a refusal naming configuration rather than asserting non-existence, both need a served verb and a refusal surface, and the wire route now serves every verb — crates/norn-serve/src/wire.rs routes each to the host method that answers it, and a refusal now reaches a caller as its envelope; what is still missing is the configuration the refusal would name — the excluded roots are handed to a walk rather than read from a file — and the person-facing rendering of that refusal through crates/norn-console, which is not in the workspace — and the membership configuration is not configured: the excluded roots are handed to a walk rather than read from a file.",
         "grounds": [
           { "present": "crates/norn-fs/src/exclusion.rs" },
           { "present": "crates/norn-fs/src/walk.rs" },
-          { "symbol-absent": "crates/norn-serve/src/wire.rs::dispatch" }
+          { "present": "crates/norn-serve/src/wire.rs" },
+          { "absent": "crates/norn-console" }
         ]
       }
     },
@@ -852,11 +864,12 @@
       "sources": ["NRN-a60", "NRN-a61", "NRN-a62"],
       "binding": {
         "status": "dormant",
-        "reason": "the find builder takes its projection from the columns a request names: crates/norn-store/src/find/hydrate.rs reads the frontmatter projection, the head of the body and each nested collection only where a column names it, and crates/norn-wire/src/document.rs spells the row a find answers with. Neither boundary the property measures has a subject: peak resident set and wire bytes for a body-less verb need a served verb to be measured over, and norn serve answers every request 404 and dispatches no verb until the wire route's dispatch, crates/norn-serve/src/wire.rs::dispatch, lands.",
+        "reason": "the find builder takes its projection from the columns a request names: crates/norn-store/src/find/hydrate.rs reads the frontmatter projection, the head of the body and each nested collection only where a column names it, and crates/norn-wire/src/document.rs spells the row a find answers with. Neither boundary the property measures has a subject: peak resident set and wire bytes for a body-less verb need a served verb to be measured over, and the wire route now serves every verb — crates/norn-serve/src/wire.rs routes each to the host method that answers it, and wire bytes are counted per answer on the counters route, but the body-less verb's transport bytes over two body sizes, and the real-process peak resident set beside them, are the served bars at scale, and crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault is not in the workspace.",
         "grounds": [
           { "present": "crates/norn-store/src/find/hydrate.rs" },
           { "present": "crates/norn-wire/src/document.rs" },
-          { "symbol-absent": "crates/norn-serve/src/wire.rs::dispatch" }
+          { "present": "crates/norn-serve/src/wire.rs" },
+          { "symbol-absent": "crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault" }
         ]
       }
     },
@@ -868,12 +881,13 @@
       "sources": ["NRN-a59", "NRN-a62"],
       "binding": {
         "status": "dormant",
-        "reason": "recovery exists and runs off every caller's thread: crates/norn-host/src/lifecycle.rs answers a recovery demand on the bounded lifecycle worker pool, and crates/norn-host/tests/kill_recovery.rs converges after a process died mid-increment. The billing has no subject: there is no request whose latency after an out-of-band change could be compared with warm and no pool to grow, because norn serve answers every request 404 and dispatches no verb until the wire route's dispatch, crates/norn-serve/src/wire.rs::dispatch, lands, and a connection-open counter is not in crates/norn-store/src/counters.rs — that vocabulary counts derivation alone.",
+        "reason": "recovery exists and runs off every caller's thread: crates/norn-host/src/lifecycle.rs answers a recovery demand on the bounded lifecycle worker pool, and crates/norn-host/tests/kill_recovery.rs converges after a process died mid-increment. The billing has no subject: there is no request whose latency after an out-of-band change could be compared with warm and no pool to grow, because the wire route now serves every verb — crates/norn-serve/src/wire.rs routes each to the host method that answers it, and a served request after an out-of-band change can now be timed against warm, but the served counter bars at scale, which read the counters route's serve.* counters and the host's host.request.* tallies at two vault scales beside a growing control, are not written: crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault is not in the workspace, and a connection-open counter is not in crates/norn-store/src/counters.rs — that vocabulary counts derivation alone.",
         "grounds": [
           { "present": "crates/norn-host/src/lifecycle.rs" },
           { "present": "crates/norn-host/tests/kill_recovery.rs" },
           { "present": "crates/norn-store/src/counters.rs" },
-          { "symbol-absent": "crates/norn-serve/src/wire.rs::dispatch" }
+          { "present": "crates/norn-serve/src/wire.rs" },
+          { "symbol-absent": "crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault" }
         ]
       }
     },
@@ -885,10 +899,11 @@
       "sources": ["frozen NRN board sweep"],
       "binding": {
         "status": "dormant",
-        "reason": "the folding half is stated once and has no second site to disagree with it: crates/norn-fs/src/path.rs declares ASCII-only folding, decided by the entry the root holds rather than by a platform guess. The date half has no subject: no filter, default or rendered field accepts a relative word, because no vocabulary spells a time zone to resolve one against, and no caller's filter reaches a host until a verb is served: norn serve answers every request 404 and dispatches no verb until the wire route's dispatch, crates/norn-serve/src/wire.rs::dispatch, lands.",
+        "reason": "the folding half is stated once and has no second site to disagree with it: crates/norn-fs/src/path.rs declares ASCII-only folding, decided by the entry the root holds rather than by a platform guess. The date half has no subject: no filter, default or rendered field accepts a relative word, because no vocabulary spells a time zone to resolve one against, and no caller's filter reaches a host until a verb is served: the wire route now serves every verb — crates/norn-serve/src/wire.rs routes each to the host method that answers it, and a caller's filter now reaches a host; what is still missing is a vocabulary that spells a time zone, and the rendered field that would state it, which the CLI renders through crates/norn-console, not in the workspace.",
         "grounds": [
           { "present": "crates/norn-fs/src/path.rs" },
-          { "symbol-absent": "crates/norn-serve/src/wire.rs::dispatch" }
+          { "present": "crates/norn-serve/src/wire.rs" },
+          { "absent": "crates/norn-console" }
         ]
       }
     },
@@ -947,7 +962,7 @@
       "sources": ["NRN-a60", "NRN-a63", "NRN-a59"],
       "binding": {
         "status": "dormant",
-        "reason": "the index and the targeted readers exist: crates/norn-store/src/ddl/documents.rs indexes the path and suffix keys, crates/norn-store/src/request/mod.rs answers one identifier with one bounded statement, and crates/norn-store/tests/store/pillars.rs proves those plans over the SQL the readers emitted. Resolving one string has a subject: crates/norn-store/src/get/mod.rs resolves a target by one seek of the suffix key its root probes, and crates/norn-store/tests/store/get.rs::a_gets_work_follows_its_document_not_the_vault holds its statements independent of vault size. Asking which documents link here has a subject too: crates/norn-store/src/ddl/facts.rs holds every link under the keys a links-to seek reads, a find's links-to part seeks them at the handful of keys one document is named by, and crates/norn-store/tests/store/links.rs::a_links_to_parts_work_follows_its_backlinks_not_the_vault holds its statements and steps independent of vault size. The rest of the re-entry points the property binds have none: k membership probes and every advisory uniqueness or collision check are served request paths, and norn serve answers every request 404 and dispatches no verb until the wire route's dispatch, crates/norn-serve/src/wire.rs::dispatch, lands.",
+        "reason": "the index and the targeted readers exist: crates/norn-store/src/ddl/documents.rs indexes the path and suffix keys, crates/norn-store/src/request/mod.rs answers one identifier with one bounded statement, and crates/norn-store/tests/store/pillars.rs proves those plans over the SQL the readers emitted. Resolving one string has a subject: crates/norn-store/src/get/mod.rs resolves a target by one seek of the suffix key its root probes, and crates/norn-store/tests/store/get.rs::a_gets_work_follows_its_document_not_the_vault holds its statements independent of vault size. Asking which documents link here has a subject too: crates/norn-store/src/ddl/facts.rs holds every link under the keys a links-to seek reads, a find's links-to part seeks them at the handful of keys one document is named by, and crates/norn-store/tests/store/links.rs::a_links_to_parts_work_follows_its_backlinks_not_the_vault holds its statements and steps independent of vault size. The rest of the re-entry points the property binds have none: k membership probes and every advisory uniqueness or collision check are served request paths, and the wire route now serves every verb — crates/norn-serve/src/wire.rs routes each to the host method that answers it, and the membership probes and advisory checks are served, but the served counter bars at scale, which read the counters route's serve.* counters and the host's host.request.* tallies at two vault scales beside a growing control, are not written: crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault is not in the workspace.",
         "grounds": [
           { "present": "crates/norn-store/src/ddl/documents.rs" },
           { "present": "crates/norn-store/src/request/mod.rs" },
@@ -956,7 +971,8 @@
           { "symbol-present": "crates/norn-store/tests/store/get.rs::a_gets_work_follows_its_document_not_the_vault" },
           { "present": "crates/norn-store/src/ddl/facts.rs" },
           { "symbol-present": "crates/norn-store/tests/store/links.rs::a_links_to_parts_work_follows_its_backlinks_not_the_vault" },
-          { "symbol-absent": "crates/norn-serve/src/wire.rs::dispatch" }
+          { "present": "crates/norn-serve/src/wire.rs" },
+          { "symbol-absent": "crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault" }
         ]
       }
     },
@@ -1065,13 +1081,12 @@
       "property": "A barrier fails closed. A change to one is tested in the direction that would let something through, not only in the direction that would refuse too much: trading a spurious refusal for a silent miss trades a safe failure for a dangerous one.",
       "sources": ["NRN-266", "norn-legacy engineering learnings"],
       "binding": {
-        "status": "dormant",
-        "reason": "the refusals this substrate makes are already held in both directions: crates/norn-host/tests/lockdown.rs injects a full disk and a revoked permission, asserts the heal refuses with every committed row standing and the rebuild rung never reached, and asserts the recovery after it admits the withheld work again — so neither the direction that lets something through nor the direction that refuses too much is tested alone. What has no subject is a barrier in this property's sense, a guard deciding what is admitted to a request. This workspace spells barrier in two other senses and neither is that one: the watcher's synchronization boundary in crates/norn-fs/src/watch/faults.rs is a deadline, and the two durability barriers in crates/norn-fs/src/write.rs are the fsyncs that order a replacement's bytes against its name. A deadline and an fsync have no admit-or-refuse direction to be tested in, so neither can fail closed in the sense this property means, and the guards the property is stated over decide what a served request path admits, and nothing is admitted to one: norn serve answers every request 404 and dispatches no verb until the wire route's dispatch, crates/norn-serve/src/wire.rs::dispatch, lands.",
-        "grounds": [
-          { "present": "crates/norn-host/tests/lockdown.rs" },
-          { "present": "crates/norn-fs/src/watch/faults.rs" },
-          { "present": "crates/norn-fs/src/write.rs" },
-          { "symbol-absent": "crates/norn-serve/src/wire.rs::dispatch" }
+        "status": "bound",
+        "tests": [
+          "crates/norn-serve/src/http.rs::the_bearer_middleware_answers_each_refusal_and_admits_the_stored_secret",
+          "crates/norn-serve/src/http.rs::the_fail_closed_state_refuses_the_hello_and_every_bearer_with_500",
+          "crates/norn-serve/src/http/tests/wire.rs::past_the_in_flight_bound_a_request_is_busy_at_once",
+          "crates/norn-serve/src/admission.rs::the_sweep_refuses_every_waiting_claim_and_no_started_one"
         ]
       }
     },
@@ -1098,10 +1113,11 @@
       "sources": ["NRN-257", "NRN-258", "NRN-215", "NRN-503", "NRN-250", "NRN-s17"],
       "binding": {
         "status": "dormant",
-        "reason": "the operator state this protects is computed and kept: crates/norn-host/src/production.rs types a vault whose derivation is degraded and re-files the finding beside that reading, so a schema re-pin leaves the degraded row standing with its finding rather than discarding either. What has no subject is the caller's channel. Nothing emits a signal at the moment a fallback engages, and nothing names the component at fault to an operator, because there is no channel to say it on: the caller's channel is the served answer, and norn serve answers every request 404 and dispatches no verb until the wire route's dispatch, crates/norn-serve/src/wire.rs::dispatch, lands.",
+        "reason": "the operator state this protects is computed and kept: crates/norn-host/src/production.rs types a vault whose derivation is degraded and re-files the finding beside that reading, so a schema re-pin leaves the degraded row standing with its finding rather than discarding either. What has no subject is the caller's channel. Nothing emits a signal at the moment a fallback engages, and nothing names the component at fault to an operator, because there is no channel to say it on: the caller's channel is the served answer, and the wire route now serves every verb — crates/norn-serve/src/wire.rs routes each to the host method that answers it, and the served answer is now the caller's channel, but nothing yet emits a signal on it at the moment a fallback engages, and the operator-visible rendering of one is the CLI's, through crates/norn-console, which is not in the workspace.",
         "grounds": [
           { "present": "crates/norn-host/src/production.rs" },
-          { "symbol-absent": "crates/norn-serve/src/wire.rs::dispatch" }
+          { "present": "crates/norn-serve/src/wire.rs" },
+          { "absent": "crates/norn-console" }
         ]
       }
     },
@@ -1128,11 +1144,11 @@
       "sources": ["NRN-a61"],
       "binding": {
         "status": "dormant",
-        "reason": "a finding is produced and stored today: crates/norn-host/src/derivation.rs plans one for every document it could not read whole, and the store's validate builder answers each as a row carrying the bounded candidate head the pillar holds. What has no subject is the payload. This property is stated over what a caller is handed and how that answer grows with the vault at a fixed defect density, and nothing hands a finding to a caller — norn serve answers every request 404 and dispatches no verb until the wire route's dispatch, crates/norn-serve/src/wire.rs::dispatch, lands, and the surface the payload is measured on first is MCP, crates/norn-mcp, which is not in the workspace — so there is no answer to measure at two scales, and no ambiguity class whose own payload could be shown not to square.",
+        "reason": "a finding is produced and stored today: crates/norn-host/src/derivation.rs plans one for every document it could not read whole, and the store's validate builder answers each as a row carrying the bounded candidate head the pillar holds. What has no subject is the payload. This property is stated over what a caller is handed and how that answer grows with the vault at a fixed defect density, and the wire route now hands a finding to a caller — the wire route now serves every verb — crates/norn-serve/src/wire.rs routes each to the host method that answers it — but the surface the payload is measured on first is MCP, crates/norn-mcp, which is not in the workspace, so there is no answer to measure at two scales, and no ambiguity class whose own payload could be shown not to square.",
         "grounds": [
           { "present": "crates/norn-host/src/derivation.rs" },
-          { "symbol-absent": "crates/norn-serve/src/wire.rs::dispatch" },
-          { "absent": "crates/norn-mcp" }
+          { "absent": "crates/norn-mcp" },
+          { "present": "crates/norn-serve/src/wire.rs" }
         ]
       }
     },
@@ -1144,10 +1160,11 @@
       "sources": ["NRN-466", "NRN-488", "NRN-487", "NRN-303", "NRN-475"],
       "binding": {
         "status": "dormant",
-        "reason": "the snapshot clause is built and holds: crates/norn-host/src/reload.rs reads each authored control file once and hashes the bytes it read, so the bytes it parses are the bytes it fingerprints, and a reload decides against those fingerprints rather than against a value remembered from the attach. The owner the rest of the property is stated over does not exist. Nothing is summoned, nothing resolves an input per request, and there is no served request for a registration or a configuration change to become visible to: norn serve answers every request 404 and dispatches no verb until the wire route's dispatch, crates/norn-serve/src/wire.rs::dispatch, lands.",
+        "reason": "the snapshot clause is built and holds: crates/norn-host/src/reload.rs reads each authored control file once and hashes the bytes it read, so the bytes it parses are the bytes it fingerprints, and a reload decides against those fingerprints rather than against a value remembered from the attach. The owner the rest of the property is stated over does not exist. Nothing is summoned, nothing resolves an input per request, and there is no served request for a registration or a configuration change to become visible to: the wire route now serves every verb — crates/norn-serve/src/wire.rs routes each to the host method that answers it, and a registration made through the wire route is now visible to the next served request, but the owner the rest of the property is stated over — a host summoned per client, resolving inputs per request — is the CLI's auto-launched host, which arrives with crates/norn-console, not in the workspace.",
         "grounds": [
           { "present": "crates/norn-host/src/reload.rs" },
-          { "symbol-absent": "crates/norn-serve/src/wire.rs::dispatch" }
+          { "present": "crates/norn-serve/src/wire.rs" },
+          { "absent": "crates/norn-console" }
         ]
       }
     },
@@ -1223,11 +1240,12 @@
       "sources": ["NRN-323", "NRN-325", "NRN-337", "NRN-465", "NRN-483", "NRN-s29", "NRN-55", "norn-legacy annoyances log", "norn-legacy engineering learnings"],
       "binding": {
         "status": "dormant",
-        "reason": "the poisoned half is built and exercised: crates/norn-db/src/ceremony.rs types a database it cannot read as damage at the statement that met it, crates/norn-host/src/production.rs reads that verdict as the rebuild rung and derives the vault again with nobody asking it to, and creation is exclusive because an attach takes the maintainer lock before it opens anything. The unambiguous-write half has no subject. Applied or not applied, the bounded time a client learns which of the two it was, and a liveness verdict issued against a request the server already completed are all stated over a write a client sends a server, and no write is served: norn serve answers every request 404 and dispatches no verb until the wire route's dispatch, crates/norn-serve/src/wire.rs::dispatch, lands.",
+        "reason": "the poisoned half is built and exercised: crates/norn-db/src/ceremony.rs types a database it cannot read as damage at the statement that met it, crates/norn-host/src/production.rs reads that verdict as the rebuild rung and derives the vault again with nobody asking it to, and creation is exclusive because an attach takes the maintainer lock before it opens anything. The unambiguous-write half has no subject. Applied or not applied, the bounded time a client learns which of the two it was, and a liveness verdict issued against a request the server already completed are all stated over a write a client sends a server, and no write is served: the wire route now serves every verb — crates/norn-serve/src/wire.rs routes each to the host method that answers it, and a served write is answered applied, refused or interrupted by its envelope; what is still missing is the bounded time a client learns which it was when the host stops or dies under the write, which the bounded drain answers through an apply's abandonment, crates/norn-host/src/lifecycle/apply.rs::abandon, not in the workspace.",
         "grounds": [
           { "present": "crates/norn-db/src/ceremony.rs" },
           { "present": "crates/norn-host/src/production.rs" },
-          { "symbol-absent": "crates/norn-serve/src/wire.rs::dispatch" }
+          { "present": "crates/norn-serve/src/wire.rs" },
+          { "symbol-absent": "crates/norn-host/src/lifecycle/apply.rs::abandon" }
         ]
       }
     },
@@ -1248,7 +1266,7 @@
           "crates/norn-host/tests/applies.rs::a_resolved_plan_whose_target_drifted_previews_as_its_apply_refuses",
           "crates/norn-host/tests/verbs.rs::a_previewed_creation_lands_as_previewed_after_the_clock_moves",
           "crates/norn-host/src/applier/tests.rs::re_sending_conditioned_operations_is_refused_rather_than_repeated",
-      "crates/norn-host/tests/verbs.rs::re_sending_unconditioned_operations_appends_again_but_the_resolved_plan_does_not",
+          "crates/norn-host/tests/verbs.rs::re_sending_unconditioned_operations_appends_again_but_the_resolved_plan_does_not",
           "crates/norn-host/tests/verbs.rs::a_set_where_writes_exactly_the_matched_documents_in_one_changeset",
           "crates/norn-host/tests/verbs.rs::a_set_where_naming_an_unknown_key_is_unresolved_naming_it",
           "crates/norn-host/tests/verbs.rs::a_set_where_with_a_typed_bound_matches_what_a_find_answers",
@@ -1331,11 +1349,12 @@
       "sources": ["NORN-a1", "NRN-a59", "NRN-a62"],
       "binding": {
         "status": "dormant",
-        "reason": "the derivation half of the bar runs today: crates/norn-host/tests/counter_gate.rs attaches a real host over a generated tree and reads every member of the vocabulary crates/norn-store/src/counters.rs declares back at zero on a warm read, once over the rows an attachment left behind and once under a live attachment. What the case still waits on is the verb. Every substrate input the handler does not read, and the round-trip floor a verb costs and nothing more, are stated over a served handler and its round trip, and norn serve answers every request 404 and dispatches no verb until the wire route's dispatch, crates/norn-serve/src/wire.rs::dispatch, lands, so there is no floor to measure a verb against and no closure whose unread inputs could be enumerated.",
+        "reason": "the derivation half of the bar runs today: crates/norn-host/tests/counter_gate.rs attaches a real host over a generated tree and reads every member of the vocabulary crates/norn-store/src/counters.rs declares back at zero on a warm read, once over the rows an attachment left behind and once under a live attachment. What the case still waits on is the verb. Every substrate input the handler does not read, and the round-trip floor a verb costs and nothing more, are stated over a served handler and its round trip, and the wire route now serves every verb — crates/norn-serve/src/wire.rs routes each to the host method that answers it, and the counters route reads a served request's host.request.* tallies and the host's job account, but the served counter bars at scale, which read the counters route's serve.* counters and the host's host.request.* tallies at two vault scales beside a growing control, are not written: crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault is not in the workspace, so there is no floor to measure a verb against and no closure whose unread inputs could be enumerated.",
         "grounds": [
           { "present": "crates/norn-host/tests/counter_gate.rs" },
           { "present": "crates/norn-store/src/counters.rs" },
-          { "symbol-absent": "crates/norn-serve/src/wire.rs::dispatch" }
+          { "present": "crates/norn-serve/src/wire.rs" },
+          { "symbol-absent": "crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault" }
         ]
       }
     },
@@ -1637,12 +1656,13 @@
       "kind": "defect-class",
       "mandatory": true,
       "venue": 6,
-      "property": "A failure's code belongs to one fault class, and the exit code a surface ends with agrees with that class for every code, so a caller reading only the exit status learns the class of fault the code names.",
+      "property": "A failure belongs to one fault class, decided by its code and, where the class depends on it, by the detail the code carries, and the exit code a surface ends with agrees with that class for every code and every such detail, so a caller reading only the exit status learns the class of fault the failure names.",
       "sources": ["NRN-s8", "NRN-387", "NRN-436", "NRN-131", "NRN-414"],
       "binding": {
         "status": "dormant",
-        "reason": "no failure code reaches an exit status: the binary's one command is norn serve, which exits with its own start and stop statuses, and a verb's outcome is ended with a status by the command-line surface that renders through crates/norn-console, which is not in the workspace.",
+        "reason": "no failure reaches an exit status: the classes are decided, over each code and the detail variants the class depends on, by crates/norn-wire/src/fault.rs, but the binary's one command is norn serve, which exits with its own start and stop statuses, and a verb's outcome is ended with a status by the command-line surface that renders through crates/norn-console, which is not in the workspace.",
         "grounds": [
+          { "present": "crates/norn-wire/src/fault.rs" },
           { "absent": "crates/norn-console" }
         ]
       }
@@ -2041,12 +2061,12 @@
       "sources": ["NRN-s14", "NRN-367", "NRN-374", "NRN-428", "NRN-427", "NRN-44", "NRN-392", "NRN-452", "NRN-399", "norn-legacy annoyances log"],
       "binding": {
         "status": "dormant",
-        "reason": "the diagnostic reaches the answer: crates/norn-wire/src/product.rs::VaultAnswer carries the parts a request could not apply beside its report and says whether the answer is complete. What has no subject is a surface: nothing serves, renders an answer or exits with its outcome, because norn serve answers every request 404 and dispatches no verb until the wire route's dispatch, crates/norn-serve/src/wire.rs::dispatch, lands, and crates/norn-mcp and crates/norn-console are not in the workspace.",
+        "reason": "the diagnostic reaches the answer: crates/norn-wire/src/product.rs::VaultAnswer carries the parts a request could not apply beside its report and says whether the answer is complete. What has no subject is a surface: the wire route now serves every verb — crates/norn-serve/src/wire.rs routes each to the host method that answers it and carries the answer whole, but nothing renders an answer or exits with its outcome, because crates/norn-mcp and crates/norn-console are not in the workspace.",
         "grounds": [
           { "symbol-present": "crates/norn-wire/src/product.rs::VaultAnswer" },
           { "absent": "crates/norn-mcp" },
-          { "symbol-absent": "crates/norn-serve/src/wire.rs::dispatch" },
-          { "absent": "crates/norn-console" }
+          { "absent": "crates/norn-console" },
+          { "present": "crates/norn-serve/src/wire.rs" }
         ]
       }
     },
@@ -2058,11 +2078,11 @@
       "sources": ["NRN-446", "NRN-500", "NRN-503", "NRN-476", "NRN-37", "norn-legacy annoyances log"],
       "binding": {
         "status": "dormant",
-        "reason": "no surface renders a verb's warning: norn serve answers every request 404 and dispatches no verb until the wire route's dispatch, crates/norn-serve/src/wire.rs::dispatch, lands, and the two renderings the property is held across, MCP's crates/norn-mcp and the CLI's crates/norn-console, are not in the workspace.",
+        "reason": "the wire route carries every warning in the answer — the wire route now serves every verb — crates/norn-serve/src/wire.rs routes each to the host method that answers it — but no surface renders one: the two renderings the property is held across, MCP's crates/norn-mcp and the CLI's crates/norn-console, are not in the workspace.",
         "grounds": [
-          { "symbol-absent": "crates/norn-serve/src/wire.rs::dispatch" },
           { "absent": "crates/norn-mcp" },
-          { "absent": "crates/norn-console" }
+          { "absent": "crates/norn-console" },
+          { "present": "crates/norn-serve/src/wire.rs" }
         ]
       }
     },
@@ -2087,10 +2107,14 @@
       "property": "An outcome is carried in the protocol's native failure channel on every surface, so a completed apply, a preflight refusal and a partial-apply failure are distinguishable without parsing an in-band report. The same condition yields the same machine code and envelope everywhere, asserted across surfaces, and a machine code is never laundered into prose on the way out.",
       "sources": ["NRN-s5", "NRN-219", "NRN-183", "NRN-220", "NRN-279", "NRN-221", "NRN-150", "NRN-235", "NRN-473", "NRN-497"],
       "binding": {
-        "status": "dormant",
-        "reason": "no protocol surface carries a verb's outcome: norn serve answers every request 404 and dispatches no verb until the wire route's dispatch, crates/norn-serve/src/wire.rs::dispatch, lands. The wire route binds the case for its own channel when that symbol lands; MCP's channel follows.",
-        "grounds": [
-          { "symbol-absent": "crates/norn-serve/src/wire.rs::dispatch" }
+        "status": "bound",
+        "tests": [
+          "crates/norn/tests/serve_wire.rs::a_completed_apply_a_preflight_refusal_and_a_partial_apply_are_told_apart_by_status",
+          "crates/norn-serve/src/http/tests/wire.rs::every_code_reaches_its_class_status_on_the_wire_route",
+          "crates/norn-wire/src/fault.rs::every_code_reaches_the_class_the_table_states",
+          "crates/norn-wire/src/fault.rs::an_untrusted_entry_takes_its_reasons_class",
+          "crates/norn-wire/src/fault.rs::a_failed_read_takes_its_failures_class",
+          "crates/norn-wire/src/fault.rs::an_apply_not_run_takes_its_causes_class"
         ]
       }
     },

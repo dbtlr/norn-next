@@ -40,8 +40,16 @@ test = false
 # `norn-fs`'s `test-support`, since `copied_sources` reads a plan's copy
 # sources under a case behavior its caller states, which only
 # `PathNormalizer::for_sensitivity` builds.
+#
+# `evidence` is the read-only half of that surface, with no fault seam: the
+# job account (`JobEvidence`, `EvidenceReading`) and the per-request tallies,
+# read back as one process-cumulative set through `Host::evidence`, and
+# measured per request through `Host::tallied`. `norn-serve`'s `counters`
+# feature turns it on for the counters route, and no shipped build carries it.
 [features]
+evidence = []
 induced-failure = [
+    "evidence",
     "norn-fs/induced-failure",
     "norn-fs/test-support",
     "norn-store/induced-failure",

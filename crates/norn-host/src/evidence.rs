@@ -159,7 +159,7 @@ pub struct JobEvidence {
 /// what a job spent is how the answer stops being discarded, and it happens
 /// whatever features are on; taking a reading is a harness act, so the reader
 /// is behind `induced-failure` with the rest of the harness-reachable surface.
-#[cfg(any(feature = "induced-failure", test))]
+#[cfg(any(feature = "evidence", test))]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct EvidenceReading {
     /// Reads of a file's content through the contained open, over every
@@ -379,7 +379,7 @@ pub struct EvidenceReading {
     pub rewrite_selection_steps: u64,
 }
 
-#[cfg(any(feature = "induced-failure", test))]
+#[cfg(any(feature = "evidence", test))]
 impl EvidenceReading {
     /// What happened between an earlier reading and this one.
     ///
@@ -543,7 +543,7 @@ impl EvidenceReading {
 
 /// What `later`, a total of rule work, holds beyond `earlier`, count by
 /// count, flooring at zero as [`EvidenceReading::since`] does.
-#[cfg(any(feature = "induced-failure", test))]
+#[cfg(any(feature = "evidence", test))]
 fn rule_work_since(later: RuleWork, earlier: RuleWork) -> RuleWork {
     RuleWork {
         rules_evaluated: later
@@ -604,7 +604,7 @@ impl JobEvidence {
     }
 
     /// This host's account as it stands.
-    #[cfg(any(feature = "induced-failure", test))]
+    #[cfg(any(feature = "evidence", test))]
     pub fn read(&self) -> EvidenceReading {
         let get = |field: &AtomicU64| field.load(Ordering::Relaxed);
         EvidenceReading {
@@ -770,7 +770,7 @@ impl JobEvidence {
     /// The window is consumed by its own report and the changeset tally is
     /// emptied as it is read, so no reading is folded twice and nothing a job
     /// spent is left behind for the next one.
-    fn absorb(&self, window: ReadWindow) {
+    fn absorb(&self, window: ReadWindow) -> norn_fs::reads::ReadTally {
         #[cfg(feature = "induced-failure")]
         let reads = {
             let (reads, files) = window.finish_with_files();
@@ -849,6 +849,7 @@ impl JobEvidence {
             .fetch_add(changesets.link_health_candidates_read, Ordering::Relaxed);
         self.changeset_read_steps
             .fetch_add(changesets.read_steps, Ordering::Relaxed);
+        reads
     }
 
     /// Open a job's window, and fold what it reports into the account when the
@@ -881,6 +882,18 @@ pub(crate) struct Attribution {
     window: Option<ReadWindow>,
 }
 
+impl Attribution {
+    /// End the job's window here rather than at the drop, and answer what its
+    /// thread read while it stood: an apply job hands that to its request's
+    /// tally, which the drop has no way to reach.
+    pub(crate) fn finish(mut self) -> norn_fs::reads::ReadTally {
+        self.window
+            .take()
+            .map(|window| self.account.absorb(window))
+            .unwrap_or_default()
+    }
+}
+
 impl Drop for Attribution {
     fn drop(&mut self) {
         // This drop runs while a failed job unwinds, and a panic here would
@@ -888,7 +901,7 @@ impl Drop for Attribution {
         // taken by whether it is there, so the fold is the same act it always
         // was and the guard has nothing left to panic about.
         if let Some(window) = self.window.take() {
-            self.account.absorb(window);
+            let _ = self.account.absorb(window);
         }
     }
 }
@@ -918,6 +931,15 @@ impl SnapshotWork {
             statements: counters.statements_executed(),
             vm_steps: counters.vm_steps(),
             full_scan_steps: counters.full_scan_steps(),
+        }
+    }
+
+    /// The statements and steps of this work, as a request's tally counts them.
+    pub(crate) fn request_tally(self) -> crate::request_tally::RequestTally {
+        crate::request_tally::RequestTally {
+            statements: self.statements,
+            vm_steps: self.vm_steps,
+            ..Default::default()
         }
     }
 

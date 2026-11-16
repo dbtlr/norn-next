@@ -172,6 +172,7 @@ impl<A: SnapshotSource> ServingSet<A> {
 
     /// The entry serving `name`, and nothing where the set serves no such name.
     pub(crate) fn get(&self, name: &VaultName) -> Option<Arc<Entry<A>>> {
+        crate::request_tally::visit_entries(1);
         self.entries
             .read()
             .expect("serving set poisoned")
@@ -215,12 +216,15 @@ impl<A: SnapshotSource> ServingSet<A> {
 
     /// Every entry the set serves at this instant, ascending by name.
     pub(crate) fn snapshot(&self) -> Vec<Arc<Entry<A>>> {
-        self.entries
+        let entries: Vec<_> = self
+            .entries
             .read()
             .expect("serving set poisoned")
             .values()
             .cloned()
-            .collect()
+            .collect();
+        crate::request_tally::visit_entries(entries.len());
+        entries
     }
 
     /// Every registration the set serves at this instant, ascending by name.
@@ -230,12 +234,15 @@ impl<A: SnapshotSource> ServingSet<A> {
     /// a filesystem read included — stands outside the set's lock and holds
     /// no entry alive.
     pub(crate) fn registrations(&self) -> Vec<Registration> {
-        self.entries
+        let registrations: Vec<_> = self
+            .entries
             .read()
             .expect("serving set poisoned")
             .values()
             .map(|entry| entry.registration.clone())
-            .collect()
+            .collect();
+        crate::request_tally::visit_registrations(registrations.len());
+        registrations
     }
 
     /// The registration whose root most specifically contains `directory`,
@@ -295,6 +302,7 @@ impl<A: SnapshotSource> ServingSet<A> {
                 })
                 .collect::<Vec<_>>()
         };
+        crate::request_tally::visit_registrations(roots.len());
         self.classifications.fetch_add(1, Ordering::SeqCst);
         recheck(
             roots.iter().map(|(name, root)| (name, root.as_path())),

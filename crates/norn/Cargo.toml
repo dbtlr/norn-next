@@ -32,4 +32,7 @@ libc = { workspace = true }
 norn-config = { path = "../norn-config" }
 norn-testkit = { path = "../norn-testkit" }
 norn-wire = { path = "../norn-wire" }
+# The wire suite reads each body it sends as that verb's params first, so a
+# body the suite spelled wrong fails as that rather than as a host refusal.
+serde = { workspace = true }
 serde_json = { workspace = true }

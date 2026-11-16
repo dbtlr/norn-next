@@ -4715,6 +4715,9 @@ pub struct Host<O: EntryOps> {
     scheduler: Option<thread::JoinHandle<()>>,
     /// The background lane's threads.
     lanes: Vec<thread::JoinHandle<()>>,
+    /// The running totals of the requests measured through [`Host::tallied`].
+    #[cfg(feature = "evidence")]
+    requests: crate::request_tally::RequestEvidence,
 }
 
 /// One read's hold on a vault entry.
@@ -5375,6 +5378,47 @@ impl<O: EntryOps> Drop for Host<O> {
     }
 }
 
+/// **What a host has done, process-cumulative and read-only**: the job account
+/// of the work no one request owns (attach, re-attach, heal, background turns)
+/// and the totals of the requests measured through [`Host::tallied`]. A
+/// caller reads it before and after a workload and subtracts. There is no
+/// fault seam behind it.
+#[cfg(feature = "evidence")]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct HostEvidence {
+    /// What the host's jobs spent and did.
+    pub jobs: crate::EvidenceReading,
+    /// What the measured requests cost.
+    pub requests: crate::RequestReading,
+}
+
+#[cfg(feature = "evidence")]
+impl<O: EntryOps> Host<O> {
+    /// Run one request's host call on this thread and measure it alone: the
+    /// `norn-fs` reads this thread made, the statements and VM steps its
+    /// snapshot ran — an apply's job included, which its progress hands back
+    /// — and the registrations and entries it looked at. The tally is added
+    /// to the totals [`Host::evidence`] reads, and answered beside the call's
+    /// own answer.
+    ///
+    /// One request per call: a read window stands on this thread while `run`
+    /// runs, and a second on the same thread is refused.
+    pub fn tallied<T>(&self, run: impl FnOnce() -> T) -> (T, crate::RequestTally) {
+        self.requests.measure(run)
+    }
+}
+
+#[cfg(feature = "evidence")]
+impl Host<crate::ProductionEntryOps> {
+    /// The host's process-cumulative reading set.
+    pub fn evidence(&self) -> HostEvidence {
+        HostEvidence {
+            jobs: self.ops().job_evidence().read(),
+            requests: self.requests.read(),
+        }
+    }
+}
+
 impl<O: EntryOps> Host<O> {
     /// The effect seam this host drives.
     pub(crate) fn ops(&self) -> &O {
@@ -5729,6 +5773,8 @@ impl<O: EntryOps> Host<O> {
             dispatcher: Some(dispatcher),
             scheduler: Some(scheduler),
             lanes,
+            #[cfg(feature = "evidence")]
+            requests: crate::request_tally::RequestEvidence::default(),
         })
     }
 

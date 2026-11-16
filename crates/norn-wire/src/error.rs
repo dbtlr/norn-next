@@ -596,6 +596,90 @@ pub enum ReasonCode {
     /// as what an unverified listener said, not as a fact about the file.
     #[serde(rename = "serve/token-file-unreadable")]
     ServeTokenFileUnreadable,
+    /// `serve/unknown-verb` — the request's path names no verb this host
+    /// serves: no verb at all, or one whose phase has not landed on the wire
+    /// route. Nothing ran. The detail carries nothing.
+    #[serde(rename = "serve/unknown-verb")]
+    ServeUnknownVerb,
+    /// `serve/busy` — the host could not take the request up before its
+    /// deadline: the wire route's in-flight bound was full, or the request
+    /// waited out its deadline for a pool thread or its vault's mutation turn.
+    /// Nothing ran, so the same request may be sent again. The detail carries
+    /// nothing.
+    #[serde(rename = "serve/busy")]
+    ServeBusy,
+    /// `serve/draining` — the host has begun to stop, and refused the request
+    /// before running it: it arrived after the drain began, or it was waiting
+    /// to run when the drain began. Nothing ran, so the same request may be
+    /// sent to the next host. The detail carries nothing.
+    #[serde(rename = "serve/draining")]
+    ServeDraining,
+    /// `serve/outcome-unknown` — the request was running when the host could
+    /// no longer answer it, so whether it took effect is not known: read the
+    /// state back, or send the same request again, which re-checks the state
+    /// it changes. The detail carries nothing.
+    #[serde(rename = "serve/outcome-unknown")]
+    ServeOutcomeUnknown,
+    /// `serve/drain-refused` — the host was asked to drain and was started
+    /// explicitly, and an explicit host is never displaced, so it keeps
+    /// serving. The detail carries nothing.
+    #[serde(rename = "serve/drain-refused")]
+    ServeDrainRefused,
+}
+
+impl ReasonCode {
+    /// Every code the vocabulary holds, in declaration order.
+    ///
+    /// A surface that must answer each code — the fault classes, a status
+    /// table, an exit-code table — walks this list in its tests, so a code
+    /// minted without a row there fails a test rather than falling through a
+    /// wildcard. The error suite holds it equal to the enum itself.
+    pub const ALL: [ReasonCode; 44] = [
+        ReasonCode::HostDuplicateRoot,
+        ReasonCode::HostSharedSchema,
+        ReasonCode::HostEntryUntrusted,
+        ReasonCode::HostMaintainerContended,
+        ReasonCode::HostUnknownVault,
+        ReasonCode::HostAlreadyServed,
+        ReasonCode::HostEntryHeld,
+        ReasonCode::HostEntryNotReady,
+        ReasonCode::HostReaderUnavailable,
+        ReasonCode::HostRegistryUnwritable,
+        ReasonCode::HostReadFailed,
+        ReasonCode::HostApplyNotRun,
+        ReasonCode::HostApplyOutcomeUnknown,
+        ReasonCode::VaultAmbiguousRoot,
+        ReasonCode::VaultAmbiguousTarget,
+        ReasonCode::VaultUnknownTarget,
+        ReasonCode::VaultUnknownRule,
+        ReasonCode::VaultReloadBusy,
+        ReasonCode::VaultReloadFailed,
+        ReasonCode::VaultCursorOrderChanged,
+        ReasonCode::VaultUnreadableBound,
+        ReasonCode::VaultPlanRefused,
+        ReasonCode::VaultRootChanged,
+        ReasonCode::VaultPlanInterrupted,
+        ReasonCode::VaultWriteFailed,
+        ReasonCode::VaultMigrationRefused,
+        ReasonCode::RequestOutOfBound,
+        ReasonCode::RequestPartNotTaken,
+        ReasonCode::RequestCursorNotTaken,
+        ReasonCode::RequestPlanInvalid,
+        ReasonCode::RequestUnsatisfied,
+        ReasonCode::EngineNotEnabled,
+        ReasonCode::EngineUnavailable,
+        ReasonCode::EngineFailed,
+        ReasonCode::ServeBadRequest,
+        ReasonCode::ServeUnauthorized,
+        ReasonCode::ServeHelloRefused,
+        ReasonCode::ServeRequestTooLarge,
+        ReasonCode::ServeTokenFileUnreadable,
+        ReasonCode::ServeUnknownVerb,
+        ReasonCode::ServeBusy,
+        ReasonCode::ServeDraining,
+        ReasonCode::ServeOutcomeUnknown,
+        ReasonCode::ServeDrainRefused,
+    ];
 }
 
 /// A list of vault names naming fewer than two of them.
@@ -1067,6 +1151,21 @@ pub enum ErrorDetail {
     /// The detail of `serve/token-file-unreadable`, which carries nothing.
     #[serde(rename = "serve/token-file-unreadable")]
     TokenFileUnreadable {},
+    /// The detail of `serve/unknown-verb`, which carries nothing.
+    #[serde(rename = "serve/unknown-verb")]
+    UnknownVerb {},
+    /// The detail of `serve/busy`, which carries nothing.
+    #[serde(rename = "serve/busy")]
+    Busy {},
+    /// The detail of `serve/draining`, which carries nothing.
+    #[serde(rename = "serve/draining")]
+    Draining {},
+    /// The detail of `serve/outcome-unknown`, which carries nothing.
+    #[serde(rename = "serve/outcome-unknown")]
+    OutcomeUnknown {},
+    /// The detail of `serve/drain-refused`, which carries nothing.
+    #[serde(rename = "serve/drain-refused")]
+    DrainRefused {},
 }
 
 impl ErrorDetail {
@@ -1353,6 +1452,31 @@ impl ErrorDetail {
         ErrorDetail::TokenFileUnreadable {}
     }
 
+    /// The detail of `serve/unknown-verb`.
+    pub const fn unknown_verb() -> Self {
+        ErrorDetail::UnknownVerb {}
+    }
+
+    /// The detail of `serve/busy`.
+    pub const fn busy() -> Self {
+        ErrorDetail::Busy {}
+    }
+
+    /// The detail of `serve/draining`.
+    pub const fn draining() -> Self {
+        ErrorDetail::Draining {}
+    }
+
+    /// The detail of `serve/outcome-unknown`.
+    pub const fn outcome_unknown() -> Self {
+        ErrorDetail::OutcomeUnknown {}
+    }
+
+    /// The detail of `serve/drain-refused`.
+    pub const fn drain_refused() -> Self {
+        ErrorDetail::DrainRefused {}
+    }
+
     /// The code this detail is the payload of.
     pub const fn code(&self) -> ReasonCode {
         match self {
@@ -1395,6 +1519,11 @@ impl ErrorDetail {
             ErrorDetail::HelloRefused { .. } => ReasonCode::ServeHelloRefused,
             ErrorDetail::RequestTooLarge { .. } => ReasonCode::ServeRequestTooLarge,
             ErrorDetail::TokenFileUnreadable { .. } => ReasonCode::ServeTokenFileUnreadable,
+            ErrorDetail::UnknownVerb { .. } => ReasonCode::ServeUnknownVerb,
+            ErrorDetail::Busy { .. } => ReasonCode::ServeBusy,
+            ErrorDetail::Draining { .. } => ReasonCode::ServeDraining,
+            ErrorDetail::OutcomeUnknown { .. } => ReasonCode::ServeOutcomeUnknown,
+            ErrorDetail::DrainRefused { .. } => ReasonCode::ServeDrainRefused,
         }
     }
 }
@@ -1474,7 +1603,7 @@ impl<'de> Deserialize<'de> for ErrorEnvelope {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     use crate::finding_row::Candidate;
@@ -1495,7 +1624,7 @@ mod tests {
         ResolutionTarget::new("glossary").expect("a legal resolution target")
     }
 
-    fn a_name() -> VaultName {
+    pub(crate) fn a_name() -> VaultName {
         VaultName::new("notes").expect("a legal vault name")
     }
 
@@ -1504,7 +1633,7 @@ mod tests {
     }
 
     /// The plan the apply outcomes are read against: one removal, resolved.
-    fn a_plan() -> ResolvedPlan {
+    pub(crate) fn a_plan() -> ResolvedPlan {
         ResolvedPlan::new(
             crate::address::VaultAddress::name(a_name()),
             RootIdentity::from_device_and_inode(1, 2),
@@ -1516,7 +1645,7 @@ mod tests {
 
     /// Every code the vocabulary holds, read back out of the schema the derive
     /// produces: the list is the enum's own, not one maintained beside it.
-    fn every_code() -> Vec<(String, ReasonCode)> {
+    pub(crate) fn every_code() -> Vec<(String, ReasonCode)> {
         let schema = serde_json::to_value(schemars::schema_for!(ReasonCode))
             .expect("a reason-code schema as JSON");
         let branches = schema["oneOf"]
@@ -1581,13 +1710,18 @@ mod tests {
             ReasonCode::ServeHelloRefused => "serve/hello-refused",
             ReasonCode::ServeRequestTooLarge => "serve/request-too-large",
             ReasonCode::ServeTokenFileUnreadable => "serve/token-file-unreadable",
+            ReasonCode::ServeUnknownVerb => "serve/unknown-verb",
+            ReasonCode::ServeBusy => "serve/busy",
+            ReasonCode::ServeDraining => "serve/draining",
+            ReasonCode::ServeOutcomeUnknown => "serve/outcome-unknown",
+            ReasonCode::ServeDrainRefused => "serve/drain-refused",
         }
     }
 
     /// A detail the code pairs with, carrying one payload that code can hold.
     /// The match carries no wildcard, so a code minted without a detail does
     /// not compile.
-    fn a_detail(code: &ReasonCode) -> ErrorDetail {
+    pub(crate) fn a_detail(code: &ReasonCode) -> ErrorDetail {
         match code {
             ReasonCode::HostDuplicateRoot => ErrorDetail::duplicate_root(two_names()),
             ReasonCode::HostSharedSchema => ErrorDetail::shared_schema(two_names()),
@@ -1703,7 +1837,20 @@ mod tests {
             ReasonCode::ServeHelloRefused => ErrorDetail::hello_refused(),
             ReasonCode::ServeRequestTooLarge => ErrorDetail::request_too_large(),
             ReasonCode::ServeTokenFileUnreadable => ErrorDetail::token_file_unreadable(),
+            ReasonCode::ServeUnknownVerb => ErrorDetail::unknown_verb(),
+            ReasonCode::ServeBusy => ErrorDetail::busy(),
+            ReasonCode::ServeDraining => ErrorDetail::draining(),
+            ReasonCode::ServeOutcomeUnknown => ErrorDetail::outcome_unknown(),
+            ReasonCode::ServeDrainRefused => ErrorDetail::drain_refused(),
         }
+    }
+
+    /// The list a surface walks is the enum's own, in declaration order:
+    /// a code missing from it is a code no surface's table is held to.
+    #[test]
+    fn the_code_list_is_every_code_the_enum_holds() {
+        let codes: Vec<ReasonCode> = every_code().into_iter().map(|(_, code)| code).collect();
+        assert_eq!(ReasonCode::ALL.to_vec(), codes);
     }
 
     #[test]
@@ -1769,6 +1916,11 @@ mod tests {
             ErrorDetail::hello_refused(),
             ErrorDetail::request_too_large(),
             ErrorDetail::token_file_unreadable(),
+            ErrorDetail::unknown_verb(),
+            ErrorDetail::busy(),
+            ErrorDetail::draining(),
+            ErrorDetail::outcome_unknown(),
+            ErrorDetail::drain_refused(),
         ] {
             let json = serde_json::to_value(&detail).expect("a detail as JSON");
             let object = json.as_object().expect("a detail is an object");

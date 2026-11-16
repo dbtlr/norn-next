@@ -153,7 +153,12 @@ where
             .begin_read_for(name, need)
             .map_err(|refusal| refusal.answer(name))?;
         let reading = hold.reading().answer_reading(name)?;
-        let built = match build(name, &hold) {
+        let built = build(name, &hold);
+        // What the builder ran is the request's whether it answered or
+        // refused, so it is counted before either leaves.
+        let snapshot = hold.snapshot().counters();
+        crate::request_tally::add(crate::request_tally::RequestTally::of_snapshot(snapshot));
+        let built = match built {
             Ok(built) => built,
             Err(BuildRefused::Answered(envelope)) => return Err(envelope),
             Err(BuildRefused::Page(refusal)) => {
@@ -169,7 +174,7 @@ where
             answer: VaultAnswer::new(reading, built.unsatisfied, built.report)
                 .with_advisories(built.advisories),
             work: built.work,
-            snapshot: hold.snapshot().counters(),
+            snapshot,
         })
     }
 
@@ -200,6 +205,10 @@ where
         let result = build(&hold);
         #[cfg(feature = "induced-failure")]
         hold.query_boundary(self, true);
+        // What the builder ran is the request's whether it answered or
+        // refused, so it is counted before either leaves.
+        let snapshot = hold.counters();
+        crate::request_tally::add(crate::request_tally::RequestTally::of_snapshot(snapshot));
         // Storage/resource failures keep their actual type. Other refusals require
         // the same final authority judgment as successful rows.
         let depends_on_source = match &result {
@@ -243,7 +252,7 @@ where
             answer: VaultAnswer::new(reading, built.unsatisfied, built.report)
                 .with_advisories(built.advisories),
             work: built.work,
-            snapshot: hold.counters(),
+            snapshot,
         })
     }
 

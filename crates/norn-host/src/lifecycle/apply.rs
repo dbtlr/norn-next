@@ -27,6 +27,8 @@ use std::sync::{Arc, Mutex, PoisonError, mpsc};
 
 use norn_fs::Batch;
 use norn_store::StoreReading;
+
+use crate::request_tally::RequestTally;
 use norn_wire::{
     ApplyReport, ErrorDetail, ErrorEnvelope, PlanDocument, ResolvedPlan, VaultAnswer, VaultName,
 };
@@ -55,6 +57,10 @@ pub struct ApplyProgress {
 struct ProgressRecord {
     plan: Option<ResolvedPlan>,
     publishing: bool,
+    /// What the apply's job cost, recorded on the worker that ran it before
+    /// the answer is sent, and added to the waiting caller's request tally
+    /// once it is answered.
+    tally: RequestTally,
 }
 
 impl ApplyProgress {
@@ -75,6 +81,18 @@ impl ApplyProgress {
     /// Whether publication began.
     pub(super) fn began_publishing(&self) -> bool {
         self.lock().publishing
+    }
+
+    /// Add `tally` to what this apply's job cost.
+    pub(crate) fn tally(&self, tally: RequestTally) {
+        let mut record = self.lock();
+        record.tally = record.tally.plus(tally);
+    }
+
+    /// Hand what the job cost to the request waiting on this thread, once.
+    pub(crate) fn hand_tally_to_this_thread(&self) {
+        let tally = std::mem::take(&mut self.lock().tally);
+        crate::request_tally::add(tally);
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, ProgressRecord> {
@@ -337,9 +355,15 @@ impl PendingApply {
                 answer,
                 progress,
                 cause,
-            } => answer
-                .recv()
-                .unwrap_or_else(|_| Err(progress.unanswered(cause))),
+            } => {
+                let answered = answer
+                    .recv()
+                    .unwrap_or_else(|_| Err(progress.unanswered(cause)));
+                // The job recorded its tally before the answer was sent, so
+                // it is whole by now; a dropped reply hands what it reached.
+                progress.hand_tally_to_this_thread();
+                answered
+            }
         }
     }
 }

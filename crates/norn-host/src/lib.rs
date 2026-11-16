@@ -23,6 +23,7 @@ mod refusal;
 mod registry;
 mod reload;
 mod repair_advisories;
+mod request_tally;
 mod search;
 mod semantic;
 mod status;
@@ -35,11 +36,12 @@ pub use evidence::{
     EarlyReadsServed, LinkJudgmentCost, PlanningHoldCost, ReadReading, ReadsSince,
     RepairAdvisoryCost, RepairBatchCost, RepairSuggestionsCost, SimilarStemsCost,
 };
-/// **The harness-reachable readers of a host's own account.** Every job writes
-/// the account whatever features are on; reading it is what this feature opens,
-/// beside [`ProductionEntryOps::account`], [`Host::classifications`] and
+/// **The readers of a host's own account.** Every job writes the account
+/// whatever features are on; reading it is what the `evidence` feature opens,
+/// read-only and with no fault seam, and `induced-failure` implies it, beside
+/// [`ProductionEntryOps::account`], [`Host::classifications`] and
 /// [`Host::recovery_demands`].
-#[cfg(feature = "induced-failure")]
+#[cfg(feature = "evidence")]
 pub use evidence::{EvidenceReading, JobEvidence};
 /// **What is running against an entry**, read by the harness that has to know
 /// the host stopped working before it measures one at rest. Behind the same
@@ -48,6 +50,11 @@ pub use evidence::{EvidenceReading, JobEvidence};
 pub use lifecycle::WorkInFlight;
 #[cfg(feature = "induced-failure")]
 pub use production::loading::{LoadingBoundary, LoadingProbe};
+#[cfg(feature = "evidence")]
+pub use request_tally::RequestReading;
+/// **What the requests a host served cost**, each attributed to its own
+/// request: read back under the `evidence` feature through `Host::evidence`.
+pub use request_tally::RequestTally;
 
 /// **Which targets of a resolved plan the applier copies another target
 /// from**, unread, through the write kernel (`norn_fs::Content::CopyOf`):
@@ -64,6 +71,8 @@ pub fn copied_sources(
 ) -> Vec<norn_wire::DocumentPath> {
     applier::copied_sources(plan, &norn_fs::PathNormalizer::for_sensitivity(sensitivity))
 }
+#[cfg(feature = "evidence")]
+pub use lifecycle::HostEvidence;
 pub use lifecycle::{
     ApplyEnd, ApplyEnding, ApplyProgress, BackgroundUnit, Demand, DemandLease, EntryOps,
     EntryReloadFailure, Established, Healing, HoldReading, Host, HostError, JobFailure,
