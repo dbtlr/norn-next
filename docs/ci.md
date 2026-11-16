@@ -223,6 +223,11 @@ names no shell. What the script cannot honor as CI does stops it with an error:
 - a workflow with `defaults.run`, and an `env` at any level that cannot be read
   whole.
 
+A job's `timeout-minutes` is neither honored nor refused. In CI it is a runaway
+guard that cancels a hung job; the script sets no deadline, so a step that
+hangs locally hangs the gate until it is interrupted, and a job that would
+outrun its guard in CI is not failed for it locally.
+
 Each step prints its job and name, then PASS or FAIL with its exit status and
 wall time. The gate keeps going after a failure, ends with a summary of every
 step, and exits non-zero if any step failed. `--list` prints the steps and
