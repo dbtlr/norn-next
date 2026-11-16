@@ -336,6 +336,24 @@ impl Lease {
     /// bounds tell themselves apart in the diagnostic.
     #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // The lease is this crate's own machine-local state, and a file lock is what makes it cross-process.
     fn try_hold_under(key: &str, budget: Budget, patience: Patience) -> Result<Self, WaitFailure> {
+        Self::try_hold_noting(key, budget, patience, |line| eprintln!("{line}"))
+    }
+
+    /// The acquisition, with the waiter's two notices handed to `note`.
+    ///
+    /// A waiter that finds the lease held says once who holds it, using the
+    /// record the failure messages already read, and says when it acquires the
+    /// lease how long it waited. A hold that finds the lease free says nothing,
+    /// so uncontended runs stay quiet. The notices are why a caller whose own
+    /// deadline counts this queue time is not left with an empty stderr when a
+    /// long holder ends it. No bound moves with them.
+    #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // See `try_hold_under`.
+    fn try_hold_noting(
+        key: &str,
+        budget: Budget,
+        patience: Patience,
+        mut note: impl FnMut(&str),
+    ) -> Result<Self, WaitFailure> {
         let patience = patience.bound();
         let root = root();
         let path = lease_path(&root, key);
@@ -353,6 +371,7 @@ impl Lease {
         let started = Instant::now();
         let mut probes = 0usize;
         let mut looks = Unmoved::default();
+        let mut queued = false;
 
         wait_until(&what, budget, || {
             probes += 1;
@@ -360,6 +379,10 @@ impl Lease {
                 Ok(()) => Observed::Met(Ok(())),
                 Err(TryLockError::WouldBlock) => {
                     let (record, unmoved) = looks.look(|| holder(&path));
+                    if !queued {
+                        queued = true;
+                        note(&format!("waiting for the {key} lease, held by {record}"));
+                    }
                     if unmoved >= patience {
                         Observed::Met(Err(WaitFailure {
                             what: what.clone(),
@@ -382,6 +405,12 @@ impl Lease {
             }
         })??;
 
+        if queued {
+            note(&format!(
+                "acquired the {key} lease; waited {:?}",
+                started.elapsed()
+            ));
+        }
         record_holder(&file, key, write_record);
         Ok(Lease {
             key: key.to_owned(),
@@ -654,6 +683,76 @@ mod tests {
             "the failure does not name the lease it waited for: {rendered}"
         );
         drop(occupier);
+    }
+
+    /// A waiter says who it is queued behind while it waits, and says when it
+    /// got the lease and how long that took; a hold that never waits says
+    /// nothing.
+    ///
+    /// The forbidden shape is the silent queue: a child whose own deadline
+    /// counts its time behind a long holder and ends with an empty stderr that
+    /// gives the operator nothing to go look at.
+    #[test]
+    fn a_waiter_names_its_holder_before_it_acquires_and_says_how_long_it_waited() {
+        let key = PrivateKey::new("noted");
+        let notes = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let sink = |notes: &Arc<std::sync::Mutex<Vec<String>>>| {
+            let notes = Arc::clone(notes);
+            move |line: &str| notes.lock().expect("notes").push(line.to_owned())
+        };
+
+        let free = Lease::try_hold_noting(key.as_str(), budget(), Patience::Standing, sink(&notes))
+            .expect("a free lease");
+        assert!(
+            notes.lock().expect("notes").is_empty(),
+            "a hold that did not wait wrote {:?}",
+            notes.lock().expect("notes")
+        );
+
+        let waiter = {
+            let (name, notes) = (key.as_str().to_owned(), Arc::clone(&notes));
+            thread::spawn(move || {
+                let lease =
+                    Lease::try_hold_noting(&name, budget(), Patience::Standing, sink(&notes))
+                        .expect("the lease once it is let go");
+                drop(lease);
+            })
+        };
+
+        wait_until("the waiter's holder line", budget(), || {
+            let seen = notes.lock().expect("notes").clone();
+            if seen.is_empty() {
+                Observed::pending("the waiter has said nothing")
+            } else {
+                Observed::Met(seen)
+            }
+        })
+        .unwrap_or_else(|failure| panic!("{failure}"));
+        let before = notes.lock().expect("notes").clone();
+        assert_eq!(before.len(), 1, "one line while waiting: {before:?}");
+        assert!(
+            before[0].contains(&format!("pid {}", std::process::id()))
+                && before[0].contains(key.as_str())
+                && before[0].contains("since unix"),
+            "the waiting line does not name the holder: {}",
+            before[0]
+        );
+
+        drop(free);
+        waiter.join().expect("the waiter");
+        let after = notes.lock().expect("notes").clone();
+        assert_eq!(
+            after.len(),
+            2,
+            "a waiting line and an acquired line: {after:?}"
+        );
+        assert!(
+            after[1].contains("acquired")
+                && after[1].contains(key.as_str())
+                && after[1].contains("waited"),
+            "the acquired line does not say it waited: {}",
+            after[1]
+        );
     }
 
     /// Two keys are two leases: holding one leaves the other free, so a second
