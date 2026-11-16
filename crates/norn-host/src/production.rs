@@ -545,6 +545,7 @@ fn apply_over(
     let counted = SnapshotCounted {
         snapshot: &planned_on,
         evidence,
+        progress,
     };
     let resolved = match plan {
         PlanDocument::Resolved(resolved) => resolved,
@@ -608,12 +609,16 @@ fn apply_over(
 struct SnapshotCounted<'s, 'a> {
     snapshot: &'s crate::apply::PlanSnapshot<'a>,
     evidence: &'s JobEvidence,
+    /// The apply's request, whose tally the snapshot's work is also the
+    /// request's share of.
+    progress: &'s ApplyProgress,
 }
 
 impl Drop for SnapshotCounted<'_, '_> {
     fn drop(&mut self) {
-        self.evidence
-            .count_apply_snapshot(self.snapshot.job_snapshot_work());
+        let work = self.snapshot.job_snapshot_work();
+        self.evidence.count_apply_snapshot(work);
+        self.progress.tally(work.request_tally());
     }
 }
 
@@ -1439,6 +1444,12 @@ impl ProductionEntryOps {
     #[cfg(feature = "induced-failure")]
     pub fn account(&self) -> Arc<JobEvidence> {
         Arc::clone(&self.evidence)
+    }
+
+    /// This host's job account, read by [`Host::evidence`](crate::Host::evidence).
+    #[cfg(feature = "evidence")]
+    pub(crate) fn job_evidence(&self) -> &JobEvidence {
+        &self.evidence
     }
 
     fn derived(&self, name: &VaultName) -> PathBuf {
@@ -2532,7 +2543,7 @@ impl EntryOps for ProductionEntryOps {
         progress: &ApplyProgress,
         reporter: &ProgressReporter<Self::Attachment>,
     ) -> Result<ApplyEnd, JobFailure> {
-        let _job = self.evidence.attributing();
+        let job = self.evidence.attributing();
         if !attachment
             .maintainership
             .still_current()
@@ -2548,6 +2559,11 @@ impl EntryOps for ProductionEntryOps {
         if matches!(ended.answer, ApplyEnding::Answered(_)) {
             self.owe_semantic(name, attachment, reporter);
         }
+        // The request's share of the job: what this worker read, recorded
+        // before the lifecycle sends the answer, so the caller reads it once
+        // it is answered. The snapshot's statements were recorded where the
+        // snapshot was counted.
+        progress.tally(crate::request_tally::RequestTally::of_reads(&job.finish()));
         Ok(ended)
     }
 

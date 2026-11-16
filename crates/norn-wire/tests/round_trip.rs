@@ -193,6 +193,11 @@ fn reason_codes() -> Vec<ReasonCode> {
         ReasonCode::ServeHelloRefused,
         ReasonCode::ServeRequestTooLarge,
         ReasonCode::ServeTokenFileUnreadable,
+        ReasonCode::ServeUnknownVerb,
+        ReasonCode::ServeBusy,
+        ReasonCode::ServeDraining,
+        ReasonCode::ServeOutcomeUnknown,
+        ReasonCode::ServeDrainRefused,
     ]
 }
 
@@ -349,6 +354,11 @@ fn error_details() -> Vec<ErrorDetail> {
         ErrorDetail::hello_refused(),
         ErrorDetail::request_too_large(),
         ErrorDetail::token_file_unreadable(),
+        ErrorDetail::unknown_verb(),
+        ErrorDetail::busy(),
+        ErrorDetail::draining(),
+        ErrorDetail::outcome_unknown(),
+        ErrorDetail::drain_refused(),
     ]);
     details.extend(migration_refusals().into_iter().flat_map(|reason| {
         [ControlFile::Schema, ControlFile::Config]

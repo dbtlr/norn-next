@@ -543,10 +543,18 @@
 //! any vault: a count it named outside the bound that count holds to, a part
 //! it carries that the answer it asks for does not take, or a cursor that
 //! names no position among the rows the request pages.
-//! `serve/…` is a fact about the server's own handling of the request, decided
-//! before any verb runs: a body it could not read as the route's shape or
-//! that is over its bound, a bearer it did not accept, a hello it refused, or
-//! a token file it cannot read, which refuses every request until it reads.
+//! `serve/…` is a fact about the server's own handling of the request: a body
+//! it could not read as the route's shape or that is over its bound, a bearer
+//! it did not accept, a hello it refused, a token file it cannot read, which
+//! refuses every request until it reads, a path naming no verb it serves, a
+//! request it could not take up in time or refused because it is stopping, a
+//! request whose outcome it can no longer report, and a drain an explicit host
+//! refuses.
+//!
+//! **Every refusal has one [`FaultClass`]**, decided by
+//! [`ErrorEnvelope::fault_class`] from its code and, where the class depends
+//! on it, its detail: what the caller should do next, which every surface
+//! renders its own way — an HTTP status, an exit code.
 //!
 //! A namespace names who the
 //! fact is about, never which crate produced it, and a code is *defined*
@@ -598,6 +606,7 @@ mod doctor;
 mod document;
 mod drain;
 mod error;
+mod fault;
 mod finding;
 mod finding_row;
 mod glob;
@@ -647,6 +656,7 @@ pub use error::{
     AnswerShape, ErrorDetail, ErrorEnvelope, MaintainerIdentity, NameSet, ReadFailure, ReasonCode,
     RequestBound, RequestPart, TooFewNames,
 };
+pub use fault::FaultClass;
 pub use finding::{FindingKind, FindingScope, Severity, UnknownFindingKind, UnknownSeverity};
 pub use finding_row::{
     CANDIDATE_HEAD, Candidate, CandidateHead, DocumentPathHead, FindingRow, Hint, IllegalValueHead,

@@ -73,9 +73,9 @@ jobs:
       - name: Lint the induced-failure targets
         if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
         run: cargo clippy --locked -p norn-host --all-targets --features induced-failure -- -D warnings
-      # The counters build: the counters route, its unit test and the token
-      # counter bar compile only with the feature on, as ci.yml's lint job
-      # explains.
+      # The counters build: the counters route, its unit tests, the token
+      # counter bar and the wire counter bars compile only with the feature
+      # on, as ci.yml's lint job explains.
       - name: Lint the counters build
         if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
         run: cargo clippy --locked --workspace --all-targets --features norn/counters -- -D warnings
@@ -85,6 +85,12 @@ jobs:
       - name: Counters route
         if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
         run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked --no-fail-fast -p norn-serve --features counters --lib http::tests::the_counters_route_answers_the_token_counters_behind_the_bearer -- --exact
+      - name: Wire counter bars
+        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
+        run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked --no-fail-fast -p norn --features counters --test serve_wire
+      - name: Wire host time
+        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
+        run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked --no-fail-fast -p norn-serve --features counters --lib http::tests::wire::every_wire_answer_carries_the_host_time_under_the_counters_feature -- --exact
       - name: Document
         if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
         run: cargo doc --locked --workspace --no-deps --document-private-items

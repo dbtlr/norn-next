@@ -599,6 +599,11 @@ fn an_error_detail_advertises_the_code_as_its_tag() {
             "serve/hello-refused",
             "serve/request-too-large",
             "serve/token-file-unreadable",
+            "serve/unknown-verb",
+            "serve/busy",
+            "serve/draining",
+            "serve/outcome-unknown",
+            "serve/drain-refused",
         ])
     );
 }
@@ -765,6 +770,11 @@ fn a_reason_code_advertises_its_flat_namespaced_string() {
             "serve/hello-refused",
             "serve/request-too-large",
             "serve/token-file-unreadable",
+            "serve/unknown-verb",
+            "serve/busy",
+            "serve/draining",
+            "serve/outcome-unknown",
+            "serve/drain-refused",
         ])
     );
 }
