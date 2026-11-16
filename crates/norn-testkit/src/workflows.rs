@@ -700,8 +700,9 @@ pub struct GateStep {
 ///   `defaults.run`;
 /// - a job whose `runs-on` is missing or is not a plain string, because it
 ///   cannot be placed on either side of the Linux line;
-/// - a command or an environment value holding a `${{ }}` expression, and an
-///   `env` that cannot be read whole.
+/// - a command or an environment value holding a `${{ }}` expression, an
+///   `env` that cannot be read whole, and a `run` that is not a string, which
+///   CI would run as the scalar's text.
 pub fn linux_run_steps(workflow: &str) -> Result<Vec<GateStep>, String> {
     let document: Value =
         serde_yaml::from_str(workflow).map_err(|e| format!("not a YAML document: {e}"))?;
@@ -772,8 +773,18 @@ pub fn linux_run_steps(workflow: &str) -> Result<Vec<GateStep>, String> {
             if !step.is_mapping() {
                 return Err(format!("a step of job `{key}` is not a mapping"));
             }
-            let Some(command) = step.get("run").and_then(Value::as_str) else {
-                continue;
+            // A step with no `run` is a `uses:` step and is skipped. A `run`
+            // that is not a string (`run: false`) is still a command in CI,
+            // which reads the scalar as text, so it is refused here rather
+            // than dropped from the gate.
+            let command = match step.get("run") {
+                None => continue,
+                Some(Value::String(command)) => command.as_str(),
+                Some(_) => {
+                    return Err(format!(
+                        "a step of job `{key}` has a `run` that is not a string"
+                    ));
+                }
             };
             let name = step.get("name").and_then(Value::as_str).map_or_else(
                 || command.lines().next().unwrap_or_default().to_string(),
@@ -1269,6 +1280,11 @@ mod tests {
         let workflow = "jobs:\n  j:\n    uses: ./.github/workflows/other.yml\n";
         let error = linux_run_steps(workflow).unwrap_err();
         assert!(error.contains("runs-on"), "{error}");
+        // A `run` that is not a string is a command in CI (`false` here), so
+        // it is refused, not skipped while the step after it passes.
+        let workflow = "jobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - run: false\n      - run: echo ok\n";
+        let error = linux_run_steps(workflow).unwrap_err();
+        assert!(error.contains("not a string"), "{error}");
         // A step that is not a mapping is an error, not a skipped step.
         let workflow = "jobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - echo hi\n";
         assert!(linux_run_steps(workflow).is_err());

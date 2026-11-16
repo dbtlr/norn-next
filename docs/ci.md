@@ -216,7 +216,8 @@ edit to the script. Each step runs under `bash -e`, as CI runs a step that
 names no shell. What the script cannot honor as CI does stops it with an error:
 
 - a step with an `if:`, `continue-on-error`, a `working-directory`, a `shell`,
-  or a `${{ }}` expression in its command or environment;
+  a `${{ }}` expression in its command or environment, or a `run` that is not
+  a string;
 - a job with an `if:`, `continue-on-error`, `container`, `services`, `needs`,
   `strategy` or `defaults.run`, or a `runs-on` that is missing or is not a plain
   string;
@@ -232,7 +233,8 @@ Each step prints its job and name, then PASS or FAIL with its exit status and
 wall time. The gate keeps going after a failure, ends with a summary of every
 step, and exits non-zero if any step failed. `--list` prints the steps and
 their environment without running them, `--job <key>` runs one job, and
-`--step <number|name>` runs one step, so an edit to the script or the workflow
+`--step <number|name>` runs one step (a name that stands in more than one job
+needs `--job`), so an edit to the script or the workflow
 can be checked without a full run.
 
 The script holds no machine policy: it writes no absolute path and takes no

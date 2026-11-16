@@ -29,7 +29,8 @@
 #   --list      print the steps that would run, without running any
 #   --job       run only the steps of one job, by its key under `jobs`
 #   --step      run only one step: its number in the --list output, or its
-#               exact name (with --job, the number counts within that job)
+#               exact name (with --job, the number counts within that job); a
+#               name that stands in more than one job needs --job
 #   --workflow  read another workflow file, as a path from the repository root
 #
 # Every step runs to completion even after an earlier one fails. Each prints its
@@ -144,6 +145,13 @@ done
 
 if [ "${#selected[@]}" -eq 0 ]; then
   echo "gate: no step matches --job '${only_job}' --step '${only_step}'" >&2
+  exit 2
+fi
+
+# --step promises one step. A number selects one; a name can stand in more than
+# one job, as `Test` does in ci.yml, and is refused rather than run several times.
+if [ -n "$only_step" ] && [ "${#selected[@]}" -gt 1 ]; then
+  echo "gate: --step '${only_step}' names ${#selected[@]} steps; add --job, or use a number from --list" >&2
   exit 2
 fi
 
