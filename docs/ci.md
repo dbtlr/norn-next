@@ -204,6 +204,45 @@ comments outside the diff.
 
 ## Local runs
 
+`scripts/gate.sh` runs what a pull request's Linux CI runs. It executes each
+`run:` step of every job in `.github/workflows/ci.yml` whose `runs-on` is
+`ubuntu-*`, in file order, with the environment the workflow layers over each
+step. It skips `uses:` steps (checkout, the cache, the actionlint container) and
+every job on another runner, so the macOS job is not run. The commands come
+from the workflow when the script runs, through the `norn-gate-steps` binary of
+`norn-testkit`, which reads the workflow with the reader the CI guards use. A
+step added to `ci.yml` therefore joins the gate with no edit to the script. A
+Linux step the script cannot honor as CI does (one with an `if:`, a
+`working-directory` or a `${{ }}` expression) stops it with an error.
+
+Each step prints its job and name, then PASS or FAIL with its exit status and
+wall time. The gate keeps going after a failure, ends with a summary of every
+step, and exits non-zero if any step failed. `--list` prints the steps and
+their environment without running them, `--job <key>` runs one job, and
+`--step <number|name>` runs one step, so an edit to the script or the workflow
+can be checked without a full run.
+
+The script holds no machine policy: it writes no absolute path and takes no
+lock. The caller supplies `CARGO_TARGET_DIR`, `TMPDIR`, `CARGO_BUILD_JOBS`, the
+toolchain on `PATH` and any lock that serializes heavy cargo runs, for example
+`flock <lockfile> scripts/gate.sh`. The measurement suites inside the gate (the
+counter bars and the `serve_memory` lane of the lint job, and the host and
+fixture baselines) refuse a profile override, so the caller sets no
+`CARGO_PROFILE_*` variable, no optimization flag in `RUSTFLAGS`, no cargo config
+holding a profile table and no relative `CARGO_HOME`; the script refuses to
+start with a `CARGO_PROFILE_*` variable set. The script's header lists these.
+
+The gate does not run the nightly lanes: `counter_gate`, the compiled registry
+and inventory audits, and the `lockdown` and `kill_recovery` fault lanes run in
+`regression.yml` only. A green gate is therefore the PR's Linux checks, not the
+full regression. When a change touches store-open or watcher semantics, or a
+statement or path a counter or memory bar measures, run the deep lanes on the
+candidate:
+
+```sh
+gh workflow run regression.yml --ref <branch> -f candidate=<full sha>
+```
+
 A full local test run leaves a cargo target of roughly 40 GB in its checkout:
 about 100 debug test executables of 100 to 400 MB each, plus incremental state.
 Every checkout keeps its own target, so parallel full runs across checkouts can
