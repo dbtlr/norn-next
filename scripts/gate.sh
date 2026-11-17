@@ -11,9 +11,9 @@
 # workflow with a reader that shares the CI guards' env layering, so a step
 # added to or removed from ci.yml changes what runs here with no edit to this
 # file. A Linux step the gate cannot honor as CI does (an `if:`, a
-# `working-directory`, a named `shell`, a `${{ }}` expression, a job
-# `container`, `needs` or `strategy`) stops the gate with an error rather than
-# running differently.
+# `working-directory`, a named `shell`, a `${{ }}` expression, a command naming
+# a runner file such as `GITHUB_ENV`, a job `container`, `needs` or `strategy`)
+# stops the gate with an error rather than running differently.
 #
 # One thing is neither honored nor refused: a job's `timeout-minutes`. In CI it
 # is a runaway guard that cancels a hung job. The gate sets no deadline, so a

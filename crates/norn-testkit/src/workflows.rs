@@ -668,6 +668,20 @@ fn is_count(text: &str) -> bool {
     text.chars().all(|c| c.is_ascii_digit()) && text.chars().any(|c| c != '0')
 }
 
+/// The files a runner hands each step to write what it reads back afterwards:
+/// environment entries and path entries for the job's later steps, a step's
+/// outputs and saved state, and the job summary. A local run has no runner to
+/// read them back, and none of the variables is set outside one, so a command
+/// naming any of them cannot run as CI runs it. Only a command's own text is
+/// read: a script it calls that writes one of them is not seen.
+const RUNNER_FILES: [&str; 5] = [
+    "GITHUB_ENV",
+    "GITHUB_PATH",
+    "GITHUB_OUTPUT",
+    "GITHUB_STATE",
+    "GITHUB_STEP_SUMMARY",
+];
+
 /// One `run:` step of a Linux job, as a local gate executes it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GateStep {
@@ -702,7 +716,10 @@ pub struct GateStep {
 ///   cannot be placed on either side of the Linux line;
 /// - a command or an environment value holding a `${{ }}` expression, an
 ///   `env` that cannot be read whole, and a `run` that is not a string, which
-///   CI would run as the scalar's text.
+///   CI would run as the scalar's text;
+/// - a command naming a runner file (`GITHUB_ENV`, `GITHUB_PATH`,
+///   `GITHUB_OUTPUT`, `GITHUB_STATE` or `GITHUB_STEP_SUMMARY`), because what
+///   it writes there reaches no later step.
 pub fn linux_run_steps(workflow: &str) -> Result<Vec<GateStep>, String> {
     let document: Value =
         serde_yaml::from_str(workflow).map_err(|e| format!("not a YAML document: {e}"))?;
@@ -803,6 +820,11 @@ pub fn linux_run_steps(workflow: &str) -> Result<Vec<GateStep>, String> {
             if command.contains("${{") || env.values().any(|value| value.contains("${{")) {
                 return Err(format!(
                     "{at} holds an expression, which a local run cannot expand"
+                ));
+            }
+            if let Some(file) = RUNNER_FILES.iter().find(|file| command.contains(**file)) {
+                return Err(format!(
+                    "{at} names `{file}`, a runner file a local run cannot honor"
                 ));
             }
             steps.push(GateStep {
@@ -1288,6 +1310,21 @@ mod tests {
         // A step that is not a mapping is an error, not a skipped step.
         let workflow = "jobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - echo hi\n";
         assert!(linux_run_steps(workflow).is_err());
+        // A command that names a runner file hands state to a later step, or
+        // to the runner, through a file no local run reads back.
+        for file in [
+            "GITHUB_ENV",
+            "GITHUB_PATH",
+            "GITHUB_OUTPUT",
+            "GITHUB_STATE",
+            "GITHUB_STEP_SUMMARY",
+        ] {
+            let workflow = format!(
+                "jobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo A=b >> \"${file}\"\n      - run: echo \"$A\"\n"
+            );
+            let error = linux_run_steps(&workflow).unwrap_err();
+            assert!(error.contains(file), "{error}");
+        }
         // The same step on a macOS job is out of scope and so is not refused.
         let workflow =
             "jobs:\n  j:\n    runs-on: macos-15\n    steps:\n      - run: x\n        if: true\n";

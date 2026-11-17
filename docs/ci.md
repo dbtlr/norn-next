@@ -218,6 +218,10 @@ names no shell. What the script cannot honor as CI does stops it with an error:
 - a step with an `if:`, `continue-on-error`, a `working-directory`, a `shell`,
   a `${{ }}` expression in its command or environment, or a `run` that is not
   a string;
+- a step whose command names a runner file: `GITHUB_ENV`, `GITHUB_PATH`,
+  `GITHUB_OUTPUT`, `GITHUB_STATE` or `GITHUB_STEP_SUMMARY`. The runner reads
+  those files back for later steps and nothing does locally. A script the
+  command calls is not read, so one that writes a runner file is not caught;
 - a job with an `if:`, `continue-on-error`, `container`, `services`, `needs`,
   `strategy` or `defaults.run`, or a `runs-on` that is missing or is not a plain
   string;
