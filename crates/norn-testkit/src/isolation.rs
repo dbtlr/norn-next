@@ -87,9 +87,13 @@
 //!
 //! The turnstile gives exclusive waiters priority and ordinary holders no turn
 //! of their own. While one exclusive hold holds and the next exclusive waiter
-//! stands in the turnstile behind it, no ordinary hold passes, so a stream of
-//! exclusive holds handing over to one another keeps every ordinary waiter out
-//! for as long as the stream lasts, however long that is.
+//! stands in the turnstile behind it, no ordinary hold passes. A stream here
+//! is exclusive holds that hand over to one another in that way, each letting
+//! go while the next waiter stands in the turnstile, and it keeps every
+//! ordinary waiter out for as long as it lasts, however long that is. A
+//! hand-over with nobody in the turnstile is a gap: an ordinary waiter that
+//! looks inside it lands, and the exclusive waiter arriving after it waits for
+//! that holder as for any other.
 //!
 //! What bounds that wait is the acquisition wall alone. Every hand-over puts a
 //! different exclusive holder's record in front of the waiter, so
@@ -1270,13 +1274,17 @@ mod tests {
     /// stopped, and names the exclusive holder or the exclusive hold waiting
     /// in the turnstile.
     ///
-    /// The stream is three threads taking exclusive holds back to back, each
-    /// held far longer than the gap a waiter at the turnstile leaves between
-    /// its looks, so the next one is in the turnstile before the last lets go.
-    /// Each holder rewrites its record to a line of its own, since holds taken
-    /// by one process in one second would otherwise all write the same line,
-    /// and the patience would join their standings into one. Every record
-    /// stands well inside the patience, and the wall is past it.
+    /// The stream is three threads taking exclusive holds back to back, and
+    /// it is a stream in the sense the module documentation gives: a holder
+    /// lets go only once it has seen the next exclusive waiter standing in the
+    /// turnstile, so at every instant the lease is held exclusively or a waiter
+    /// stands there, however the threads are scheduled. A hand-over with nobody
+    /// in the turnstile is a gap an ordinary waiter may land in, and that is
+    /// the lease working, not this bar failing. Each holder rewrites its record
+    /// to a line of its own, since holds taken by one process in one second
+    /// would otherwise all write the same line, and the patience would join
+    /// their standings into one. Every record stands well inside the patience,
+    /// and the wall is past it.
     ///
     /// The forbidden shape is a failure that misnames the wait: a patience
     /// that fires on a stream that is moving, which names a working exclusive
@@ -1285,12 +1293,14 @@ mod tests {
     #[test]
     fn an_exclusive_stream_holds_an_ordinary_waiter_out_until_the_wall() {
         let key = PrivateKey::new("exclusive-stream");
+        let turnstile = key.files().turnstile;
         let stop = Arc::new(AtomicBool::new(false));
         let landed = Arc::new(AtomicUsize::new(0));
         let stream: Vec<_> = (0..3)
             .map(|_| {
-                let (key, stop, landed) = (
+                let (key, turnstile, stop, landed) = (
                     key.as_str().to_owned(),
+                    turnstile.clone(),
                     Arc::clone(&stop),
                     Arc::clone(&landed),
                 );
@@ -1307,7 +1317,26 @@ mod tests {
                             ),
                         )
                         .expect("a record of its own");
-                        thread::sleep(Duration::from_millis(150));
+                        thread::sleep(Duration::from_millis(100));
+                        // The waiter seen here stays in the turnstile until it
+                        // lands, and it lands only once this hold has let go,
+                        // so the hand-over leaves no instant without one or the
+                        // other.
+                        crate::wait::wait_until_with_interval(
+                            "the next exclusive waiter in the turnstile",
+                            budget(),
+                            Duration::from_millis(1),
+                            || {
+                                if stop.load(Ordering::SeqCst)
+                                    || an_exclusive_waiter_stands_in(&turnstile)
+                                {
+                                    Observed::Met(())
+                                } else {
+                                    Observed::pending("nobody stands in the turnstile")
+                                }
+                            },
+                        )
+                        .unwrap_or_else(|failure| panic!("{failure}"));
                         drop(lease);
                     }
                 })
@@ -1367,6 +1396,31 @@ mod tests {
              patience inside a {:?} wall",
             wall.work()
         );
+    }
+
+    /// Whether an exclusive waiter stands in the turnstile at `path`.
+    ///
+    /// A shared probe of the turnstile is refused only while someone holds it
+    /// exclusively. The only exclusive holder of a turnstile is an exclusive
+    /// acquisition on its way to the lease, and while the prober holds the
+    /// lease exclusively none can have landed, so what refuses the probe is a
+    /// waiter. An ordinary hold passing through holds the turnstile shared and
+    /// does not refuse it. The probe's own shared lock goes with the file at
+    /// the end of the call.
+    #[cfg(target_os = "linux")]
+    #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // Probing this module's own scratch turnstile.
+    fn an_exclusive_waiter_stands_in(path: &Path) -> bool {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .open(path)
+            .unwrap_or_else(|error| panic!("the turnstile {}: {error}", path.display()));
+        match file.try_lock_shared() {
+            Ok(()) => false,
+            Err(TryLockError::WouldBlock) => true,
+            Err(TryLockError::Error(error)) => {
+                panic!("probing the turnstile {}: {error}", path.display())
+            }
+        }
     }
 
     /// A hold that cannot be taken inside its bound reports the holder rather
