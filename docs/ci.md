@@ -204,6 +204,66 @@ comments outside the diff.
 
 ## Local runs
 
+`scripts/gate.sh` runs what a pull request's Linux CI runs. It executes each
+`run:` step of every job in `.github/workflows/ci.yml` whose `runs-on` is
+`ubuntu-*`, in file order, with the environment the workflow layers over each
+step. It skips `uses:` steps (checkout, the cache, the actionlint container) and
+every job on another runner, so the macOS job is not run. The commands come
+from the workflow when the script runs, through the `norn-gate-steps` binary of
+`norn-testkit`, which reads the workflow with a reader that shares the CI
+guards' env layering. A step added to `ci.yml` therefore joins the gate with no
+edit to the script. Each step runs under `bash -e`, as CI runs a step that
+names no shell. What the script cannot honor as CI does stops it with an error:
+
+- a step with an `if:`, `continue-on-error`, a `working-directory`, a `shell`,
+  a `${{ }}` expression in its command or environment, or a `run` that is not
+  a string;
+- a step whose command names a runner file: `GITHUB_ENV`, `GITHUB_PATH`,
+  `GITHUB_OUTPUT`, `GITHUB_STATE` or `GITHUB_STEP_SUMMARY`. The runner reads
+  those files back for later steps and nothing does locally. A script the
+  command calls is not read, so one that writes a runner file is not caught;
+- a job with an `if:`, `continue-on-error`, `container`, `services`, `needs`,
+  `strategy` or `defaults.run`, or a `runs-on` that is missing or is not a plain
+  string;
+- a workflow with `defaults.run`, and an `env` at any level that cannot be read
+  whole.
+
+A job's `timeout-minutes` is neither honored nor refused. In CI it is a runaway
+guard that cancels a hung job; the script sets no deadline, so a step that
+hangs locally hangs the gate until it is interrupted, and a job that would
+outrun its guard in CI is not failed for it locally.
+
+Each step prints its job and name, then PASS or FAIL with its exit status and
+wall time. The gate keeps going after a failure, ends with a summary of every
+step, and exits non-zero if any step failed. `--list` prints the steps and
+their environment without running them, `--job <key>` runs one job, and
+`--step <number|name>` runs one step (a name that stands in more than one job
+needs `--job`), so an edit to the script or the workflow
+can be checked without a full run.
+
+The script holds no machine policy: it writes no absolute path and takes no
+lock. The caller supplies `CARGO_TARGET_DIR`, `TMPDIR`, `CARGO_BUILD_JOBS`, the
+toolchain on `PATH` and any lock that serializes heavy cargo runs, for example
+`flock <lockfile> scripts/gate.sh`. No step of the Linux gate runs the
+build-profile guard: only the ignored lanes of `regression.yml` and
+`certify.yml` and the macOS job reach it. A caller may therefore set
+`CARGO_PROFILE_DEV_DEBUG` and `CARGO_PROFILE_TEST_DEBUG` to `line-tables-only`
+for the gate. The guard itself refuses any `CARGO_PROFILE_*` variable, an
+optimization flag in `RUSTFLAGS` or `CARGO_ENCODED_RUSTFLAGS`, a profile table
+in a cargo config or the workspace `Cargo.toml`, and a relative or unresolved
+`CARGO_HOME`; keep those out of any shell that runs the ignored lanes.
+
+The gate does not run the nightly lanes: `counter_gate`, the compiled registry
+and inventory audits, and the `lockdown` and `kill_recovery` fault lanes run in
+`regression.yml` only. A green gate is therefore the PR's Linux checks, not the
+full regression. When a change touches store-open or watcher semantics, or a
+statement or path a counter or memory bar measures, run the deep lanes on the
+candidate:
+
+```sh
+gh workflow run regression.yml --ref <branch> -f candidate=<full sha>
+```
+
 A full local test run leaves a cargo target of roughly 40 GB in its checkout:
 about 100 debug test executables of 100 to 400 MB each, plus incremental state.
 Every checkout keeps its own target, so parallel full runs across checkouts can
