@@ -8,10 +8,11 @@
 use super::*;
 use norn_testkit::{isolation, scratch::Scratch, wait::Budget};
 
-/// Take the lease before creating the tree. Callers bind in this order so the
-/// subscription and scratch tree drop before the lease is released.
+/// Take the lease, exclusively, before creating the tree. Callers bind in this
+/// order so the subscription and scratch tree drop before the lease is
+/// released.
 fn fixture() -> (isolation::Lease, Scratch, Subscription) {
-    let lease = isolation::Lease::hold(
+    let lease = isolation::Lease::hold_exclusive(
         isolation::REAL_WATCHER,
         isolation::acquisition_budget(Budget::new(
             Duration::from_secs(15),

@@ -18,20 +18,130 @@
 //! statement about how many sibling processes were running.
 //!
 //! So a case that owns a real platform watcher holds [`REAL_WATCHER`] for the
-//! window that watcher is live, and the number of live watchers this
-//! workspace's suites have on the machine is one — however many binaries the
-//! runner started, and however many children of their own those binaries
-//! re-execute, because the lease is taken where the watcher is installed
-//! rather than where the run began.
+//! window that watcher is live. The lease is taken where the watcher is
+//! installed rather than where the run began, so it counts every binary the
+//! runner started and every child those binaries re-execute. How many holders
+//! it admits at once is the platform's, and the next section says which.
+//!
+//! # Linux shares the lease; every other platform holds it alone
+//!
+//! The silence is macOS's: every subscription there is a client of one
+//! daemon, fseventsd, and that daemon is what goes quiet under a crowd. Linux
+//! has no such daemon. Each watcher is an inotify instance of the process's
+//! own, counted against a per-user instance limit and served by the kernel, and
+//! the host suites pass with a dozen of them live at once, in one process or in
+//! twelve. So the lease has two kinds of hold:
+//!
+//! - **An ordinary hold**, [`Lease::hold`], is what a case that attaches a
+//!   production host takes. On Linux it is shared: any number of ordinary
+//!   holders are live at once, in one process or in several. On every other
+//!   platform it is exclusive.
+//! - **An exclusive hold**, [`Lease::hold_exclusive`], is what the
+//!   watcher-fidelity suites take: the cases that state what the platform
+//!   watcher itself delivers, which are the cases a crowd of sibling watchers
+//!   would turn into statements about the crowd. It excludes every other hold
+//!   on every platform.
+//!
+//! [`ORDINARY_HOLDS_SHARE`] is the switch. Off Linux both kinds are exclusive,
+//! so exactly one holder is live on macOS, as before the lease had two kinds.
+//!
+//! **Shared and exclusive locks on one file, rather than a number of slot
+//! files.** A slot count is a number to choose and to keep in step with the
+//! runner, and an exclusive window over slots means taking every slot in turn.
+//! A shared lock needs no count, and the exclusive window is the lock's other
+//! mode. What it costs is the holder record: one file cannot carry the name of
+//! every holder sharing it, so each holder writes a record of its own (below).
+//!
+//! **No bound on how many ordinary holders are live, beyond the runner's.** The
+//! count is the test threads of every binary running at once, and the limit it
+//! meets is the per-user inotify instance limit (`fs.inotify.max_user_instances`),
+//! whose kernel default is 128. A runner's limit is whatever its image sets,
+//! and `/proc/sys/fs/inotify/max_user_instances` on the runner reads it. One
+//! attached host installs one inotify instance, for its one subscription, so
+//! four test threads are four live instances per binary and twelve are
+//! twelve; with the runner's four binaries at once, that is at most sixteen
+//! at four threads and forty-eight at twelve. A case that attaches a few
+//! vaults at once multiplies that by a few: at four threads the product stays
+//! well inside the default, and at twelve it can reach it. The watches
+//! inside each instance, one per covered directory, count against
+//! `fs.inotify.max_user_watches`, and a test vault covers a handful.
+//!
+//! # An exclusive waiter is not starved by a stream of ordinary holders
+//!
+//! A shared lock admits a new shared holder while an exclusive waiter is
+//! queued, so ordinary holders that overlap one another would keep the lease
+//! from ever coming free. Each lease therefore has a turnstile beside it, a
+//! second lock file. An exclusive waiter stands in the turnstile, exclusively,
+//! for as long as it waits; an ordinary hold passes through it, shared, on its
+//! way to the lease and cannot pass while a waiter stands there.
+//!
+//! So once an exclusive waiter is in the turnstile no new ordinary holder
+//! lands, and the holders already in drain side by side. What bounds that wait
+//! is what bounds every acquisition: [`HOLDER_PATIENCE`] on the oldest holder
+//! still in, which a stuck one stays, and the acquisition wall. A failure names
+//! that oldest holder. An ordinary hold that is held at the turnstile names
+//! the same holders, because those are what it is queued behind, and says an
+//! exclusive hold is waiting ahead of it.
+//!
+//! # A stream of exclusive holders holds ordinary waiters out while it lasts
+//!
+//! The turnstile gives exclusive waiters priority and ordinary holders no turn
+//! of their own. While one exclusive hold holds and the next exclusive waiter
+//! stands in the turnstile behind it, no ordinary hold passes. A stream here
+//! is exclusive holds that hand over to one another in that way, each letting
+//! go while the next waiter stands in the turnstile, and it keeps every
+//! ordinary waiter out for as long as it lasts, however long that is. A
+//! hand-over with nobody in the turnstile is a gap: an ordinary waiter that
+//! looks inside it lands, and the exclusive waiter arriving after it waits for
+//! that holder as for any other.
+//!
+//! What bounds that wait is the acquisition wall alone. Every hand-over puts a
+//! different exclusive holder's record in front of the waiter, so
+//! [`HOLDER_PATIENCE`] re-arms at each one and never fires: the queue is
+//! moving, and the patience is for a holder that stopped. The wall's failure
+//! is reported against the wall the caller passed rather than the patience,
+//! says nothing about a holder that stopped, and names what was ahead at its
+//! last look: the exclusive holder, or, in the middle of a hand-over, the
+//! exclusive hold waiting in the turnstile.
+//!
+//! One stall blanks that name. An ordinary waiter lets go of the turnstile
+//! before it reads the records, so one that passed the turnstile, was refused
+//! the lease and then stood still across a whole hand-over can read the
+//! instant in which the old holder's record is withdrawn and the new holder's
+//! is not yet published. That look names a holder that recorded nothing, and
+//! the next look names the new holder. The window is accepted: it costs a
+//! diagnostic one name and never an admission, and reading the records under
+//! the turnstile would make every refused look hold exclusive waiters out of
+//! it for the length of a directory read.
+//!
+//! This is accepted rather than given a turn for ordinary holders. The
+//! exclusive holders are the watcher-fidelity cases: each holds for one case's
+//! watcher window, a stream needs one of them waiting while another holds, and
+//! the stream ends when the binaries running them do.
+//!
+//! # A holder records itself in a file of its own
+//!
+//! Every holder, of either kind, writes a record — its pid, the key, the kind
+//! of hold and when it took it — into a file of its own in the lease's
+//! holders directory, and keeps that file locked for as long as it holds. A
+//! waiter lists the directory and names the oldest record whose file is still
+//! locked, which is the holder it has been behind longest, and says how many
+//! more stand beside it. A record whose file it can lock is one whose holder
+//! died without withdrawing it, and the waiter removes it rather than naming a
+//! pid that holds nothing. The record is published under its final name only
+//! once it is locked, so a waiter never reads a live holder's record as a dead
+//! one.
 //!
 //! # Exclusion joins here; partitioning is the other door
 //!
 //! A second isolation concern joins here rather than bringing a second
-//! mechanism: [`Lease::hold`] is keyed, and a key is what a new concern
-//! declares.
+//! mechanism: a hold is keyed, and a key is what a new concern declares.
 //!
 //! **What joins here is exclusion**: concerns whose subject is one machine-wide
-//! thing that has to be used by one holder at a time. The other family is
+//! thing that has to be used by one holder at a time. Such a concern takes
+//! [`Lease::hold_exclusive`]; the shared ordinary hold is shaped by the
+//! watcher's platforms, and a concern whose platforms tolerate a crowd
+//! differently says so where it declares its key. The other family is
 //! **partitioning** — a run wanting state of its own rather than a turn at
 //! shared state — and that is [`crate::process::Sandbox`]'s: a private
 //! directory tree per run, with `HOME`, `TMPDIR` and the XDG variables pointed
@@ -56,40 +166,45 @@
 //! [`Lease`] is a lock on an open file and it excludes per open file
 //! description, which is what makes two threads of one binary exclude each
 //! other — and it makes a second hold in the *same* test exclude it too. A case
-//! that takes [`REAL_WATCHER`] while already holding it waits out its whole
-//! acquisition bound against itself and then names its own process as the
-//! holder. So each watcher window has exactly one holder: a helper that takes
-//! the lease is the only thing that takes it, and its callers hold what it
-//! hands back rather than taking one of their own.
+//! that takes an exclusive hold while already holding the lease waits out its
+//! whole acquisition bound against itself and then names its own process as
+//! the holder. Off Linux an ordinary hold inside an ordinary hold does the
+//! same. On Linux it lands, but only while no exclusive waiter stands in the
+//! turnstile; with one there it waits at the turnstile behind a waiter that is
+//! waiting for it. So each watcher window has exactly one hold: a helper that
+//! takes the lease is the only thing that takes it, and its callers hold what
+//! it hands back rather than taking one of their own.
 //!
 //! # The lock is a file lock, and that is what makes it cross-process
 //!
 //! [`Lease`] is a lock on an open file. Two properties are why:
 //!
 //! - **It is released when the holder dies.** A test that panics, and a
-//!   process killed mid-run, both release. A lease built from a file's
-//!   *existence* would leave a killed run's lease standing forever, and the
-//!   next run would wait out its budget against a holder that is gone.
+//!   process killed mid-run, both release — the lease, the turnstile a waiter
+//!   stood in, and the lock on the holder's record. A lease built from a
+//!   file's *existence* would leave a killed run's lease standing forever, and
+//!   the next run would wait out its budget against a holder that is gone.
 //! - **It excludes per open file description, not per process.** Two threads
-//!   in one binary each open the lease file and exclude each other, which is
-//!   the case the runner's own threads produce. A POSIX record lock is
-//!   per-process and would let all four of a binary's test threads hold the
-//!   same lease at once — the exclusion nobody would notice was missing.
+//!   in one binary each open the lease file, and an exclusive hold on one
+//!   excludes the other, which is the case the runner's own threads produce. A
+//!   POSIX record lock is per-process and would let all four of a binary's
+//!   test threads hold an exclusive lease at once — the exclusion nobody would
+//!   notice was missing.
 //!
 //! # Acquisition is a budgeted wait, and what fires is per holder
 //!
 //! Taking a lease is [`crate::wait`]'s wait like any other: a bound, and a
-//! failure naming the holder it was waiting on. Queueing behind every other
-//! holder is what the lease is *for*, so the thing worth diagnosing is not a
-//! long queue but a holder that is stuck rather than working — and those two
-//! are told apart by whether the queue is moving.
+//! failure naming the holder it was waiting on. Queueing behind other holders
+//! is what the lease is *for*, so the thing worth diagnosing is not a long
+//! queue but a holder that is stuck rather than working — and those two are
+//! told apart by whether the queue is moving.
 //!
 //! So the acquisition carries two bounds over two different things, the same
 //! way a [`Budget`] does:
 //!
 //! - [`HOLDER_PATIENCE`] is per holder, and it is what fires. Every look that
-//!   finds the lease in different hands than the last one re-arms it, so a
-//!   queue that is changing hands is never interrupted however deep it is.
+//!   finds a different oldest holder than the last one re-arms it, so a queue
+//!   that is changing hands is never interrupted however deep it is.
 //! - [`acquisition_budget`] is the wall on the whole acquisition, because a
 //!   wait that runs on while it observes progress is a wait with no deadline
 //!   at all — the shape [`crate::wait`] refuses to offer.
@@ -104,6 +219,7 @@
 use std::fs::TryLockError;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::wait::{Budget, FailureKind, Observed, WaitFailure, wait_until};
@@ -112,10 +228,22 @@ use crate::wait::{Budget, FailureKind, Observed, WaitFailure, wait_until};
 ///
 /// Every such case across the workspace names this one key, because the
 /// service they contend for is one service. A suite that watches a real
-/// filesystem and does not hold it is a suite that starves the others.
+/// filesystem and does not hold it is a suite that starves the others. A case
+/// that attaches a production host takes an ordinary hold, [`Lease::hold`]; a
+/// watcher-fidelity case takes [`Lease::hold_exclusive`].
 pub const REAL_WATCHER: &str = "real-watcher";
 
-/// The real-watcher holders that can be queued ahead of one case.
+/// Whether an ordinary hold shares the lease with other ordinary holds on this
+/// platform.
+///
+/// True on Linux only, where each watcher is a kernel inotify instance of its
+/// own process and a crowd of them stays heard. Everywhere else an ordinary
+/// hold is exclusive, so one holder is live at a time; the module
+/// documentation says why.
+pub const ORDINARY_HOLDS_SHARE: bool = cfg!(target_os = "linux");
+
+/// The real-watcher holders that can be queued ahead of one case, where
+/// holders queue one at a time.
 ///
 /// **A census, written as its two factors.** Cases across the workspace hold
 /// [`REAL_WATCHER`] by the hundred, and which ones is a rule rather than a
@@ -132,6 +260,21 @@ pub const REAL_WATCHER: &str = "real-watcher";
 /// suite that gains cases moves one of them and a runner configured differently
 /// moves the other.
 ///
+/// **It is the depth of the serial queue, which is the queue off Linux.** Where
+/// every hold is exclusive each holder ahead is one hold window. On Linux
+/// ordinary holders do not queue behind one another: an ordinary hold waits
+/// only for an exclusive holder, or for an exclusive waiter standing in the
+/// turnstile, and an exclusive hold waits for the exclusive waiters ahead of it
+/// and for the ordinary holders in flight when it reached the turnstile, which
+/// drain side by side in about one hold window. The queue ahead of an
+/// exclusive hold on Linux is therefore shorter than this depth. The queue
+/// ahead of an ordinary hold there is every exclusive hold that keeps arriving
+/// while it waits, because the turnstile gives it no turn, and it lasts as long
+/// as that stream does; the module documentation says why that is accepted.
+/// That wait is the one this depth does not describe: the patience re-arms at
+/// every hand-over in the stream, so the wall the depth derives is all that
+/// ends it.
+///
 /// **The first factor is a round figure for that census rather than a headcount
 /// of it**, and it can be: the number is a queue depth and not a measurement —
 /// queueing behind holders that are working is what the lease is for — and the
@@ -144,10 +287,19 @@ pub const REAL_WATCHER: &str = "real-watcher";
 /// and what actually diagnoses a stuck holder is [`HOLDER_PATIENCE`].
 pub const QUEUED_HOLDERS: u32 = 160 * 4;
 
-/// How long the lease may stay in one holder's hands before a waiter names it.
+/// How long one holder may stay the oldest a waiter is behind before the
+/// waiter names it.
 ///
 /// **This is the bound that fires, and it is per holder rather than per
-/// acquisition.** A look that finds a different holder than the last one
+/// acquisition.** A waiter blocked by several holders tracks the oldest of
+/// them, the one it has been behind longest, and younger holders leaving or
+/// arriving beside it do not move that. Once an exclusive waiter stands in the
+/// turnstile no holder arrives, so what moves beside a stuck holder is the
+/// working ones draining one by one; a waiter not yet in the turnstile can
+/// also see holders that arrived between two of its looks. Either way a stuck
+/// holder among working ones is named at this bound, rather than this bound
+/// after the last working one has gone. A look that finds a different oldest
+/// holder than the last one
 /// re-arms it, so a queue that is changing hands runs on under the wall alone;
 /// a record that has not moved for this long is a holder that stopped working
 /// rather than one working slowly.
@@ -200,6 +352,33 @@ impl Patience {
     }
 }
 
+/// How a hold shares the lease with other holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// Beside any number of other shared holds, and never beside an exclusive
+    /// one.
+    Shared,
+    /// Alone.
+    Exclusive,
+}
+
+impl Mode {
+    /// The mode an ordinary hold takes on this platform.
+    const ORDINARY: Mode = if ORDINARY_HOLDS_SHARE {
+        Mode::Shared
+    } else {
+        Mode::Exclusive
+    };
+
+    /// How a holder record says it holds.
+    fn word(self) -> &'static str {
+        match self {
+            Mode::Shared => "shared",
+            Mode::Exclusive => "exclusively",
+        }
+    }
+}
+
 /// The full-regression memory job's wall, which every bound here must fire
 /// inside of.
 ///
@@ -218,12 +397,20 @@ pub const ACQUISITION_WALL: Duration = Duration::from_secs(15 * 60);
 /// The bound on taking a lease, given the window one holder holds it for.
 ///
 /// The work bound is the shorter of two real constraints: what a fully queued
-/// acquisition can honestly take — [`QUEUED_HOLDERS`] hold windows — and
-/// [`ACQUISITION_WALL`]. At a fifteen-second hold window the first of those is
-/// hours and the ceiling is what binds; at a hold window short enough that the
-/// depth comes in under the ceiling, the depth binds instead.
+/// acquisition can honestly take — [`QUEUED_HOLDERS`] hold windows, the serial
+/// queue — and [`ACQUISITION_WALL`]. At a fifteen-second hold window the first
+/// of those is hours and the ceiling is what binds; at a hold window short
+/// enough that the depth comes in under the ceiling, the depth binds instead.
+/// The same bound serves both kinds of hold and every platform. The serial
+/// queue is the longest a queue of holders that each wait their turn can be
+/// anywhere. An ordinary hold on Linux behind a stream of exclusive holds is
+/// in no such queue, because it gets no turn: it waits for as long as the stream
+/// lasts, the patience re-arms at every hand-over, and this bound is the only
+/// one that ends the wait. Its failure is reported against this bound and
+/// names the exclusive holder, or the exclusive hold in the turnstile, that was
+/// ahead at the last look.
 ///
-/// A probe makes a non-blocking lock attempt and reads the holder record.
+/// A probe makes a non-blocking lock attempt and reads the holder records.
 /// Its ten-second allowance is independent of the holder's own probes:
 /// descheduling a waiter must not turn a moving queue into a failure.
 pub fn acquisition_budget(hold_window: Budget) -> Budget {
@@ -280,6 +467,28 @@ fn lease_path(root: &Path, key: &str) -> PathBuf {
     root.join(format!("{key}.lease"))
 }
 
+/// The three places one lease lives, side by side under the root.
+struct LeaseFiles {
+    /// The lock every holder takes, shared or exclusive.
+    lock: PathBuf,
+    /// The lock an exclusive waiter stands in and an ordinary hold passes
+    /// through.
+    turnstile: PathBuf,
+    /// The directory each holder writes its own record into.
+    holders: PathBuf,
+}
+
+impl LeaseFiles {
+    fn under(root: &Path, key: &str) -> Self {
+        let lock = lease_path(root, key);
+        LeaseFiles {
+            lock,
+            turnstile: root.join(format!("{key}.turnstile")),
+            holders: root.join(format!("{key}.holders")),
+        }
+    }
+}
+
 /// A held lease, released when it is dropped.
 ///
 /// The lease is the value: holding it in a `let _ = ...` binding drops it at
@@ -292,37 +501,63 @@ pub struct Lease {
     // file releases the lock, which is why nothing else may hold this handle.
     #[allow(clippy::disallowed_types)] // This crate's own lease handle; see `try_hold`.
     file: std::fs::File,
+    // This holder's own record, or nothing when it could not be published; a
+    // waiter then names a holder that recorded nothing about itself.
+    record: Option<Record>,
 }
 
 impl Lease {
-    /// Hold the lease named `key`, waiting under `budget` for whoever has it.
+    /// Take an ordinary hold on the lease named `key`, waiting under `budget`
+    /// for whoever excludes it.
     ///
-    /// A failure to acquire panics with the wait's own diagnostic, because a
-    /// lease is harness scaffolding rather than a subject: the case that could
-    /// not take it has asserted nothing yet, and there is nothing for it to
-    /// report but the holder it waited on. [`Lease::try_hold`] is the same
-    /// acquisition with the failure handed back.
+    /// An ordinary hold is shared on Linux and exclusive elsewhere; see
+    /// [`ORDINARY_HOLDS_SHARE`]. A failure to acquire panics with the wait's
+    /// own diagnostic, because a lease is harness scaffolding rather than a
+    /// subject: the case that could not take it has asserted nothing yet, and
+    /// there is nothing for it to report but the holder it waited on.
+    /// [`Lease::try_hold`] is the same acquisition with the failure handed
+    /// back.
     pub fn hold(key: &str, budget: Budget) -> Self {
         Self::try_hold(key, budget).unwrap_or_else(|failure| panic!("{failure}"))
     }
 
-    /// Hold the lease named `key`, handing back the wait that failed.
+    /// Take an exclusive hold on the lease named `key`, waiting under `budget`
+    /// for every other holder to let go.
     ///
-    /// The probe is one non-blocking attempt at the lock, so it costs a
-    /// syscall whatever the machine is doing, and a pending observation names
-    /// the record the holder wrote about itself.
+    /// Exclusive on every platform. It panics on a failure to acquire, as
+    /// [`Lease::hold`] does; [`Lease::try_hold_exclusive`] hands it back.
+    pub fn hold_exclusive(key: &str, budget: Budget) -> Self {
+        Self::try_hold_exclusive(key, budget).unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// Take an ordinary hold on the lease named `key`, handing back the wait
+    /// that failed.
+    ///
+    /// The probe is one non-blocking attempt at the turnstile and the lock, so
+    /// it costs a few syscalls whatever the machine is doing, and a pending
+    /// observation names the record the oldest holder wrote about itself.
     ///
     /// **Two bounds end this wait, and the one that ends it says which.**
     /// `budget`'s work bound is the wall on the whole acquisition; a failure
     /// that names it is a queue that kept moving for that long.
     /// [`HOLDER_PATIENCE`] is the per-holder bound, re-armed every time the
-    /// record names different hands than the last look and held against a
-    /// lower bound on how long the waiter saw one record unchanged, and a
+    /// oldest record names different hands than the last look and held against
+    /// a lower bound on how long the waiter saw one record unchanged, and a
     /// failure that names it is one holder that stopped letting go. Both come
     /// back as the same [`WaitFailure`] shape, carrying the bound that was
     /// passed and the holder that was there when it went.
     pub fn try_hold(key: &str, budget: Budget) -> Result<Self, WaitFailure> {
-        Self::try_hold_under(key, budget, Patience::Standing)
+        Self::try_hold_under(key, Mode::ORDINARY, budget, Patience::Standing)
+    }
+
+    /// Take an exclusive hold on the lease named `key`, handing back the wait
+    /// that failed.
+    ///
+    /// The waiter stands in the lease's turnstile while it waits, so no new
+    /// ordinary holder lands ahead of it, and the bounds are
+    /// [`Lease::try_hold`]'s.
+    pub fn try_hold_exclusive(key: &str, budget: Budget) -> Result<Self, WaitFailure> {
+        Self::try_hold_under(key, Mode::Exclusive, budget, Patience::Standing)
     }
 
     /// The acquisition, with the per-holder bound named rather than assumed.
@@ -334,76 +569,134 @@ impl Lease {
     /// about the acquisition moves with it — the failure a spent patience
     /// raises carries whatever bound spent it, which is what makes the two
     /// bounds tell themselves apart in the diagnostic.
-    #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // The lease is this crate's own machine-local state, and a file lock is what makes it cross-process.
-    fn try_hold_under(key: &str, budget: Budget, patience: Patience) -> Result<Self, WaitFailure> {
-        Self::try_hold_noting(key, budget, patience, |line| eprintln!("{line}"))
+    fn try_hold_under(
+        key: &str,
+        mode: Mode,
+        budget: Budget,
+        patience: Patience,
+    ) -> Result<Self, WaitFailure> {
+        Self::try_hold_noting(key, mode, budget, patience, |line| eprintln!("{line}"))
     }
 
     /// The acquisition, with the waiter's two notices handed to `note`.
     ///
     /// A waiter that finds the lease held says once who holds it, using the
-    /// record the failure messages already read, and says when it acquires the
-    /// lease how long it waited. A hold that finds the lease free says nothing,
-    /// so uncontended runs stay quiet. The notices are why a caller whose own
-    /// deadline counts this queue time is not left with an empty stderr when a
-    /// long holder ends it. No bound moves with them.
-    #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // See `try_hold_under`.
+    /// records the failure messages already read, and says when it acquires
+    /// the lease how long it waited. A hold that finds the lease free says
+    /// nothing, so uncontended runs stay quiet. The notices are why a caller
+    /// whose own deadline counts this queue time is not left with an empty
+    /// stderr when a long holder ends it. No bound moves with them.
+    #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // The lease is this crate's own machine-local state, and a file lock is what makes it cross-process.
     fn try_hold_noting(
         key: &str,
+        mode: Mode,
         budget: Budget,
         patience: Patience,
         mut note: impl FnMut(&str),
     ) -> Result<Self, WaitFailure> {
         let patience = patience.bound();
         let root = root();
-        let path = lease_path(&root, key);
-        std::fs::create_dir_all(&root)
-            .unwrap_or_else(|error| panic!("the lease directory {}: {error}", root.display()));
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(&path)
-            .unwrap_or_else(|error| panic!("the lease file {}: {error}", path.display()));
+        let files = LeaseFiles::under(&root, key);
+        std::fs::create_dir_all(&files.holders).unwrap_or_else(|error| {
+            panic!("the lease directory {}: {error}", files.holders.display())
+        });
+        let open = |path: &Path| {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .truncate(false)
+                .open(path)
+                .unwrap_or_else(|error| panic!("the lease file {}: {error}", path.display()))
+        };
+        let file = open(&files.lock);
+        // Opened per acquisition, so it is this waiter's own open file
+        // description, and dropped at the end of this function: an exclusive
+        // waiter stands in it only while it waits.
+        let turnstile = open(&files.turnstile);
+        let attempt = |outcome: Result<(), TryLockError>, path: &Path| match outcome {
+            Ok(()) => true,
+            Err(TryLockError::WouldBlock) => false,
+            Err(TryLockError::Error(error)) => {
+                panic!("locking the lease file {}: {error}", path.display())
+            }
+        };
 
         let what = format!("the {key} lease");
         let started = Instant::now();
         let mut probes = 0usize;
         let mut looks = Unmoved::default();
         let mut queued = false;
+        let mut in_turnstile = false;
 
         wait_until(&what, budget, || {
             probes += 1;
-            match file.try_lock() {
-                Ok(()) => Observed::Met(Ok(())),
-                Err(TryLockError::WouldBlock) => {
-                    let (record, unmoved) = looks.look(|| holder(&path));
-                    if !queued {
-                        queued = true;
-                        note(&format!("waiting for the {key} lease, held by {record}"));
+            // Where this look stopped: at the turnstile, behind an exclusive
+            // waiter, or at the lock itself.
+            let (landed, at_turnstile) = match mode {
+                Mode::Exclusive => {
+                    if !in_turnstile {
+                        in_turnstile = attempt(turnstile.try_lock(), &files.turnstile);
                     }
-                    if unmoved >= patience {
-                        Observed::Met(Err(WaitFailure {
-                            what: what.clone(),
-                            kind: FailureKind::Elapsed,
-                            budget: Budget::new(patience, budget.probe()),
-                            elapsed: started.elapsed(),
-                            probes,
-                            last_state: format!(
-                                "held by {record}, which has neither let go nor changed hands in \
-                                 {unmoved:?}"
-                            ),
-                        }))
+                    (
+                        in_turnstile && attempt(file.try_lock(), &files.lock),
+                        !in_turnstile,
+                    )
+                }
+                Mode::Shared => {
+                    if attempt(turnstile.try_lock_shared(), &files.turnstile) {
+                        let landed = attempt(file.try_lock_shared(), &files.lock);
+                        // Let go before the records are read below, so a
+                        // refused look never keeps an exclusive waiter out of
+                        // the turnstile while it reads a directory. The cost is
+                        // that the try and the read are not one step: a waiter
+                        // stalled between them across a whole hand-over reads
+                        // no record and no hold in the turnstile for that one
+                        // look. The module documentation accepts that window.
+                        let _ = turnstile.unlock();
+                        (landed, false)
                     } else {
-                        Observed::pending(format!("held by {record} for {unmoved:?}"))
+                        (false, true)
                     }
                 }
-                Err(TryLockError::Error(error)) => {
-                    panic!("locking the lease file {}: {error}", path.display())
-                }
+            };
+            if landed {
+                return Observed::Met(Ok(()));
+            }
+            let mut beside = 0usize;
+            let (record, unmoved) = looks.look(|| {
+                let standing = standing(&files.holders);
+                beside = standing.beside;
+                standing.oldest
+            });
+            let behind = behind(&record, beside, at_turnstile);
+            if !queued {
+                queued = true;
+                note(&format!("waiting for the {key} lease, held by {behind}"));
+            }
+            if unmoved >= patience {
+                Observed::Met(Err(WaitFailure {
+                    what: what.clone(),
+                    kind: FailureKind::Elapsed,
+                    budget: Budget::new(patience, budget.probe()),
+                    elapsed: started.elapsed(),
+                    probes,
+                    last_state: format!(
+                        "held by {behind}; the oldest has neither let go nor changed hands in \
+                         {unmoved:?}"
+                    ),
+                }))
+            } else {
+                Observed::pending(format!("held by {behind}; the oldest for {unmoved:?}"))
             }
         })??;
+        // The record is published before the turnstile is let go. An ordinary
+        // look that begins while an exclusive hold is landing therefore still
+        // stops at the turnstile, so it never reads a taken lease that has
+        // neither a record nor a hold waiting ahead to name. A look that began
+        // before the landing and stalled across it can; see the unlock above.
+        let record = Record::publish(&files.holders, key, mode);
+        drop(turnstile);
 
         if queued {
             note(&format!(
@@ -411,10 +704,10 @@ impl Lease {
                 started.elapsed()
             ));
         }
-        record_holder(&file, key, write_record);
         Ok(Lease {
             key: key.to_owned(),
             file,
+            record,
         })
     }
 
@@ -425,17 +718,35 @@ impl Lease {
 }
 
 impl Drop for Lease {
-    #[allow(clippy::disallowed_types)] // This crate's own lease handle; see `try_hold`.
     fn drop(&mut self) {
         // The record goes before the lock does. A record left standing after
         // its writer let go names a process that no longer holds anything, and
         // the next waiter to read it would name that dead pid as the holder it
         // is queued behind.
-        clear_record(&self.file);
+        if let Some(record) = self.record.take() {
+            record.withdraw();
+        }
         // Closing the file would release the lock on its own; unlocking first
         // says so where a reader is looking for the release.
         let _ = self.file.unlock();
     }
+}
+
+/// How a waiter names what it is queued behind.
+///
+/// The oldest record is the holder; the count beside it and the turnstile are
+/// context. Only the oldest record is what the look tracker compares, so
+/// younger holders leaving or arriving do not re-arm the patience on a stuck
+/// one; [`HOLDER_PATIENCE`] says when a waiter sees each.
+fn behind(oldest: &str, beside: usize, at_turnstile: bool) -> String {
+    let mut named = oldest.to_owned();
+    if beside > 0 {
+        named.push_str(&format!(", with {beside} more holding beside it"));
+    }
+    if at_turnstile {
+        named.push_str(", and an exclusive hold waiting ahead in the turnstile");
+    }
+    named
 }
 
 /// How long the holder record one acquisition keeps reading has stood
@@ -454,12 +765,13 @@ impl Drop for Lease {
 ///
 /// **What it bounds is one record string, not one holder.** A string that
 /// recurs across hand-overs joins those standings into one span: every empty
-/// file reads as the same placeholder, whether a holder let go, died recording
-/// nothing, or failed to write its record, and a process that holds the lease
-/// twice writes the same record both times. So a run of consecutive looks that
-/// each land on such a string, spanning the patience, names a queue that did
-/// move. The placeholder is not made to re-arm all the same, because then a
-/// holder that died recording nothing would never be named at all.
+/// record reads as the same placeholder, whether no holder recorded anything,
+/// one died recording nothing, or one failed to write its record, and a process
+/// that holds the lease twice in the same second writes the same record both
+/// times. So a run of consecutive looks that each land on such a string,
+/// spanning the patience, names a queue that did move. The placeholder is not
+/// made to re-arm all the same, because then a holder that died recording
+/// nothing would never be named at all.
 ///
 /// The look reads the clock and the record in one place, [`Unmoved::look`], so
 /// no call site can order them the other way.
@@ -494,19 +806,82 @@ impl Unmoved {
     }
 }
 
+/// One holder's record of itself: a file in the lease's holders directory that
+/// the holder keeps locked for as long as it holds.
+///
+/// The lock is what tells a live record from a dead one. A holder that dies
+/// releases it with every other lock it had, so a record a reader can lock is
+/// one nobody is holding behind, and the reader removes it.
+#[derive(Debug)]
+struct Record {
+    path: PathBuf,
+    // Locked exclusively for the record's life; see the type.
+    #[allow(clippy::disallowed_types)] // This crate's own lease record; see `try_hold`.
+    file: std::fs::File,
+}
+
+impl Record {
+    /// Write and publish this holder's record, or publish nothing when it
+    /// cannot be written.
+    ///
+    /// The file is made and locked under a name readers do not list, and only
+    /// renamed to its listed name once it is locked: a reader that could see
+    /// it before the lock would read a live holder as a dead one and remove
+    /// it. A holder killed between those two steps leaves an unlisted file
+    /// behind, which no reader names. The listed name begins with the time it
+    /// was taken, zero-padded, so names sort oldest first.
+    #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // This crate's own lease record; see `try_hold`.
+    fn publish(holders: &Path, key: &str, mode: Mode) -> Option<Record> {
+        static SERIAL: AtomicU64 = AtomicU64::new(0);
+        let taken = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
+        let stem = format!(
+            "{:020}-{}-{}",
+            taken.as_nanos(),
+            std::process::id(),
+            SERIAL.fetch_add(1, Ordering::Relaxed)
+        );
+        let unlisted = holders.join(format!(".{stem}.unlisted"));
+        let path = holders.join(format!("{stem}.holder"));
+        let file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(&unlisted)
+            .ok()?;
+        let listed = file.try_lock().is_ok() && {
+            record_holder(&file, key, mode, write_record);
+            std::fs::rename(&unlisted, &path).is_ok()
+        };
+        if listed {
+            Some(Record { path, file })
+        } else {
+            let _ = std::fs::remove_file(&unlisted);
+            None
+        }
+    }
+
+    /// Take the record down, and only then let go of its lock.
+    #[allow(clippy::disallowed_methods)] // This crate's own lease record; see `try_hold`.
+    fn withdraw(self) {
+        let _ = std::fs::remove_file(&self.path);
+        drop(self.file);
+    }
+}
+
 /// Write who holds the lease, for whoever is waiting on it, putting the line
 /// down through `write`.
 ///
-/// The record is diagnostic only: a waiter reads it while the holder writes
+/// The record is diagnostic only: a waiter may read it while the holder writes
 /// it, so a torn read is possible and costs a confusing line in a failure that
 /// was going to name the wait's own bound anyway. What it buys is a timeout
 /// that names a process a reader can go look at.
 ///
-/// **A write that fails clears the record instead of leaving the last one.**
+/// **A write that fails clears the record instead of leaving a partial one.**
 /// The failure a swallowed error could otherwise cause is not a missing record
-/// but a wrong one — the previous holder's line, read by a waiter as the name
-/// of the process it is queued behind — and an empty record reads as the
-/// holder that recorded nothing about itself, which is true.
+/// but a wrong one, and an empty record reads as the holder that recorded
+/// nothing about itself, which is true.
 ///
 /// That arm is why the write is a parameter: it is the arm worth pinning, and a
 /// filesystem does not fail on request. The acquisition passes
@@ -517,6 +892,7 @@ impl Unmoved {
 fn record_holder(
     file: &std::fs::File,
     key: &str,
+    mode: Mode,
     write: impl FnOnce(&std::fs::File, &str) -> std::io::Result<()>,
 ) {
     let since = SystemTime::now()
@@ -524,8 +900,9 @@ fn record_holder(
         .map(|elapsed| elapsed.as_secs())
         .unwrap_or_default();
     let record = format!(
-        "pid {} holding {key} since unix {since}",
-        std::process::id()
+        "pid {} holding {key} {} since unix {since}",
+        std::process::id(),
+        mode.word()
     );
     if write(file, &record).is_err() {
         clear_record(file);
@@ -540,28 +917,70 @@ fn write_record(mut file: &std::fs::File, record: &str) -> std::io::Result<()> {
     file.set_len(record.len() as u64)
 }
 
-/// Leave the lease file saying nothing about who holds it.
+/// Leave the record saying nothing about who holds the lease.
 ///
-/// The truncation is what a released lease leaves behind, and it is also the
-/// fallback for a record that could not be written: in both cases the honest
-/// answer is that nobody has recorded anything, and [`holder`] renders an empty
-/// file as exactly that.
+/// It is the fallback for a record that could not be written: the honest
+/// answer is that nobody has recorded anything, and [`standing`] renders an
+/// empty record as exactly that.
 #[allow(clippy::disallowed_types)] // This crate's own lease handle; see `try_hold`.
 fn clear_record(file: &std::fs::File) {
     let _ = file.set_len(0);
 }
 
-/// What the lease file says about its holder, for a wait that is pending.
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)] // Reading this crate's own lease record; see `try_hold`.
-fn holder(path: &Path) -> String {
-    let mut record = String::new();
-    let read = std::fs::OpenOptions::new()
-        .read(true)
-        .open(path)
-        .and_then(|mut file| file.read_to_string(&mut record));
-    match read {
-        Ok(_) if !record.trim().is_empty() => record.trim().to_owned(),
-        _ => "a holder that recorded nothing about itself".to_owned(),
+/// What a waiter reads as the placeholder for a holder with no record.
+const UNRECORDED: &str = "a holder that recorded nothing about itself";
+
+/// The holders a waiter is behind, as their records name them.
+#[derive(Debug, PartialEq, Eq)]
+struct Standing {
+    /// The oldest live holder's record, or [`UNRECORDED`] when no live holder
+    /// has one.
+    oldest: String,
+    /// How many live records stand beside the oldest.
+    beside: usize,
+}
+
+/// Read the live records under a lease's holders directory, for a wait that
+/// is pending.
+///
+/// A record whose file this read can lock is one whose holder is gone, and it
+/// is removed here rather than named.
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)] // Reading this crate's own lease records; see `try_hold`.
+fn standing(holders: &Path) -> Standing {
+    let mut listed: Vec<PathBuf> = std::fs::read_dir(holders)
+        .map(|entries| {
+            entries
+                .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+                .filter(|path| {
+                    path.extension()
+                        .is_some_and(|extension| extension == "holder")
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    listed.sort();
+    let mut live = listed.iter().filter_map(|path| {
+        let mut file = std::fs::OpenOptions::new().read(true).open(path).ok()?;
+        match file.try_lock_shared() {
+            Ok(()) => {
+                let _ = std::fs::remove_file(path);
+                None
+            }
+            Err(TryLockError::WouldBlock) => {
+                let mut record = String::new();
+                let read = file.read_to_string(&mut record);
+                Some(match read {
+                    Ok(_) if !record.trim().is_empty() => record.trim().to_owned(),
+                    _ => UNRECORDED.to_owned(),
+                })
+            }
+            Err(TryLockError::Error(_)) => None,
+        }
+    });
+    let oldest = live.next().unwrap_or_else(|| UNRECORDED.to_owned());
+    Standing {
+        oldest,
+        beside: live.count(),
     }
 }
 
@@ -574,13 +993,13 @@ mod tests {
 
     use super::*;
 
-    /// A key nothing else on the machine holds, whose lease file goes with it.
+    /// A key nothing else on the machine holds, whose lease files go with it.
     ///
     /// The key carries this process's id, so these cases queue behind each
     /// other and never behind a real watcher a sibling binary is running. The
-    /// file it mints is this guard's to remove: a per-pid name nothing cleared
-    /// would leave one file behind per case per run, and the isolation root is
-    /// shared by every run on the machine.
+    /// files it mints are this guard's to remove: a per-pid name nothing
+    /// cleared would leave files behind per case per run, and the isolation
+    /// root is shared by every run on the machine.
     struct PrivateKey(String);
 
     impl PrivateKey {
@@ -591,12 +1010,19 @@ mod tests {
         fn as_str(&self) -> &str {
             &self.0
         }
+
+        fn files(&self) -> LeaseFiles {
+            LeaseFiles::under(&root(), &self.0)
+        }
     }
 
     impl Drop for PrivateKey {
-        #[allow(clippy::disallowed_methods)] // Removing this module's own scratch lease file.
+        #[allow(clippy::disallowed_methods)] // Removing this module's own scratch lease files.
         fn drop(&mut self) {
-            let _ = std::fs::remove_file(lease_path(&root(), &self.0));
+            let files = self.files();
+            let _ = std::fs::remove_file(files.lock);
+            let _ = std::fs::remove_file(files.turnstile);
+            let _ = std::fs::remove_dir_all(files.holders);
         }
     }
 
@@ -604,25 +1030,28 @@ mod tests {
         Budget::new(Duration::from_secs(10), Duration::from_millis(500))
     }
 
-    /// **The bar.** A lease is held by one holder at a time, and the second
-    /// holder takes it only once the first has let go.
-    ///
-    /// The forbidden shape is a lease that admits everyone — a lock taken per
-    /// process rather than per open file, or a hold that returns without
-    /// locking anything. Under it the second hold lands while the first is
-    /// still holding, and the flag the first sets on its way out is still
-    /// false.
-    #[test]
-    fn a_second_hold_waits_for_the_first_to_let_go() {
-        let private = PrivateKey::new("exclusion");
+    /// A wall a hold that is excluded spends in full, and a hold that is free
+    /// lands well inside.
+    fn brief() -> Budget {
+        Budget::new(Duration::from_millis(50), Duration::from_millis(500))
+    }
+
+    /// One way of taking the lease, named for the failure messages.
+    type Take = (&'static str, fn(&str, Budget) -> Lease);
+    const ORDINARY: Take = ("an ordinary hold", Lease::hold);
+    const EXCLUSIVE: Take = ("an exclusive hold", Lease::hold_exclusive);
+
+    /// The second hold lands only once the first has let go.
+    fn waits_for_the_first((first_kind, first): Take, (second_kind, second): Take, label: &str) {
+        let private = PrivateKey::new(label);
         let key = private.as_str().to_owned();
         let held = Arc::new(AtomicBool::new(false));
         let released = Arc::new(AtomicBool::new(false));
 
-        let first = {
+        let holder = {
             let (key, held, released) = (key.clone(), Arc::clone(&held), Arc::clone(&released));
             thread::spawn(move || {
-                let lease = Lease::hold(&key, budget());
+                let lease = first(&key, budget());
                 held.store(true, Ordering::SeqCst);
                 thread::sleep(Duration::from_millis(200));
                 released.store(true, Ordering::SeqCst);
@@ -639,50 +1068,430 @@ mod tests {
         })
         .unwrap_or_else(|failure| panic!("{failure}"));
 
-        let second = Lease::hold(&key, budget());
+        let lease = second(&key, budget());
         assert!(
             released.load(Ordering::SeqCst),
-            "the second hold landed while the first was still holding the lease"
+            "{second_kind} landed while {first_kind} was still holding the lease"
         );
-        assert_eq!(second.key(), key);
-        drop(second);
-        first.join().expect("the first holder");
+        assert_eq!(lease.key(), key);
+        drop(lease);
+        holder.join().expect("the first holder");
     }
 
-    /// A hold that cannot be taken inside its bound reports the holder rather
-    /// than a bare timeout, and reports it as the wait's own failure.
+    /// **The bar on exclusion.** An exclusive hold is held by one holder at a
+    /// time on every platform: it waits for any holder to let go, and any
+    /// holder waits for it.
     ///
-    /// The bound it is reported against is the one the caller passed, which is
-    /// what says [`Lease::try_hold`] carries a per-holder bound wider than a
-    /// wall of milliseconds: an acquisition given fifty of them against a
-    /// holder that never moves is the wall's failure and not the patience's.
+    /// The forbidden shape is a lease that admits everyone — a lock taken per
+    /// process rather than per open file, a shared lock where an exclusive one
+    /// was asked for, or a hold that returns without locking anything. Under it
+    /// the second hold lands while the first is still holding, and the flag
+    /// the first sets on its way out is still false.
     #[test]
-    fn a_hold_that_never_comes_free_names_the_holder_it_waited_on() {
-        let key = PrivateKey::new("occupied");
-        let occupier = Lease::hold(key.as_str(), budget());
+    fn an_exclusive_hold_and_any_other_hold_wait_for_each_other() {
+        waits_for_the_first(EXCLUSIVE, EXCLUSIVE, "exclusive-exclusive");
+        waits_for_the_first(ORDINARY, EXCLUSIVE, "ordinary-exclusive");
+        waits_for_the_first(EXCLUSIVE, ORDINARY, "exclusive-ordinary");
+    }
 
-        let wall = Budget::new(Duration::from_millis(50), Duration::from_millis(500));
-        let failure = Lease::try_hold(key.as_str(), wall).expect_err("a lease another holder has");
+    /// **The bar off Linux.** An ordinary hold waits for an ordinary holder,
+    /// so exactly one holder of the watcher lease is live at a time.
+    ///
+    /// The forbidden shape is the Linux sharing reaching a platform whose
+    /// watcher service goes silent under a crowd, which is the starvation the
+    /// lease was written for.
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn off_linux_an_ordinary_hold_waits_for_the_one_live_holder() {
+        const { assert!(!ORDINARY_HOLDS_SHARE) };
+        waits_for_the_first(ORDINARY, ORDINARY, "ordinary-ordinary");
+    }
 
+    /// **The bar on Linux.** Two ordinary holds are live at once in one
+    /// process: the second lands at once while the first still holds.
+    ///
+    /// The forbidden shape is the serial lease this replaced, under which every
+    /// host case on the machine queues behind every other and threads buy
+    /// nothing.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn on_linux_two_ordinary_holds_are_live_at_once() {
+        const { assert!(ORDINARY_HOLDS_SHARE) };
+        let key = PrivateKey::new("overlap");
+        let first = Lease::hold(key.as_str(), budget());
+        let second = Lease::try_hold(key.as_str(), brief()).unwrap_or_else(|failure| {
+            panic!("a second ordinary hold waited for the first: {failure}")
+        });
+        drop(first);
+        drop(second);
+    }
+
+    /// The variable that makes a run of the cross-process case the child half
+    /// of it, naming the hold the child takes.
+    const CHILD_TAKES: &str = "NORN_ISOLATION_CASE_CHILD_TAKES";
+    /// The variable carrying the parent's private key to the child.
+    const CHILD_KEY: &str = "NORN_ISOLATION_CASE_CHILD_KEY";
+
+    /// **The bar across processes.** Holds in two processes share and exclude
+    /// as holds in one do: an ordinary hold lands beside another process's
+    /// ordinary hold on Linux and waits for it elsewhere, and an exclusive hold
+    /// waits for any other process's hold and is waited for.
+    ///
+    /// The forbidden shape is a sharing that only threads see — a lock kept in
+    /// process memory, which would leave every binary a runner starts
+    /// excluding nothing in the others — or an exclusion that only threads
+    /// see. The child is this binary run again on this one case; it takes one
+    /// hold under a short wall while the parent holds the other for the
+    /// child's whole life, and says whether it landed.
+    #[test]
+    #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // Harness scaffolding: starting this binary as the other process.
+    fn holds_in_two_processes_share_and_exclude_as_holds_in_one_do() {
+        if let Some(takes) = std::env::var_os(CHILD_TAKES) {
+            let key = std::env::var(CHILD_KEY).expect("the parent's key");
+            let wall = Budget::new(Duration::from_millis(500), Duration::from_millis(500));
+            let taken = match takes.to_str() {
+                Some("ordinary") => Lease::try_hold(&key, wall),
+                Some("exclusive") => Lease::try_hold_exclusive(&key, wall),
+                other => panic!("an unknown hold {other:?}"),
+            };
+            // Stderr, beside the waiter's own notices; stdout is the
+            // runner's.
+            eprintln!(
+                "child {}",
+                if taken.is_ok() { "landed" } else { "excluded" }
+            );
+            return;
+        }
+
+        let key = PrivateKey::new("processes");
+        let child = |takes: &str| -> String {
+            let output = std::process::Command::new(
+                std::env::current_exe().expect("this test binary"),
+            )
+            .args([
+                "--exact",
+                "isolation::tests::holds_in_two_processes_share_and_exclude_as_holds_in_one_do",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CHILD_TAKES, takes)
+            .env(CHILD_KEY, key.as_str())
+            .env(ISOLATION_ROOT, root())
+            .output()
+            .expect("the child runs");
+            let said = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                output.status.success(),
+                "the child failed: {said}{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            ["child landed", "child excluded"]
+                .into_iter()
+                .find(|line| said.contains(line))
+                .unwrap_or_else(|| panic!("the child said neither: {said}"))
+                .to_owned()
+        };
+
+        let ordinary = Lease::hold(key.as_str(), budget());
+        assert_eq!(
+            child("ordinary"),
+            if ORDINARY_HOLDS_SHARE {
+                "child landed"
+            } else {
+                "child excluded"
+            },
+            "an ordinary hold in another process, beside this one's ordinary hold"
+        );
+        assert_eq!(
+            child("exclusive"),
+            "child excluded",
+            "an exclusive hold in another process, beside this one's ordinary hold"
+        );
+        drop(ordinary);
+
+        let exclusive = Lease::hold_exclusive(key.as_str(), budget());
+        assert_eq!(
+            child("ordinary"),
+            "child excluded",
+            "an ordinary hold in another process, beside this one's exclusive hold"
+        );
+        drop(exclusive);
+    }
+
+    /// **The bar on the turnstile.** A stream of ordinary holders that overlap
+    /// one another, so the lease is never free of them, does not keep an
+    /// exclusive waiter out: it lands inside its wall, and while it holds, no
+    /// ordinary holder does.
+    ///
+    /// The forbidden shape is the bare shared lock, which admits a new shared
+    /// holder while an exclusive one waits. Under it the waiter here only ever
+    /// finds the lease held, and ends at its wall naming holders that were
+    /// working the whole time.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_stream_of_ordinary_holders_does_not_keep_an_exclusive_waiter_out() {
+        let key = PrivateKey::new("stream");
+        let stop = Arc::new(AtomicBool::new(false));
+        let live = Arc::new(AtomicUsize::new(0));
+        let landed = Arc::new(AtomicUsize::new(0));
+        let stream: Vec<_> = (0..4u64)
+            .map(|nth| {
+                let (key, stop, live, landed) = (
+                    key.as_str().to_owned(),
+                    Arc::clone(&stop),
+                    Arc::clone(&live),
+                    Arc::clone(&landed),
+                );
+                thread::spawn(move || {
+                    // Staggered, so the four windows overlap and the lease is
+                    // never free of all of them at once.
+                    thread::sleep(Duration::from_millis(10 * nth));
+                    while !stop.load(Ordering::SeqCst) {
+                        let lease = Lease::hold(&key, budget());
+                        live.fetch_add(1, Ordering::SeqCst);
+                        landed.fetch_add(1, Ordering::SeqCst);
+                        thread::sleep(Duration::from_millis(40));
+                        live.fetch_sub(1, Ordering::SeqCst);
+                        drop(lease);
+                    }
+                })
+            })
+            .collect();
+
+        wait_until("the stream to be running", budget(), || {
+            if landed.load(Ordering::SeqCst) >= 8 {
+                Observed::Met(())
+            } else {
+                Observed::pending("the stream has not got going")
+            }
+        })
+        .unwrap_or_else(|failure| panic!("{failure}"));
+
+        let wall = Budget::new(Duration::from_secs(5), Duration::from_millis(500));
+        let exclusive = Lease::try_hold_exclusive(key.as_str(), wall);
+        // Read while the exclusive hold, if it landed, is still held.
+        let beside = live.load(Ordering::SeqCst);
+        let outcome = exclusive.map(drop);
+        stop.store(true, Ordering::SeqCst);
+        for holder in stream {
+            holder.join().expect("an ordinary holder");
+        }
+        outcome.unwrap_or_else(|failure| {
+            panic!("a stream of ordinary holders kept the exclusive waiter out: {failure}")
+        });
+        assert_eq!(
+            beside, 0,
+            "{beside} ordinary holders were live while the exclusive hold held"
+        );
+    }
+
+    /// **The bar on an ordinary waiter behind an exclusive stream.** Exclusive
+    /// holds handing over to one another keep an ordinary waiter out, and
+    /// what ends its wait is the wall: the failure is reported against the
+    /// wall rather than the patience, says nothing about a holder that
+    /// stopped, and names the exclusive holder or the exclusive hold waiting
+    /// in the turnstile.
+    ///
+    /// The stream is three threads taking exclusive holds back to back, and
+    /// it is a stream in the sense the module documentation gives: a holder
+    /// lets go only once it has seen the next exclusive waiter standing in the
+    /// turnstile, so at every instant the lease is held exclusively or a waiter
+    /// stands there, however the threads are scheduled. A hand-over with nobody
+    /// in the turnstile is a gap an ordinary waiter may land in, and that is
+    /// the lease working, not this bar failing. Each holder rewrites its record
+    /// to a line of its own, since holds taken by one process in one second
+    /// would otherwise all write the same line, and the patience would join
+    /// their standings into one. Every record stands well inside the patience,
+    /// and the wall is past it.
+    ///
+    /// The forbidden shape is a failure that misnames the wait: a patience
+    /// that fires on a stream that is moving, which names a working exclusive
+    /// holder as one that stopped, or a failure that names nothing ahead.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_exclusive_stream_holds_an_ordinary_waiter_out_until_the_wall() {
+        let key = PrivateKey::new("exclusive-stream");
+        let turnstile = key.files().turnstile;
+        let stop = Arc::new(AtomicBool::new(false));
+        let landed = Arc::new(AtomicUsize::new(0));
+        let stream: Vec<_> = (0..3)
+            .map(|_| {
+                let (key, turnstile, stop, landed) = (
+                    key.as_str().to_owned(),
+                    turnstile.clone(),
+                    Arc::clone(&stop),
+                    Arc::clone(&landed),
+                );
+                thread::spawn(move || {
+                    while !stop.load(Ordering::SeqCst) {
+                        let lease = Lease::hold_exclusive(&key, budget());
+                        let nth = landed.fetch_add(1, Ordering::SeqCst);
+                        let record = lease.record.as_ref().expect("a published record");
+                        write_record(
+                            &record.file,
+                            &format!(
+                                "pid {} holding {key} exclusively, hand-over {nth}",
+                                std::process::id()
+                            ),
+                        )
+                        .expect("a record of its own");
+                        thread::sleep(Duration::from_millis(100));
+                        // The waiter seen here stays in the turnstile until it
+                        // lands, and it lands only once this hold has let go,
+                        // so the hand-over leaves no instant without one or the
+                        // other.
+                        crate::wait::wait_until_with_interval(
+                            "the next exclusive waiter in the turnstile",
+                            budget(),
+                            Duration::from_millis(1),
+                            || {
+                                if stop.load(Ordering::SeqCst)
+                                    || an_exclusive_waiter_stands_in(&turnstile)
+                                {
+                                    Observed::Met(())
+                                } else {
+                                    Observed::pending("nobody stands in the turnstile")
+                                }
+                            },
+                        )
+                        .unwrap_or_else(|failure| panic!("{failure}"));
+                        drop(lease);
+                    }
+                })
+            })
+            .collect();
+
+        wait_until("the exclusive stream to be running", budget(), || {
+            if landed.load(Ordering::SeqCst) >= 2 {
+                Observed::Met(())
+            } else {
+                Observed::pending("the stream has not handed over yet")
+            }
+        })
+        .unwrap_or_else(|failure| panic!("{failure}"));
+
+        let patience = Duration::from_millis(500);
+        let wall = Budget::new(Duration::from_millis(1_200), Duration::from_millis(500));
+        let started = landed.load(Ordering::SeqCst);
+        let outcome =
+            Lease::try_hold_under(key.as_str(), Mode::ORDINARY, wall, Patience::Of(patience))
+                .map(drop);
+        let handed_over = landed.load(Ordering::SeqCst) - started;
+        stop.store(true, Ordering::SeqCst);
+        for holder in stream {
+            holder.join().expect("an exclusive holder");
+        }
+
+        let failure = outcome.expect_err("an ordinary hold landed inside an exclusive stream");
+        assert_eq!(
+            failure.kind,
+            FailureKind::Elapsed,
+            "the wait ended on a probe rather than a bound: {failure}"
+        );
         assert_eq!(
             failure.budget.work(),
             wall.work(),
-            "the failure is reported against {:?} rather than the {:?} wall the caller passed, so \
-             this acquisition ran under a per-holder bound of its own: {failure}",
-            failure.budget.work(),
+            "the wait behind {handed_over} hand-overs ended at the {patience:?} patience instead \
+             of the wall: {failure}"
+        );
+        assert!(
+            !failure
+                .last_state
+                .contains("neither let go nor changed hands"),
+            "a stream that handed over {handed_over} times is reported as a holder that \
+             stopped: {failure}"
+        );
+        // The one look that can name neither is a stall across a whole
+        // hand-over between the lease try and the read of the records, which
+        // the module documentation accepts.
+        assert!(
+            failure.last_state.contains("exclusively")
+                || failure
+                    .last_state
+                    .contains("an exclusive hold waiting ahead in the turnstile"),
+            "the failure names nothing exclusive ahead of the ordinary waiter: {failure}"
+        );
+        assert!(
+            handed_over as u32 > wall.work().as_millis() as u32 / patience.as_millis() as u32,
+            "the stream handed over {handed_over} times, too few to outlive a {patience:?} \
+             patience inside a {:?} wall",
             wall.work()
         );
+    }
 
-        let rendered = failure.to_string();
-        assert!(
-            rendered.contains(&format!("pid {}", std::process::id())),
-            "the failure does not name the holding process: {rendered}"
-        );
-        assert!(
-            rendered.contains(key.as_str()),
-            "the failure does not name the lease it waited for: {rendered}"
-        );
-        drop(occupier);
+    /// Whether an exclusive waiter stands in the turnstile at `path`.
+    ///
+    /// A shared probe of the turnstile is refused only while someone holds it
+    /// exclusively. The only exclusive holder of a turnstile is an exclusive
+    /// acquisition on its way to the lease, and while the prober holds the
+    /// lease exclusively none can have landed, so what refuses the probe is a
+    /// waiter. An ordinary hold passing through holds the turnstile shared and
+    /// does not refuse it. The probe's own shared lock goes with the file at
+    /// the end of the call.
+    #[cfg(target_os = "linux")]
+    #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // Probing this module's own scratch turnstile.
+    fn an_exclusive_waiter_stands_in(path: &Path) -> bool {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .open(path)
+            .unwrap_or_else(|error| panic!("the turnstile {}: {error}", path.display()));
+        match file.try_lock_shared() {
+            Ok(()) => false,
+            Err(TryLockError::WouldBlock) => true,
+            Err(TryLockError::Error(error)) => {
+                panic!("probing the turnstile {}: {error}", path.display())
+            }
+        }
+    }
+
+    /// A hold that cannot be taken inside its bound reports the holder rather
+    /// than a bare timeout, and reports it as the wait's own failure, whichever
+    /// kind of hold is waiting on whichever kind.
+    ///
+    /// The bound it is reported against is the one the caller passed, which is
+    /// what says the acquisition carries a per-holder bound wider than a wall
+    /// of milliseconds: an acquisition given fifty of them against a holder
+    /// that never moves is the wall's failure and not the patience's.
+    #[test]
+    fn a_hold_that_never_comes_free_names_the_holder_it_waited_on() {
+        let pairs = [
+            (EXCLUSIVE, ORDINARY, "occupied-exclusively"),
+            (ORDINARY, EXCLUSIVE, "occupied-ordinarily"),
+        ];
+        for ((holding_kind, holding), (waiting_kind, _), label) in pairs {
+            let key = PrivateKey::new(label);
+            let occupier = holding(key.as_str(), budget());
+
+            let failure = if waiting_kind == EXCLUSIVE.0 {
+                Lease::try_hold_exclusive(key.as_str(), brief())
+            } else {
+                Lease::try_hold(key.as_str(), brief())
+            }
+            .expect_err("a lease another holder excludes");
+
+            assert_eq!(
+                failure.budget.work(),
+                brief().work(),
+                "{waiting_kind} behind {holding_kind}: the failure is reported against {:?} \
+                 rather than the {:?} wall the caller passed, so this acquisition ran under a \
+                 per-holder bound of its own: {failure}",
+                failure.budget.work(),
+                brief().work()
+            );
+
+            let rendered = failure.to_string();
+            assert!(
+                rendered.contains(&format!("pid {}", std::process::id())),
+                "{waiting_kind} behind {holding_kind}: the failure does not name the holding \
+                 process: {rendered}"
+            );
+            assert!(
+                rendered.contains(key.as_str()),
+                "{waiting_kind} behind {holding_kind}: the failure does not name the lease it \
+                 waited for: {rendered}"
+            );
+            drop(occupier);
+        }
     }
 
     /// A waiter says who it is queued behind while it waits, and says when it
@@ -701,8 +1510,14 @@ mod tests {
             move |line: &str| notes.lock().expect("notes").push(line.to_owned())
         };
 
-        let free = Lease::try_hold_noting(key.as_str(), budget(), Patience::Standing, sink(&notes))
-            .expect("a free lease");
+        let free = Lease::try_hold_noting(
+            key.as_str(),
+            Mode::Exclusive,
+            budget(),
+            Patience::Standing,
+            sink(&notes),
+        )
+        .expect("a free lease");
         assert!(
             notes.lock().expect("notes").is_empty(),
             "a hold that did not wait wrote {:?}",
@@ -712,9 +1527,14 @@ mod tests {
         let waiter = {
             let (name, notes) = (key.as_str().to_owned(), Arc::clone(&notes));
             thread::spawn(move || {
-                let lease =
-                    Lease::try_hold_noting(&name, budget(), Patience::Standing, sink(&notes))
-                        .expect("the lease once it is let go");
+                let lease = Lease::try_hold_noting(
+                    &name,
+                    Mode::ORDINARY,
+                    budget(),
+                    Patience::Standing,
+                    sink(&notes),
+                )
+                .expect("the lease once it is let go");
                 drop(lease);
             })
         };
@@ -733,6 +1553,7 @@ mod tests {
         assert!(
             before[0].contains(&format!("pid {}", std::process::id()))
                 && before[0].contains(key.as_str())
+                && before[0].contains("exclusively")
                 && before[0].contains("since unix"),
             "the waiting line does not name the holder: {}",
             before[0]
@@ -760,8 +1581,9 @@ mod tests {
     #[test]
     fn two_keys_are_two_leases() {
         let (one, two) = (PrivateKey::new("one"), PrivateKey::new("two"));
-        let watcher = Lease::hold(one.as_str(), budget());
-        let other = Lease::hold(two.as_str(), budget());
+        let watcher = Lease::hold_exclusive(one.as_str(), budget());
+        let other = Lease::try_hold_exclusive(two.as_str(), brief())
+            .unwrap_or_else(|failure| panic!("one key's holder excluded another's: {failure}"));
         drop(other);
         drop(watcher);
     }
@@ -776,22 +1598,98 @@ mod tests {
     /// from.
     #[test]
     fn a_released_lease_records_no_holder() {
-        let key = PrivateKey::new("released");
-        let path = lease_path(&root(), key.as_str());
+        for (kind, take) in [ORDINARY, EXCLUSIVE] {
+            let key = PrivateKey::new("released");
+            let holders = key.files().holders;
 
-        let held = Lease::hold(key.as_str(), budget());
-        assert!(
-            holder(&path).contains(&format!("pid {}", std::process::id())),
-            "a held lease does not record its holder: {}",
-            holder(&path)
-        );
-        drop(held);
+            let held = take(key.as_str(), budget());
+            assert!(
+                standing(&holders)
+                    .oldest
+                    .contains(&format!("pid {}", std::process::id())),
+                "{kind} does not record its holder: {:?}",
+                standing(&holders)
+            );
+            drop(held);
 
-        let after = holder(&path);
+            let after = standing(&holders);
+            assert_eq!(
+                after,
+                Standing {
+                    oldest: UNRECORDED.to_owned(),
+                    beside: 0
+                },
+                "the lease still names a holder after {kind} was let go"
+            );
+        }
+    }
+
+    /// **The bar on a holder that died.** A record whose holder is gone is not
+    /// named, and the read that finds it removes it.
+    ///
+    /// The forbidden shape is the record a killed process leaves behind being
+    /// read as a holder: the waiter's failure would name a pid that holds
+    /// nothing, and the record would stand for every run after. The dead
+    /// record here is the oldest, so a reader that named it would name it
+    /// first.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Writing this module's own scratch lease record.
+    fn a_record_whose_holder_died_is_neither_named_nor_left_standing() {
+        let key = PrivateKey::new("died");
+        let holders = key.files().holders;
+        let occupier = Lease::hold_exclusive(key.as_str(), budget());
+        let dead = holders.join(format!("{:020}-1-0.holder", 0));
+        std::fs::write(&dead, "pid 1 holding a lease exclusively since unix 0")
+            .expect("a record nobody holds");
+
+        let read = standing(&holders);
         assert!(
-            !after.contains("pid "),
-            "the lease still names a holder after it was let go: {after}"
+            read.oldest.contains(&format!("pid {}", std::process::id())) && read.beside == 0,
+            "a record nobody holds was read as a holder: {read:?}"
         );
+        assert!(
+            !std::fs::exists(&dead).expect("the holders directory"),
+            "a record nobody holds was left standing"
+        );
+        drop(occupier);
+    }
+
+    /// **The bar on which holder a waiter names.** Behind several holders a
+    /// waiter names the oldest and counts the rest; when the oldest lets go,
+    /// the next oldest is named.
+    ///
+    /// The forbidden shape is naming whichever record the directory listed
+    /// first, or the newest: under either, a stuck holder among working ones is
+    /// a name that keeps changing, the patience keeps re-arming, and the stuck
+    /// holder is never named.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn behind_several_holders_a_waiter_names_the_oldest() {
+        let key = PrivateKey::new("several");
+        let holders = key.files().holders;
+        let first = Lease::hold(key.as_str(), budget());
+        let second = Lease::hold(key.as_str(), budget());
+        for (lease, says) in [(&first, "the first holder"), (&second, "the second holder")] {
+            let record = lease.record.as_ref().expect("a published record");
+            write_record(&record.file, says).expect("a record");
+        }
+
+        assert_eq!(
+            standing(&holders),
+            Standing {
+                oldest: "the first holder".to_owned(),
+                beside: 1
+            }
+        );
+        drop(first);
+        assert_eq!(
+            standing(&holders),
+            Standing {
+                oldest: "the second holder".to_owned(),
+                beside: 0
+            }
+        );
+        drop(second);
     }
 
     /// **The bar on the per-holder bound.** A lease that stays in one holder's
@@ -806,13 +1704,86 @@ mod tests {
     #[test]
     fn a_holder_that_never_changes_hands_is_named_at_the_patience_bound() {
         let key = PrivateKey::new("unmoving");
-        let occupier = Lease::hold(key.as_str(), budget());
+        let occupier = Lease::hold_exclusive(key.as_str(), budget());
 
         let patience = Duration::from_millis(200);
         let wall = Budget::new(Duration::from_secs(10), Duration::from_millis(500));
-        let failure = Lease::try_hold_under(key.as_str(), wall, Patience::Of(patience))
-            .expect_err("a lease whose holder never lets go");
+        let failure =
+            Lease::try_hold_under(key.as_str(), Mode::ORDINARY, wall, Patience::Of(patience))
+                .expect_err("a lease whose holder never lets go");
 
+        assert_stopped_holder_named(&failure, patience, wall);
+        drop(occupier);
+    }
+
+    /// **The bar on a stuck holder among working ones.** An exclusive waiter
+    /// behind an ordinary holder that never lets go names it at the patience
+    /// while the working ordinary holders beside it are still leaving one by
+    /// one.
+    ///
+    /// The waiter stands in the turnstile, so no holder arrives while it
+    /// waits: what moves beside the stuck holder is the working ones draining,
+    /// and they drain here more often than the patience, for longer than it.
+    /// The forbidden shape is a waiter that tracks the whole set rather than
+    /// its oldest record. Every departure re-arms it, and the stuck holder is
+    /// named only a patience after the last working holder has gone, with
+    /// nobody beside it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_stuck_ordinary_holder_is_named_at_the_patience_while_working_ones_leave_beside_it() {
+        let key = PrivateKey::new("stuck-among-working");
+        let stuck = Lease::hold(key.as_str(), budget());
+        let named = format!(
+            "pid {} holding {} shared, the stuck one",
+            std::process::id(),
+            key.as_str()
+        );
+        let record = stuck.record.as_ref().expect("a published record");
+        write_record(&record.file, &named).expect("the stuck holder's record");
+        // Taken after the stuck one, so each is younger than it.
+        let working: Vec<Lease> = (0..6)
+            .map(|_| Lease::hold(key.as_str(), budget()))
+            .collect();
+
+        // One working holder leaves every `apart`, well inside the patience,
+        // and the last leaves well past it.
+        let apart = Duration::from_millis(150);
+        let patience = Duration::from_millis(400);
+        let stop = Arc::new(AtomicBool::new(false));
+        let drain = {
+            let stop = Arc::clone(&stop);
+            thread::spawn(move || {
+                for lease in working {
+                    thread::sleep(apart);
+                    drop(lease);
+                    if stop.load(Ordering::SeqCst) {
+                        break;
+                    }
+                }
+            })
+        };
+
+        let wall = Budget::new(Duration::from_secs(10), Duration::from_millis(500));
+        let failure =
+            Lease::try_hold_under(key.as_str(), Mode::Exclusive, wall, Patience::Of(patience))
+                .expect_err("a lease whose oldest holder never lets go");
+        stop.store(true, Ordering::SeqCst);
+        drain.join().expect("the working holders leaving");
+
+        assert_stopped_holder_named(&failure, patience, wall);
+        assert!(
+            failure.last_state.contains(&named),
+            "the failure does not name the ordinary holder that stopped: {failure}"
+        );
+        assert!(
+            failure.last_state.contains("more holding beside it"),
+            "the stuck holder was named only once every working holder had gone, so the \
+             waiter re-armed on their departures: {failure}"
+        );
+        drop(stuck);
+    }
+
+    fn assert_stopped_holder_named(failure: &WaitFailure, patience: Duration, wall: Budget) {
         assert_eq!(
             failure.budget.work(),
             patience,
@@ -837,7 +1808,6 @@ mod tests {
             "the wait ran to its {:?} wall instead of ending at the patience: {failure}",
             wall.work()
         );
-        drop(occupier);
     }
 
     /// **The bar on what a look charges the holder.** The span a record is read
@@ -945,8 +1915,7 @@ mod tests {
     #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // Writing this module's own scratch lease record.
     fn a_queue_that_keeps_changing_hands_outlives_the_patience_bound() {
         let key = PrivateKey::new("changing-hands");
-        let path = lease_path(&root(), key.as_str());
-        let occupier = Lease::hold(key.as_str(), budget());
+        let occupier = Lease::hold_exclusive(key.as_str(), budget());
 
         let patience = Duration::from_millis(500);
         let wall = Budget::new(Duration::from_secs(2), Duration::from_millis(500));
@@ -984,8 +1953,8 @@ mod tests {
         let last_made = Arc::new(AtomicU64::new(0));
         let record_file = std::fs::OpenOptions::new()
             .write(true)
-            .open(&path)
-            .expect("the scratch lease record the hands write to");
+            .open(&occupier.record.as_ref().expect("a published record").path)
+            .expect("the occupier's record the hands write to");
         let hands = {
             let (stop, handovers, widest_window, last_made) = (
                 Arc::clone(&stop),
@@ -1037,8 +2006,9 @@ mod tests {
             );
         }
 
-        let failure = Lease::try_hold_under(key.as_str(), wall, Patience::Of(patience))
-            .expect_err("a lease no waiter is ever handed");
+        let failure =
+            Lease::try_hold_under(key.as_str(), Mode::ORDINARY, wall, Patience::Of(patience))
+                .expect_err("a lease no waiter is ever handed");
         let at_failure = epoch.elapsed();
         stop.store(true, Ordering::SeqCst);
         hands.join().expect("the hands the record kept changing to");
@@ -1088,38 +2058,39 @@ mod tests {
     }
 
     /// **The bar on a holder record that cannot be written.** A failed write
-    /// leaves the lease file saying nothing, not saying what the last holder
-    /// said.
+    /// leaves the holder's record saying nothing, not saying what it said
+    /// before.
     ///
     /// The forbidden shape is the swallowed error that leaves the previous
-    /// record standing. Under it the next waiter's timeout names a process that
-    /// let go before this holder ever took the lease — a pid a reader goes and
-    /// looks at, and a wrong answer is worse than none.
+    /// record standing. Under it the next waiter's timeout names what the file
+    /// last said rather than who holds it — and a wrong answer is worse than
+    /// none.
     #[test]
     fn a_holder_record_that_cannot_be_written_leaves_no_record_at_all() {
         let key = PrivateKey::new("unwritable-record");
-        let path = lease_path(&root(), key.as_str());
+        let holders = key.files().holders;
 
         let held = Lease::hold(key.as_str(), budget());
-        let standing = holder(&path);
+        let named = standing(&holders).oldest;
         assert!(
-            standing.contains(&format!("pid {}", std::process::id())),
-            "a held lease does not record its holder: {standing}"
+            named.contains(&format!("pid {}", std::process::id())),
+            "a held lease does not record its holder: {named}"
         );
 
-        record_holder(&held.file, key.as_str(), |_, _| {
+        let record = held.record.as_ref().expect("a published record");
+        record_holder(&record.file, key.as_str(), Mode::ORDINARY, |_, _| {
             Err(std::io::Error::other("the record could not be written"))
         });
 
         assert_eq!(
-            holder(&path),
-            "a holder that recorded nothing about itself",
+            standing(&holders).oldest,
+            UNRECORDED,
             "a record that could not be written left the previous one standing"
         );
         assert_eq!(
-            held.file.metadata().expect("the lease file").len(),
+            record.file.metadata().expect("the record file").len(),
             0,
-            "the lease file still carries bytes a waiter would read as a holder"
+            "the record still carries bytes a waiter would read as a holder"
         );
         drop(held);
     }
@@ -1184,9 +2155,18 @@ mod tests {
              directory",
             derived.display()
         );
+        let files = LeaseFiles::under(Path::new("/somewhere"), REAL_WATCHER);
         assert_eq!(
-            lease_path(Path::new("/somewhere"), REAL_WATCHER),
+            files.lock,
             Path::new("/somewhere").join(format!("{REAL_WATCHER}.lease"))
+        );
+        assert_eq!(
+            files.turnstile,
+            Path::new("/somewhere").join(format!("{REAL_WATCHER}.turnstile"))
+        );
+        assert_eq!(
+            files.holders,
+            Path::new("/somewhere").join(format!("{REAL_WATCHER}.holders"))
         );
     }
 }
