@@ -530,30 +530,49 @@ fn an_inherited_ignored_sighup_stays_ignored() {
 /// **An auto-launched host exits 0 after `auto_exit_after` without
 /// activity; an explicit host never idle-exits.** Both are started with the
 /// shortest idle exit; the explicit one is still serving after the
-/// auto-launched one has gone.
+/// auto-launched one has gone, and after it has outlived that exit several
+/// times over.
+///
+/// One second is the setting's floor. Nothing in the case depends on a host
+/// staying up across a pause: the auto-launched host is meant to exit, its
+/// `listening:` line is read from a buffer whether or not it has already
+/// gone, and the explicit host's survival is what the case checks. The
+/// negative check waits three times the value, since a host that exits
+/// after one idle second must be seen to have outlived it.
 #[test]
 fn an_auto_launched_host_idles_out_and_an_explicit_one_does_not() {
+    const AUTO_EXIT_AFTER: Duration = Duration::from_secs(1);
+    // What a loaded runner may add to the exit; the minute this replaced
+    // carried the same slack on top of its value.
+    const EXIT_SLACK: Duration = Duration::from_secs(60);
     let auto_fixture = Fixture::new("serve-idle-auto");
     let explicit_fixture = Fixture::new("serve-idle-explicit");
     let explicit_port = free_port();
     explicit_fixture.write_settings(&format!(
-        "[endpoint]\nport = {explicit_port}\n[serve]\nauto_exit_after = \"1m\"\n"
+        "[endpoint]\nport = {explicit_port}\n[serve]\nauto_exit_after = \"1s\"\n"
     ));
     let mut explicit = explicit_fixture.start(&["serve"]);
     explicit.listening_port();
+    let explicit_up = std::time::Instant::now();
     let started = std::time::Instant::now();
     let auto = auto_launched(
         &auto_fixture,
         free_port(),
-        "[serve]\nauto_exit_after = \"1m\"\n",
+        "[serve]\nauto_exit_after = \"1s\"\n",
     );
-    let (status, lines) = auto.wait_within(Duration::from_secs(120));
+    let (status, lines) = auto.wait_within(AUTO_EXIT_AFTER + EXIT_SLACK);
     assert_eq!(status.code(), Some(0), "{lines:?}");
-    assert!(started.elapsed() >= Duration::from_secs(60), "{lines:?}");
+    assert!(started.elapsed() >= AUTO_EXIT_AFTER, "{lines:?}");
     assert!(
         lines.iter().any(|line| line == "stopped: the idle exit"),
         "{lines:?}"
     );
+    // Observe the explicit host for longer than the exit it must not take.
+    // The explicit host sees no activity here: the hello below comes after.
+    while explicit_up.elapsed() < AUTO_EXIT_AFTER * 3 {
+        assert!(explicit.running(), "the explicit host idled out");
+        std::thread::sleep(Duration::from_millis(100));
+    }
     assert!(explicit.running(), "the explicit host idled out");
     assert_eq!(hello(explicit_port, "default").status, 200);
     assert_eq!(explicit.terminate().0.code(), Some(0));

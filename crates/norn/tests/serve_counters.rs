@@ -380,6 +380,12 @@ fn served_counters_do_not_grow_with_the_vault() {
 /// Fixed pools spawn eagerly and never retire: there is no keep-alive to
 /// wait out. Only an observed detach and the release of closed sockets are
 /// synchronization points. Token edits retain the default bearer.
+///
+/// `idle_after` is one second, the setting's floor. No step relies on the
+/// vault staying attached across a pause: the detach is waited for, a read
+/// that finds the vault detached is answered by attaching it, and the one
+/// wait for the re-attached state also accepts the vault having already gone
+/// idle again, which only a read that was answered can have preceded.
 #[test]
 #[allow(clippy::disallowed_methods)] // /proc reads of this test's own child.
 fn idle_connection_and_token_cycles_retain_no_descriptors_or_threads() {
@@ -393,7 +399,7 @@ fn idle_connection_and_token_cycles_retain_no_descriptors_or_threads() {
     #[cfg(target_os = "linux")]
     {
         let fixture = Fixture::new("serve-cycles");
-        fixture.write_settings("[serve]\nidle_after = \"1m\"\n");
+        fixture.write_settings("[serve]\nidle_after = \"1s\"\n");
         let port = free_port();
         let (served, bearer) = fixture.serve_on(port);
         register_tree(&fixture, port, &bearer, "notes", 16);
@@ -416,7 +422,9 @@ fn idle_connection_and_token_cycles_retain_no_descriptors_or_threads() {
             .unwrap();
             assert_eq!(hello(port, &format!("cycling{cycle}")).status, 200);
 
-            let until = std::time::Instant::now() + std::time::Duration::from_secs(150);
+            // The idle time, plus the 90 s that bounded detach scheduling
+            // and a stalled runner when the idle time was a minute.
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(1 + 90);
             loop {
                 let reply = wire(
                     port,
@@ -485,7 +493,13 @@ fn idle_connection_and_token_cycles_retain_no_descriptors_or_threads() {
                     serde_json::json!({"vault":notes()}),
                 );
                 let value: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
-                value["status"]["published"]["state"]["state"] == "ready"
+                // A stall past `idle_after` here lets the vault go idle again
+                // before this poll sees it ready; the answered read above
+                // is what proves it attached.
+                matches!(
+                    value["status"]["published"]["state"]["state"].as_str(),
+                    Some("ready" | "unattached")
+                )
             });
             read_one(port, &bearer);
             read_one(port, &bearer);

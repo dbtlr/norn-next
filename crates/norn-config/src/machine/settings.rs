@@ -274,8 +274,8 @@ fn parse_with(
                     "background_threads" => integer!(background_threads, 1, 8),
                     "read_idle_grace" => time!(read_idle_grace, 0, 600_000),
                     "background_turn_budget" => time!(background_turn_budget, 10, 1000),
-                    "idle_after" => time!(idle_after, 60_000, 604_800_000),
-                    "auto_exit_after" => time!(auto_exit_after, 60_000, 86_400_000),
+                    "idle_after" => time!(idle_after, 1000, 604_800_000),
+                    "auto_exit_after" => time!(auto_exit_after, 1000, 86_400_000),
                     "ready_wait" => time!(ready_wait, 1000, 300_000),
                     "drain_bound" => time!(drain_bound, 1000, 20_000),
                     "request_log" => {
