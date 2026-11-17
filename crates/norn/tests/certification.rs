@@ -1299,8 +1299,16 @@ fn the_fast_gate_keeps_ordinary_functional_coverage() {
         gate.replace("--exclude norn-host", "--exclude norn-store"),
         gate.replace(" --exclude norn-host", ""),
         gate.replace(
-            "--locked -p norn-host -p norn-testkit -p norn-serve\n",
+            "--locked -p norn-testkit -p norn-serve\n",
             "--locked -p norn-store\n",
+        ),
+        gate.replace(
+            "-p norn-host --features induced-failure\n",
+            "-p norn-store --features induced-failure\n",
+        ),
+        gate.replace(
+            "cargo test --locked -p norn-testkit -p norn-serve\n",
+            "cargo test --locked -p norn-host -p norn-testkit -p norn-serve\n",
         ),
         gate.replace(" --exclude norn-serve", ""),
         gate.replace(" -p norn-serve\n", "\n"),
@@ -1325,7 +1333,7 @@ fn the_fast_gate_keeps_ordinary_functional_coverage() {
     ];
     for command in [
         "cargo test --locked --workspace --exclude norn-host --exclude norn-testkit --exclude norn-serve",
-        "cargo test --locked -p norn-host -p norn-testkit -p norn-serve",
+        "cargo test --locked -p norn-testkit -p norn-serve",
     ] {
         for narrowing in [
             " ordinary",
@@ -1379,9 +1387,7 @@ fn assert_fast_gate(workflow: &str) {
     assert_matrix_step_values(
         workflow,
         "build-host",
-        &[
-            ".github/scripts/flake-tripwire.sh cargo test --locked -p norn-host -p norn-testkit -p norn-serve",
-        ],
+        &[".github/scripts/flake-tripwire.sh cargo test --locked -p norn-testkit -p norn-serve"],
         false,
     );
 }

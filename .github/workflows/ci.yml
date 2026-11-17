@@ -91,12 +91,17 @@ jobs:
       - name: Test
         run: .github/scripts/flake-tripwire.sh cargo test --locked --workspace --exclude norn-host --exclude norn-testkit --exclude norn-serve
 
-  # `build and test (norn-host and norn-testkit)` is a required check in the `main` ruleset.
-  # The named packages and catch-all exclusions must match exactly. Each package's
-  # ordinary tests and doctests run once; new crates join the catch-all automatically.
-  # norn-serve runs here too: its tokio and hyper switch features on in mio and
+  # `build and test (norn-host and norn-testkit)` is a required check in the `main` ruleset,
+  # and the name predates the job's current packages: norn-host is tested in
+  # `host-functional` below, once, with `induced-failure` on. The named packages and
+  # catch-all exclusions must match exactly. Each package's ordinary tests and
+  # doctests run in exactly one PR job; new crates join the catch-all automatically.
+  # norn-serve runs here: its tokio and hyper switch features on in mio and
   # smallvec, which norn-host's graph links, so the shard needs it to build those
-  # with the whole-workspace feature set (`norn-testkit --test shards`). The check
+  # with the whole-workspace feature set (`norn-testkit --test shards`). Without
+  # norn-host selected, norn-serve's development dependencies on norn-fs and
+  # norn-store keep the fault features those two (and norn-db) get from
+  # norn-host's own development dependencies in a whole-workspace run. The check
   # keeps its required name.
   build-host:
     name: build and test (norn-host and norn-testkit)
@@ -109,7 +114,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # cargo test builds every selected target before running tests and doctests.
       - name: Test
-        run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-host -p norn-testkit -p norn-serve
+        run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-testkit -p norn-serve
 
   # `lint and document` is a required check in the `main` ruleset.
   # Its 30-minute timeout is a runaway guard, under the same doctrine above.
@@ -188,6 +193,14 @@ jobs:
   # targets and exposes the accounts ordinary churn and rolling-heal cases
   # assert over. Without it, those files or assertions would be absent.
   #
+  # This is the only PR job that runs norn-host's ordinary tests and doctests.
+  # Every case the feature-off run executes also runs here (2,197 cases in both,
+  # none only in the feature-off run), so a second run on PRs only repeated
+  # them. The feature-off build stays proven on every PR by compilation: the
+  # build job builds the shipped graph and the workspace clippy compiles
+  # norn-host's targets with the feature off. regression.yml still runs the
+  # default-feature host suite nightly.
+  #
   # Select the whole package so every current and future ordinary host target
   # and case joins PR coverage automatically. A list of targets or a --skip
   # would silently leave newly added functional coverage behind. Only lockdown
@@ -219,8 +232,8 @@ jobs:
       - name: Host functional suite
         run: .github/scripts/flake-tripwire.sh cargo test --locked --config profile.dev.package.libsqlite3-sys.opt-level=3 -p norn-host --features induced-failure
 
-  # A targeted second-architecture gate. The two default test shards cover the
-  # full workspace on Linux x86_64; this job holds contracts whose answers can
+  # A targeted second-architecture gate. The three Linux test jobs above cover
+  # the full workspace on x86_64; this job holds contracts whose answers can
   # drift with architecture or filesystem behavior without duplicating the
   # complete host suite: embedding determinism, norn-fs contracts, Obsidian
   # parity, exact rename/refusal cases, and the folding-root spelling bar.
@@ -298,8 +311,9 @@ jobs:
   # local crate the workspace does not hold as a member; and it holds the
   # invariant-to-mechanism mapping to the boundary lints configured in
   # clippy.toml. The lints themselves bind in the lint job, where clippy runs.
-  # The shard certification beside it holds the two package-shard jobs above to
-  # building every package's tests with the whole-workspace feature set.
+  # The shard certification beside it holds the three PR test jobs to testing
+  # every package exactly once, and the two package-shard jobs to building every
+  # package's tests with the whole-workspace feature set.
   #
   # It also lints the workflows themselves with actionlint, whose image carries
   # shellcheck for every `run:` script: an unknown runner label, a bad

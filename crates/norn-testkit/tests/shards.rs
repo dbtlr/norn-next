@@ -1,12 +1,14 @@
-//! The package-shard certification, run against this workspace: each PR test
-//! shard, with the selection `ci.yml` gives it, builds every package's tests
-//! with the features a whole-workspace `cargo test` would. The logic is
+//! The package-shard certification, run against this workspace: every package
+//! is tested in exactly one PR job with the selection `ci.yml` gives it, and
+//! each package shard builds every package's tests with the features a
+//! whole-workspace `cargo test` would. The logic is
 //! unit-tested in `norn_testkit::shards`.
 
 use norn_testkit::shards::{Shard, TreeReading, shards_in, violations};
 
 #[test]
-fn each_ci_shard_builds_tests_with_the_whole_workspace_feature_set() {
+fn each_package_is_tested_in_one_pr_job_and_each_shard_builds_with_the_whole_workspace_feature_set()
+{
     let workflow = include_str!("../../../.github/workflows/ci.yml");
     let whole = TreeReading::read(&["--workspace".to_string()]).expect("reading the workspace");
     let shards: Vec<(Shard, TreeReading)> = shards_in(workflow)
