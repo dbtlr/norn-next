@@ -104,6 +104,16 @@
 //! last look: the exclusive holder, or, in the middle of a hand-over, the
 //! exclusive hold waiting in the turnstile.
 //!
+//! One stall blanks that name. An ordinary waiter lets go of the turnstile
+//! before it reads the records, so one that passed the turnstile, was refused
+//! the lease and then stood still across a whole hand-over can read the
+//! instant in which the old holder's record is withdrawn and the new holder's
+//! is not yet published. That look names a holder that recorded nothing, and
+//! the next look names the new holder. The window is accepted: it costs a
+//! diagnostic one name and never an admission, and reading the records under
+//! the turnstile would make every refused look hold exclusive waiters out of
+//! it for the length of a directory read.
+//!
 //! This is accepted rather than given a turn for ordinary holders. The
 //! exclusive holders are the watcher-fidelity cases: each holds for one case's
 //! watcher window, a stream needs one of them waiting while another holds, and
@@ -636,6 +646,13 @@ impl Lease {
                 Mode::Shared => {
                     if attempt(turnstile.try_lock_shared(), &files.turnstile) {
                         let landed = attempt(file.try_lock_shared(), &files.lock);
+                        // Let go before the records are read below, so a
+                        // refused look never keeps an exclusive waiter out of
+                        // the turnstile while it reads a directory. The cost is
+                        // that the try and the read are not one step: a waiter
+                        // stalled between them across a whole hand-over reads
+                        // no record and no hold in the turnstile for that one
+                        // look. The module documentation accepts that window.
                         let _ = turnstile.unlock();
                         (landed, false)
                     } else {
@@ -674,9 +691,10 @@ impl Lease {
             }
         })??;
         // The record is published before the turnstile is let go. An ordinary
-        // waiter that looks while an exclusive hold is landing therefore still
+        // look that begins while an exclusive hold is landing therefore still
         // stops at the turnstile, so it never reads a taken lease that has
-        // neither a record nor a hold waiting ahead to name.
+        // neither a record nor a hold waiting ahead to name. A look that began
+        // before the landing and stalled across it can; see the unlock above.
         let record = Record::publish(&files.holders, key, mode);
         drop(turnstile);
 
@@ -1383,6 +1401,9 @@ mod tests {
             "a stream that handed over {handed_over} times is reported as a holder that \
              stopped: {failure}"
         );
+        // The one look that can name neither is a stall across a whole
+        // hand-over between the lease try and the read of the records, which
+        // the module documentation accepts.
         assert!(
             failure.last_state.contains("exclusively")
                 || failure
