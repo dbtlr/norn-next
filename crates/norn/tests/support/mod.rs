@@ -109,11 +109,13 @@ impl Fixture {
     pub fn start_with(&self, args: &[&str], arrange: impl FnOnce(&mut Command)) -> Served {
         use std::os::unix::process::CommandExt;
         let mut command = Command::new(&self.binary);
-        // SAFETY: `signal` is async-signal-safe, and nothing else runs in the
-        // child between fork and exec. The host honors an inherited SIGHUP
-        // ignore (as `nohup` leaves it), so a runner launched that way would
-        // otherwise make every case's SIGHUP a no-op. `arrange` runs after
-        // this hook and may set the ignore back on purpose.
+        // SAFETY: `signal` is async-signal-safe, and the closure neither
+        // allocates nor locks; the only other hooks in the child between fork
+        // and exec are those `arrange` adds. The host honors an inherited
+        // SIGHUP ignore (as `nohup` leaves it), so a runner launched that way
+        // would otherwise make every case's SIGHUP a no-op. `pre_exec` hooks
+        // run in the order they were added, so one `arrange` adds after this
+        // may set the ignore back on purpose.
         unsafe {
             command.pre_exec(|| {
                 libc::signal(libc::SIGHUP, libc::SIG_DFL);
