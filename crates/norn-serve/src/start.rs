@@ -726,7 +726,10 @@ mod tests {
         }
     }
 
-    /// Contract invariant 6: a launched start verifies a first mint on its next poll.
+    /// Contract invariant 6: a launched start verifies a first mint on its next
+    /// poll. The case proves the start re-reads the token on a later poll,
+    /// before the release deadline; a start that reuses its first (empty) read
+    /// never verifies and runs to that deadline, exiting 11.
     #[test]
     #[allow(clippy::disallowed_methods)] // Harness scaffolding: an initially empty config base.
     fn a_launched_start_verifies_a_first_mint_on_its_next_poll() {
@@ -749,12 +752,18 @@ mod tests {
             channel: HelloChannel::Dev,
             launch: Launch::Auto,
         };
-        // Only the initial poll and one retry fit before the release deadline;
-        // a third poll reaches that deadline before it can dial.
+        // The deadline has seconds of headroom, so a starved runner delaying
+        // the mint or a dial cannot reach it, while the poll stays short. A
+        // start that never re-reads the token still runs to the deadline.
         let pace = Pace {
-            poll: SMALL.release / 2,
+            release: Duration::from_secs(10),
+            cap: Duration::from_secs(20),
+            dial: Duration::from_secs(2),
+            drain_dial: Duration::from_secs(2),
+            poll: Duration::from_millis(50),
             ..SMALL
         };
+        let began = Instant::now();
         let outcome = runtime.block_on(async {
             let mut waiting = std::pin::pin!(wait_on_held_lock(&start, pace));
             // With no token there is no socket I/O to suspend on: Pending
@@ -773,6 +782,9 @@ mod tests {
         let ended = ended(outcome);
         assert_eq!(ended.status, HOST_SERVES, "{}", ended.line);
         assert!(ended.line.contains("a verified norn host already serves"));
+        // Verifying on a later poll takes a poll interval and a dial; well
+        // under the release deadline, but generous for a starved runner.
+        assert!(began.elapsed() < pace.release / 2, "{:?}", began.elapsed());
     }
 
     /// **A held lock with nothing verified answering**: past the release
