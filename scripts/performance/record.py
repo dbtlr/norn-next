@@ -322,10 +322,13 @@ def main():
         binary, built = identity(args)
         metadata.update(built)
         processes = []
+        # Each size's fixture digest, so a record compared with another names the bytes it measured.
+        metadata["fixtures"] = {}
         for size in args.sizes:
             if args.engine != "current" and not (args.fixtures / str(size)).exists():
                 raise ValueError("only a current run generates fixtures; record the current engine first")
             source, manifest = fixture(binary, args.fixtures, size)
+            metadata["fixtures"][str(size)] = manifest["tree_sha256"]
             for number in range(args.processes):
                 root = args.output / "work" / f"{size}-{number}"
                 root.mkdir(parents=True)
@@ -347,6 +350,9 @@ def main():
             metadata["serving_overhead_allowance"] = {"fixed_ns": OVERHEAD_FIXED_NS, "per_byte_ns": OVERHEAD_PER_BYTE_NS, "statistic": "p95 residual after per-byte allowance"}
             metadata["rows"].extend(overhead_rows(processes))
         metadata["rows"].extend(resource_rows(processes))
+        if args.engine == "legacy":
+            # Legacy is recorded one process per runner; the parts are summarized together.
+            metadata["process_evidence"] = processes
         metadata["completed"] = True
     except BaseException as problem:
         metadata["failure"] = repr(problem)
