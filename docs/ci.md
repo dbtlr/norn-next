@@ -75,10 +75,10 @@ and refuses every other `--config`.
 | macOS platform | Embedding determinism, filesystem contracts, Obsidian parity, exact case-rename and unreadable-document/subtree cases, folding-root spelling bar |
 | Architecture | Actionlint, the architecture gate and the shard certification |
 
-`regression.yml` runs the complete eight-job matrix at 02:17 UTC daily and by
+`regression.yml` runs the complete nine-job matrix at 02:17 UTC daily and by
 manual dispatch. Its `full ` job names retain the build, induced-failure,
-platform, folding-counter, architecture, Linux counter, Linux memory and nightly
-performance jobs.
+platform, folding-counter, architecture, Linux counter, Linux memory and the two
+nightly performance jobs, current and serve.
 Compiled registry-carrier and inventory audits run only in its Linux build job.
 The complete lockdown and process-death recovery targets run in its Linux
 induced-failure and macOS platform jobs. Counter and memory lanes run in full
@@ -97,15 +97,41 @@ macOS uses `macos-15` and asserts ARM64. Host fault and counter lane steps name
 `LANE_FEATURES: induced-failure`. The full Linux memory job keeps its 20-minute
 guard and existing feature selections.
 
-The independent `full nightly performance` job records all three engines and
-uploads `nightly-performance-<attempt>`. Its script builds independently receipted
-release subjects outside the workspace target; it needs no build-job artifacts.
-It has its own checkout, Rust cache and `regression-performance-<attempt>` identity
-receipt. Complete release evidence requires this job and its performance artifact
-as well as the other seven jobs. The artifact can contain partial diagnostics
-after an engine fails; its presence alone does not qualify a run. A complete
-report contains `current/record.json`, `serve/record.json`, `legacy/record.json`
-and `summary.md`.
+Two independent jobs measure performance, `full nightly performance (current)`
+and `full nightly performance (serve)`. Each records one engine with
+`nightly.py --engines <engine>` and uploads `nightly-performance-<engine>-<attempt>`.
+The script builds independently receipted release subjects outside the
+workspace target, so neither job needs build-job artifacts or waits on another
+job. Each has its own checkout, Rust cache and `regression-<job>-<attempt>`
+identity receipt. Each job's summary sets the stored legacy record beside its
+engine or says why it cannot, as `docs/performance.md` describes. Complete
+release evidence requires both jobs and both performance artifacts as well as
+the other seven jobs. An artifact can contain partial diagnostics after an
+engine fails; its presence alone does not qualify a run. A complete current
+artifact contains `current/record.json` and `summary.md`, and a complete serve
+artifact contains `serve/record.json` and `summary.md`.
+
+Legacy Norn 0.48.3 is not recorded nightly. The dispatch-only `legacy-record.yml`
+records it in six parallel `part` jobs, one process of one size each, and an
+`assemble` job that uploads the record to commit as
+`scripts/performance/legacy-record.json`. It is no part of release evidence.
+
+Each performance guard is a runaway bound over completed hosted runs, and
+`nightly.py` gives each engine's recorder a deadline inside it, so a stuck
+engine still packages its evidence before the job is cancelled:
+
+| Job | Guard | Completed runs | Recorder deadline |
+|---|---:|---|---|
+| `full nightly performance (current)` | 30 min | 6m47s and 4m43s; each process 25 to 41 s | 60 s + 10 s per 1,000 documents per process: 12 min |
+| `full nightly performance (serve)` | 45 min | 14m08s and 12m02s; each process 86 to 103 s, 60 s of it the idle wait | 180 s + 10 s per 1,000 documents per process: 24 min |
+| `legacy-record.yml` part, 2,000 documents | 90 min | 16m57s to 18m07s; the process 14m49s to 15m34s | 600 s + 1,600 s per 1,000 documents: 63 min |
+| `legacy-record.yml` part, 10,000 documents | 300 min | 1h36m12s to 1h57m08s; the process 1h33m42s to 1h54m04s | 600 s + 1,600 s per 1,000 documents: 4 h 37 min |
+
+Each job also builds its release subjects first, about 3 minutes for the
+current worker and 1.5 more for the serving binary. Serve's 60 s idle wait is
+part of what it measures, the first Get after an observed idle detach. It is
+not shortened: the idle clock starts while a from-zero build can still be
+running, so a shorter wait could detach the vault before the warm calls.
 
 Every suite runs through the flake tripwire, which records ledger matches without
 retrying or changing verdicts. Ignored targets use `lane-suite.sh`, whose shared
@@ -162,11 +188,11 @@ gh run download <run-id> --pattern 'regression-*-<attempt>' --dir <evidence-dire
 
 Verify all of the following before accepting release evidence:
 
-- The same run attempt completed successfully with all eight expected full jobs.
+- The same run attempt completed successfully with all nine expected full jobs.
   Their names are the complete matrix names prefixed with `full `.
 - Every required job and step executed its obligations successfully. Missing,
   skipped or cancelled required evidence does not qualify.
-- All eight receipts identify their expected job and the same run ID and attempt.
+- All nine receipts identify their expected job and the same run ID and attempt.
   Each has `identity_matches: true` and candidate, event, workflow and checkout
   SHAs equal to the intended candidate.
 - The suite contract is `active-regression-v1`; the candidate's checked-in commands,
