@@ -553,10 +553,10 @@ fn served_reads_and_applies_cost_the_same_as_in_process() {
     register_tree(&fixture, port, &bearer, "notes", 16);
     read_one(port, &bearer);
     wait_for_ready(port, &bearer);
-    read_one(port, &bearer);
+    read_settled(port, &bearer);
 
     let before = counters(port, &bearer);
-    read_one(port, &bearer);
+    read_settled(port, &bearer);
     let served_read = differences(&before, &counters(port, &bearer));
     let params = serde_json::json!({"vault":notes(), "mode":"apply", "where":[{"op":"path","glob":"d0000.md"}], "changes":[{"change":"set", "field":"status", "value":"done"}]});
     assert_eq!(served.terminate().0.code(), Some(0));

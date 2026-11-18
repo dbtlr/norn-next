@@ -2732,8 +2732,9 @@ every build and read only under the feature; a `channel-live` artifact carries n
 `counters` nor `evidence`.
 
 **The serving bars run on the real process.** `serve_counters` varies document,
-registration, token and idle-connection counts independently, repeats requests
-as a growing control, and compares read and apply request tallies with the
+registration, token and idle-connection counts independently against a Ready vault
+(an early answer carries its warming trust, so its bytes are not a settled read's),
+repeats requests as a growing control, and compares read and apply request tallies with the
 same fixture through an in-process host composed from the production constants.
 Its cycle bar waits for idle detach and Ready re-attach, opens and closes
 connections and edits the token file, then compares the child's descriptor and
