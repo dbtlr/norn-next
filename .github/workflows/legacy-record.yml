@@ -1,0 +1,70 @@
+# Record legacy Norn 0.48.3 once, for the nightly to set beside current and serve.
+# Legacy rescans the vault on every write, so the documented settings take hours:
+# each part records one process of one size on a runner of its own, and the
+# assembly job summarizes the six parts into the record committed as
+# scripts/performance/legacy-record.json. Dispatch only. See docs/performance.md.
+name: legacy record
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  # Guards are runaway bounds over completed parts (docs/ci.md), each above
+  # nightly.py's own legacy deadline for its size plus the worker build.
+  part:
+    name: legacy ${{ matrix.size }} documents, process ${{ matrix.process }}
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ matrix.guard }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {size: 2000, process: 0, guard: 90}
+          - {size: 2000, process: 1, guard: 90}
+          - {size: 2000, process: 2, guard: 90}
+          - {size: 10000, process: 0, guard: 300}
+          - {size: 10000, process: 1, guard: 300}
+          - {size: 10000, process: 2, guard: 300}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Record one legacy process
+        run: python3 scripts/performance/nightly.py --engines legacy --sizes ${{ matrix.size }} --processes 1 --output "$RUNNER_TEMP/legacy"
+      - name: Upload the part
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: legacy-part-${{ matrix.size }}-${{ matrix.process }}
+          path: ${{ runner.temp }}/legacy/evidence.tar.gz
+          if-no-files-found: error
+
+  assemble:
+    name: assemble the legacy record
+    needs: part
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: legacy-part-*
+          path: ${{ runner.temp }}/parts
+      - name: Assemble
+        run: python3 scripts/performance/legacy_record.py assemble --output "$RUNNER_TEMP/legacy-record.json" "$RUNNER_TEMP/parts"
+      - name: Upload the record
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: legacy-record
+          path: ${{ runner.temp }}/legacy-record.json
+          if-no-files-found: error
+          retention-days: 90

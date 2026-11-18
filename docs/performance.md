@@ -368,8 +368,10 @@ fixtures a current run already generated: `ready` is its hello-to-ready time,
 operations match. Legacy reports no first reads and no counters.
 
 `record.json` holds the run identity (commit, executable hash, compiler, start
-time and load), the parameters and the rows. A failed run keeps its failure and
-no rows. Worker logs remain under `work/`; vaults and stores are removed after
+time and load), the parameters, each size's fixture tree digest and the rows. A
+legacy record also keeps each process's measurements as `process_evidence`, so
+single-process records can be summarized together. A failed run keeps its
+failure and no rows. Worker logs remain under `work/`; vaults and stores are removed after
 each process.
 
 ### Keep a timing table
@@ -447,10 +449,91 @@ spawn eagerly and never retire, so resource sampling needs no keep-alive wait.
 RSS, peak RSS, descriptor and thread readings come from the process's `/proc`
 entries. The timing record keeps these beside the in-process and legacy engines.
 
-`nightly.py --output <new-directory>` builds both receipted subjects, freezes
-legacy 0.48.3 after checking its published archive digest, and records all three
-engines serially. Full regression runs it and retains receipts, records and
-worker logs in `evidence.tar.gz`. It writes a comparison table to the job
-summary. `--sizes 300 --processes 1 --samples 2 --warmups 0 --write-payoff 0`
-provides the smallest local measurement run. `--legacy <executable>` uses an
-already installed legacy binary.
+## Run the nightly engines
+
+`nightly.py --output <new-directory>` builds the receipted subjects, generates
+the fixtures with the current worker, and records the engines `--engines`
+names: `current`, `serve` and `legacy`, all three by default, each serially.
+Legacy 0.48.3 is frozen after its published archive digest is checked;
+`--legacy <executable>` uses an already installed binary instead. Each engine's
+`record.py` run has its own deadline, a runaway bound that grows with the
+processes and the size of each fixture. `nightly.py` keeps receipts, fixture
+manifests, records and worker logs in `evidence.tar.gz`, whatever the outcome,
+and writes `summary.md`, which it also appends to the job summary in Actions.
+`--sizes 300 --processes 1 --samples 2 --warmups 0 --write-payoff 0` provides
+the smallest local measurement run.
+
+Full regression runs current and serve in two jobs, one engine each. Legacy is
+not recorded there: version 0.48.3 rescans the vault on every write, so a field
+update takes about half a second at 2,000 documents and three at 10,000 on a
+hosted runner, and one 10,000-document process takes up to two hours. Legacy is
+recorded once and stored instead.
+
+The summary opens with a provenance table: each record's executable, when and
+where it was recorded, and its settings. When legacy is not among the engines
+recorded, the summary then says one of three things about the stored legacy
+record:
+
+- **No legacy record is stored**, so legacy is not compared.
+- **The stored legacy record does not match this run**, followed by every reason:
+  a different legacy executable, a fixture whose bytes differ at a measured
+  size, a size the stored record lacks, or a different record version. Its values
+  are not shown. In Actions, the job also raises a warning.
+- The stored legacy record matches this run. Its values stand in a
+  `legacy (stored)` column beside the engines measured, for the sizes this run
+  measured.
+
+### Store the legacy record
+
+The stored record is `scripts/performance/legacy-record.json`. It is a timing
+record of the legacy engine, at the settings above: 2,000 and 10,000 background
+documents, three fresh processes per size, five warmups and 400 measured calls,
+with writes measured after their first 200 calls. It adds the key the nightly
+checks (the legacy executable's digest, each fixture's tree digest and the
+record version, beside which it compares the process count, samples, warmups and
+write payoff the record carries, so a run at other settings is never compared), the run that recorded it, and when each part ran and under
+what load.
+
+A committed file is the durable form. A workflow artifact expires, and a
+committed record changes only through a reviewed pull request, so the numbers a
+nightly sets beside current main are ones a reviewer has seen, with their key
+and provenance in the diff.
+
+Record it again whenever a nightly reports that the stored record does not
+match: after a generator change moves a fixture's bytes, after the record format
+changes `RECORD_VERSION`, or to measure another legacy executable.
+
+1. Dispatch the recording workflow on the branch that should carry the new record:
+
+   ```sh
+   gh workflow run legacy-record.yml --ref <branch>
+   ```
+
+   Each of its six `part` jobs records one legacy process of one size on a
+   runner of its own, with `nightly.py --engines legacy --sizes <size>
+   --processes 1`. The `assemble` job then summarizes the six parts as one record
+   of three processes per size. It refuses a part that is incomplete, has
+   another record version or other settings, or measured another executable,
+   and parts of one size that measured different fixtures.
+
+2. Download the assembled record, replace the stored one with it, and commit it through a
+   pull request:
+
+   ```sh
+   rm -rf .scratch/legacy-record &&
+     gh run download <run-id> --name legacy-record --dir .scratch/legacy-record &&
+     cp .scratch/legacy-record/legacy-record.json scripts/performance/legacy-record.json
+   ```
+
+   `gh run download` does not overwrite an existing file, so the record is
+   downloaded into an emptied scratch directory first, and the tracked record is
+   replaced only if the download succeeded.
+
+The parts' evidence archives, which keep each process's raw samples, stay
+with the recording run as `legacy-part-<size>-<process>` artifacts until they
+expire. The rows in the stored record are summarized from them, so they are not
+needed to read it.
+
+Each part is a fresh process on its own runner, as the record mode's processes
+are fresh processes on one host. The median across them therefore also spans
+runner hardware, and each part's load is kept with the record.
