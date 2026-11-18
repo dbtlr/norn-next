@@ -156,6 +156,10 @@ jobs:
       # for that crate.
       - name: Lint the induced-failure targets
         run: cargo clippy --locked -p norn-host --all-targets --features induced-failure -- -D warnings
+      # The drain-hold cases and their helpers compile only with `norn`'s
+      # `induced-failure` feature, which no other lint step turns on.
+      - name: Lint the drain holds
+        run: cargo clippy --locked -p norn --test serve_drain --features induced-failure -- -D warnings
       # The `counters` feature compiles the counters route into norn-serve and
       # the token counter bar into the `norn` package's tests; with it off,
       # both compile to nothing, so neither the lint above nor the build job
@@ -234,8 +238,9 @@ jobs:
       # The drain cases that hold a real `norn serve`'s apply at a write stage
       # arm norn-fs's write seam, which only `norn`'s `induced-failure`
       # feature compiles into the binary; without it they compile to nothing.
-      # The feature reaches norn-host's with the same set as the step above, so
-      # this step reuses that build. The rest of the package's tests run in
+      # `-p norn` resolves its own feature graph, so this step rebuilds the
+      # crates from rusqlite up through norn-serve (about 45 s cold) and shares
+      # the dependency builds it can with the step above. The rest of the package's tests run in
       # the build job; test-suite.sh rejects a selection that executes no case,
       # and the shard guard reads a step through it as focused, not as the
       # job's package step.

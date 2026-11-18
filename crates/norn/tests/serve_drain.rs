@@ -355,7 +355,10 @@ fn sigterm_during_an_apply(label: &str, arm: &str, after_first_landed: bool) {
 /// Bar 9b: SIGTERM once publication began: the apply still publishing at the
 /// bound is answered `host/apply-outcome-unknown` with its plan, no sooner
 /// than the bound; released, it finishes; and the host exits 0 within the
-/// bound and the margin.
+/// bound and the margin. That it finishes pins what the host does today: the
+/// contract puts the only stop point at the check before publication, and the
+/// outcome-unknown answer allows either result, so a later change that stands
+/// a publishing apply down safely would change this case, not break a promise.
 #[test]
 #[cfg(all(target_os = "linux", feature = "induced-failure"))]
 fn sigterm_during_publication_answers_the_apply_unknown_with_its_plan() {
