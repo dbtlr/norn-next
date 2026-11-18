@@ -516,7 +516,7 @@ changes `RECORD_VERSION`, or to measure another legacy executable.
    another record version or other settings, or measured another executable,
    and parts of one size that measured different fixtures.
 
-2. Download the assembled record over the stored one, and commit it through a
+2. Download the assembled record, replace the stored one with it, and commit it through a
    pull request:
 
    ```sh
