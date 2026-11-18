@@ -46,6 +46,7 @@ fn peak(profile: Option<&str>, workload: &str) -> u64 {
         .unwrap();
     }
     let port = free_port();
+    let mut resident = None;
     let result = Run::new(&fixture.sandbox, &fixture.binary)
         .args(["serve", "--port", &port.to_string()])
         .deadline(Duration::from_secs(240))
@@ -56,6 +57,7 @@ fn peak(profile: Option<&str>, workload: &str) -> u64 {
             // host is serving; an unauthenticated one costs it the least.
             support::eventually("serve listening", || std::net::TcpStream::connect(("127.0.0.1", port)).is_ok());
             assert_eq!(exchange(port, "GET", "/", None, b"").status, 401, "the host answers before it is measured");
+            let prefaulted = prefault_the_server(group);
             let bearer = fixture.default_bearer();
             if profile.is_some() {
                 call(port, &bearer, "vault_register", json!({"registration":{"name":"notes", "root":root}}));
@@ -122,16 +124,83 @@ fn peak(profile: Option<&str>, workload: &str) -> u64 {
                     assert!(answer.to_string().contains("resolved"), "a plan was actually built: {answer}");
                 }
             }
+            resident = prefaulted.map(|(server, after_prefault)| {
+                let at_end = norn_testkit::image::residency_of(server).unwrap().unwrap();
+                norn_testkit::image::ResidencyReport { after_prefault, at_end }
+                    .wholly_resident()
+                    .unwrap_or_else(|problem| panic!("serve {profile:?} {workload}: {problem}"))
+            });
             // SAFETY: this is the owned, still-running measuring group. Its
             // launcher shields SIGTERM and accounts for the server it reaps.
             assert_eq!(unsafe { libc::kill(-group, libc::SIGTERM) }, 0);
         }).unwrap();
     result.assert_success();
     eprintln!(
-        "serve {profile:?} {workload}: {} peak RSS bytes",
+        "serve {profile:?} {workload}: {} peak RSS bytes, executable {resident:?} bytes resident",
         result.peak_rss_bytes
     );
     result.peak_rss_bytes
+}
+
+/// Make the server's executable wholly resident, as every `norn-host` memory
+/// child makes its own, and hand back the server's pid and its residency.
+///
+/// **Without it the code term depends on the page cache, not on the server.**
+/// The kernel maps a touched text page and, through fault-around, the cached
+/// pages beside it, and how far that reaches depends on the size of the page
+/// cache's folios for the freshly copied binary. On hosted `ubuntu-latest`,
+/// about 6% of null servers held exactly 17,904 KiB of text where the rest held
+/// 20.9–22.6 MiB, with the same anonymous memory, threads and stacks and more
+/// minor faults (NORN-577 evidence run 44273242054). The suite subtracts the
+/// least of three nulls, so one such server raised every above-null reading of
+/// its job by about 3 MB. With the executable wholly resident in every server,
+/// null and measured alike, the term is the file's mapped size by
+/// construction, and the differences cancel it.
+///
+/// The server prefaults after its first answer rather than at its entry: it
+/// runs no harness this suite could enter, and what it touched starting is
+/// resident already. Linux only, where the bars gate; elsewhere `None`.
+fn prefault_the_server(
+    group: libc::pid_t,
+) -> Option<(libc::pid_t, norn_testkit::image::Residency)> {
+    if !cfg!(target_os = "linux") {
+        return None;
+    }
+    let server = server_in(group);
+    let residency = norn_testkit::image::prefault_process(server).unwrap()?;
+    Some((server, residency))
+}
+
+/// The one process of the measuring `group` other than its launcher, which
+/// leads it: the server the launcher started and will reap.
+fn server_in(group: libc::pid_t) -> libc::pid_t {
+    let members: Vec<libc::pid_t> = std::fs::read_dir("/proc")
+        .unwrap()
+        .filter_map(|entry| {
+            entry
+                .ok()?
+                .file_name()
+                .to_str()?
+                .parse::<libc::pid_t>()
+                .ok()
+        })
+        .filter(|&pid| pid != group)
+        .filter(|&pid| {
+            // `stat`'s fields after the parenthesised command are state,
+            // parent and process group.
+            std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+                stat.rsplit_once(')').and_then(|(_, rest)| {
+                    rest.split_whitespace().nth(2)?.parse::<libc::pid_t>().ok()
+                }) == Some(group)
+            })
+        })
+        .collect();
+    assert_eq!(
+        members.len(),
+        1,
+        "the measuring group {group} holds one server: {members:?}"
+    );
+    members[0]
 }
 
 /// Measured over the eight-shape read mix, including eight rich find pages:

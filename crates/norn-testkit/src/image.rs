@@ -159,6 +159,28 @@ pub fn prefault() -> io::Result<()> {
     platform::prefault()
 }
 
+/// Make every executable-file mapping of another process, `pid`, wholly
+/// resident, and read how much of them is then, or `None` on a platform that
+/// does not report it.
+///
+/// **This is [`prefault`] for a subject the suite does not build**, such as
+/// the real `norn serve`, which runs no harness of its own. On Linux this
+/// process reads every page of those mappings through `/proc/<pid>/mem`. The
+/// kernel faults each page into the target's own page tables, so the pages
+/// count in the target's resident set and in its peak, as if it had touched
+/// them itself. Reading another process's memory needs the right to trace it,
+/// which an ancestor of the target holds under Yama's default scope. Elsewhere
+/// this does nothing and reports `None`: a macOS reading gates nothing.
+pub fn prefault_process(pid: libc::pid_t) -> io::Result<Option<Residency>> {
+    platform::prefault_process(pid)
+}
+
+/// How much of another process's executable-file mappings is resident, or
+/// `None` on a platform that does not report it.
+pub fn residency_of(pid: libc::pid_t) -> io::Result<Option<Residency>> {
+    platform::residency_of(pid)
+}
+
 /// How much of this process's executable-file mappings is resident, or
 /// `None` on a platform that does not report it.
 pub fn residency() -> io::Result<Option<Residency>> {
@@ -324,6 +346,43 @@ mod platform {
         let smaps = std::fs::read_to_string("/proc/self/smaps")?;
         Ok(Some(executable_residency(&smaps, &exe()?)))
     }
+
+    /// The executable's path as `/proc/<pid>/maps` names it.
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: a measured child's executable.
+    fn exe_of(pid: libc::pid_t) -> io::Result<String> {
+        Ok(std::fs::read_link(format!("/proc/{pid}/exe"))?
+            .to_string_lossy()
+            .into_owned())
+    }
+
+    #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // Harness scaffolding: a measured child's memory.
+    pub(super) fn prefault_process(pid: libc::pid_t) -> io::Result<Option<Residency>> {
+        use std::os::unix::fs::FileExt;
+        let maps = std::fs::read_to_string(format!("/proc/{pid}/maps"))?;
+        let mappings = executable_mappings(&maps, &exe_of(pid)?);
+        if mappings.is_empty() {
+            return Err(io::Error::other(format!(
+                "no readable mapping of process {pid}'s executable in its maps"
+            )));
+        }
+        let memory = std::fs::File::open(format!("/proc/{pid}/mem"))?;
+        let mut buffer = vec![0u8; 1 << 20];
+        for (start, end) in mappings {
+            let mut address = start;
+            while address < end {
+                let length = (end - address).min(buffer.len());
+                memory.read_exact_at(&mut buffer[..length], address as u64)?;
+                address += length;
+            }
+        }
+        residency_of(pid)
+    }
+
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: a measured child's memory map.
+    pub(super) fn residency_of(pid: libc::pid_t) -> io::Result<Option<Residency>> {
+        let smaps = std::fs::read_to_string(format!("/proc/{pid}/smaps"))?;
+        Ok(Some(executable_residency(&smaps, &exe_of(pid)?)))
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -394,6 +453,14 @@ mod platform {
     pub(super) fn residency() -> io::Result<Option<Residency>> {
         Ok(None)
     }
+
+    pub(super) fn prefault_process(_pid: libc::pid_t) -> io::Result<Option<Residency>> {
+        Ok(None)
+    }
+
+    pub(super) fn residency_of(_pid: libc::pid_t) -> io::Result<Option<Residency>> {
+        Ok(None)
+    }
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -408,6 +475,14 @@ mod platform {
     }
 
     pub(super) fn residency() -> io::Result<Option<Residency>> {
+        Ok(None)
+    }
+
+    pub(super) fn prefault_process(_pid: libc::pid_t) -> io::Result<Option<Residency>> {
+        Ok(None)
+    }
+
+    pub(super) fn residency_of(_pid: libc::pid_t) -> io::Result<Option<Residency>> {
         Ok(None)
     }
 }
