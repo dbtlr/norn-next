@@ -726,6 +726,55 @@ mod tests {
         }
     }
 
+    /// Contract invariant 6: a launched start verifies a first mint on its next poll.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: an initially empty config base.
+    fn a_launched_start_verifies_a_first_mint_on_its_next_poll() {
+        use std::future::{Future, poll_fn};
+        use std::task::Poll;
+
+        let scratch = Scratch::new("norn-serve-wait-first-mint");
+        std::fs::create_dir_all(scratch.join("config")).unwrap();
+        let dirs = ConfigDirs::new(scratch.join("config"), scratch.join("data")).unwrap();
+        assert!(tokens::read(&dirs).unwrap().is_empty());
+        let _held = ChannelLock::try_take(&dirs).unwrap().unwrap();
+        let host = stand_in(&dirs, HelloLaunch::Auto, Holder::One, || {});
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let start = Start {
+            dirs: &dirs,
+            endpoint: host,
+            channel: HelloChannel::Dev,
+            launch: Launch::Auto,
+        };
+        // Only the initial poll and one retry fit before the release deadline;
+        // a third poll reaches that deadline before it can dial.
+        let pace = Pace {
+            poll: SMALL.release / 2,
+            ..SMALL
+        };
+        let outcome = runtime.block_on(async {
+            let mut waiting = std::pin::pin!(wait_on_held_lock(&start, pace));
+            // With no token there is no socket I/O to suspend on: Pending
+            // means the initial empty read reached the poll-interval sleep.
+            poll_fn(|cx| {
+                assert!(waiting.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            assert!(matches!(
+                crate::mint::mint(&dirs, &[42; 32]).unwrap(),
+                crate::mint::Mint::Minted
+            ));
+            waiting.await
+        });
+        let ended = ended(outcome);
+        assert_eq!(ended.status, HOST_SERVES, "{}", ended.line);
+        assert!(ended.line.contains("a verified norn host already serves"));
+    }
+
     /// **A held lock with nothing verified answering**: past the release
     /// bound a launched start exits 11 and an explicit one 1, with the facts.
     #[test]
