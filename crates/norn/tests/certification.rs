@@ -1797,12 +1797,16 @@ fn assert_complete_active_matrix(workflow: &str, full: bool) {
         (
             "performance-current",
             "nightly performance (current)",
-            &["python3 scripts/performance/nightly.py --engines current --output \"$RUNNER_TEMP/performance\""],
+            &[
+                "python3 scripts/performance/nightly.py --engines current --output \"$RUNNER_TEMP/performance\"",
+            ],
         ),
         (
             "performance-serve",
             "nightly performance (serve)",
-            &["python3 scripts/performance/nightly.py --engines serve --output \"$RUNNER_TEMP/performance\""],
+            &[
+                "python3 scripts/performance/nightly.py --engines serve --output \"$RUNNER_TEMP/performance\"",
+            ],
         ),
         (
             "induced-failure",
@@ -1858,7 +1862,16 @@ fn assert_complete_active_matrix(workflow: &str, full: bool) {
         ),
     ];
     for &(mut key, mut name, runs) in commands {
-        if !full && matches!(key, "performance-current" | "performance-serve" | "folding-counters" | "gates" | "memory") {
+        if !full
+            && matches!(
+                key,
+                "performance-current"
+                    | "performance-serve"
+                    | "folding-counters"
+                    | "gates"
+                    | "memory"
+            )
+        {
             continue;
         }
         let mut runs = runs.to_vec();
