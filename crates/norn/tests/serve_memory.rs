@@ -167,8 +167,9 @@ const ATTACH_GROWTH: u64 = 4 * 1024 * 1024; // measured 1,380,352 bytes
 /// MB at 300 documents and 47.97–50.09 MB at 2,000.
 ///
 /// The bar is a quarter of headroom over the highest reading, rounded up to the
-/// next twentieth: 1.35, 27% over it. It refuses a 2,000-document attach about
-/// 15 MB above today's. [`ATTACH_GROWTH`] bounds the same growth at 4 MiB.
+/// next twentieth: 1.35, 27% over it. Over those readings it lets the
+/// 2,000-document attach grow 13.3–16.2 MB (median 15.1) before refusing it.
+/// [`ATTACH_GROWTH`] bounds the same growth at 4 MiB.
 const ATTACH_RATIO_PER_MILLE: u64 = 1350;
 
 /// How far the read mix may raise the whole-process peak over the attach alone,
@@ -182,13 +183,16 @@ const ATTACH_RATIO_PER_MILLE: u64 = 1350;
 /// sits in the 47.97–50.09 MB spread. Whole-process reads span 60.19–63.87 MB.
 ///
 /// The bar is a quarter of headroom over the highest reading, rounded up to the
-/// next twentieth: 1.65, 25% over it. It refuses a read peak about 18 MB above
-/// today's. The read ceiling in [`CEILINGS`] is the sharper instrument: it
-/// refuses about 5 MB.
+/// next twentieth: 1.65, 25% over it. Over those readings it lets the read peak
+/// grow 16.2–20.2 MB (median 18.6) before refusing it. The read ceiling in
+/// [`CEILINGS`] is the sharper instrument: it refuses 5.4 MB of growth at the
+/// highest reading.
 ///
 /// It does not refuse a find that hydrates 1,000 documents with their fields,
-/// tags and bodies into one 5.1 MB answer. That find read 1.288–1.336 in the
-/// evidence run, because the server drops each answer once it is written.
+/// tags and bodies into one 5.1 MB answer. Alone, that find raised the peak
+/// about as far as the whole read mix does, 1.288–1.336 in the evidence run,
+/// and a ratio with a quarter of headroom over the read mix cannot tell the two
+/// apart.
 const READ_OVER_ATTACH_PER_MILLE: u64 = 1650;
 
 /// The null server's peak, and each subject's peak above it: attach, read and
