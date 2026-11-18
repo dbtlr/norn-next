@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from legacy_record import SETTINGS, assemble, key, mismatches, part_records
+from legacy_record import SETTINGS, STORED, assemble, key, mismatches, part_records
 from nightly import deadline, summary
 from record import RECORD_VERSION, resource_rows, summarize
 
@@ -109,8 +109,8 @@ class Key(unittest.TestCase):
 
 class Summary(unittest.TestCase):
     def test_no_stored_record_is_said_plainly_and_nothing_is_compared(self):
-        text = summary({"current": engine_record()}, None, [], Path("legacy-record.json"))
-        self.assertIn("**No legacy record is stored** at `legacy-record.json`", text)
+        text = summary({"current": engine_record()}, None, [], STORED)
+        self.assertIn("**No legacy record is stored** at `scripts/performance/legacy-record.json`", text)
         self.assertNotIn("legacy (stored)", text)
 
     def test_a_stored_record_whose_key_fails_shows_its_reasons_and_no_values(self):

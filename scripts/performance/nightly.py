@@ -129,6 +129,14 @@ def cell(row):
     return value if row["status"] == "measured" else f"{value} ({row['status']})"
 
 
+def shown(path):
+    """A path as the repository names it, or its file name outside the repository."""
+    try:
+        return path.resolve().relative_to(Path(__file__).resolve().parents[2]).as_posix()
+    except ValueError:
+        return path.name
+
+
 def summary(records, stored=None, reasons=(), stored_path=STORED):
     """The job summary: each record's provenance, the stored legacy record's state, and the metric table."""
     lines = ["## Nightly performance: " + ", ".join(records), "",
@@ -140,7 +148,7 @@ def summary(records, stored=None, reasons=(), stored_path=STORED):
             lines.append(provenance("legacy", stored, stored=True))
         lines.append("")
         if stored is None:
-            lines.append(f"**No legacy record is stored** at `{stored_path.name}`, so legacy is not compared. "
+            lines.append(f"**No legacy record is stored** at `{shown(stored_path)}`, so legacy is not compared. "
                          "Record it with the legacy record workflow, as docs/performance.md describes.")
         elif reasons:
             lines.append("**The stored legacy record does not match this run, so its values are not shown:**")
