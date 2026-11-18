@@ -231,6 +231,16 @@ jobs:
       # did not shorten them on hosted runners.
       - name: Host functional suite
         run: .github/scripts/flake-tripwire.sh cargo test --locked --config profile.dev.package.libsqlite3-sys.opt-level=3 -p norn-host --features induced-failure
+      # The drain cases that hold a real `norn serve`'s apply at a write stage
+      # arm norn-fs's write seam, which only `norn`'s `induced-failure`
+      # feature compiles into the binary; without it they compile to nothing.
+      # The feature reaches norn-host's with the same set as the step above, so
+      # this step reuses that build. The rest of the package's tests run in
+      # the build job; test-suite.sh rejects a selection that executes no case,
+      # and the shard guard reads a step through it as focused, not as the
+      # job's package step.
+      - name: Drain holds on a real host
+        run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked --config profile.dev.package.libsqlite3-sys.opt-level=3 -p norn --features induced-failure --test serve_drain -- --exact sigterm_during_publication_answers_the_apply_unknown_with_its_plan sigterm_before_publication_answers_the_apply_not_run
 
   # A targeted second-architecture gate. The three Linux test jobs above cover
   # the full workspace on x86_64; this job holds contracts whose answers can
@@ -299,6 +309,8 @@ jobs:
         run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-serve --lib -- --exact start::tests::the_probe_refuses_a_listener_on_loopback_or_the_wildcard start::tests::the_probe_passes_a_socket_in_time_wait
       - name: Wildcard-held port refuses the start
         run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn --test serve a_port_held_on_the_wildcard_address_refuses_the_start -- --exact
+      - name: Loopback-held port refuses the start
+        run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn --test serve_hello a_foreign_loopback_holder_refuses_a_real_start -- --exact
       - name: Folding-root spelling bar
         run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host folding_cost --nocapture --test-threads=1
         env:

@@ -754,6 +754,7 @@ fn the_hello_names_the_built_channel_identity_and_actual_launch_kind() {
 
 /// **Exit bar 6d (Linux and macOS).** A foreign loopback listener refuses a
 /// real host start, including macOS's exact-bind fallback after the probe.
+/// The macOS PR job runs this case by name.
 #[test]
 fn a_foreign_loopback_holder_refuses_a_real_start() {
     let fixture = Fixture::new("hello-loopback-holder");

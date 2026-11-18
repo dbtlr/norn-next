@@ -41,7 +41,11 @@ package is selected in no PR job or in two, and naming the shard, package and fe
 when a package shard builds any package in its graph, selected root or dependency, with
 a different feature set. The host functional job joins the first check only: it
 sets `induced-failure` on purpose, and its command may carry only `--features` and the
-one SQLite `--config` value below.
+one SQLite `--config` value below. A step run through `test-suite.sh` is a focused
+step, not its job's package step, and the guard leaves it out of the partition: the
+host functional job's second step runs the `norn` drain cases that hold a real host's
+apply through `norn-fs`'s write seam, which only `norn`'s own `induced-failure` feature
+compiles into the binary.
 
 The host functional job builds the bundled SQLite (`libsqlite3-sys`) at
 opt-level 3 by passing `--config profile.dev.package.libsqlite3-sys.opt-level=3`
