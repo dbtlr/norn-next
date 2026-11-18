@@ -128,12 +128,24 @@ fn an_edit_costs_exactly_one_re_read_on_the_next_request() {
 
 /// One wire call whose report must succeed.
 fn wire(port: u16, bearer: &str, verb: &str, body: serde_json::Value) -> support::Reply {
-    let reply = support::exchange(
+    wire_within(port, bearer, verb, body, std::time::Duration::from_secs(10))
+}
+
+/// [`wire`], waiting at most `within` for the answer.
+fn wire_within(
+    port: u16,
+    bearer: &str,
+    verb: &str,
+    body: serde_json::Value,
+    within: std::time::Duration,
+) -> support::Reply {
+    let reply = support::exchange_within(
         port,
         "POST",
         &format!("/v1/wire/{verb}"),
         Some(bearer),
         &serde_json::to_vec(&body).unwrap(),
+        within,
     );
     assert_eq!(reply.status, 200, "{verb}: {}", reply.body_text());
     reply
@@ -195,6 +207,18 @@ fn read_one(port: u16, bearer: &str) -> support::Reply {
     reply
 }
 
+/// A read of the settled vault: its answer must carry Ready trust, so its
+/// bytes and work are those of a settled read and not of an early answer.
+fn read_settled(port: u16, bearer: &str) {
+    let reply = read_one(port, bearer);
+    let answer: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+    assert_eq!(
+        answer["reading"]["trust"],
+        serde_json::json!({"state":"ready"}),
+        "a measured read must not be an early answer"
+    );
+}
+
 fn differences(before: &Counters, after: &Counters) -> Counters {
     after
         .iter()
@@ -228,11 +252,15 @@ fn growing_control(port: u16, bearer: &str, documents: usize) -> Counters {
         }
     }
     assert_eq!(paths.len(), documents);
-    let reply = wire(
+    // The apply's work grows with the vault by design, so its answer may
+    // outlast the default window on a loaded debug build. The window bounds
+    // only how long a hung host can stall the test; it measures nothing.
+    let reply = wire_within(
         port,
         bearer,
         "set",
         serde_json::json!({"vault":notes(), "mode":"apply", "where":[{"op":"path","glob":"d*.md"}], "changes":[{"change":"set", "field":"status", "value":"controlled"}]}),
+        std::time::Duration::from_secs(60),
     );
     let applied: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
     assert_eq!(applied["report"]["outcome"], "applied", "{applied}");
@@ -264,13 +292,18 @@ fn served_counters_do_not_grow_with_the_vault() {
         for n in 1..registrations {
             register_tree(&fixture, port, &bearer, &format!("other{n}"), 1);
         }
+        // The first read starts the attach. An answer before Ready is an early
+        // answer: it carries the warming trust with its phase and progress, so
+        // its bytes differ from a settled read's. The bar measures the settled
+        // vault, so it waits for Ready, and every measured read checks it.
         read_one(port, &bearer);
+        wait_for_ready(port, &bearer);
         settle_token_file(&fixture.tokens_file());
         let idle: Vec<_> = (0..connections)
             .map(|_| std::net::TcpStream::connect(("127.0.0.1", port)).unwrap())
             .collect();
         let before = counters(port, &bearer);
-        read_one(port, &bearer);
+        read_settled(port, &bearer);
         let after = counters(port, &bearer);
         let measured = differences(&before, &after);
         eprintln!(
@@ -298,7 +331,7 @@ fn served_counters_do_not_grow_with_the_vault() {
         }
         let before = after;
         for _ in 0..3 {
-            read_one(port, &bearer);
+            read_settled(port, &bearer);
         }
         let control = differences(&before, &counters(port, &bearer));
         for name in names {
@@ -520,10 +553,10 @@ fn served_reads_and_applies_cost_the_same_as_in_process() {
     register_tree(&fixture, port, &bearer, "notes", 16);
     read_one(port, &bearer);
     wait_for_ready(port, &bearer);
-    read_one(port, &bearer);
+    read_settled(port, &bearer);
 
     let before = counters(port, &bearer);
-    read_one(port, &bearer);
+    read_settled(port, &bearer);
     let served_read = differences(&before, &counters(port, &bearer));
     let params = serde_json::json!({"vault":notes(), "mode":"apply", "where":[{"op":"path","glob":"d0000.md"}], "changes":[{"change":"set", "field":"status", "value":"done"}]});
     assert_eq!(served.terminate().0.code(), Some(0));
