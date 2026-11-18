@@ -459,7 +459,8 @@ fn an_idle_vaults_verification_comes_due_again_at_each_deadline() {
     assert_eq!(scheduler.wakes, wakes, "a wake asked: {scheduler:?}");
     assert!(
         scheduler.deadlines + 1 >= sound,
-        "{sound} sound verifications, but {scheduler:?}"
+        "a verification after the first started without a deadline: {sound} sound \
+         verifications, but {scheduler:?}"
     );
     assert_eq!(host.maintenance_reading().legs, 0);
 }
