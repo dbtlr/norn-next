@@ -1,0 +1,567 @@
+{
+  "build_sha256": "a7eb0dfbcc386e97049bfb8cec935fe4675a6c0594b4115cc42b31aed75ee56c",
+  "commit": "norn 0.48.3",
+  "compiler": "unknown",
+  "completed": true,
+  "engine": "legacy",
+  "finished_at": "2026-11-18T15:37:15Z",
+  "key": {
+    "fixtures": {
+      "10000": "4d89ead9a0b4c16d139d8d8c558f139e85e02b36402bbf279297aeecb69d80c8",
+      "2000": "3c0fa350593b337a953d14c59dcb240ea5afca93d36d120d6c7b38fc5fd3635a"
+    },
+    "legacy_sha256": "a7eb0dfbcc386e97049bfb8cec935fe4675a6c0594b4115cc42b31aed75ee56c",
+    "record_version": 1
+  },
+  "load_start": 4.233154296875,
+  "parts": [
+    {
+      "finished_at": "2026-11-18T13:58:14Z",
+      "load_end": 1.02978515625,
+      "load_start": 3.86962890625,
+      "name": "legacy-part-2000-0",
+      "run_at": "2026-11-18T13:42:40Z",
+      "size": 2000
+    },
+    {
+      "finished_at": "2026-11-18T13:58:02Z",
+      "load_end": 1.03564453125,
+      "load_start": 3.39111328125,
+      "name": "legacy-part-2000-1",
+      "run_at": "2026-11-18T13:42:52Z",
+      "size": 2000
+    },
+    {
+      "finished_at": "2026-11-18T13:57:04Z",
+      "load_end": 1.07080078125,
+      "load_start": 4.45654296875,
+      "name": "legacy-part-2000-2",
+      "run_at": "2026-11-18T13:42:15Z",
+      "size": 2000
+    },
+    {
+      "finished_at": "2026-11-18T15:16:19Z",
+      "load_end": 1.10009765625,
+      "load_start": 4.27099609375,
+      "name": "legacy-part-10000-0",
+      "run_at": "2026-11-18T13:42:37Z",
+      "size": 10000
+    },
+    {
+      "finished_at": "2026-11-18T15:19:02Z",
+      "load_end": 1.15478515625,
+      "load_start": 4.1953125,
+      "name": "legacy-part-10000-1",
+      "run_at": "2026-11-18T13:42:37Z",
+      "size": 10000
+    },
+    {
+      "finished_at": "2026-11-18T15:37:15Z",
+      "load_end": 1.2353515625,
+      "load_start": 5.15966796875,
+      "name": "legacy-part-10000-2",
+      "run_at": "2026-11-18T13:43:11Z",
+      "size": 10000
+    }
+  ],
+  "processes": 3,
+  "record_version": 1,
+  "recorded": {
+    "assembled_at": "2026-11-18T15:37:27Z",
+    "ref": "norn-574-nightly-perf-job",
+    "run_attempt": "1",
+    "run_id": "44316040467",
+    "url": "https://github.com/dbtlr/norn-next/actions/runs/44316040467",
+    "workflow_sha": "605bc86d5cbf40ef086ea8f4616fe3b8dcd8ee4a"
+  },
+  "rows": [
+    {
+      "documents": 2014,
+      "metric": "ready",
+      "note": "",
+      "status": "measured",
+      "unit": "ms",
+      "value": 1.658
+    },
+    {
+      "documents": 2014,
+      "metric": "first_query",
+      "note": "",
+      "status": "measured",
+      "unit": "ms",
+      "value": 492.27
+    },
+    {
+      "documents": 2014,
+      "metric": "warm.search_rare.median",
+      "note": "",
+      "status": "measured",
+      "unit": "ms",
+      "value": 48.721
+    },
+    {
+      "documents": 2014,
+      "metric": "warm.search_rare.p95",
+      "note": "",
+      "status": "measured",
+      "unit": "ms",
+      "value": 49.349
+    },
+    {
+      "documents": 2014,
+      "metric": "warm.search_common.median",
+      "note": "",
+      "status": "measured",
+      "unit": "ms",
+      "value": 28.944
+    },
+    {
+      "documents": 2014,
+      "metric": "warm.search_common.p95",
+      "note": "",
+      "status": "measured",
+      "unit": "ms",
+      "value": 29.588
+    },
+    {
+      "documents": 2014,
+      "metric": "warm.search_missing.median",
+      "note": "",
+      "status": "measured",
+      "unit": "ms",
+      "value": 49.231
+    },
+    {
+      "documents": 2014,
+      "metric": "warm.search_missing.p95",
+      "note": "",
+      "status": "measured",
+      "unit": "ms",
+      "value": 50.168
+    },
+    {
+      "documents": 2014,
+      "metric": "warm.search_filtered.median",
+      "note": "",
+      "status": "measured",
+      "unit": "ms",
+      "value": 67.65
+    },
+    {
+      "documents": 2014,
+      "metric": "warm.search_filtered.p95",
+      "note": "",
+      "status": "measured",
+      "unit": "ms",
+      "value": 70.538
+    },
+    {
+      "documents": 2014,
+      "metric": "warm.find_metadata.median",
+      "note": "",
+      "status": "measured",
+      "unit": "ms",
+      "value": 13.33
+    },
+    {
+      "documents": 2014,
+      "metric": "warm.find_metadata.p95",
+      "note": "",
+      "status": "measured",
+      "unit": "ms",
+      "value": 13.626
+    },
+    {
+      "documents": 2014,
+      "metric": "warm.get_small.median",
+      "note": "",
+      "status": "measured",
+      "unit": "ms",
+      "value": 8.1
+    },
+    {
+      "documents": 2014,
+      "metric": "warm.get_small.p95",
+      "note": "",
+      "status": "measured",
+      "unit": "ms",
+      "value": 8.387
+    },
+    {
+      "documents": 2014,
+      "metric": "warm.get_large.median",
+      "note": "",
+      "status": "measured",
+      "unit": "ms",
+      "value": 8.75
+    },
+    {
+      "documents": 2014,
+      "metric": "warm.get_large.p95",
+      "note": "",
+      "status": "measured",
+      "unit": "ms",
+      "value": 9.02
+    },
+    {
+      "documents": 2014,
+      "metric": "warm.get_section.median",
+      "note": "",
+      "status": "measured",
+      "unit": "ms",
+      "value": 8.436
+    },
+    {
+      "documents": 2014,
+      "metric": "warm.get_section.p95",
+      "note": "",
+      "status": "measured",
+      "unit": "ms",
+      "value": 8.691
+    },
+    {
+      "documents": 2014,
+      "metric": "warm.set_field.median",
+      "note": "",
+      "status": "measured",
+      "unit": "ms",
+      "value": 446.688
+    },
+    {
+      "documents": 2014,
+      "metric": "warm.set_field.p95",
+      "note": "",
+      "status": "measured",
+      "unit": "ms",
+      "value": 452.674
+    },
+    {
+      "documents": 2014,
+      "metric": "warm.create.median",
+      "note": "",
+      "status": "measured",
+      "unit": "ms",
+      "value": 571.805
+    },
+    {
+      "documents": 2014,
+      "metric": "warm.create.p95",
+      "note": "",
+      "status": "measured",
+      "unit": "ms",
+      "value": 594.643
+    },
+    {
+      "documents": 2014,
+      "metric": "warm.rename.median",
+      "note": "",
+      "status": "measured",
+      "unit": "ms",
+      "value": 472.779
+    },
+    {
+      "documents": 2014,
+      "metric": "warm.rename.p95",
+      "note": "",
+      "status": "measured",
+      "unit": "ms",
+      "value": 487.742
+    },
+    {
+      "documents": 2014,
+      "metric": "warm.rename_hub.median",
+      "note": "",
+      "status": "measured",
+      "unit": "ms",
+      "value": 481.711
+    },
+    {
+      "documents": 2014,
+      "metric": "warm.rename_hub.p95",
+      "note": "",
+      "status": "measured",
+      "unit": "ms",
+      "value": 489.882
+    },
+    {
+      "documents": 10014,
+      "metric": "ready",
+      "note": "",
+      "status": "measured",
+      "unit": "ms",
+      "value": 1.818
+    },
+    {
+      "documents": 10014,
+      "metric": "first_query",
+      "note": "",
+      "status": "measured",
+      "unit": "ms",
+      "value": 3722.189
+    },
+    {
+      "documents": 10014,
+      "metric": "warm.search_rare.median",
+      "note": "",
+      "status": "measured",
+      "unit": "ms",
+      "value": 371.694
+    },
+    {
+      "documents": 10014,
+      "metric": "warm.search_rare.p95",
+      "note": "",
+      "status": "measured",
+      "unit": "ms",
+      "value": 380.237
+    },
+    {
+      "documents": 10014,
+      "metric": "warm.search_common.median",
+      "note": "",
+      "status": "measured",
+      "unit": "ms",
+      "value": 222.621
+    },
+    {
+      "documents": 10014,
+      "metric": "warm.search_common.p95",
+      "note": "",
+      "status": "measured",
+      "unit": "ms",
+      "value": 229.278
+    },
+    {
+      "documents": 10014,
+      "metric": "warm.search_missing.median",
+      "note": "",
+      "status": "measured",
+      "unit": "ms",
+      "value": 372.947
+    },
+    {
+      "documents": 10014,
+      "metric": "warm.search_missing.p95",
+      "note": "",
+      "status": "measured",
+      "unit": "ms",
+      "value": 381.958
+    },
+    {
+      "documents": 10014,
+      "metric": "warm.search_filtered.median",
+      "note": "",
+      "status": "measured",
+      "unit": "ms",
+      "value": 378.918
+    },
+    {
+      "documents": 10014,
+      "metric": "warm.search_filtered.p95",
+      "note": "",
+      "status": "measured",
+      "unit": "ms",
+      "value": 383.565
+    },
+    {
+      "documents": 10014,
+      "metric": "warm.find_metadata.median",
+      "note": "",
+      "status": "measured",
+      "unit": "ms",
+      "value": 89.803
+    },
+    {
+      "documents": 10014,
+      "metric": "warm.find_metadata.p95",
+      "note": "",
+      "status": "measured",
+      "unit": "ms",
+      "value": 92.888
+    },
+    {
+      "documents": 10014,
+      "metric": "warm.get_small.median",
+      "note": "",
+      "status": "measured",
+      "unit": "ms",
+      "value": 63.579
+    },
+    {
+      "documents": 10014,
+      "metric": "warm.get_small.p95",
+      "note": "",
+      "status": "measured",
+      "unit": "ms",
+      "value": 65.16
+    },
+    {
+      "documents": 10014,
+      "metric": "warm.get_large.median",
+      "note": "",
+      "status": "measured",
+      "unit": "ms",
+      "value": 64.277
+    },
+    {
+      "documents": 10014,
+      "metric": "warm.get_large.p95",
+      "note": "",
+      "status": "measured",
+      "unit": "ms",
+      "value": 65.847
+    },
+    {
+      "documents": 10014,
+      "metric": "warm.get_section.median",
+      "note": "",
+      "status": "measured",
+      "unit": "ms",
+      "value": 64.099
+    },
+    {
+      "documents": 10014,
+      "metric": "warm.get_section.p95",
+      "note": "",
+      "status": "measured",
+      "unit": "ms",
+      "value": 66.135
+    },
+    {
+      "documents": 10014,
+      "metric": "warm.set_field.median",
+      "note": "",
+      "status": "measured",
+      "unit": "ms",
+      "value": 2944.693
+    },
+    {
+      "documents": 10014,
+      "metric": "warm.set_field.p95",
+      "note": "",
+      "status": "measured",
+      "unit": "ms",
+      "value": 3128.609
+    },
+    {
+      "documents": 10014,
+      "metric": "warm.create.median",
+      "note": "",
+      "status": "measured",
+      "unit": "ms",
+      "value": 3289.452
+    },
+    {
+      "documents": 10014,
+      "metric": "warm.create.p95",
+      "note": "",
+      "status": "measured",
+      "unit": "ms",
+      "value": 3485.761
+    },
+    {
+      "documents": 10014,
+      "metric": "warm.rename.median",
+      "note": "",
+      "status": "measured",
+      "unit": "ms",
+      "value": 3001.619
+    },
+    {
+      "documents": 10014,
+      "metric": "warm.rename.p95",
+      "note": "",
+      "status": "measured",
+      "unit": "ms",
+      "value": 3279.86
+    },
+    {
+      "documents": 10014,
+      "metric": "warm.rename_hub.median",
+      "note": "",
+      "status": "measured",
+      "unit": "ms",
+      "value": 2995.432
+    },
+    {
+      "documents": 10014,
+      "metric": "warm.rename_hub.p95",
+      "note": "",
+      "status": "measured",
+      "unit": "ms",
+      "value": 3098.001
+    },
+    {
+      "documents": 2014,
+      "metric": "resources.VmRSS_bytes",
+      "note": "",
+      "status": "measured",
+      "unit": "bytes",
+      "value": 44396544
+    },
+    {
+      "documents": 2014,
+      "metric": "resources.VmHWM_bytes",
+      "note": "",
+      "status": "measured",
+      "unit": "bytes",
+      "value": 88436736
+    },
+    {
+      "documents": 2014,
+      "metric": "resources.open_fds",
+      "note": "",
+      "status": "measured",
+      "unit": "count",
+      "value": 21
+    },
+    {
+      "documents": 2014,
+      "metric": "resources.threads",
+      "note": "",
+      "status": "measured",
+      "unit": "count",
+      "value": 7
+    },
+    {
+      "documents": 10014,
+      "metric": "resources.VmRSS_bytes",
+      "note": "",
+      "status": "measured",
+      "unit": "bytes",
+      "value": 72921088
+    },
+    {
+      "documents": 10014,
+      "metric": "resources.VmHWM_bytes",
+      "note": "",
+      "status": "measured",
+      "unit": "bytes",
+      "value": 277655552
+    },
+    {
+      "documents": 10014,
+      "metric": "resources.open_fds",
+      "note": "",
+      "status": "measured",
+      "unit": "count",
+      "value": 21
+    },
+    {
+      "documents": 10014,
+      "metric": "resources.threads",
+      "note": "",
+      "status": "measured",
+      "unit": "count",
+      "value": 7
+    }
+  ],
+  "run_at": "2026-11-18T13:42:15Z",
+  "samples": 400,
+  "sizes": [
+    2000,
+    10000
+  ],
+  "warmups": 5,
+  "write_payoff": 200
+}
