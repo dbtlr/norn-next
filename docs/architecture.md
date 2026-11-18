@@ -2991,14 +2991,16 @@ auto-launched host's idle exit, a removed lock name another start held, and a st
      publishing. Nothing reaches the vault before that check: staging writes shadows in the
      shadow home only, folders are made at publication, and an apply that stands down
      removes its shadows.
-   - **A synchronous mutation** (`vault register`, `vault unregister`, `vault set`, `init`,
-     `vault migrate`, an activating `vault reload`): 503 `serve/outcome-unknown`, whose
+   - **A synchronous mutation** (`vault register`, `vault unregister`, `vault set`, `init`
+     and `vault migrate` in apply mode, an activating `vault reload`): 503
+     `serve/outcome-unknown`, whose
      message says what a resend answers once the first took effect — `host/already-served`
      for a register, `host/unknown-vault` for an unregister, `already_set_up` for `init`,
      `already_current` for `vault migrate`, the same answer for `vault set` and `vault
      reload` — each of which is safe to resend.
-   - **A read**, a dry-run reload among them: not answered; its connection closes with the
-     process, and the drain does not wait for it.
+   - **A read**, a dry-run reload and an `init` or `vault migrate` preview among them: not
+     answered; its connection closes with the process, and the drain does not wait for it.
+     None of them writes anything, so a resend is safe.
 5. **Flush and exit.** Each answer is flushed and its connection half-closed
    (`shutdown(SHUT_WR)`), so the client reads the answer and an end of stream rather than a
    reset; the remaining connections close; the host is dropped on a helper thread; and the

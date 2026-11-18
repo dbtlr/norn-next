@@ -46,11 +46,11 @@ use std::time::Instant;
 
 use norn_host::{Host, HostError, PendingApply, ProductionEntryOps};
 use norn_wire::{
-    ApplyParams, CountParams, DeleteParams, DescribeParams, DoctorRegistryParams, EditParams,
-    ErrorEnvelope, FindParams, GetParams, InitParams, ListParams, MigrateParams, MoveParams,
-    NewParams, RegisterParams, ReloadParams, RepairParams, ResolveParams, RewriteWikilinkParams,
-    SearchParams, SetParams, StatusParams, UnregisterParams, ValidateParams, VaultAddress,
-    VaultName, VaultSetParams, Verb,
+    ApplyMode, ApplyParams, CountParams, DeleteParams, DescribeParams, DoctorRegistryParams,
+    EditParams, ErrorEnvelope, FindParams, GetParams, InitParams, ListParams, MigrateParams,
+    MoveParams, NewParams, RegisterParams, ReloadParams, RepairParams, ResolveParams,
+    RewriteWikilinkParams, SearchParams, SetParams, StatusParams, UnregisterParams, ValidateParams,
+    VaultAddress, VaultName, VaultSetParams, Verb,
 };
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -123,14 +123,14 @@ pub(crate) fn at_bound(verb: Verb, body: &[u8]) -> AtBound {
     }
     #[derive(Deserialize)]
     struct Mode {
-        mode: Option<String>,
+        mode: Option<ApplyMode>,
     }
     match lane(verb) {
         Some(Runs::Read) | None => AtBound::CloseWithProcess,
         Some(Runs::Mutation) => match verb {
             Verb::Init | Verb::VaultMigrate => {
                 if serde_json::from_slice::<Mode>(body)
-                    .is_ok_and(|params| params.mode.as_deref() == Some("preview"))
+                    .is_ok_and(|params| params.mode == Some(ApplyMode::Preview))
                 {
                     AtBound::CloseWithProcess
                 } else {
