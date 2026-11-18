@@ -701,21 +701,22 @@ mod counted {
             let latency = asked.elapsed();
             assert_eq!(reply.status, 200, "{}", reply.body_text());
             let after = counters(port, &bearer);
-            let state = state_of(port, &bearer);
-            if state == "ready" {
+            // The answer's own trust state is the evidence it was made before
+            // Ready: a later status sample could read either state whatever
+            // the answer was.
+            let answered_in = json_of(&reply)["reading"]["trust"]["state"].clone();
+            if answered_in == "ready" {
                 eprintln!("{documents} documents: Ready won the race; increasing the vault");
                 assert_eq!(served.terminate().0.code(), Some(0));
                 continue;
             }
-            assert_eq!(state, "warming");
-            assert_eq!(json_of(&reply)["reading"]["trust"]["state"], "warming");
+            assert_eq!(answered_in, "warming", "{}", reply.body_text());
             assert_eq!(delta(&before, &after, "serve.dispatches"), 1);
             assert_eq!(delta(&before, &after, "serve.ready_retries"), 0);
             support::eventually("from-zero build reaches Ready", || {
                 state_of(port, &bearer) == "ready"
             });
             let time_to_ready = asked.elapsed();
-            assert!(latency < time_to_ready, "{latency:?} >= {time_to_ready:?}");
             let finished = counters(port, &bearer);
             assert_eq!(delta(&initial, &finished, "host.jobs.from_zero_builds"), 1);
             eprintln!(
