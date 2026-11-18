@@ -423,6 +423,37 @@ pub fn hello(port: u16, label: &str) -> Reply {
     exchange(port, "POST", "/v1/hello", None, body.as_bytes())
 }
 
+/// One hello on a kept-alive connection, and its answer read by its declared
+/// length, so the connection stays usable for the next request.
+pub fn hello_on(stream: &mut std::net::TcpStream) -> Option<Reply> {
+    let body = serde_json::json!({ "label": "default", "nonce": "ab".repeat(32) }).to_string();
+    write!(
+        stream,
+        "POST /v1/hello HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    )
+    .ok()?;
+    let mut raw = Vec::new();
+    let mut byte = [0u8; 1];
+    while !raw.ends_with(b"\r\n\r\n") {
+        if stream.read(&mut byte).ok()? == 0 {
+            return None;
+        }
+        raw.push(byte[0]);
+    }
+    let head = String::from_utf8_lossy(&raw).into_owned();
+    let status = head.split(' ').nth(1)?.parse().ok()?;
+    let mut reply = Reply {
+        status,
+        head,
+        body: Vec::new(),
+    };
+    let length: usize = reply.header("content-length")?.parse().ok()?;
+    reply.body = vec![0; length];
+    stream.read_exact(&mut reply.body).ok()?;
+    Some(reply)
+}
+
 /// How long after a write the token file's times must be before a host
 /// holds its fingerprint as settled: `norn-config`'s 3 s window, and a margin
 /// for the filesystem's clock tick.
@@ -483,88 +514,37 @@ pub fn hold_file_lock(path: &Path) -> std::fs::File {
     file
 }
 
-/// Witness the real child's blocked flock, rather than guessing when its
-/// synchronous mutation has started. Linux lists blocked requests with ->.
+/// Witness the real child blocked on the lock at `lock`, rather than guessing
+/// when the work behind it has started: a blocked request on that file's
+/// device and inode, by a thread of the child. Linux lists blocked requests
+/// with `->`, and names a file as `MAJOR:MINOR:INODE`, the device numbers in
+/// hex.
 #[cfg(target_os = "linux")]
-pub fn wait_for_file_lock(served: &Served) {
+pub fn wait_for_file_lock(served: &Served, lock: &Path) {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = std::fs::metadata(lock).expect("the lock file the child waits on");
+    let device = metadata.dev();
+    // glibc's `major` and `minor` over a Linux `dev_t`.
+    let major = ((device >> 8) & 0xfff) | ((device >> 32) & !0xfff);
+    let minor = (device & 0xff) | ((device >> 12) & !0xff);
+    let file = format!("{major:02x}:{minor:02x}:{}", metadata.ino());
     let tasks = format!("/proc/{}/task", served.child.id());
-    eventually("the child's blocked file lock", || {
-        let tids: HashSet<String> = std::fs::read_dir(&tasks)
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-            .collect();
-        std::fs::read_to_string("/proc/locks")
-            .unwrap()
-            .lines()
-            .any(|line| {
-                let fields: Vec<_> = line.split_whitespace().collect();
-                fields.get(1) == Some(&"->") && fields.get(5).is_some_and(|pid| tids.contains(*pid))
-            })
-    });
-}
-
-/// An external fsync gate for the drain's process tests. Only the preload
-/// library sees these variables; the shipped binary has no testing switch.
-/// A blocked flock witnesses the selected filesystem boundary while every
-/// other host thread, including its drain and exit timers, keeps running.
-#[cfg(target_os = "linux")]
-pub fn apply_gate() -> &'static Path {
-    static LIBRARY: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-    LIBRARY.get_or_init(|| {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.scratch/apply-gate");
-        std::fs::create_dir_all(&dir).unwrap();
-        let source = dir.join("gate.c");
-        let library = dir.join("gate.so");
-        std::fs::write(
-            &source,
-            r#"
-#define _GNU_SOURCE
-#include <dlfcn.h>
-#include <fcntl.h>
-#include <stdlib.h>
-#include <stdatomic.h>
-#include <stdio.h>
-#include <string.h>
-#include <sys/file.h>
-#include <unistd.h>
-
-static atomic_int taken = 0;
-static void gate(int fd) {
-    const char *match = getenv("NORN_TEST_FSYNC_MATCH");
-    const char *lock = getenv("NORN_TEST_FSYNC_LOCK");
-    if (!match || !lock) return;
-    char name[64], path[4096];
-    snprintf(name, sizeof(name), "/proc/self/fd/%d", fd);
-    ssize_t n = readlink(name, path, sizeof(path)-1);
-    if (n < 0) return;
-    path[n] = 0;
-    if (!strstr(path, match) || atomic_exchange(&taken, 1)) return;
-    int held = open(lock, O_WRONLY | O_CLOEXEC);
-    if (held < 0) _exit(98);
-    if (flock(held, LOCK_EX) != 0) _exit(99);
-    close(held);
-}
-int fsync(int fd) {
-    gate(fd);
-    int (*real)(int) = dlsym(RTLD_NEXT, "fsync");
-    return real(fd);
-}
-int fdatasync(int fd) {
-    gate(fd);
-    int (*real)(int) = dlsym(RTLD_NEXT, "fdatasync");
-    return real(fd);
-}
-"#,
-        )
-        .unwrap();
-        let status = Command::new("cc")
-            .args(["-shared", "-fPIC", "-std=c11", "-o"])
-            .arg(&library)
-            .arg(&source)
-            .arg("-ldl")
-            .status()
-            .expect("building the process test's fsync gate");
-        assert!(status.success());
-        library
-    })
+    eventually(
+        &format!("the child's blocked lock on {}", lock.display()),
+        || {
+            let tids: HashSet<String> = std::fs::read_dir(&tasks)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            std::fs::read_to_string("/proc/locks")
+                .unwrap()
+                .lines()
+                .any(|line| {
+                    let fields: Vec<_> = line.split_whitespace().collect();
+                    fields.get(1) == Some(&"->")
+                        && fields.get(5).is_some_and(|pid| tids.contains(*pid))
+                        && fields.get(6) == Some(&file.as_str())
+                })
+        },
+    );
 }

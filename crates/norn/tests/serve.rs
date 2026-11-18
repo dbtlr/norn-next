@@ -462,32 +462,33 @@ fn a_deleted_channel_lock_is_taken_again_and_the_host_keeps_serving() {
 /// names what it was waiting on. The suite holds the token file's lock, so
 /// the mint waits.
 #[test]
-#[allow(clippy::disallowed_types)] // Harness scaffolding: the token file's lock, held as another start would.
 fn a_start_that_passes_its_start_bound_exits_1_naming_its_wait() {
-    use std::os::unix::io::AsRawFd;
     let fixture = Fixture::new("serve-watchdog");
-    let dir = fixture.config_dir();
-    let lock = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(dir.join(".tokens.toml.lock"))
-        .unwrap();
-    // SAFETY: a plain advisory lock on a descriptor this case owns.
-    assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
+    let lock = support::hold_file_lock(&fixture.config_dir().join(".tokens.toml.lock"));
     let started = std::time::Instant::now();
-    let (status, stderr) = fixture.run(&["serve", "--port", &free_port().to_string()]);
-    assert_eq!(status, RunStatus::Exited(1), "{stderr}");
+    let mut served = fixture.start(&["serve", "--port", &free_port().to_string()]);
+    served.line_starting("starting:");
+    let logged = std::time::Instant::now();
+    let (status, lines) = served.wait_within(Duration::from_secs(30));
+    let stderr = lines.join("\n");
+    assert_eq!(status.code(), Some(1), "{stderr}");
+    // The start bound runs from taking the channel lock, which comes after
+    // the spawn and before the first `starting:` line: at least the bound
+    // from the spawn, and at most the bound from that line, with two seconds
+    // for the timer thread's exit to be reaped and seen.
     assert!(started.elapsed() >= Duration::from_secs(10), "{stderr}");
-    // Two seconds for scheduling and reaping beyond the 10 s watchdog.
-    assert!(started.elapsed() < Duration::from_secs(12), "{stderr}");
+    assert!(logged.elapsed() < Duration::from_secs(10 + 2), "{stderr}");
     assert_eq!(
-        stderr.lines().last(),
+        lines.last().map(String::as_str),
         Some("starting: taking the token file's lock to mint or read the token"),
         "{stderr}"
     );
     assert!(!stderr.contains("listening"), "{stderr}");
-    eprintln!("Bar 6i elapsed: {:?}", started.elapsed());
+    eprintln!(
+        "Bar 6i elapsed: {:?} from the spawn, {:?} from the first starting line",
+        started.elapsed(),
+        logged.elapsed()
+    );
     drop(lock);
     let (following, _) = fixture.serve_on(free_port());
     assert_eq!(following.terminate().0.code(), Some(0));
@@ -726,16 +727,33 @@ fn an_unknown_setting_warns_and_is_ignored() {
 fn a_second_start_during_a_blocked_mint_reports_only_its_observations() {
     let started = std::time::Instant::now();
     let fixture = Fixture::new("serve-mint-waiter");
-    let held = support::hold_file_lock(&fixture.config_dir().join(".tokens.toml.lock"));
+    let tokens_lock = fixture.config_dir().join(".tokens.toml.lock");
+    let held = support::hold_file_lock(&tokens_lock);
     let mut a = fixture.start(&["serve", "--port", &free_port().to_string()]);
+    // Each start's bound is armed when it takes the channel lock, before its
+    // first `starting:` line, so each exits within the bound of that line,
+    // with two seconds for the timer thread's exit to be reaped and seen.
     a.line_starting("starting: taking the token");
-    support::wait_for_file_lock(&a);
+    let a_logged = std::time::Instant::now();
+    support::wait_for_file_lock(&a, &tokens_lock);
     let mut b = fixture.start(&["serve", "--port", &free_port().to_string()]);
     b.line_starting("the channel lock in");
-    let (status, lines) = a.wait_within(Duration::from_secs(12));
+    let (status, lines) = a.wait_within(Duration::from_secs(30));
     assert_eq!(status.code(), Some(1), "{lines:?}");
-    let (status, lines) = b.wait_within(Duration::from_secs(12));
+    assert!(
+        a_logged.elapsed() < Duration::from_secs(10 + 2),
+        "{:?}",
+        a_logged.elapsed()
+    );
+    b.line_starting("starting: taking the token");
+    let b_logged = std::time::Instant::now();
+    let (status, lines) = b.wait_within(Duration::from_secs(30));
     assert_eq!(status.code(), Some(1), "{lines:?}");
+    assert!(
+        b_logged.elapsed() < Duration::from_secs(10 + 2),
+        "{:?}",
+        b_logged.elapsed()
+    );
     eprintln!("Bar 6j elapsed: {:?}", started.elapsed());
     let report = lines.join("\n");
     assert!(
@@ -748,8 +766,11 @@ fn a_second_start_during_a_blocked_mint_reports_only_its_observations() {
     drop(held);
 }
 
-/// Bar 7c: accepted hellos defer a launched host's two-second idle exit.
-/// Stop activity after six seconds, then observe the idle drain and exit.
+/// Bar 7c: hellos defer a launched host's two-second idle exit. They come on
+/// one kept-alive connection, accepted once at the start, so the host stays
+/// past its idle bound only if an answered hello counts as activity and not
+/// only an accepted connection. Stop activity after six seconds, then observe
+/// the idle drain and exit.
 /// Bar 7d observation limit: an idle host has no in-flight work to hold its
 /// drain open. Neither log line witnesses listener close: draining is logged
 /// before close, stopped after it. A refused connection after exit is stable;
@@ -759,14 +780,20 @@ fn activity_defers_the_auto_launched_hosts_idle_exit() {
     let fixture = Fixture::new("serve-idle-activity");
     let port = free_port();
     let mut served = auto_launched(&fixture, port, "[serve]\nauto_exit_after = \"2s\"\n");
+    let mut connection = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    connection
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
     let started = std::time::Instant::now();
     while started.elapsed() < Duration::from_secs(6) {
-        assert_eq!(hello(port, "default").status, 200);
+        let answered = support::hello_on(&mut connection).expect("a hello on the kept connection");
+        assert_eq!(answered.status, 200, "{}", answered.head);
         assert!(served.running());
         // This is the activity cadence, not a wait for an observable state.
         std::thread::sleep(Duration::from_millis(100));
     }
     assert!(served.running());
+    drop(connection);
     let (status, lines) = served.wait_within(Duration::from_secs(8));
     assert_eq!(status.code(), Some(0), "{lines:?}");
     let draining = lines

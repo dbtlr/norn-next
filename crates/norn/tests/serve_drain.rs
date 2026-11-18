@@ -3,9 +3,13 @@
 //! resend of each synchronous mutation answers after each point the drain
 //! could have stopped it at.
 //!
-//! **Truthful at the bound.** An external fsync gate holds an apply before
-//! publication or after its first rename while the host's other threads run.
-//! Each case pins the exact drain answer and checks the vault it left.
+//! **Truthful at the bound.** norn-fs's write seam, armed through the
+//! environment of a host built with the `induced-failure` feature, holds an
+//! apply at a write stage before publication or after its first rename while
+//! the host's other threads run. Each case pins the exact drain answer, then
+//! releases the hold while the host still runs and checks what the abandoned
+//! apply does next and the vault it left. A build without the feature has no
+//! seam to arm, so those cases compile out of it.
 //!
 //! **A resend of a synchronous mutation.** A registration, an unregistration,
 //! a registration edit, `init`, `vault migrate` and an activating `vault
@@ -18,8 +22,6 @@
 
 mod support;
 
-use std::collections::BTreeMap;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -27,9 +29,11 @@ use serde_json::{Value, json};
 use support::{Fixture, Reply, Served, exchange_within, free_port};
 
 /// Two creates distinguish the first publication from a completed plan;
-/// the external fsync gate holds the selected boundary for the whole drain.
+/// the write seam's hold keeps the selected stage for the whole drain.
+#[cfg(all(target_os = "linux", feature = "induced-failure"))]
 const CREATES: usize = 2;
 
+#[cfg(all(target_os = "linux", feature = "induced-failure"))]
 fn created(n: usize) -> (String, String) {
     (
         format!("made/doc-{n:05}.md"),
@@ -91,6 +95,7 @@ fn serving(label: &str) -> (Fixture, Served, u16, String, PathBuf) {
 }
 
 /// The resolved plan of `CREATES` creates, by a preview.
+#[cfg(all(target_os = "linux", feature = "induced-failure"))]
 fn the_plan(port: u16, bearer: &str) -> Value {
     let operations: Vec<Value> = (0..CREATES)
         .map(|n| {
@@ -111,6 +116,7 @@ fn the_plan(port: u16, bearer: &str) -> Value {
     resolved_plan(&json_of(&preview)).expect("a preview carries its resolved plan")
 }
 
+#[cfg(all(target_os = "linux", feature = "induced-failure"))]
 fn resolved_plan(value: &Value) -> Option<Value> {
     match value {
         Value::Object(map) => {
@@ -125,8 +131,14 @@ fn resolved_plan(value: &Value) -> Option<Value> {
 }
 
 /// An apply sent on a connection of its own, answered on the returned
-/// thread.
-fn send_apply(port: u16, bearer: &str, plan: &Value) -> std::thread::JoinHandle<Option<Reply>> {
+/// thread with the instant its answer was read.
+#[cfg(all(target_os = "linux", feature = "induced-failure"))]
+fn send_apply(
+    port: u16,
+    bearer: &str,
+    plan: &Value,
+) -> std::thread::JoinHandle<Option<(Reply, Instant)>> {
+    use std::io::Write as _;
     let body = serde_json::to_vec(&json!({ "mode": "apply", "plan": plan })).unwrap();
     let bearer = bearer.to_string();
     std::thread::spawn(move || {
@@ -140,15 +152,46 @@ fn send_apply(port: u16, bearer: &str, plan: &Value) -> std::thread::JoinHandle<
         stream.write_all(&body).ok()?;
         let mut answer = Vec::new();
         std::io::Read::read_to_end(&mut stream, &mut answer).ok()?;
-        support::parse(&answer)
+        let answered = Instant::now();
+        support::parse(&answer).map(|reply| (reply, answered))
     })
+}
+
+/// Every staged shadow under the sandbox's data directory, where the shadow
+/// home sits beside the derived store, or under the vault root's fallback.
+#[cfg(all(target_os = "linux", feature = "induced-failure"))]
+fn shadows(fixture: &Fixture, root: &Path) -> Vec<PathBuf> {
+    fn walk(dir: &Path, found: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                walk(&path, found);
+            } else if path
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with("norn-shadow-"))
+            {
+                found.push(path);
+            }
+        }
+    }
+    let mut found = Vec::new();
+    walk(
+        Path::new(&fixture.sandbox.environment()["XDG_DATA_HOME"]),
+        &mut found,
+    );
+    walk(&root.join(".norn"), &mut found);
+    found
 }
 
 /// How many of the plan's creates landed, each whole; no other document
 /// beside `alpha.md`.
+#[cfg(all(target_os = "linux", feature = "induced-failure"))]
 fn landed(root: &Path) -> usize {
-    let mut found = BTreeMap::new();
-    fn walk(root: &Path, dir: &Path, found: &mut BTreeMap<String, Vec<u8>>) {
+    let mut found = std::collections::BTreeMap::new();
+    fn walk(root: &Path, dir: &Path, found: &mut std::collections::BTreeMap<String, Vec<u8>>) {
         for entry in std::fs::read_dir(dir).unwrap() {
             let path = entry.unwrap().path();
             let relative = path
@@ -183,57 +226,70 @@ fn landed(root: &Path) -> usize {
     count
 }
 
-/// What SIGTERM at the witnessed fsync boundary answers, checked against what the
-/// vault holds; then the host's exit, within the bound and the margin.
+/// The drain bound every case here starts its host with.
 #[cfg(target_os = "linux")]
-fn sigterm_during_an_apply(label: &str, after_first_landed: bool) -> (Value, usize) {
+const DRAIN_BOUND: Duration = Duration::from_secs(1);
+
+/// What SIGTERM answers an apply held by the write seam at `arm`, checked
+/// against what the vault holds; then what the abandoned apply does once the
+/// hold is released while the host still runs, and the host's exit, within
+/// the bound and the margin.
+///
+/// `arm` is spelled in `NORN_FS_ARMED_STAGES`'s grammar: `stage-sync=hold`
+/// stands at the first shadow's sync, before publication; `swap@2=hold` at
+/// the second publication's rename, after the first document landed.
+#[cfg(all(target_os = "linux", feature = "induced-failure"))]
+fn sigterm_during_an_apply(label: &str, arm: &str, after_first_landed: bool) {
     let (fixture, mut served, port, bearer, root) = serving(label);
-    // Restart with an external filesystem gate. No production test hook:
-    // the preload library holds only the fsync-ing worker on a harness lock.
+    // Restart under the write seam's hold. Only a build with the
+    // `induced-failure` feature reads these variables.
     assert_eq!(served.terminate().0.code(), Some(0));
-    let lock_path = fixture.config_dir().join("apply-gate.lock");
+    let lock_path = fixture.config_dir().join("apply-hold.lock");
+    let hits = fixture.config_dir().join("apply-hold.hits");
     let gate = support::hold_file_lock(&lock_path);
     served = fixture.start_with(&["serve"], |command| {
         command
-            .env("LD_PRELOAD", support::apply_gate())
-            .env("NORN_TEST_FSYNC_LOCK", &lock_path)
-            .env(
-                "NORN_TEST_FSYNC_MATCH",
-                if after_first_landed {
-                    root.join("made").to_string_lossy().into_owned()
-                } else {
-                    "norn-shadow-".to_string()
-                },
-            );
+            .env("NORN_FS_ARMED_STAGES", arm)
+            .env("NORN_FS_HOLD_LOCK", &lock_path)
+            .env("NORN_FS_ARM_HITS", &hits);
     });
     served.listening_port();
     let plan = the_plan(port, &bearer);
     let answering = send_apply(port, &bearer, &plan);
-    support::wait_for_file_lock(&served);
+    support::wait_for_file_lock(&served, &lock_path);
+    let held_at = std::fs::read_to_string(&hits).expect("the hold recorded its stage");
+    let (stage, ordinal) = if after_first_landed {
+        ("swap", "2")
+    } else {
+        ("stage-sync", "-")
+    };
+    assert!(
+        held_at.lines().next().is_some_and(|record| record
+            .contains(&format!("stage={stage} ordinal={ordinal} "))
+            && record.ends_with("answer=hold")),
+        "{held_at}"
+    );
     if after_first_landed {
-        assert!(root.join(created(0).0).exists(), "publication has begun");
+        assert_eq!(landed(&root), 1, "publication has begun and not finished");
     } else {
         assert_eq!(landed(&root), 0, "publication has not begun");
     }
+    // The held write's shadow is staged, so the stand-down below has one to
+    // remove: the witness of its removal is not vacuous.
+    assert!(!shadows(&fixture, &root).is_empty(), "no staged shadow");
     let signalled = Instant::now();
     served.send(libc::SIGTERM);
-    let reply = answering
+    let (reply, answered) = answering
         .join()
         .unwrap()
         .expect("the apply was answered before the host exited");
-    let (status, lines) = served.wait_within(Duration::from_secs(30));
-    assert_eq!(status.code(), Some(0), "{lines:?}");
-    // The bound and the margin, and a second for the process to be reaped
-    // and seen: an apply still publishing keeps the host's drop going, and
-    // the margin's end is the exit.
+    // The drain answers a running apply at its bound and no sooner.
     assert!(
-        signalled.elapsed() < Duration::from_secs(1 + 5 + 1),
-        "the drain outlasted its bound and margin: {:?}",
-        signalled.elapsed()
+        answered.duration_since(signalled) >= DRAIN_BOUND,
+        "answered {:?} after the signal, inside the {DRAIN_BOUND:?} drain bound",
+        answered.duration_since(signalled)
     );
-    let landed_at_the_bound = landed(&root);
     let answer = json_of(&reply);
-    drop(gate);
     assert_eq!(reply.status, 503, "{answer}");
     if after_first_landed {
         assert_eq!(reply.code(), "host/apply-outcome-unknown", "{answer}");
@@ -244,11 +300,41 @@ fn sigterm_during_an_apply(label: &str, after_first_landed: bool) -> (Value, usi
         );
     } else {
         assert_eq!(reply.code(), "host/apply-not-run", "{answer}");
-        assert_eq!(landed_at_the_bound, 0, "{answer}");
         assert_eq!(
             answer["detail"]["cause"]["code"], "serve/draining",
             "{answer}"
         );
+    }
+    assert_eq!(landed(&root), usize::from(after_first_landed));
+    // Release the hold while the host still runs, and watch the abandoned
+    // apply go on (docs/architecture.md, Stopping, step 4). Its staged
+    // shadows are gone only once the job has acted: a process cut off at the
+    // margin removes nothing.
+    assert!(
+        served.running(),
+        "the host exited before the hold was released"
+    );
+    drop(gate);
+    support::eventually("the abandoned apply's shadows to be removed", || {
+        shadows(&fixture, &root).is_empty()
+    });
+    let (status, lines) = served.wait_within(Duration::from_secs(30));
+    assert_eq!(status.code(), Some(0), "{lines:?}");
+    // The bound and the margin, and a second for the process to be reaped
+    // and seen.
+    assert!(
+        signalled.elapsed() < DRAIN_BOUND + Duration::from_secs(5 + 1),
+        "the drain outlasted its bound and margin: {:?}",
+        signalled.elapsed()
+    );
+    if after_first_landed {
+        // An apply abandoned once publication began stops nothing: the
+        // answer said its outcome is unknown, and it finishes.
+        assert_eq!(landed(&root), CREATES, "{lines:?}");
+    } else {
+        // An apply answered not run stands down at its check before
+        // publication and publishes nothing.
+        assert_eq!(landed(&root), 0, "{lines:?}");
     }
     // Whatever the answer, a resend on a restarted host finishes the plan.
     let (served, bearer) = fixture.serve_on(port);
@@ -264,26 +350,26 @@ fn sigterm_during_an_apply(label: &str, after_first_landed: bool) -> (Value, usi
     assert_eq!(landed(&root), CREATES);
     assert_eq!(served.terminate().0.code(), Some(0));
     eprintln!("{label}: drain and resend {:?}", signalled.elapsed());
-    (answer, landed_at_the_bound)
 }
 
 /// Bar 9b: SIGTERM once publication began: the apply still publishing at the
-/// bound is answered `host/apply-outcome-unknown` with its plan,
-/// and the host exits 0 within the bound and the
-/// margin.
+/// bound is answered `host/apply-outcome-unknown` with its plan, no sooner
+/// than the bound; released, it finishes; and the host exits 0 within the
+/// bound and the margin.
 #[test]
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "induced-failure"))]
 fn sigterm_during_publication_answers_the_apply_unknown_with_its_plan() {
-    sigterm_during_an_apply("serve-drain-publishing", true);
+    sigterm_during_an_apply("serve-drain-publishing", "swap@2=hold", true);
 }
 
-/// Bar 9b: SIGTERM before publication began: the apply still planning or
-/// staging at the bound is answered `host/apply-not-run`, its cause
-/// `serve/draining`, and no document was written.
+/// Bar 9b: SIGTERM before publication began: the apply still staging at the
+/// bound is answered `host/apply-not-run`, its cause `serve/draining`, no
+/// sooner than the bound; released, it stands down, writes no document and
+/// removes its shadows; and the host exits 0 within the bound and the margin.
 #[test]
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "induced-failure"))]
 fn sigterm_before_publication_answers_the_apply_not_run() {
-    sigterm_during_an_apply("serve-drain-staging", false);
+    sigterm_during_an_apply("serve-drain-staging", "stage-sync=hold", false);
 }
 
 /// The same synchronous mutation twice, and both answers.
@@ -380,38 +466,6 @@ fn a_resend_of_each_synchronous_mutation_answers_what_its_message_says() {
     assert_eq!(served.terminate().0.code(), Some(0));
 }
 
-/// One hello on a kept-alive connection, and its answer read by its declared
-/// length, so the connection stays usable for the next request.
-fn hello_on(stream: &mut std::net::TcpStream) -> Option<Reply> {
-    use std::io::Read;
-    let body = json!({ "label": "default", "nonce": "ab".repeat(32) }).to_string();
-    write!(
-        stream,
-        "POST /v1/hello HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\n\r\n{body}",
-        body.len()
-    )
-    .ok()?;
-    let mut raw = Vec::new();
-    let mut byte = [0u8; 1];
-    while !raw.ends_with(b"\r\n\r\n") {
-        if stream.read(&mut byte).ok()? == 0 {
-            return None;
-        }
-        raw.push(byte[0]);
-    }
-    let head = String::from_utf8_lossy(&raw).into_owned();
-    let status = head.split(' ').nth(1)?.parse().ok()?;
-    let mut reply = Reply {
-        status,
-        head,
-        body: Vec::new(),
-    };
-    let length: usize = reply.header("content-length")?.parse().ok()?;
-    reply.body = vec![0; length];
-    stream.read_exact(&mut reply.body).ok()?;
-    Some(reply)
-}
-
 /// **An answer made during the drain tells its client to close.** The
 /// close is decided when the route answers, and only an answer that carries
 /// it is half-closed after its flush, so a client never reuses a connection
@@ -455,12 +509,13 @@ fn an_answer_flushed_during_the_drain_carries_connection_close() {
     let mut open = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
     open.set_read_timeout(Some(Duration::from_secs(10)))
         .unwrap();
-    let before = hello_on(&mut open).expect("a hello before the drain");
+    let before = support::hello_on(&mut open).expect("a hello before the drain");
     assert_eq!(before.status, 200);
     assert_eq!(before.header("connection"), None);
     served.send(libc::SIGTERM);
     served.line_starting("draining: SIGTERM");
-    let during = hello_on(&mut open).expect("an answer to the hello sent during the drain");
+    let during =
+        support::hello_on(&mut open).expect("an answer to the hello sent during the drain");
     assert_eq!(during.status, 200, "{}", during.head);
     assert_eq!(
         during.header("connection").as_deref(),
@@ -484,18 +539,27 @@ fn an_answer_flushed_during_the_drain_carries_connection_close() {
 fn sigterm_during_a_synchronous_registration_answers_outcome_unknown() {
     let (fixture, mut served, port, bearer, _) = serving("serve-drain-register");
     let root = a_vault(&fixture, "other");
-    let held = support::hold_file_lock(&fixture.config_dir().join(".registry.toml.lock"));
+    let registry_lock = fixture.config_dir().join(".registry.toml.lock");
+    let held = support::hold_file_lock(&registry_lock);
     let answering = std::thread::spawn(move || {
-        wire(
+        let reply = wire(
             port,
             &bearer,
             "vault_register",
             &json!({ "registration": { "name": "other", "root": root } }),
-        )
+        );
+        (reply, Instant::now())
     });
-    support::wait_for_file_lock(&served);
+    support::wait_for_file_lock(&served, &registry_lock);
+    let signalled = Instant::now();
     served.send(libc::SIGTERM);
-    let reply = answering.join().unwrap();
+    let (reply, answered) = answering.join().unwrap();
+    // The drain answers a running mutation at its bound and no sooner.
+    assert!(
+        answered.duration_since(signalled) >= DRAIN_BOUND,
+        "answered {:?} after the signal, inside the {DRAIN_BOUND:?} drain bound",
+        answered.duration_since(signalled)
+    );
     assert_eq!(reply.status, 503, "{}", reply.body_text());
     assert_eq!(
         reply.code(),
@@ -522,7 +586,8 @@ fn a_longer_draining_host_releases_the_lock_for_a_shorter_waiter() {
     served = fixture.start(&["serve"]);
     served.listening_port();
     let root = a_vault(&fixture, "other");
-    let held = support::hold_file_lock(&fixture.config_dir().join(".registry.toml.lock"));
+    let registry_lock = fixture.config_dir().join(".registry.toml.lock");
+    let held = support::hold_file_lock(&registry_lock);
     let answering = std::thread::spawn(move || {
         wire(
             port,
@@ -531,7 +596,7 @@ fn a_longer_draining_host_releases_the_lock_for_a_shorter_waiter() {
             &json!({ "registration": { "name": "other", "root": root } }),
         )
     });
-    support::wait_for_file_lock(&served);
+    support::wait_for_file_lock(&served, &registry_lock);
     let signalled = Instant::now();
     served.send(libc::SIGTERM);
     support::eventually("the listener closing", || {
@@ -594,7 +659,8 @@ fn an_invalid_drain_knob_uses_the_default_in_the_running_process() {
         served.seen
     );
     let root = a_vault(&fixture, "other");
-    let held = support::hold_file_lock(&fixture.config_dir().join(".registry.toml.lock"));
+    let registry_lock = fixture.config_dir().join(".registry.toml.lock");
+    let held = support::hold_file_lock(&registry_lock);
     let answering = std::thread::spawn(move || {
         wire(
             port,
@@ -603,7 +669,7 @@ fn an_invalid_drain_knob_uses_the_default_in_the_running_process() {
             &json!({ "registration": { "name": "other", "root": root } }),
         )
     });
-    support::wait_for_file_lock(&served);
+    support::wait_for_file_lock(&served, &registry_lock);
     let signalled = Instant::now();
     served.send(libc::SIGTERM);
     let reply = answering.join().unwrap();
@@ -614,8 +680,10 @@ fn an_invalid_drain_knob_uses_the_default_in_the_running_process() {
         reply.body_text()
     );
     assert!(signalled.elapsed() >= Duration::from_secs(10));
-    // Two seconds cover scheduling and socket delivery beyond the default.
-    assert!(signalled.elapsed() < Duration::from_secs(12));
+    // The contract answers at the 10 s default and ends the process by that
+    // bound plus the 5 s shutdown margin; an answer read later than the
+    // exit could be is outside the contract, and anything inside it is not.
+    assert!(signalled.elapsed() < Duration::from_secs(10 + 5));
     eprintln!("Bar 5d drain answer: {:?}", signalled.elapsed());
     assert_eq!(served.wait_within(Duration::from_secs(7)).0.code(), Some(0));
     drop(held);

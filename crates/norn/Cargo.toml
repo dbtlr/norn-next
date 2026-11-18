@@ -11,6 +11,10 @@ publish.workspace = true
 # A build of the binary that serves `GET /v1/debug/counters`, for the token
 # counter bar and the nightly subject. Shipped builds leave it off.
 counters = ["norn-serve/counters"]
+# A build of the binary whose host arms norn-fs's write seam from its
+# environment, for the drain cases that hold an apply at a write stage while
+# the process runs. Shipped builds leave it off.
+induced-failure = ["norn-serve/induced-failure"]
 
 [dependencies]
 norn-client = { path = "../norn-client" }

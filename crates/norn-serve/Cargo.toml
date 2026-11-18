@@ -16,6 +16,10 @@ publish.workspace = true
 # host's per-request tallies and job account beside its own counters, and every
 # wire answer carries `x-norn-host-time-us`.
 counters = ["norn-host/evidence"]
+# The write seam's faults in the host this server runs, read from the
+# environment of a test's own `norn serve`: `norn`'s drain cases arm a hold on
+# an apply's write through it. Off by default, so no shipped build reads it.
+induced-failure = ["norn-host/induced-failure"]
 
 [dependencies]
 # The HTTP/1.1 server the routes are served by (ruling R2: hyper 1 on tokio,
