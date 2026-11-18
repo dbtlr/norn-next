@@ -419,9 +419,22 @@ fn host_shutdown_stops_a_verification_in_flight() {
 /// **An idle vault's verification comes due again, deadline after deadline,
 /// with no wake and no poll.** Each verification moves its clock on one
 /// interval, and the lane hands the clock's next reading back to the
-/// scheduler as the turn ends, so the next verification starts at that
-/// deadline: nothing else asks — the watcher poll is a minute away and the
-/// vault takes no write.
+/// scheduler as the turn ends, so every verification after the first starts
+/// at that deadline: nothing else asks — the watcher poll is a minute away and
+/// the vault takes no write.
+///
+/// The first verification need not start at a deadline. The clock starts when
+/// the attach binds the store, partway through the attach, and an ask made
+/// before coverage is accounted for hands the scheduler no deadline. When the
+/// attach outlasts one interval past that bind, the ask that answers the
+/// attach's last wake finds the verification already owed and starts it. So
+/// the property is one deadline for each verification after the first.
+///
+/// The case accepts one window as wall-clock starvation rather than closing
+/// it: a later verification also starts without a deadline where a step that
+/// takes well under a millisecond, such as the ask answering an attach wake
+/// or the lane's re-queue after a turn, is held off for a whole interval and
+/// finds the next clock already due.
 #[test]
 fn an_idle_vaults_verification_comes_due_again_at_each_deadline() {
     let f = Fixture::new("verification-due-again");
@@ -430,18 +443,25 @@ fn an_idle_vaults_verification_comes_due_again_at_each_deadline() {
     let verifications = Arc::clone(&ops.verifications);
     let (host, _name, _lease) = ready_host(&f, ops);
     let wakes = host.scheduler_reading().wakes;
-    wait_until("three verifications to run", lifecycle_budget(), || {
+    let sound = wait_until("three verifications to run", lifecycle_budget(), || {
         let reading = verifications.reading();
         if reading.sound >= 3 {
-            Observed::Met(())
+            Observed::Met(reading.sound)
         } else {
             Observed::Pending(format!("{reading:?}"))
         }
     })
     .unwrap_or_else(|failure| panic!("{failure}"));
+    // Read after the verifications: both counters only grow, and a deadline
+    // is counted before the verification it starts is, so a later scheduler
+    // reading holds every deadline behind the `sound` already read.
     let scheduler = host.scheduler_reading();
     assert_eq!(scheduler.wakes, wakes, "a wake asked: {scheduler:?}");
-    assert!(scheduler.deadlines >= 3, "{scheduler:?}");
+    assert!(
+        scheduler.deadlines + 1 >= sound,
+        "a verification after the first started without a deadline: {sound} sound \
+         verifications, but {scheduler:?}"
+    );
     assert_eq!(host.maintenance_reading().legs, 0);
 }
 
