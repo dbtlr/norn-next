@@ -143,11 +143,12 @@ pub struct Shard {
 /// requests: the package shards, then the feature jobs.
 ///
 /// Each job must hold exactly one package `cargo test` step. A step run
-/// through [`FOCUSED_SCRIPT`] is not one: it runs a focused selection of one
-/// target beside the job's package step, such as cases that need a feature
-/// the package's own job leaves off, and the package stays tested in exactly
-/// one job by that job's package step. A package shard's command
-/// may carry only `--locked` and the package selectors the guard understands.
+/// through `.github/scripts/test-suite.sh` is not one: it runs a focused
+/// selection of one target beside the job's package step, such as cases that
+/// need a feature the package's own job leaves off, and the package stays
+/// tested in exactly one job by that job's package step. A package shard's
+/// command may carry only `--locked` and the package selectors the guard
+/// understands.
 /// A feature job's command may also carry `--features <list>` and the one
 /// SQLite `--config` value. Any other flag could change what is built, so it
 /// is refused rather than ignored.
