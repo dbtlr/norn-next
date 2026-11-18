@@ -26,6 +26,9 @@ STORED = Path(__file__).resolve().parent / "legacy-record.json"
 SIZES = (2000, 10000)
 PROCESSES = 3
 SETTINGS = {"samples": 400, "warmups": 5, "write_payoff": 200}
+# What a run sets besides the sizes (its fixtures judge those) that changes what
+# legacy's numbers are. The record carries each at its top level.
+MEASURED = ("processes", *SETTINGS)
 
 
 def key(legacy_sha256, fixtures):
@@ -36,8 +39,11 @@ def key(legacy_sha256, fixtures):
     return {"legacy_sha256": legacy_sha256, "fixtures": dict(fixtures), "record_version": RECORD_VERSION}
 
 
-def mismatches(stored, expected):
+def mismatches(stored, expected, measured):
     """Why the stored record's key does not hold for `expected`; empty when it does.
+
+    `measured` maps each name in `MEASURED` to the value this run sets; the stored
+    record must have been recorded at the same values.
 
     Only the sizes `expected` measures are judged: a stored size the run does not
     measure is never shown, so it cannot be compared stale.
@@ -57,6 +63,10 @@ def mismatches(stored, expected):
         elif stored_fixtures[size] != digest:
             reasons.append(f"the {size}-document fixture differs: stored {short(stored_fixtures[size])}, "
                            f"this run {short(digest)}")
+    for name in MEASURED:
+        if stored.get(name) != measured[name]:
+            reasons.append(f"the {name.replace('_', ' ')} setting differs: stored {stored.get(name)}, "
+                           f"this run {measured[name]}")
     return reasons
 
 

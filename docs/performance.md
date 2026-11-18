@@ -490,7 +490,8 @@ record of the legacy engine, at the settings above: 2,000 and 10,000 background
 documents, three fresh processes per size, five warmups and 400 measured calls,
 with writes measured after their first 200 calls. It adds the key the nightly
 checks (the legacy executable's digest, each fixture's tree digest and the
-record version), the run that recorded it, and when each part ran and under
+record version, beside which it compares the process count, samples, warmups and
+write payoff the record carries, so a run at other settings is never compared), the run that recorded it, and when each part ran and under
 what load.
 
 A committed file is the durable form. A workflow artifact expires, and a

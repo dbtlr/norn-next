@@ -12,7 +12,7 @@ import sys
 import tarfile
 import urllib.request
 
-from legacy_record import STORED, key, mismatches
+from legacy_record import MEASURED, STORED, key, mismatches
 from provenance import sha256, verify_build
 from record import fixture
 from serve import other_servers, stop_group, stop_subjects
@@ -87,7 +87,7 @@ def generate_fixtures(receipt, fixtures, sizes):
     return {str(size): fixture(binary, fixtures, size)[1]["tree_sha256"] for size in sizes}
 
 
-def stored_legacy(path, legacy, fixtures):
+def stored_legacy(path, legacy, fixtures, measured):
     """The stored legacy record and why it does not apply to this run, or None when none is stored.
 
     `legacy` is a callable returning the executable a legacy run would measure; a
@@ -100,7 +100,7 @@ def stored_legacy(path, legacy, fixtures):
         digest = sha256(legacy())
     except Exception as problem:
         return stored, [f"the legacy executable could not be obtained to check the key: {problem!r}"]
-    return stored, mismatches(stored, key(digest, fixtures))
+    return stored, mismatches(stored, key(digest, fixtures), measured)
 
 
 def settings(record):
@@ -158,7 +158,7 @@ def summary(records, stored=None, reasons=(), stored_path=STORED):
             sizes = " and ".join(f"{size:,}" for size in sorted({size for record in records.values()
                                                                  for size in record.get("sizes", [])}))
             lines.append(f"The stored legacy record matches this run: the same legacy executable, the same "
-                         f"fixtures at {sizes} background documents, and record version {stored['record_version']}.")
+                         f"fixtures at {sizes} background documents, record version {stored['record_version']} and the same measurement settings.")
             columns["legacy (stored)"] = stored
     lines.append("")
     indexed = {name: {(row["documents"], row["metric"]): row for row in record["rows"]} for name, record in columns.items()}
@@ -227,8 +227,9 @@ def main():
             "--sizes", *args.sizes, "--processes", args.processes, "--samples", args.samples,
             "--warmups", args.warmups, "--write-payoff", args.write_payoff, subjects=output / engine,
             timeout=deadline(engine, args.sizes, args.processes))
+    run_settings = {name: getattr(args, name) for name in MEASURED}
     records = {engine: json.loads((output / engine / "record.json").read_text()) for engine in engines}
-    stored, reasons = (None, []) if "legacy" in engines else stored_legacy(args.stored_legacy, legacy_executable, fixtures)
+    stored, reasons = (None, []) if "legacy" in engines else stored_legacy(args.stored_legacy, legacy_executable, fixtures, run_settings)
     text = summary(records, stored, reasons, args.stored_legacy)
     (output / "summary.md").write_text(text)
     if os.environ.get("GITHUB_STEP_SUMMARY"):

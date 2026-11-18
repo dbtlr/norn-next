@@ -7,12 +7,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from legacy_record import SETTINGS, STORED, assemble, key, mismatches, part_records
+from legacy_record import MEASURED, SETTINGS, STORED, assemble, key, mismatches, part_records
 from nightly import deadline, summary
 from record import RECORD_VERSION, resource_rows, summarize
 
 LEGACY = "a" * 64
 FIXTURES = {"2000": "b" * 64, "10000": "c" * 64}
+DOCUMENTED = {"processes": 3, **SETTINGS}
 
 
 def evidence(documents, ready):
@@ -91,20 +92,33 @@ class Assembly(unittest.TestCase):
 
 class Key(unittest.TestCase):
     def test_a_record_whose_key_holds_has_no_mismatch(self):
-        self.assertEqual(mismatches(stored_record(), key(LEGACY, FIXTURES)), [])
+        self.assertEqual(mismatches(stored_record(), key(LEGACY, FIXTURES), DOCUMENTED), [])
 
     def test_each_failed_part_of_the_key_is_named(self):
         stored = stored_record()
-        reasons = mismatches(stored, key("1" * 64, {"2000": "2" * 64, "300": "3" * 64}))
+        reasons = mismatches(stored, key("1" * 64, {"2000": "2" * 64, "300": "3" * 64}), DOCUMENTED)
         self.assertEqual(len(reasons), 3, reasons)
         self.assertIn("legacy executable differs", reasons[0])
         self.assertIn("no 300-document fixture", reasons[1])
         self.assertIn("2000-document fixture differs", reasons[2])
         stored["key"]["record_version"] = RECORD_VERSION + 1
-        self.assertIn("record version differs", mismatches(stored, key(LEGACY, FIXTURES))[0])
+        self.assertIn("record version differs", mismatches(stored, key(LEGACY, FIXTURES), DOCUMENTED)[0])
 
     def test_a_stored_size_the_run_does_not_measure_is_not_judged(self):
-        self.assertEqual(mismatches(stored_record(), key(LEGACY, {"2000": FIXTURES["2000"]})), [])
+        self.assertEqual(mismatches(stored_record(), key(LEGACY, {"2000": FIXTURES["2000"]}), DOCUMENTED), [])
+
+
+class Settings(unittest.TestCase):
+    def test_each_measurement_setting_that_differs_is_named_alone(self):
+        for name in MEASURED:
+            with self.subTest(name):
+                reasons = mismatches(stored_record(), key(LEGACY, FIXTURES), {**DOCUMENTED, name: 2})
+                self.assertEqual(len(reasons), 1, reasons)
+                self.assertIn(f"the {name.replace('_', ' ')} setting differs: stored {DOCUMENTED[name]}, this run 2", reasons[0])
+
+    def test_a_trial_run_names_every_setting_it_changes(self):
+        trial = {"processes": 1, "samples": 2, "warmups": 0, "write_payoff": 0}
+        self.assertEqual(len(mismatches(stored_record(), key(LEGACY, FIXTURES), trial)), 4)
 
 
 class Summary(unittest.TestCase):
