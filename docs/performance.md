@@ -447,7 +447,9 @@ Launch to listening also records registration and derived-directory
 counts. The engine waits for observed states under deadlines. Its fixed pools
 spawn eagerly and never retire, so resource sampling needs no keep-alive wait.
 RSS, peak RSS, descriptor and thread readings come from the process's `/proc`
-entries. The timing record keeps these beside the in-process and legacy engines.
+entries. The nightly's serve report keeps these beside the stored legacy record;
+the in-process engine's readings for the same commit and fixtures are in the
+current job's report from the same run.
 
 ## Run the nightly engines
 
