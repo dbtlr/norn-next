@@ -255,7 +255,7 @@ fn every_recorded_entry_reconstructs_its_bytes() {
 /// the architecture and not yet built; it is decided to be re-derived at
 /// installation scope over the one host an installation supervises, with no
 /// per-vault form, so the flag has no successor. The ruling stays here until
-/// `service`'s recorded cases retire at Layer 6, and the corpus retires it
+/// `service`'s recorded cases retire in phase 6.4, and the corpus retires it
 /// with them.
 #[test]
 fn rulings_without_an_activation_path_are_known() {

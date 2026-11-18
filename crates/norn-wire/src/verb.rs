@@ -14,9 +14,10 @@
 //! says what may be carried, the request says what was, and the scope follows
 //! from the pair.
 //!
-//! **`Installation` is in the vocabulary before a verb carries it.** Layer 6
-//! lands the installation verbs — self-update, service install — into this
-//! same registry, and they are the requests that name no vault, carry no
+//! **`Installation` is in the vocabulary before a verb carries it.** Phase 6.3
+//! lands token commands and self-update; phase 6.4 lands service install,
+//! completions and manpage. They extend this same registry and are the
+//! requests that name no vault, carry no
 //! answer reading, and are permitted to reach the external network. The scope
 //! is spelled here so the partition a surface reads is the whole partition
 //! rather than the part that happens to be inhabited, and so the verbs that
