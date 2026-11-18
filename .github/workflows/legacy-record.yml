@@ -7,6 +7,9 @@ name: legacy record
 
 on:
   workflow_dispatch:
+  # Once, to record before this file reaches the default branch, which a dispatch needs.
+  push:
+    branches: [norn-574-nightly-perf-job]
 
 permissions:
   contents: read
