@@ -2743,7 +2743,8 @@ readiness-retry, no-walk, transport and unchanged re-attach evidence.
 `serve_memory` measures attach, read and plan peaks through the measuring
 launcher, subtracting the minimum of three null servers of the same binary,
 listening without registrations. Its 300- and 2,000-document pairs hold attach
-growth and reads over attach beside authored ceilings. Full regression's memory
+growth beside authored ceilings, and its ratios (the attach pair, and reads over
+attach) divide whole-process peaks, so the null's noise reaches neither term. Full regression's memory
 job adopts these cases and retains the in-process heap pairs.
 
 **External MCP clients read the token file and cannot verify the host.** An HTTP MCP

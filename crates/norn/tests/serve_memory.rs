@@ -50,7 +50,12 @@ fn peak(profile: Option<&str>, workload: &str) -> u64 {
         .args(["serve", "--port", &port.to_string()])
         .deadline(Duration::from_secs(240))
         .wait_controlled(|group| {
+            // The kernel completes a connection once the socket listens, which
+            // is before the host leaves its start, and a SIGTERM in that window
+            // ends the start with exit 1. Only an answered request proves the
+            // host is serving; an unauthenticated one costs it the least.
             support::eventually("serve listening", || std::net::TcpStream::connect(("127.0.0.1", port)).is_ok());
+            assert_eq!(exchange(port, "GET", "/", None, b"").status, 401, "the host answers before it is measured");
             let bearer = fixture.default_bearer();
             if profile.is_some() {
                 call(port, &bearer, "vault_register", json!({"registration":{"name":"notes", "root":root}}));
@@ -134,16 +139,74 @@ fn peak(profile: Option<&str>, workload: &str) -> u64 {
 /// profile plus two probes [18,690,048, 30,072,832, 19,836,928], and at the
 /// 2,000-document profile plus two probes
 /// [20,070,400, 33,009,664, 21,483,520]. Read includes report encoding.
-/// The ceilings leave 5–9 MiB for process layout and allocator variation.
+/// Over the 73 hosted `ubuntu-latest` readings that author the ratios below,
+/// the highest above-null reading leaves the attach ceiling 2.55 MB, the read
+/// ceiling 5.40 MB and the plan ceiling 5.23 MB. The attach ceiling's tightest
+/// readings come from jobs whose null dipped about 3 MB (NORN-577).
 /// The attach pair also limits absolute growth, so a high small-profile
 /// peak cannot hide large-profile retention.
 const CEILINGS: [u64; 3] = [24 * 1024 * 1024, 40 * 1024 * 1024, 28 * 1024 * 1024];
-const ATTACH_RATIO_PER_MILLE: u64 = 1250; // measured 1074
 const ATTACH_GROWTH: u64 = 4 * 1024 * 1024; // measured 1,380,352 bytes
-const READ_OVER_ATTACH_PER_MILLE: u64 = 1800; // measured 1645
 
-fn readings() -> &'static [[u64; 3]; 2] {
-    static READINGS: std::sync::OnceLock<[[u64; 3]; 2]> = std::sync::OnceLock::new();
+/// How far the 2,000-document attach may raise the whole-process peak over the
+/// 300-document attach, in per mille.
+///
+/// **The ratios divide whole-process peaks**, as the in-process twins in
+/// `norn-host`'s `tests/baselines` do: the null's code and fixed cost dilutes
+/// them rather than cancelling, and the byte bars over the null are the sharper
+/// instrument. A ratio of two above-null differences instead inherits the
+/// null's noise in both terms. About 4% of null servers peak about 3 MB lower
+/// than the rest, and the suite subtracts the minimum of three (NORN-577), so
+/// above-null readings split into two populations while whole-process peaks
+/// stay in one. That ratio read 1,033–1,196 against its earlier 1,250 bar.
+///
+/// Measured on 73 hosted `ubuntu-latest` readings: 33 from `ci.yml` and
+/// `regression.yml` runs on 16 and 17 November 2026, and 40 from evidence run
+/// 44264521896 on 18 November. They read **1.011–1.064**, highest 1.064 in that
+/// run's job `serve_memory 6`. The whole-process attach peaks span 45.83–48.38
+/// MB at 300 documents and 47.97–50.09 MB at 2,000.
+///
+/// The bar is a quarter of headroom over the highest reading, rounded up to the
+/// next twentieth: 1.35, 27% over it. It refuses a 2,000-document attach about
+/// 15 MB above today's. [`ATTACH_GROWTH`] bounds the same growth at 4 MiB.
+const ATTACH_RATIO_PER_MILLE: u64 = 1350;
+
+/// How far the read mix may raise the whole-process peak over the attach alone,
+/// at the 2,000-document profile, in per mille. Whole-process for the reason
+/// [`ATTACH_RATIO_PER_MILLE`] gives; over the null, this ratio read
+/// 1,593–1,872 and failed its earlier 1,800 bar on an ordinary low attach peak
+/// (NORN-576).
+///
+/// Measured on the same 73 hosted readings: **1.245–1.315**, highest 1.315 in
+/// `ci.yml` run 44033180714, attempt 1, whose whole-process attach of 48.37 MB
+/// sits in the 47.97–50.09 MB spread. Whole-process reads span 60.19–63.87 MB.
+///
+/// The bar is a quarter of headroom over the highest reading, rounded up to the
+/// next twentieth: 1.65, 25% over it. It refuses a read peak about 18 MB above
+/// today's. The read ceiling in [`CEILINGS`] is the sharper instrument: it
+/// refuses about 5 MB.
+///
+/// It does not refuse a find that hydrates 1,000 documents with their fields,
+/// tags and bodies into one 5.1 MB answer. That find read 1.288–1.336 in the
+/// evidence run, because the server drops each answer once it is written.
+const READ_OVER_ATTACH_PER_MILLE: u64 = 1650;
+
+/// The null server's peak, and each subject's peak above it: attach, read and
+/// plan at the 300- and then the 2,000-document profile.
+struct Readings {
+    null: u64,
+    above_null: [[u64; 3]; 2],
+}
+
+impl Readings {
+    /// A subject's whole-process peak, which the ratios divide.
+    fn whole(&self, profile: usize, workload: usize) -> u64 {
+        self.null + self.above_null[profile][workload]
+    }
+}
+
+fn readings() -> &'static Readings {
+    static READINGS: std::sync::OnceLock<Readings> = std::sync::OnceLock::new();
     READINGS.get_or_init(|| {
         let null = (0..3).map(|_| peak(None, "null")).min().unwrap();
         let peaks = ["ambiguous", "realistic"].map(|profile| {
@@ -154,14 +217,17 @@ fn readings() -> &'static [[u64; 3]; 2] {
             })
         });
         eprintln!("serve peaks above null {null}: {peaks:?}");
-        peaks
+        Readings {
+            null,
+            above_null: peaks,
+        }
     })
 }
 
 #[test]
 #[ignore = "memory-lane case: runs alone in the memory job"]
 fn real_serving_attach_read_and_plan_stay_under_their_peak_rss_ceilings() {
-    for peaks in readings() {
+    for peaks in &readings().above_null {
         for (bytes, ceiling) in peaks.iter().zip(CEILINGS) {
             assert!(
                 *bytes > 0 && *bytes <= ceiling,
@@ -174,11 +240,13 @@ fn real_serving_attach_read_and_plan_stay_under_their_peak_rss_ceilings() {
 #[test]
 #[ignore = "memory-lane case: runs alone in the memory job"]
 fn peak_memory_holds_flat_from_the_ambiguity_profile_to_the_gate_profile() {
-    let [small, large] = readings().map(|peaks| peaks[0]);
+    let readings = readings();
+    let (small, large) = (readings.whole(0, 0), readings.whole(1, 0));
     assert!(
         large * 1000 <= small * ATTACH_RATIO_PER_MILLE,
-        "attach pair {small} -> {large}"
+        "whole-process attach pair {small} -> {large}"
     );
+    let [small, large] = readings.above_null.map(|peaks| peaks[0]);
     assert!(
         large <= small + ATTACH_GROWTH,
         "attach growth {small} -> {large}"
@@ -188,9 +256,10 @@ fn peak_memory_holds_flat_from_the_ambiguity_profile_to_the_gate_profile() {
 #[test]
 #[ignore = "memory-lane case: runs alone in the memory job"]
 fn reading_the_gate_profile_holds_the_process_near_its_attach_peak() {
-    let [attach, read, _] = readings()[1];
+    let readings = readings();
+    let (attach, read) = (readings.whole(1, 0), readings.whole(1, 1));
     assert!(
         read * 1000 <= attach * READ_OVER_ATTACH_PER_MILLE,
-        "read over attach {attach} -> {read}"
+        "whole-process read over attach {attach} -> {read}"
     );
 }
