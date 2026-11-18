@@ -111,6 +111,31 @@ jobs:
       - name: Certification inventory reconciliation
         if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
         run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn certification
+      - name: Upload candidate identity
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: regression-${{ github.job }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/regression-identity.json
+          if-no-files-found: error
+
+  # Measure the complete engines on a runner of their own. nightly.py builds
+  # independently receipted release subjects outside the workspace target, so
+  # this job needs no build-job outputs and cannot borrow its remaining guard.
+  # The initial generous guard permits a complete timing before final sizing.
+  performance:
+    name: full nightly performance
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Record candidate identity
+        id: identity
+        run: python3 .github/scripts/regression-identity.py "$RUNNER_TEMP/regression-identity.json"
+      - uses: Swatinem/rust-cache@v2
+        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
       - name: Nightly performance engines
         if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
         run: python3 scripts/performance/nightly.py --output "$RUNNER_TEMP/performance"

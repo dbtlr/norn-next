@@ -74,9 +74,9 @@ and refuses every other `--config`.
 | macOS platform | Embedding determinism, filesystem contracts, Obsidian parity, exact case-rename and unreadable-document/subtree cases, folding-root spelling bar |
 | Architecture | Actionlint, the architecture gate and the shard certification |
 
-`regression.yml` runs the complete seven-job matrix at 02:17 UTC daily and by
+`regression.yml` runs the complete eight-job matrix at 02:17 UTC daily and by
 manual dispatch. Its `full ` job names retain the build, induced-failure,
-platform, folding-counter, architecture, Linux counter and Linux memory jobs.
+platform, folding-counter, architecture, Linux counter, Linux memory and nightly performance jobs.
 Compiled registry-carrier and inventory audits run only in its Linux build job.
 The complete lockdown and process-death recovery targets run in its Linux
 induced-failure and macOS platform jobs. Counter and memory lanes run in full
@@ -94,6 +94,12 @@ Full jobs keep their profiles, features, authored assertions and runaway guards.
 macOS uses `macos-15` and asserts ARM64. Host fault and counter lane steps name
 `LANE_FEATURES: induced-failure`. The full Linux memory job keeps its 20-minute
 guard and existing feature selections.
+The independent `full nightly performance` job records all three engines and
+uploads `nightly-performance-<attempt>`. Its script builds independently receipted
+release subjects outside the workspace target; it needs no build-job artifacts.
+It has its own checkout, Rust cache and `regression-performance-<attempt>` identity
+receipt. Complete release evidence requires this job and its performance artifact
+as well as the other seven jobs.
 
 Every suite runs through the flake tripwire, which records ledger matches without
 retrying or changing verdicts. Ignored targets use `lane-suite.sh`, whose shared
@@ -150,11 +156,11 @@ gh run download <run-id> --pattern 'regression-*-<attempt>' --dir <evidence-dire
 
 Verify all of the following before accepting release evidence:
 
-- The same run attempt completed successfully with all seven expected full jobs.
+- The same run attempt completed successfully with all eight expected full jobs.
   Their names are the complete matrix names prefixed with `full `.
 - Every required job and step executed its obligations successfully. Missing,
   skipped or cancelled required evidence does not qualify.
-- All seven receipts identify their expected job and the same run ID and attempt.
+- All eight receipts identify their expected job and the same run ID and attempt.
   Each has `identity_matches: true` and candidate, event, workflow and checkout
   SHAs equal to the intended candidate.
 - The suite contract is `active-regression-v1`; the candidate's checked-in commands,

@@ -1487,6 +1487,7 @@ fn full_regression_adopts_fault_and_audit_cases_with_their_features() {
 
 const FULL_JOB_KEYS: &[&str] = &[
     "build",
+    "performance",
     "induced-failure",
     "platform",
     "folding-counters",
@@ -1709,7 +1710,7 @@ fn assert_matrix_step_values(workflow: &str, job: &str, runs: &[&str], full: boo
         }
         expected.push(step);
     }
-    if full && job == "build" {
+    if full && job == "performance" {
         expected.push("uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9\nname: nightly-performance-${{ github.run_attempt }}\npath: ${{ runner.temp }}/performance/evidence.tar.gz\nif-no-files-found: error".to_string());
     }
     if full {
@@ -1793,6 +1794,11 @@ fn assert_complete_active_matrix(workflow: &str, full: bool) {
             ],
         ),
         (
+            "performance",
+            "nightly performance",
+            &["python3 scripts/performance/nightly.py --output \"$RUNNER_TEMP/performance\""],
+        ),
+        (
             "induced-failure",
             "induced-failure recovery",
             &[
@@ -1846,7 +1852,7 @@ fn assert_complete_active_matrix(workflow: &str, full: bool) {
         ),
     ];
     for &(mut key, mut name, runs) in commands {
-        if !full && matches!(key, "folding-counters" | "gates" | "memory") {
+        if !full && matches!(key, "performance" | "folding-counters" | "gates" | "memory") {
             continue;
         }
         let mut runs = runs.to_vec();
@@ -1858,7 +1864,6 @@ fn assert_complete_active_matrix(workflow: &str, full: bool) {
                 "build" => runs.extend([
                     ".github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn regression",
                     ".github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn certification",
-                    "python3 scripts/performance/nightly.py --output \"$RUNNER_TEMP/performance\"",
                 ]),
                 "platform" => runs.extend([
                     PROBE_LIB,
@@ -1938,6 +1943,7 @@ fn assert_complete_active_matrix(workflow: &str, full: bool) {
         };
         assert_ci_lines(&lines, &[&format!("name: {name}")]);
         let timeout = match key {
+            "performance" => 120,
             "memory" => 20,
             "architecture" => 10,
             _ => 30,
