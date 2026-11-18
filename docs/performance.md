@@ -520,8 +520,13 @@ changes `RECORD_VERSION`, or to measure another legacy executable.
    pull request:
 
    ```sh
-   gh run download <run-id> --name legacy-record --dir scripts/performance
+   gh run download <run-id> --name legacy-record --dir .scratch/legacy-record
+   cp .scratch/legacy-record/legacy-record.json scripts/performance/legacy-record.json
    ```
+
+   `gh run download` does not overwrite an existing file, so the record is
+   downloaded into an empty scratch directory first; the tracked record is
+   replaced only once the download has succeeded.
 
 The parts' evidence archives, which keep each process's raw samples, stay
 with the recording run as `legacy-part-<size>-<process>` artifacts until they
