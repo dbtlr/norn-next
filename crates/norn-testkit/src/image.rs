@@ -22,9 +22,11 @@
 //! refuses that advice (before 5.14), and their residency is read from
 //! `/proc/self/smaps`. On macOS the main image's readable segments are walked
 //! from its Mach-O load commands and one byte is read per page of each
-//! segment's file-backed part. **Residency is read on Linux only**: macOS
-//! reports no per-mapping resident size a process can read about itself
-//! without a task port, and its readings gate nothing.
+//! segment's file-backed part. A subject that runs no harness of its own, such
+//! as a real server, is prefaulted by its ancestor through `/proc/<pid>/mem`
+//! with [`prefault_process`], on Linux only. **Residency is read on Linux
+//! only**: macOS reports no per-mapping resident size a process can read about
+//! itself without a task port, and its readings gate nothing.
 
 use std::io;
 
@@ -612,5 +614,31 @@ Rss:                   8 kB
             .expect("Linux reports it");
         assert!(residency.mapped > 0);
         assert_eq!(residency.resident, residency.mapped);
+    }
+
+    /// A child's executable is wholly resident once its parent prefaults it,
+    /// and reads so again until the child ends.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // A throwaway child to prefault.
+    fn another_process_is_wholly_resident_once_prefaulted() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("starting sleep");
+        let pid = libc::pid_t::try_from(child.id()).unwrap();
+        let after_prefault = prefault_process(pid)
+            .expect("prefaulting the child")
+            .expect("Linux reports it");
+        let at_end = residency_of(pid)
+            .expect("reading the child's residency")
+            .expect("Linux reports it");
+        child.kill().unwrap();
+        child.wait().unwrap();
+        let report = ResidencyReport {
+            after_prefault,
+            at_end,
+        };
+        assert_eq!(report.wholly_resident(), Ok(at_end.resident));
     }
 }

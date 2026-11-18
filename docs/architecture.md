@@ -2742,7 +2742,11 @@ retire, so there is no keep-alive to wait out. The wire suite retains the
 readiness-retry, no-walk, transport and unchanged re-attach evidence.
 `serve_memory` measures attach, read and plan peaks through the measuring
 launcher, subtracting the minimum of three null servers of the same binary,
-listening without registrations. Its 300- and 2,000-document pairs hold attach
+listening without registrations. Once each server, null or measured, first
+answers, the suite makes its executable wholly resident through
+`/proc/<pid>/mem`, so the code term is the file's mapped size in every server
+and cancels, rather than depending on how far fault-around reached in the page
+cache. Its 300- and 2,000-document pairs hold attach
 growth beside authored ceilings, and its ratios (the attach pair, and reads over
 attach) divide whole-process peaks, so the null's noise reaches neither term. Full regression's memory
 job adopts these cases and retains the in-process heap pairs.
