@@ -60,8 +60,9 @@ the two package shards within 3% of `main`. The macOS job, which would also have
 to build the crates above SQLite a second time for the folding-root spelling
 bar, was 7% slower.
 
-Every nightly lane runs without the flag, so every measurement stays at
-opt-level 0. Lane steps cannot carry it, because `lane-suite.sh` builds its own
+Every nightly correctness lane runs without the flag, so its measurements stay at
+opt-level 0. The nightly performance script instead builds release subjects and
+verifies their optimized profiles in its build receipts. Lane steps cannot carry it, because `lane-suite.sh` builds its own
 `cargo test` command. The workflow reader accepts this one exact flag and value
 and refuses every other `--config`.
 
@@ -76,7 +77,8 @@ and refuses every other `--config`.
 
 `regression.yml` runs the complete eight-job matrix at 02:17 UTC daily and by
 manual dispatch. Its `full ` job names retain the build, induced-failure,
-platform, folding-counter, architecture, Linux counter, Linux memory and nightly performance jobs.
+platform, folding-counter, architecture, Linux counter, Linux memory and nightly
+performance jobs.
 Compiled registry-carrier and inventory audits run only in its Linux build job.
 The complete lockdown and process-death recovery targets run in its Linux
 induced-failure and macOS platform jobs. Counter and memory lanes run in full
@@ -94,12 +96,16 @@ Full jobs keep their profiles, features, authored assertions and runaway guards.
 macOS uses `macos-15` and asserts ARM64. Host fault and counter lane steps name
 `LANE_FEATURES: induced-failure`. The full Linux memory job keeps its 20-minute
 guard and existing feature selections.
+
 The independent `full nightly performance` job records all three engines and
 uploads `nightly-performance-<attempt>`. Its script builds independently receipted
 release subjects outside the workspace target; it needs no build-job artifacts.
 It has its own checkout, Rust cache and `regression-performance-<attempt>` identity
 receipt. Complete release evidence requires this job and its performance artifact
-as well as the other seven jobs.
+as well as the other seven jobs. The artifact can contain partial diagnostics
+after an engine fails; its presence alone does not qualify a run. A complete
+report contains `current/record.json`, `serve/record.json`, `legacy/record.json`
+and `summary.md`.
 
 Every suite runs through the flake tripwire, which records ledger matches without
 retrying or changing verdicts. Ignored targets use `lane-suite.sh`, whose shared

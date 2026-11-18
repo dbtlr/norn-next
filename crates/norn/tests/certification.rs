@@ -2108,6 +2108,15 @@ fn full_regression_keeps_every_active_obligation_and_collects_later_failures() {
         }
     }
     for mutant in [
+        workflow.replace(
+            "python3 scripts/performance/nightly.py --output \"$RUNNER_TEMP/performance\"",
+            "true",
+        ),
+        workflow.replace(
+            "name: nightly-performance-${{ github.run_attempt }}",
+            "name: missing-performance",
+        ),
+        workflow.replace("    name: full nightly performance", "    needs: build\n    name: full nightly performance"),
         workflow.replace(" && steps.identity.outcome == 'success'", ""),
         workflow.replace("        id: identity\n", ""),
         workflow.replace(
