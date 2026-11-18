@@ -15,7 +15,7 @@
 //! from the pair.
 //!
 //! **`Installation` is in the vocabulary before a verb carries it.** Phase 6.3
-//! lands token commands and self-update; phase 6.4 lands service install,
+//! lands token commands; phase 6.4 lands self-update, service install,
 //! completions and manpage. They extend this same registry and are the
 //! requests that name no vault, carry no
 //! answer reading, and are permitted to reach the external network. The scope
