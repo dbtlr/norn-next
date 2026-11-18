@@ -1487,7 +1487,8 @@ fn full_regression_adopts_fault_and_audit_cases_with_their_features() {
 
 const FULL_JOB_KEYS: &[&str] = &[
     "build",
-    "performance",
+    "performance-current",
+    "performance-serve",
     "induced-failure",
     "platform",
     "folding-counters",
@@ -1710,8 +1711,8 @@ fn assert_matrix_step_values(workflow: &str, job: &str, runs: &[&str], full: boo
         }
         expected.push(step);
     }
-    if full && job == "performance" {
-        expected.push("uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9\nname: nightly-performance-${{ github.run_attempt }}\npath: ${{ runner.temp }}/performance/evidence.tar.gz\nif-no-files-found: error".to_string());
+    if let Some(engine) = job.strip_prefix("performance-").filter(|_| full) {
+        expected.push(format!("uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9\nname: nightly-performance-{engine}-${{{{ github.run_attempt }}}}\npath: ${{{{ runner.temp }}}}/performance/evidence.tar.gz\nif-no-files-found: error"));
     }
     if full {
         expected.push("uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9\nname: regression-${{ github.job }}-${{ github.run_attempt }}\npath: ${{ runner.temp }}/regression-identity.json\nif-no-files-found: error".to_string());
@@ -1794,9 +1795,14 @@ fn assert_complete_active_matrix(workflow: &str, full: bool) {
             ],
         ),
         (
-            "performance",
-            "nightly performance",
-            &["python3 scripts/performance/nightly.py --output \"$RUNNER_TEMP/performance\""],
+            "performance-current",
+            "nightly performance (current)",
+            &["python3 scripts/performance/nightly.py --engines current --output \"$RUNNER_TEMP/performance\""],
+        ),
+        (
+            "performance-serve",
+            "nightly performance (serve)",
+            &["python3 scripts/performance/nightly.py --engines serve --output \"$RUNNER_TEMP/performance\""],
         ),
         (
             "induced-failure",
@@ -1852,7 +1858,7 @@ fn assert_complete_active_matrix(workflow: &str, full: bool) {
         ),
     ];
     for &(mut key, mut name, runs) in commands {
-        if !full && matches!(key, "performance" | "folding-counters" | "gates" | "memory") {
+        if !full && matches!(key, "performance-current" | "performance-serve" | "folding-counters" | "gates" | "memory") {
             continue;
         }
         let mut runs = runs.to_vec();
@@ -1943,7 +1949,7 @@ fn assert_complete_active_matrix(workflow: &str, full: bool) {
         };
         assert_ci_lines(&lines, &[&format!("name: {name}")]);
         let timeout = match key {
-            "performance" => 120,
+            "performance-serve" => 45,
             "memory" => 20,
             "architecture" => 10,
             _ => 30,
@@ -2109,14 +2115,19 @@ fn full_regression_keeps_every_active_obligation_and_collects_later_failures() {
     }
     for mutant in [
         workflow.replace(
-            "python3 scripts/performance/nightly.py --output \"$RUNNER_TEMP/performance\"",
+            "python3 scripts/performance/nightly.py --engines current --output \"$RUNNER_TEMP/performance\"",
             "true",
         ),
+        workflow.replace("--engines serve --output", "--engines serve --sizes 300 --output"),
         workflow.replace(
-            "name: nightly-performance-${{ github.run_attempt }}",
+            "name: nightly-performance-current-${{ github.run_attempt }}",
             "name: missing-performance",
         ),
-        workflow.replace("    name: full nightly performance", "    needs: build\n    name: full nightly performance"),
+        workflow.replace(
+            "name: nightly-performance-serve-${{ github.run_attempt }}",
+            "name: nightly-performance-current-${{ github.run_attempt }}",
+        ),
+        workflow.replace("    name: full nightly performance (serve)", "    needs: performance-current\n    name: full nightly performance (serve)"),
         workflow.replace(" && steps.identity.outcome == 'success'", ""),
         workflow.replace("        id: identity\n", ""),
         workflow.replace(

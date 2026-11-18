@@ -119,14 +119,17 @@ jobs:
           path: ${{ runner.temp }}/regression-identity.json
           if-no-files-found: error
 
-  # Measure the complete engines on a runner of their own. nightly.py builds
+  # The nightly measures the current and serving engines, each on a runner of
+  # its own so neither waits on the other or on the build job. nightly.py builds
   # independently receipted release subjects outside the workspace target, so
-  # this job needs no build-job outputs and cannot borrow its remaining guard.
-  # The initial generous guard permits a complete timing before final sizing.
-  performance:
-    name: full nightly performance
+  # these jobs need no build-job outputs. Each job's summary sets the stored
+  # legacy record beside its engine, or says why it cannot (docs/performance.md);
+  # legacy itself is recorded only by dispatching legacy-record.yml. Guards are
+  # runaway bounds over completed runs (docs/ci.md).
+  performance-current:
+    name: full nightly performance (current)
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
         with:
@@ -138,12 +141,43 @@ jobs:
         if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
       - name: Nightly performance engines
         if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
-        run: python3 scripts/performance/nightly.py --output "$RUNNER_TEMP/performance"
+        run: python3 scripts/performance/nightly.py --engines current --output "$RUNNER_TEMP/performance"
       - name: Upload nightly performance
         if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
-          name: nightly-performance-${{ github.run_attempt }}
+          name: nightly-performance-current-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/performance/evidence.tar.gz
+          if-no-files-found: error
+      - name: Upload candidate identity
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: regression-${{ github.job }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/regression-identity.json
+          if-no-files-found: error
+
+  performance-serve:
+    name: full nightly performance (serve)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Record candidate identity
+        id: identity
+        run: python3 .github/scripts/regression-identity.py "$RUNNER_TEMP/regression-identity.json"
+      - uses: Swatinem/rust-cache@v2
+        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
+      - name: Nightly performance engines
+        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
+        run: python3 scripts/performance/nightly.py --engines serve --output "$RUNNER_TEMP/performance"
+      - name: Upload nightly performance
+        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: nightly-performance-serve-${{ github.run_attempt }}
           path: ${{ runner.temp }}/performance/evidence.tar.gz
           if-no-files-found: error
       - name: Upload candidate identity
