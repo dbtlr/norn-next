@@ -561,8 +561,8 @@ mod counted {
             .to_string()
     }
 
-    /// **Exit bar 8, and the production idle-detach policy.** A vault idle
-    /// past `idle_after` detaches; the next read is answered, not refused,
+    /// **Exit bars 8b and 10.7.** Under the production idle-detach policy,
+    /// a vault idle past `idle_after` detaches; the next read is answered, not refused,
     /// within `ready_wait`; its re-dispatches stay within the bound; and
     /// once it is answered nothing more is dispatched. The re-attach of the
     /// unchanged vault derives nothing and opens each document once.
@@ -606,13 +606,28 @@ mod counted {
             delta(&before, &after, "host.jobs.changesets_applied"),
         );
         assert!(took < ready_wait, "{took:?}");
+        assert!(
+            retries >= 1,
+            "the detached entry must exercise the route retry"
+        );
         assert_eq!(dispatches, retries + 1);
         assert!(retries <= most_redispatches(ready_wait), "{retries}");
         // The re-attach of an unchanged vault derives nothing, writes nothing,
         // and opens each of its three documents once.
         assert_eq!(delta(&before, &after, "host.jobs.documents_derived"), 0);
         assert_eq!(delta(&before, &after, "host.jobs.changesets_applied"), 0);
-        assert!(delta(&before, &after, "host.jobs.document_opens") <= 3);
+        assert_eq!(delta(&before, &after, "host.jobs.document_opens"), 3);
+        for name in [
+            "documents_upserted",
+            "documents_deleted",
+            "content_rows_written",
+            "structure_rows_written",
+            "findings_written",
+            "full_text_rows_indexed",
+        ] {
+            let counter = format!("host.jobs.{name}");
+            assert_eq!(delta(&before, &after, &counter), 0, "{counter}");
+        }
 
         // No dispatch follows the answer.
         std::thread::sleep(Duration::from_millis(1500));
@@ -621,9 +636,9 @@ mod counted {
         assert_eq!(served.terminate().0.code(), Some(0));
     }
 
-    /// **Early admission is not delayed, and an immediate refusal passes
-    /// through at once.** A request over a vault this host does not serve is
-    /// one dispatch and no retry, and a ready vault's read is one dispatch.
+    /// **Exit bar 8e.** An immediate refusal passes through at once. A request
+    /// over a vault this host does not serve is one dispatch and no retry,
+    /// and a ready vault's read is one dispatch.
     #[test]
     fn an_immediate_refusal_and_a_ready_read_are_one_dispatch_each() {
         let (fixture, served, port, bearer) = host("serve-wire-one-dispatch", "");
@@ -661,6 +676,58 @@ mod counted {
         assert_eq!(delta(&before, &after, "serve.dispatches"), 10);
         assert_eq!(delta(&before, &after, "serve.ready_retries"), 0);
         assert_eq!(served.terminate().0.code(), Some(0));
+    }
+
+    /// **Exit bar 8d.** An early-admitted read during a from-zero build is
+    /// answered before Ready, with one dispatch and no route retry. Attempts
+    /// that lose the race to Ready are discarded, up to 16,000 documents.
+    #[test]
+    fn an_early_admitted_read_is_answered_before_ready_without_a_route_retry() {
+        for documents in [1_000, 4_000, 16_000] {
+            let (fixture, served, port, bearer) = host("serve-wire-early-read", "");
+            let root = a_vault(&fixture, "notes");
+            let body = "# Note\n\n".to_string() + &"[[alpha]] [[beta]] [[delta]] ".repeat(2);
+            for n in 0..documents {
+                std::fs::write(root.join(format!("note{n}.md")), &body).unwrap();
+            }
+            assert_eq!(register(port, &bearer, "notes", &root).status, 200);
+            let initial = counters(port, &bearer);
+            let started = Instant::now();
+            // This demand starts construction and waits for Get's capability.
+            assert_eq!(get_alpha(port, &bearer).status, 200);
+            let before = counters(port, &bearer);
+            let asked = Instant::now();
+            let reply = get_alpha(port, &bearer);
+            let latency = asked.elapsed();
+            assert_eq!(reply.status, 200, "{}", reply.body_text());
+            let after = counters(port, &bearer);
+            let state = state_of(port, &bearer);
+            if state == "ready" {
+                eprintln!("{documents} documents: Ready won the race; increasing the vault");
+                assert_eq!(served.terminate().0.code(), Some(0));
+                continue;
+            }
+            assert_eq!(state, "warming");
+            assert_eq!(json_of(&reply)["reading"]["trust"]["state"], "warming");
+            assert_eq!(delta(&before, &after, "serve.dispatches"), 1);
+            assert_eq!(delta(&before, &after, "serve.ready_retries"), 0);
+            support::eventually("from-zero build reaches Ready", || {
+                state_of(port, &bearer) == "ready"
+            });
+            let time_to_ready = asked.elapsed();
+            assert!(latency < time_to_ready, "{latency:?} >= {time_to_ready:?}");
+            let finished = counters(port, &bearer);
+            assert_eq!(delta(&initial, &finished, "host.jobs.from_zero_builds"), 1);
+            eprintln!(
+                "{documents} documents: early read {latency:?}, Ready after read start {time_to_ready:?}, whole build {:?}",
+                started.elapsed()
+            );
+            assert_eq!(served.terminate().0.code(), Some(0));
+            return;
+        }
+        panic!(
+            "Ready won every early-read attempt through the 16,000-document cap; no attempt proved bar 8d"
+        );
     }
 
     /// **Exit bar 8: a parked vault's refusal passes through at once.** A
