@@ -429,6 +429,12 @@ fn host_shutdown_stops_a_verification_in_flight() {
 /// attach outlasts one interval past that bind, the ask that answers the
 /// attach's last wake finds the verification already owed and starts it. So
 /// the property is one deadline for each verification after the first.
+///
+/// The case accepts one window as wall-clock starvation rather than closing
+/// it: a later verification also starts without a deadline where a step that
+/// takes well under a millisecond, such as the ask answering an attach wake
+/// or the lane's re-queue after a turn, is held off for a whole interval and
+/// finds the next clock already due.
 #[test]
 fn an_idle_vaults_verification_comes_due_again_at_each_deadline() {
     let f = Fixture::new("verification-due-again");
