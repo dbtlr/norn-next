@@ -619,6 +619,39 @@ fn the_host_listens_only_on_the_exact_resolved_loopback_address() {
     assert_eq!(served.terminate().0.code(), Some(0));
 }
 
+/// Bar 7b: an auto-launched host binds only its endpoint from config.toml.
+#[test]
+fn an_auto_launched_host_listens_only_on_its_resolved_loopback_address() {
+    let fixture = Fixture::new("hello-auto-exact-address");
+    let tokens = with_token(&fixture, "default", &[8; 32]);
+    let port = free_port();
+    fixture.write_settings(&format!("[endpoint]\nport = {port}\n"));
+    let mut served = fixture.start(&["serve", "--auto-launched"]);
+    assert_eq!(served.listening_port(), port);
+    assert!(TcpStream::connect(loopback(port)).is_ok());
+    for dialer in DIALERS {
+        let verified = dialer
+            .dial(loopback(port), &tokens)
+            .expect("resolved endpoint");
+        let launch = match &verified.verified {
+            Verified::Client(connection) => connection.answer().facts().launch(),
+            Verified::Takeover(connection) => connection.answer().facts().launch(),
+        };
+        assert_eq!(launch, HelloLaunch::Auto);
+    }
+    assert!(
+        TcpStream::connect(SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, port))).is_err(),
+        "nothing listens on [::1]:{port}"
+    );
+    // macOS has no 127.0.0.2 alias by default; Linux routes all of 127/8.
+    #[cfg(target_os = "linux")]
+    assert!(
+        TcpStream::connect(SocketAddr::from(([127, 0, 0, 2], port))).is_err(),
+        "nothing listens on 127.0.0.2:{port}"
+    );
+    assert_eq!(served.terminate().0.code(), Some(0));
+}
+
 /// Each failure that is not a verification failure is its own error, and an
 /// unverified answer is reported as what a listener said.
 #[test]
