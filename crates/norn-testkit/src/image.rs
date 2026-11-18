@@ -189,38 +189,53 @@ pub fn residency() -> io::Result<Option<Residency>> {
     platform::residency()
 }
 
-/// The executable-file mappings in `maps`, the text of `/proc/self/maps`, as
-/// `(start, end)` address pairs: the readable mappings whose path is `exe`.
+/// A file's identity as `/proc/<pid>/maps` states it: the device's major and
+/// minor numbers and the inode.
+///
+/// **Mappings are matched by identity, not by pathname.** The kernel escapes a
+/// newline in a mapped path, and `/proc/<pid>/exe` does not, so a path
+/// comparison would reject every mapping of an executable under such a
+/// directory. The device and inode name the file whatever its path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FileIdentity {
+    major: u32,
+    minor: u32,
+    inode: u64,
+}
+
+/// The executable-file mappings in `maps`, the bytes of `/proc/self/maps`, as
+/// `(start, end)` address pairs: the readable mappings of the file `exe`.
 ///
 /// A mapping that cannot be read cannot be resident, so a `---p` guard mapping
 /// of the file, which some layouts carry, is neither prefaulted nor counted.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-fn executable_mappings(maps: &str, exe: &str) -> Vec<(usize, usize)> {
-    maps.lines()
+fn executable_mappings(maps: &[u8], exe: FileIdentity) -> Vec<(usize, usize)> {
+    maps.split(|&byte| byte == b'\n')
         .filter_map(|line| {
             let mapping = Mapping::parse(line)?;
-            (mapping.path == exe && mapping.readable).then_some((mapping.start, mapping.end))
+            (mapping.file == exe && mapping.readable).then_some((mapping.start, mapping.end))
         })
         .collect()
 }
 
-/// The residency `smaps`, the text of `/proc/self/smaps`, gives the readable
-/// mappings whose path is `exe`.
+/// The residency `smaps`, the bytes of `/proc/self/smaps`, gives the readable
+/// mappings of the file `exe`.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-fn executable_residency(smaps: &str, exe: &str) -> Residency {
+fn executable_residency(smaps: &[u8], exe: FileIdentity) -> Residency {
     let mut residency = Residency {
         mapped: 0,
         resident: 0,
     };
     let mut counting = false;
-    for line in smaps.lines() {
+    for line in smaps.split(|&byte| byte == b'\n') {
         if let Some(mapping) = Mapping::parse(line) {
-            counting = mapping.path == exe && mapping.readable;
+            counting = mapping.file == exe && mapping.readable;
             if counting {
                 residency.mapped += (mapping.end - mapping.start) as u64;
             }
-        } else if counting && let Some(kib) = line.strip_prefix("Rss:") {
-            let kib = kib.trim().trim_end_matches("kB").trim();
+        } else if counting && let Some(field) = line.strip_prefix(b"Rss:") {
+            let field = String::from_utf8_lossy(field);
+            let kib = field.trim().trim_end_matches("kB").trim();
             residency.resident += kib.parse::<u64>().unwrap_or(0) * 1024;
         }
     }
@@ -228,40 +243,45 @@ fn executable_residency(smaps: &str, exe: &str) -> Residency {
 }
 
 /// One mapping line of `/proc/self/maps` or `/proc/self/smaps`.
-struct Mapping<'a> {
+struct Mapping {
     start: usize,
     end: usize,
     readable: bool,
-    path: &'a str,
+    file: FileIdentity,
 }
 
-impl<'a> Mapping<'a> {
+impl Mapping {
     /// The mapping `line` states, or `None` for a line that states none, such
     /// as an `smaps` field line.
     ///
     /// The first five fields are address range, permissions, offset, device
-    /// and inode; the path is everything after them, spaces included.
-    fn parse(line: &'a str) -> Option<Mapping<'a>> {
-        let mut rest = line;
-        let mut fields = [""; 5];
-        for field in &mut fields {
-            rest = rest.trim_start_matches(' ');
-            let end = rest.find(' ').unwrap_or(rest.len());
-            *field = &rest[..end];
-            rest = &rest[end..];
-        }
-        let (start, end) = fields[0].split_once('-')?;
+    /// and inode; the path after them is not read, so a filename that is not
+    /// UTF-8 cannot fail the parse.
+    fn parse(line: &[u8]) -> Option<Mapping> {
+        let mut fields = line
+            .split(|&byte| byte == b' ')
+            .filter(|field| !field.is_empty());
+        let range = std::str::from_utf8(fields.next()?).ok()?;
+        let permissions = fields.next()?;
+        let _offset = fields.next()?;
+        let device = std::str::from_utf8(fields.next()?).ok()?;
+        let inode = std::str::from_utf8(fields.next()?).ok()?;
+        let (start, end) = range.split_once('-')?;
         let start = usize::from_str_radix(start, 16).ok()?;
         let end = usize::from_str_radix(end, 16).ok()?;
-        let permissions = fields[1].as_bytes();
         if permissions.len() != 4 || end < start {
             return None;
         }
+        let (major, minor) = device.split_once(':')?;
         Some(Mapping {
             start,
             end,
             readable: permissions[0] == b'r',
-            path: rest.trim_start_matches(' '),
+            file: FileIdentity {
+                major: u32::from_str_radix(major, 16).ok()?,
+                minor: u32::from_str_radix(minor, 16).ok()?,
+                inode: inode.parse().ok()?,
+            },
         })
     }
 }
@@ -294,21 +314,27 @@ fn page_size() -> usize {
 
 #[cfg(target_os = "linux")]
 mod platform {
-    use super::{Residency, executable_mappings, executable_residency, page_size, touch};
+    use super::{
+        FileIdentity, Residency, executable_mappings, executable_residency, page_size, touch,
+    };
     use std::io;
+    use std::os::unix::fs::MetadataExt;
 
-    /// This executable's path as `/proc/self/maps` names it.
-    #[allow(clippy::disallowed_methods)] // Harness scaffolding: this process's own executable.
-    fn exe() -> io::Result<String> {
-        Ok(std::fs::read_link("/proc/self/exe")?
-            .to_string_lossy()
-            .into_owned())
+    /// The identity of the file `/proc/<who>/exe` names, as the maps state it.
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: a process's own executable.
+    fn exe_identity(who: &str) -> io::Result<FileIdentity> {
+        let metadata = std::fs::metadata(format!("/proc/{who}/exe"))?;
+        Ok(FileIdentity {
+            major: libc::major(metadata.dev()),
+            minor: libc::minor(metadata.dev()),
+            inode: metadata.ino(),
+        })
     }
 
     #[allow(clippy::disallowed_methods)] // Harness scaffolding: this process's own memory map.
     pub(super) fn prefault() -> io::Result<()> {
-        let maps = std::fs::read_to_string("/proc/self/maps")?;
-        let mappings = executable_mappings(&maps, &exe()?);
+        let maps = std::fs::read("/proc/self/maps")?;
+        let mappings = executable_mappings(&maps, exe_identity("self")?);
         if mappings.is_empty() {
             return Err(io::Error::other(
                 "no readable mapping of this process's executable in /proc/self/maps",
@@ -345,23 +371,15 @@ mod platform {
 
     #[allow(clippy::disallowed_methods)] // Harness scaffolding: this process's own memory map.
     pub(super) fn residency() -> io::Result<Option<Residency>> {
-        let smaps = std::fs::read_to_string("/proc/self/smaps")?;
-        Ok(Some(executable_residency(&smaps, &exe()?)))
-    }
-
-    /// The executable's path as `/proc/<pid>/maps` names it.
-    #[allow(clippy::disallowed_methods)] // Harness scaffolding: a measured child's executable.
-    fn exe_of(pid: libc::pid_t) -> io::Result<String> {
-        Ok(std::fs::read_link(format!("/proc/{pid}/exe"))?
-            .to_string_lossy()
-            .into_owned())
+        let smaps = std::fs::read("/proc/self/smaps")?;
+        Ok(Some(executable_residency(&smaps, exe_identity("self")?)))
     }
 
     #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // Harness scaffolding: a measured child's memory.
     pub(super) fn prefault_process(pid: libc::pid_t) -> io::Result<Option<Residency>> {
         use std::os::unix::fs::FileExt;
-        let maps = std::fs::read_to_string(format!("/proc/{pid}/maps"))?;
-        let mappings = executable_mappings(&maps, &exe_of(pid)?);
+        let maps = std::fs::read(format!("/proc/{pid}/maps"))?;
+        let mappings = executable_mappings(&maps, exe_identity(&pid.to_string())?);
         if mappings.is_empty() {
             return Err(io::Error::other(format!(
                 "no readable mapping of process {pid}'s executable in its maps"
@@ -380,10 +398,20 @@ mod platform {
         residency_of(pid)
     }
 
+    /// The target must keep its executable image stable while this reads: an
+    /// `exec` between the identity and the `smaps` reading would describe
+    /// neither image. A reading that finds no mapping of the executable is an
+    /// error for that reason, never zero residency.
     #[allow(clippy::disallowed_methods)] // Harness scaffolding: a measured child's memory map.
     pub(super) fn residency_of(pid: libc::pid_t) -> io::Result<Option<Residency>> {
-        let smaps = std::fs::read_to_string(format!("/proc/{pid}/smaps"))?;
-        Ok(Some(executable_residency(&smaps, &exe_of(pid)?)))
+        let smaps = std::fs::read(format!("/proc/{pid}/smaps"))?;
+        let residency = executable_residency(&smaps, exe_identity(&pid.to_string())?);
+        if residency.mapped == 0 {
+            return Err(io::Error::other(format!(
+                "no readable mapping of process {pid}'s executable in its smaps"
+            )));
+        }
+        Ok(Some(residency))
     }
 }
 
@@ -493,7 +521,11 @@ mod platform {
 mod tests {
     use super::*;
 
-    const EXE: &str = "/sandbox/bin/memory-0123";
+    const EXE: FileIdentity = FileIdentity {
+        major: 8,
+        minor: 1,
+        inode: 42,
+    };
 
     /// A map with the executable split over four mappings, one of them a
     /// guard, beside a library and an anonymous mapping.
@@ -509,7 +541,7 @@ mod tests {
     #[test]
     fn every_readable_mapping_of_the_executable_file_is_prefaulted_and_no_other() {
         assert_eq!(
-            executable_mappings(MAPS, EXE),
+            executable_mappings(MAPS.as_bytes(), EXE),
             vec![
                 (0x0040_0000, 0x0040_1000),
                 (0x0040_1000, 0x0040_5000),
@@ -519,13 +551,14 @@ mod tests {
     }
 
     #[test]
-    fn a_path_with_spaces_is_one_path() {
-        let maps = "00400000-00401000 r-xp 00000000 08:01 42   /a b/memory\n";
+    fn a_mapping_matches_by_file_identity_whatever_its_path_bytes() {
+        let maps = b"00400000-00401000 r-xp 00000000 08:01 42   /a\\012b/mem\xff\n\
+00500000-00501000 r-xp 00000000 08:01 43   /a b/other\n\
+00600000-00601000 r-xp 00000000 08:02 42   /a b/other\n";
         assert_eq!(
-            executable_mappings(maps, "/a b/memory"),
+            executable_mappings(maps, EXE),
             vec![(0x0040_0000, 0x0040_1000)]
         );
-        assert!(executable_mappings(maps, "/a").is_empty());
     }
 
     #[test]
@@ -543,7 +576,7 @@ Rss:                   0 kB
 Rss:                   8 kB
 ";
         assert_eq!(
-            executable_residency(smaps, EXE),
+            executable_residency(smaps.as_bytes(), EXE),
             Residency {
                 mapped: 20 * 1024,
                 resident: 16 * 1024
@@ -627,14 +660,27 @@ Rss:                   8 kB
             .spawn()
             .expect("starting sleep");
         let pid = libc::pid_t::try_from(child.id()).unwrap();
-        let after_prefault = prefault_process(pid)
-            .expect("prefaulting the child")
-            .expect("Linux reports it");
-        let at_end = residency_of(pid)
-            .expect("reading the child's residency")
-            .expect("Linux reports it");
+        // Until the child has exec'd it still runs this test binary, and the
+        // target must keep its image stable while it is read.
+        let own = std::fs::read_link("/proc/self/exe").unwrap();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::fs::read_link(format!("/proc/{pid}/exe")).ok().as_ref() == Some(&own)
+            && std::time::Instant::now() < until
+        {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let after_prefault = prefault_process(pid);
+        let at_end = residency_of(pid);
+        // Stop and reap the child before any assertion, so a failed
+        // measurement cannot leak it.
         child.kill().unwrap();
         child.wait().unwrap();
+        let after_prefault = after_prefault
+            .expect("prefaulting the child")
+            .expect("Linux reports it");
+        let at_end = at_end
+            .expect("reading the child's residency")
+            .expect("Linux reports it");
         let report = ResidencyReport {
             after_prefault,
             at_end,

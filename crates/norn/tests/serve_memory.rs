@@ -124,17 +124,27 @@ fn peak(profile: Option<&str>, workload: &str) -> u64 {
                     assert!(answer.to_string().contains("resolved"), "a plan was actually built: {answer}");
                 }
             }
-            resident = prefaulted.map(|(server, after_prefault)| {
-                let at_end = norn_testkit::image::residency_of(server).unwrap().unwrap();
+            // Keep a prefault or final-reading failure as a result: a panic
+            // here would unwind before SIGTERM, and the launcher's waiter
+            // would then hold the still-listening server until its deadline.
+            let measured = prefaulted.map(|prefaulted| {
+                let (server, after_prefault) = prefaulted?;
+                let at_end = norn_testkit::image::residency_of(server)
+                    .map_err(|error| format!("reading the final residency: {error}"))?
+                    .ok_or_else(|| "the final residency is not reported".to_owned())?;
                 norn_testkit::image::ResidencyReport { after_prefault, at_end }
                     .wholly_resident()
-                    .unwrap_or_else(|problem| panic!("serve {profile:?} {workload}: {problem}"))
             });
             // SAFETY: this is the owned, still-running measuring group. Its
             // launcher shields SIGTERM and accounts for the server it reaps.
             assert_eq!(unsafe { libc::kill(-group, libc::SIGTERM) }, 0);
+            resident = measured;
         }).unwrap();
     result.assert_success();
+    if let Some(Err(problem)) = &resident {
+        panic!("serve {profile:?} {workload}: {problem}");
+    }
+    let resident = resident.and_then(Result::ok);
     eprintln!(
         "serve {profile:?} {workload}: {} peak RSS bytes, executable {resident:?} bytes resident",
         result.peak_rss_bytes
@@ -157,21 +167,31 @@ fn peak(profile: Option<&str>, workload: &str) -> u64 {
 /// each fault mapped less text. The suite subtracts the least of three nulls,
 /// so one such server raised every above-null reading of its job by about
 /// 3 MB. With the executable wholly resident in every server,
-/// null and measured alike, the term is the file's mapped size by
-/// construction, and the differences cancel it.
+/// null and measured alike, the term is the file's mapped size at the two
+/// sampled points, and the differences cancel it.
 ///
 /// The server prefaults after its first answer rather than at its entry: it
 /// runs no harness this suite could enter, and what it touched starting is
-/// resident already. Linux only, where the bars gate; elsewhere `None`.
+/// resident already. Linux only, where the bars gate; elsewhere `None`. A
+/// failure to prefault is returned, not raised, so the caller can stop the
+/// server before reporting it.
+///
+/// **The claim is two readings, not the whole run.** The suite checks that the
+/// executable is wholly resident after the prefault and again just before
+/// SIGTERM. Under memory pressure, executable pages reclaimed and faulted back
+/// between those readings could lower the recorded peak, and neither reading
+/// would show it.
 fn prefault_the_server(
     group: libc::pid_t,
-) -> Option<(libc::pid_t, norn_testkit::image::Residency)> {
+) -> Option<Result<(libc::pid_t, norn_testkit::image::Residency), String>> {
     if !cfg!(target_os = "linux") {
         return None;
     }
     let server = server_in(group);
-    let residency = norn_testkit::image::prefault_process(server).unwrap()?;
-    Some((server, residency))
+    let prefaulted = norn_testkit::image::prefault_process(server)
+        .map_err(|error| format!("prefaulting the server: {error}"))
+        .transpose()?;
+    Some(prefaulted.map(|residency| (server, residency)))
 }
 
 /// The one process of the measuring `group` other than its launcher, which
