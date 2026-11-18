@@ -42,7 +42,7 @@
 //!
 //!   ```text
 //!   arm      = pair { "," pair }
-//!   pair     = ( counted [ "@" N ] | uncounted ) "=" ( "fails" | "full-disk" | "ends" ) | "foreign@" N "=" ( "edit" | "remove" | "take" )
+//!   pair     = ( counted [ "@" N ] | uncounted ) "=" ( "fails" | "full-disk" | "ends" | "hold" ) | "foreign@" N "=" ( "edit" | "remove" | "take" )
 //!   counted  = "swap" | "unlink" | "respell" | "mkdir" | "parent-sync" | "cleanup"
 //!   uncounted = "stage-create" | "stage-write" | "stage-sync" | "rmdir"
 //!   ```
@@ -63,7 +63,16 @@
 //!   name, `remove` removes the target, and `take` claims a create's name —
 //!   against any other kind, `take` is recorded and does nothing. A pair this
 //!   module cannot read is a mistake in the harness rather than a stage nothing
-//!   is armed at, so it panics.
+//!   is armed at, so it panics. `hold` keeps the write standing at its stage,
+//!   before the stage's own work runs, until the harness lets it go: the
+//!   stage waits for an exclusive lock on the file `NORN_FS_HOLD_LOCK` names,
+//!   then goes on as if nothing were armed. Every other thread of the process
+//!   keeps running meanwhile, which is what a parent needs to drive a process
+//!   that must not die at the stage, only stand at it.
+//! - `NORN_FS_HOLD_LOCK` — the lock file a `hold` waits on. The harness creates
+//!   the file and holds an exclusive `flock` on it before the stage is reached,
+//!   and releases it to let the write go on. An arm holding a `hold` without it
+//!   is a mistake in the harness, so it panics.
 //! - `NORN_FS_ARM_HITS` — a file each fired arm appends one record to before it
 //!   answers — `seam=norn-fs/write stage=<stage> ordinal=<N or -> path=<the
 //!   vault-relative path the stage acts on, percent-encoded> answer=<answer>`
@@ -106,6 +115,10 @@ pub(crate) const ARMED_STAGES: &str = "NORN_FS_ARMED_STAGES";
 /// The environment variable naming the file fired arms record themselves in.
 #[cfg(feature = "induced-failure")]
 pub(crate) const ARM_HITS: &str = "NORN_FS_ARM_HITS";
+
+/// The environment variable naming the lock file a `hold` answer waits on.
+#[cfg(feature = "induced-failure")]
+const HOLD_LOCK: &str = "NORN_FS_HOLD_LOCK";
 
 /// The environment variable that switches publication's second reading of a
 /// target's before-state off.
@@ -394,6 +407,11 @@ pub(crate) enum Answer {
     Ends,
     /// A foreign writer acts on the target.
     Foreign(ForeignAct),
+    /// The stage waits, before its own work runs, until the harness releases
+    /// the lock file it named, and then goes on unfailed. What a parent needs
+    /// to act on a live process while one of its writes stands at a known
+    /// point: the stage's thread waits and every other thread runs.
+    Hold,
 }
 
 /// What the foreign stage's writer does to a publication's target, through the
@@ -426,6 +444,7 @@ impl Answer {
             Answer::Foreign(ForeignAct::Edit) => "edit",
             Answer::Foreign(ForeignAct::Remove) => "remove",
             Answer::Foreign(ForeignAct::Take) => "take",
+            Answer::Hold => "hold",
         }
     }
 
@@ -439,6 +458,7 @@ impl Answer {
             "edit" => Some(Answer::Foreign(ForeignAct::Edit)),
             "remove" => Some(Answer::Foreign(ForeignAct::Remove)),
             "take" => Some(Answer::Foreign(ForeignAct::Take)),
+            "hold" => Some(Answer::Hold),
             _ => None,
         }
     }
@@ -451,8 +471,10 @@ impl Answer {
             }
             Answer::MeetsAFullDisk => io::Error::from_raw_os_error(libc::ENOSPC),
             // Nothing reaches these: `check` ends the process before it asks for
-            // an error to return, and a foreign act is never a check's answer.
+            // an error to return, a hold lets the stage through, and a foreign
+            // act is never a check's answer.
             Answer::Ends => io::Error::other("the process was armed to end here"),
+            Answer::Hold => io::Error::other("a hold fails no stage"),
             Answer::Foreign(_) => io::Error::other("a foreign act answers no check"),
         }
     }
@@ -648,6 +670,13 @@ impl Faults {
             // again. The tidy end is not the one this bar is about.
             std::process::abort();
         }
+        // Only the widened seam reads the lock file a hold waits on, so only
+        // an armed build arms one.
+        #[cfg(feature = "induced-failure")]
+        if answer == Answer::Hold {
+            armed::hold(stage);
+            return Ok(());
+        }
         Err(answer.error(stage))
     }
 
@@ -681,7 +710,7 @@ mod armed {
     use std::sync::OnceLock;
     use std::sync::atomic::{AtomicU32, Ordering};
 
-    use super::{ARMED_STAGES, Answer, Selector, Stage};
+    use super::{ARMED_STAGES, Answer, HOLD_LOCK, Selector, Stage};
 
     /// The publications this process has made.
     static PUBLICATIONS: AtomicU32 = AtomicU32::new(0);
@@ -696,12 +725,35 @@ mod armed {
         static STAGES: OnceLock<Vec<(Selector, Answer)>> = OnceLock::new();
         STAGES.get_or_init(|| match std::env::var_os(ARMED_STAGES) {
             None => Vec::new(),
-            Some(spelling) => super::parse(
-                spelling
-                    .to_str()
-                    .unwrap_or_else(|| panic!("{ARMED_STAGES} is not UTF-8")),
-            ),
+            Some(spelling) => {
+                let armed = super::parse(
+                    spelling
+                        .to_str()
+                        .unwrap_or_else(|| panic!("{ARMED_STAGES} is not UTF-8")),
+                );
+                // A hold with nothing to wait on would let its stage straight
+                // through, and the case would report on a stop it never made.
+                assert!(
+                    !armed.iter().any(|(_, answer)| *answer == Answer::Hold)
+                        || hold_lock().is_some(),
+                    "{ARMED_STAGES} arms a hold and {HOLD_LOCK} names no lock file"
+                );
+                armed
+            }
         })
+    }
+
+    /// The lock file a hold waits on, where this process was given one.
+    fn hold_lock() -> Option<&'static std::path::PathBuf> {
+        static LOCK: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
+        LOCK.get_or_init(|| std::env::var_os(HOLD_LOCK).map(std::path::PathBuf::from))
+            .as_ref()
+    }
+
+    /// Stand at `stage` until the harness releases the hold's lock file.
+    pub(super) fn hold(stage: Stage) {
+        let lock = hold_lock().unwrap_or_else(|| panic!("{HOLD_LOCK} names no lock file"));
+        super::wait_on_lock(lock, stage.name());
     }
 
     /// Append one record saying which checkpoint fired, in which publication,
@@ -731,6 +783,26 @@ mod armed {
                 answer.name()
             ),
         );
+    }
+}
+
+/// Wait until an exclusive lock on `lock` can be taken, then let it go.
+///
+/// The harness holds the lock before the stage is reached, so this returns when
+/// the harness releases it, and at once where nothing holds it. A lock file
+/// that cannot be opened or locked is a harness that named the wrong file: the
+/// process ends saying so, as [`record_or_abort`] does, rather than let the
+/// stage through as if the harness had released it.
+#[cfg(any(test, feature = "induced-failure"))]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)] // The hold's own lock file, outside the vault.
+pub(crate) fn wait_on_lock(lock: &std::path::Path, stage: &str) {
+    let held = std::fs::File::open(lock).and_then(|file| file.lock());
+    if let Err(error) = held {
+        eprintln!(
+            "norn-fs: the {stage} hold could not wait on {}: {error}",
+            lock.display()
+        );
+        std::process::abort();
     }
 }
 
@@ -978,12 +1050,70 @@ mod tests {
             "swap=ends,swap@2=fails",
             "swap@2=fails,swap=ends",
             "rmdir@1=fails",
+            "foreign@1=hold",
+            "swap=hold,swap@2=fails",
         ] {
             assert!(
                 std::panic::catch_unwind(|| parse(spelling)).is_err(),
                 "`{spelling}` was read as an arm"
             );
         }
+    }
+
+    /// **A hold arms like any failure**: bare at a staging stage, by ordinal
+    /// at a publication one.
+    #[test]
+    fn a_hold_arms_at_a_staging_stage_and_at_a_publication() {
+        assert_eq!(
+            parse("stage-sync=hold,swap@2=hold"),
+            vec![
+                (
+                    Selector {
+                        stage: Stage::ShadowSync,
+                        ordinal: None
+                    },
+                    Answer::Hold
+                ),
+                (
+                    Selector {
+                        stage: Stage::Swap,
+                        ordinal: Some(2)
+                    },
+                    Answer::Hold
+                ),
+            ]
+        );
+    }
+
+    /// **A hold stands until its lock is released, and no longer.** The
+    /// waiting thread is still waiting while the harness holds the lock, and
+    /// returns once the harness lets it go.
+    #[test]
+    #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // The hold's own lock file.
+    fn a_hold_waits_for_its_lock_to_be_released() {
+        let scratch = crate::scratch::Scratch::new("faults-hold");
+        let lock = scratch.path("hold.lock");
+        let harness = std::fs::File::create(&lock).unwrap();
+        harness.lock().unwrap();
+        let (sender, released) = std::sync::mpsc::channel();
+        let waiting = {
+            let lock = lock.clone();
+            std::thread::spawn(move || {
+                wait_on_lock(&lock, "stage-sync");
+                sender.send(()).unwrap();
+            })
+        };
+        assert!(
+            released
+                .recv_timeout(std::time::Duration::from_millis(300))
+                .is_err(),
+            "the hold went on while its lock was held"
+        );
+        drop(harness);
+        released
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the hold went on once its lock was released");
+        waiting.join().unwrap();
     }
 
     /// **A record's path cannot forge a field or a record.** Every byte a
@@ -1015,6 +1145,7 @@ mod tests {
             Answer::Foreign(ForeignAct::Edit),
             Answer::Foreign(ForeignAct::Remove),
             Answer::Foreign(ForeignAct::Take),
+            Answer::Hold,
         ] {
             assert_eq!(
                 Answer::named(answer.name()).map(|it| it.name()),

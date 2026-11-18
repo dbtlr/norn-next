@@ -73,6 +73,9 @@ jobs:
       - name: Lint the induced-failure targets
         if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
         run: cargo clippy --locked -p norn-host --all-targets --features induced-failure -- -D warnings
+      - name: Lint the drain holds
+        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
+        run: cargo clippy --locked -p norn --test serve_drain --features induced-failure -- -D warnings
       # The counters build: the counters route, its unit tests, the token
       # counter bar and the wire counter bars compile only with the feature
       # on, as ci.yml's lint job explains.

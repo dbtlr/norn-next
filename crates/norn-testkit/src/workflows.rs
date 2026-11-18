@@ -988,12 +988,15 @@ mod tests {
             });
         let workflow = serde_yaml::to_string(&document).unwrap();
         // Certification pins both complete commands; derive only their package selections here.
+        // A focused step through test-suite.sh runs chosen cases beside its job's
+        // package step and is no package's test home, as the shard guard reads it.
         let packages = |selector| -> BTreeSet<String> {
             steps_in(&workflow)
                 .unwrap()
                 .into_iter()
                 .filter(|step| step.vouches)
                 .filter_map(|step| step.run)
+                .filter(|run| !run.contains(".github/scripts/test-suite.sh"))
                 .flat_map(|run| {
                     run.split_whitespace()
                         .collect::<Vec<_>>()

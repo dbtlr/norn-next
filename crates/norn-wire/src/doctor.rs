@@ -6,7 +6,7 @@
 //!
 //! **Only the registry half crosses this seam.** `doctor` also reports on the
 //! installation — the binary, the service, the machine-local directories —
-//! and that half is an installation request, which Layer 6 lands. What is
+//! and that half is an installation request, which phase 6.3 lands (NORN-286). What is
 //! spelled here is the half answered from the serving set and the registry, so
 //! a surface that renders both renders two reports rather than one report with
 //! halves that arrive at different layers.

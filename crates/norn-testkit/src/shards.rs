@@ -39,6 +39,10 @@ pub const SHARD_JOBS: [&str; 2] = ["build", "build-host"];
 /// are not compared with the whole-workspace set.
 pub const FEATURE_JOBS: [&str; 1] = ["host-functional"];
 
+/// The script a focused step runs one target's selected cases through,
+/// refusing a run that executes no case.
+const FOCUSED_SCRIPT: &str = ".github/scripts/test-suite.sh";
+
 /// The one `--config` value a PR job may pass: it builds the bundled SQLite at
 /// opt-level 3 and changes no package, feature or target.
 const SQLITE_OPT_CONFIG: &str = "profile.dev.package.libsqlite3-sys.opt-level=3";
@@ -138,8 +142,13 @@ pub struct Shard {
 /// The package selections `workflow` (the text of `ci.yml`) runs on pull
 /// requests: the package shards, then the feature jobs.
 ///
-/// Each job must hold exactly one `cargo test` step. A package shard's command
-/// may carry only `--locked` and the package selectors the guard understands.
+/// Each job must hold exactly one package `cargo test` step. A step run
+/// through `.github/scripts/test-suite.sh` is not one: it runs a focused
+/// selection of one target beside the job's package step, such as cases that
+/// need a feature the package's own job leaves off, and the package stays
+/// tested in exactly one job by that job's package step. A package shard's
+/// command may carry only `--locked` and the package selectors the guard
+/// understands.
 /// A feature job's command may also carry `--features <list>` and the one
 /// SQLite `--config` value. Any other flag could change what is built, so it
 /// is refused rather than ignored.
@@ -160,11 +169,11 @@ pub fn shards_in(workflow: &str) -> Result<Vec<Shard>, String> {
         let commands: Vec<&str> = steps
             .iter()
             .filter_map(|step| step.get("run").and_then(Value::as_str))
-            .filter(|run| run.contains("cargo test"))
+            .filter(|run| run.contains("cargo test") && !run.contains(FOCUSED_SCRIPT))
             .collect();
         let [command] = commands[..] else {
             return Err(format!(
-                "job `{job}` must run exactly one `cargo test` step, found {}",
+                "job `{job}` must run exactly one package `cargo test` step, found {}",
                 commands.len()
             ));
         };
@@ -419,6 +428,18 @@ jobs:
         );
         let certified: Vec<bool> = shards.iter().map(|s| s.feature_certified).collect();
         assert_eq!(certified, [true, true, false]);
+    }
+
+    /// A focused step beside a job's package step selects no package for the
+    /// partition, so the job's selection is its package step's alone.
+    #[test]
+    fn a_focused_step_beside_the_package_step_is_not_the_jobs_selection() {
+        let workflow = format!(
+            "{WORKFLOW}      - run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh \
+             cargo test --locked -p norn --features induced-failure --test serve_drain -- --exact a b\n"
+        );
+        let shards = shards_in(&workflow).expect("reading the shards");
+        assert_eq!(shards[2].selection.join(" "), "-p norn-host");
     }
 
     #[test]

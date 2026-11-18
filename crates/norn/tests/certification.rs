@@ -1760,6 +1760,14 @@ fn assert_complete_active_matrix(workflow: &str, full: bool) {
     // only on a Unix host. Named exactly so a rename is a run of no case.
     const PROBE_LIB: &str = ".github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-serve --lib -- --exact start::tests::the_probe_refuses_a_listener_on_loopback_or_the_wildcard start::tests::the_probe_passes_a_socket_in_time_wait";
     const PROBE_WILDCARD: &str = ".github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn --test serve a_port_held_on_the_wildcard_address_refuses_the_start -- --exact";
+    // A foreign loopback holder refusing a real start, on macOS in the PR
+    // platform job beside the wildcard holder: the probe's exact-bind
+    // fallback is BSD's.
+    const PROBE_LOOPBACK: &str = ".github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn --test serve_hello a_foreign_loopback_holder_refuses_a_real_start -- --exact";
+    // The drain cases that hold a real host's apply through norn-fs's write
+    // seam, which only `norn`'s `induced-failure` feature compiles in. The PR
+    // host functional job runs them beside its package step, named exactly.
+    const DRAIN_HOLDS: &str = ".github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked --config profile.dev.package.libsqlite3-sys.opt-level=3 -p norn --features induced-failure --test serve_drain -- --exact sigterm_during_publication_answers_the_apply_unknown_with_its_plan sigterm_before_publication_answers_the_apply_not_run";
     let commands: &[(&str, &str, &[&str])] = &[
         (
             "build",
@@ -1773,6 +1781,7 @@ fn assert_complete_active_matrix(workflow: &str, full: bool) {
                 "python3 -m unittest discover -s scripts/performance -v",
                 "cargo clippy --locked -p norn-db -p norn-fs -p norn-store --lib -- -D warnings",
                 "cargo clippy --locked -p norn-host --all-targets --features induced-failure -- -D warnings",
+                "cargo clippy --locked -p norn --test serve_drain --features induced-failure -- -D warnings",
                 "cargo clippy --locked --workspace --all-targets --features norn/counters -- -D warnings",
                 TOKEN_COUNTER_BAR,
                 COUNTERS_ROUTE,
@@ -1900,6 +1909,7 @@ fn assert_complete_active_matrix(workflow: &str, full: bool) {
             // The one PR job that builds the bundled SQLite at opt-level 3.
             runs = vec![
                 ".github/scripts/flake-tripwire.sh cargo test --locked --config profile.dev.package.libsqlite3-sys.opt-level=3 -p norn-host --features induced-failure",
+                DRAIN_HOLDS,
             ];
         } else if key == "platform" {
             runs = vec![
@@ -1916,6 +1926,7 @@ fn assert_complete_active_matrix(workflow: &str, full: bool) {
                 ".github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-host --features induced-failure --test lockdown an_unreadable_subtree_is_withheld_and_marked_and_the_heal_reaches_ready -- --exact --include-ignored",
                 PROBE_LIB,
                 PROBE_WILDCARD,
+                PROBE_LOOPBACK,
                 ".github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host folding_cost --nocapture --test-threads=1",
             ];
         }

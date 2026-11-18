@@ -515,6 +515,7 @@ fn a_relay_to_a_real_host_that_later_binds_the_same_port_is_refused() {
     a_relay_to_a_host_that_later_binds_the_same_port("hello-relay-same-port", false);
 }
 
+// macOS needs an administrator-added 127.0.0.2 alias; Linux routes all of 127/8.
 #[cfg(target_os = "linux")]
 #[test]
 fn a_relay_through_a_second_loopback_address_with_the_clients_source_port_is_refused() {
@@ -600,6 +601,7 @@ fn the_host_listens_only_on_the_exact_resolved_loopback_address() {
         TcpStream::connect(SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, port))).is_err(),
         "nothing listens on [::1]:{port}"
     );
+    // macOS has no 127.0.0.2 alias by default; Linux routes all of 127/8.
     #[cfg(target_os = "linux")]
     assert!(
         TcpStream::connect(SocketAddr::from(([127, 0, 0, 2], port))).is_err(),
@@ -723,4 +725,52 @@ fn an_answer_over_the_cap_is_refused_unread() {
         );
     }
     assert!(!witness.saw_a_bearer());
+}
+
+/// **Exit bars 1e, 1f and 1g.** A real host reports its compiled channel and
+/// build identity, and the explicit or automatic launch kind it was given.
+#[test]
+fn the_hello_names_the_built_channel_identity_and_actual_launch_kind() {
+    for (automatic, launch) in [(false, HelloLaunch::Explicit), (true, HelloLaunch::Auto)] {
+        let fixture = Fixture::new("hello-build-and-launch");
+        let port = free_port().to_string();
+        fixture.write_settings(&format!("[endpoint]\nport = {port}\n"));
+        let args = if automatic {
+            vec!["serve", "--auto-launched"]
+        } else {
+            vec!["serve", "--port", &port]
+        };
+        let mut served = fixture.start(&args);
+        let port = served.listening_port();
+        let reply = support::hello(port, "default");
+        assert_eq!(reply.status, 200, "{reply:?}");
+        let answer: HelloAnswer = serde_json::from_slice(&reply.body).unwrap();
+        assert_eq!(answer.facts().channel(), channel_of_build());
+        assert_eq!(answer.facts().build(), env!("NORN_BUILD_IDENTITY"));
+        assert_eq!(answer.facts().launch(), launch);
+        assert_eq!(served.terminate().0.code(), Some(0));
+    }
+}
+
+/// **Exit bar 6d (Linux and macOS).** A foreign loopback listener refuses a
+/// real host start, including macOS's exact-bind fallback after the probe.
+/// The macOS PR job runs this case by name.
+#[test]
+fn a_foreign_loopback_holder_refuses_a_real_start() {
+    let fixture = Fixture::new("hello-loopback-holder");
+    let holder = bind_unissued();
+    let port = holder.local_addr().unwrap().port();
+    let (status, stderr) = fixture.run(&["serve", "--port", &port.to_string()]);
+    assert_eq!(
+        status,
+        norn_testkit::process::RunStatus::Exited(1),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(&format!(
+            "port {port} on 127.0.0.1 is held by another process"
+        )),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("listening"), "{stderr}");
 }

@@ -46,11 +46,11 @@ use std::time::Instant;
 
 use norn_host::{Host, HostError, PendingApply, ProductionEntryOps};
 use norn_wire::{
-    ApplyParams, CountParams, DeleteParams, DescribeParams, DoctorRegistryParams, EditParams,
-    ErrorEnvelope, FindParams, GetParams, InitParams, ListParams, MigrateParams, MoveParams,
-    NewParams, RegisterParams, ReloadParams, RepairParams, ResolveParams, RewriteWikilinkParams,
-    SearchParams, SetParams, StatusParams, UnregisterParams, ValidateParams, VaultAddress,
-    VaultName, VaultSetParams, Verb,
+    ApplyMode, ApplyParams, CountParams, DeleteParams, DescribeParams, DoctorRegistryParams,
+    EditParams, ErrorEnvelope, FindParams, GetParams, InitParams, ListParams, MigrateParams,
+    MoveParams, NewParams, RegisterParams, ReloadParams, RepairParams, ResolveParams,
+    RewriteWikilinkParams, SearchParams, SetParams, StatusParams, UnregisterParams, ValidateParams,
+    VaultAddress, VaultName, VaultSetParams, Verb,
 };
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -123,14 +123,14 @@ pub(crate) fn at_bound(verb: Verb, body: &[u8]) -> AtBound {
     }
     #[derive(Deserialize)]
     struct Mode {
-        mode: Option<String>,
+        mode: Option<ApplyMode>,
     }
     match lane(verb) {
         Some(Runs::Read) | None => AtBound::CloseWithProcess,
         Some(Runs::Mutation) => match verb {
             Verb::Init | Verb::VaultMigrate => {
                 if serde_json::from_slice::<Mode>(body)
-                    .is_ok_and(|params| params.mode.as_deref() == Some("preview"))
+                    .is_ok_and(|params| params.mode == Some(ApplyMode::Preview))
                 {
                     AtBound::CloseWithProcess
                 } else {
@@ -434,6 +434,46 @@ mod tests {
                 at_bound(verb, br#"{"vault":{},"mode":"apply"}"#),
                 AtBound::OutcomeUnknown,
                 "{verb} apply"
+            );
+        }
+    }
+
+    /// **`init` and `vault migrate` are classified at the bound as the host
+    /// parses them.** A body cut off with the process is one the verb's own
+    /// params read as a preview, and every other body, one they refuse
+    /// included, is answered unknown: `"bogus"` names no mode, and
+    /// `{"preview":null}` is serde's map spelling of the preview variant.
+    #[test]
+    fn an_init_or_migrate_mode_is_classified_as_its_params_parse_it() {
+        let preview_by_params = |verb: Verb, body: &[u8]| match verb {
+            Verb::Init => serde_json::from_slice::<norn_wire::InitParams>(body)
+                .map(|params| params.mode == ApplyMode::Preview),
+            Verb::VaultMigrate => serde_json::from_slice::<norn_wire::MigrateParams>(body)
+                .map(|params| params.mode == ApplyMode::Preview),
+            _ => unreachable!("{verb} is neither init nor vault migrate"),
+        };
+        let vault = r#""vault":{"by":"name","name":"notes"}"#;
+        for verb in [Verb::Init, Verb::VaultMigrate] {
+            let bogus = format!(r#"{{{vault},"mode":"bogus"}}"#);
+            assert!(
+                preview_by_params(verb, bogus.as_bytes()).is_err(),
+                "{verb}: `bogus` parsed"
+            );
+            assert_eq!(
+                at_bound(verb, bogus.as_bytes()),
+                AtBound::OutcomeUnknown,
+                "{verb} bogus"
+            );
+            let mapped = format!(r#"{{{vault},"mode":{{"preview":null}}}}"#);
+            assert_eq!(
+                preview_by_params(verb, mapped.as_bytes()).ok(),
+                Some(true),
+                "{verb}: the map spelling is not read as a preview"
+            );
+            assert_eq!(
+                at_bound(verb, mapped.as_bytes()),
+                AtBound::CloseWithProcess,
+                "{verb} {{\"preview\":null}}"
             );
         }
     }

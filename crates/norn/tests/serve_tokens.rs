@@ -212,6 +212,8 @@ fn a_revocation_by_rewrite_is_refused_on_the_next_request() {
     assert_eq!(served.terminate().0.code(), Some(0));
 }
 
+/// **Exit bar 3b.** A same-inode, same-size edit after the host has settled
+/// the token fingerprint revokes the old bearer on the very next request.
 #[test]
 fn an_in_place_same_size_edit_of_the_secret_is_refused_on_the_next_request() {
     let fixture = Fixture::new("serve-edit-in-place");
@@ -220,6 +222,9 @@ fn an_in_place_same_size_edit_of_the_secret_is_refused_on_the_next_request() {
     assert_eq!(get(port, "/", Some(&old)).status, 404);
 
     let path = fixture.tokens_file();
+    support::settle_token_file(&path);
+    // Make the host take the settled fingerprint before damaging the file.
+    assert_eq!(get(port, "/", Some(&old)).status, 404);
     let before = std::fs::metadata(&path).unwrap();
     let text = std::fs::read_to_string(&path).unwrap();
     let offset = text.find(&old).expect("the secret is in the file");

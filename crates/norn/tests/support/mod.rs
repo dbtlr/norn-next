@@ -122,17 +122,16 @@ impl Fixture {
                 Ok(())
             });
         }
-        arrange(&mut command);
-        let mut child = command
+        command
             .args(args)
             .env_clear()
             .envs(self.sandbox.environment())
             .current_dir(self.sandbox.work_dir())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("starting norn serve");
+            .stderr(Stdio::piped());
+        arrange(&mut command);
+        let mut child = command.spawn().expect("starting norn serve");
         let stderr = child.stderr.take().unwrap();
         let (sender, lines) = channel();
         std::thread::spawn(move || {
@@ -424,6 +423,37 @@ pub fn hello(port: u16, label: &str) -> Reply {
     exchange(port, "POST", "/v1/hello", None, body.as_bytes())
 }
 
+/// One hello on a kept-alive connection, and its answer read by its declared
+/// length, so the connection stays usable for the next request.
+pub fn hello_on(stream: &mut std::net::TcpStream) -> Option<Reply> {
+    let body = serde_json::json!({ "label": "default", "nonce": "ab".repeat(32) }).to_string();
+    write!(
+        stream,
+        "POST /v1/hello HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    )
+    .ok()?;
+    let mut raw = Vec::new();
+    let mut byte = [0u8; 1];
+    while !raw.ends_with(b"\r\n\r\n") {
+        if stream.read(&mut byte).ok()? == 0 {
+            return None;
+        }
+        raw.push(byte[0]);
+    }
+    let head = String::from_utf8_lossy(&raw).into_owned();
+    let status = head.split(' ').nth(1)?.parse().ok()?;
+    let mut reply = Reply {
+        status,
+        head,
+        body: Vec::new(),
+    };
+    let length: usize = reply.header("content-length")?.parse().ok()?;
+    reply.body = vec![0; length];
+    stream.read_exact(&mut reply.body).ok()?;
+    Some(reply)
+}
+
 /// How long after a write the token file's times must be before a host
 /// holds its fingerprint as settled: `norn-config`'s 3 s window, and a margin
 /// for the filesystem's clock tick.
@@ -466,4 +496,55 @@ pub fn assert_refused_start(status: RunStatus, stderr: &str, file: &Path) {
     assert!(stderr.contains("refused:"), "{stderr}");
     assert!(stderr.contains(&file.display().to_string()), "{stderr}");
     assert!(!stderr.contains("listening"), "{stderr}");
+}
+
+/// Hold a machine-file lock as a second process would, without changing its
+/// contents. The descriptor is close-on-exec, so child starts do not inherit it.
+#[allow(clippy::disallowed_types)]
+pub fn hold_file_lock(path: &Path) -> std::fs::File {
+    use std::os::fd::AsRawFd;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)
+        .unwrap();
+    // SAFETY: a live descriptor owned by this helper.
+    assert_eq!(unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) }, 0);
+    file
+}
+
+/// Witness the real child blocked on the lock at `lock`, rather than guessing
+/// when the work behind it has started: a blocked request on that file's
+/// device and inode, by a thread of the child. Linux lists blocked requests
+/// with `->`, and names a file as `MAJOR:MINOR:INODE`, the device numbers in
+/// hex.
+#[cfg(target_os = "linux")]
+pub fn wait_for_file_lock(served: &Served, lock: &Path) {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = std::fs::metadata(lock).expect("the lock file the child waits on");
+    let device = metadata.dev();
+    // glibc's `major` and `minor` over a Linux `dev_t`.
+    let major = ((device >> 8) & 0xfff) | ((device >> 32) & !0xfff);
+    let minor = (device & 0xff) | ((device >> 12) & !0xff);
+    let file = format!("{major:02x}:{minor:02x}:{}", metadata.ino());
+    let tasks = format!("/proc/{}/task", served.child.id());
+    eventually(
+        &format!("the child's blocked lock on {}", lock.display()),
+        || {
+            let tids: HashSet<String> = std::fs::read_dir(&tasks)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            std::fs::read_to_string("/proc/locks")
+                .unwrap()
+                .lines()
+                .any(|line| {
+                    let fields: Vec<_> = line.split_whitespace().collect();
+                    fields.get(1) == Some(&"->")
+                        && fields.get(5).is_some_and(|pid| tids.contains(*pid))
+                        && fields.get(6) == Some(&file.as_str())
+                })
+        },
+    );
 }
