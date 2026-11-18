@@ -122,17 +122,16 @@ impl Fixture {
                 Ok(())
             });
         }
-        arrange(&mut command);
-        let mut child = command
+        command
             .args(args)
             .env_clear()
             .envs(self.sandbox.environment())
             .current_dir(self.sandbox.work_dir())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("starting norn serve");
+            .stderr(Stdio::piped());
+        arrange(&mut command);
+        let mut child = command.spawn().expect("starting norn serve");
         let stderr = child.stderr.take().unwrap();
         let (sender, lines) = channel();
         std::thread::spawn(move || {
@@ -466,4 +465,106 @@ pub fn assert_refused_start(status: RunStatus, stderr: &str, file: &Path) {
     assert!(stderr.contains("refused:"), "{stderr}");
     assert!(stderr.contains(&file.display().to_string()), "{stderr}");
     assert!(!stderr.contains("listening"), "{stderr}");
+}
+
+/// Hold a machine-file lock as a second process would, without changing its
+/// contents. The descriptor is close-on-exec, so child starts do not inherit it.
+#[allow(clippy::disallowed_types)]
+pub fn hold_file_lock(path: &Path) -> std::fs::File {
+    use std::os::fd::AsRawFd;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)
+        .unwrap();
+    // SAFETY: a live descriptor owned by this helper.
+    assert_eq!(unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) }, 0);
+    file
+}
+
+/// Witness the real child's blocked flock, rather than guessing when its
+/// synchronous mutation has started. Linux lists blocked requests with ->.
+#[cfg(target_os = "linux")]
+pub fn wait_for_file_lock(served: &Served) {
+    let tasks = format!("/proc/{}/task", served.child.id());
+    eventually("the child's blocked file lock", || {
+        let tids: HashSet<String> = std::fs::read_dir(&tasks)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        std::fs::read_to_string("/proc/locks")
+            .unwrap()
+            .lines()
+            .any(|line| {
+                let fields: Vec<_> = line.split_whitespace().collect();
+                fields.get(1) == Some(&"->") && fields.get(5).is_some_and(|pid| tids.contains(*pid))
+            })
+    });
+}
+
+/// An external fsync gate for the drain's process tests. Only the preload
+/// library sees these variables; the shipped binary has no testing switch.
+/// A blocked flock witnesses the selected filesystem boundary while every
+/// other host thread, including its drain and exit timers, keeps running.
+#[cfg(target_os = "linux")]
+pub fn apply_gate() -> &'static Path {
+    static LIBRARY: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    LIBRARY.get_or_init(|| {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.scratch/apply-gate");
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("gate.c");
+        let library = dir.join("gate.so");
+        std::fs::write(
+            &source,
+            r#"
+#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <fcntl.h>
+#include <stdlib.h>
+#include <stdatomic.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/file.h>
+#include <unistd.h>
+
+static atomic_int taken = 0;
+static void gate(int fd) {
+    const char *match = getenv("NORN_TEST_FSYNC_MATCH");
+    const char *lock = getenv("NORN_TEST_FSYNC_LOCK");
+    if (!match || !lock) return;
+    char name[64], path[4096];
+    snprintf(name, sizeof(name), "/proc/self/fd/%d", fd);
+    ssize_t n = readlink(name, path, sizeof(path)-1);
+    if (n < 0) return;
+    path[n] = 0;
+    if (!strstr(path, match) || atomic_exchange(&taken, 1)) return;
+    int held = open(lock, O_WRONLY | O_CLOEXEC);
+    if (held < 0) _exit(98);
+    if (flock(held, LOCK_EX) != 0) _exit(99);
+    close(held);
+}
+int fsync(int fd) {
+    gate(fd);
+    int (*real)(int) = dlsym(RTLD_NEXT, "fsync");
+    return real(fd);
+}
+int fdatasync(int fd) {
+    gate(fd);
+    int (*real)(int) = dlsym(RTLD_NEXT, "fdatasync");
+    return real(fd);
+}
+"#,
+        )
+        .unwrap();
+        let status = Command::new("cc")
+            .args(["-shared", "-fPIC", "-std=c11", "-o"])
+            .arg(&library)
+            .arg(&source)
+            .arg("-ldl")
+            .status()
+            .expect("building the process test's fsync gate");
+        assert!(status.success());
+        library
+    })
 }

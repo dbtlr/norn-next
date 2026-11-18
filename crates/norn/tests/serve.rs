@@ -333,7 +333,7 @@ fn an_explicit_start_takes_over_a_verified_auto_launched_host() {
     assert_eq!(explicit.terminate().0.code(), Some(0));
 }
 
-/// **A launched start meeting a verified serving host exits 10**, at once.
+/// Bar 6e: a launched start meeting a verified serving host exits 10 at once.
 #[test]
 fn a_launched_start_meeting_a_verified_host_exits_10() {
     let fixture = Fixture::new("serve-launch-race");
@@ -341,13 +341,17 @@ fn a_launched_start_meeting_a_verified_host_exits_10() {
     fixture.write_settings(&format!("[endpoint]\nport = {port}\n"));
     let mut explicit = fixture.start(&["serve"]);
     assert_eq!(explicit.listening_port(), port);
+    let started = std::time::Instant::now();
     let (status, stderr) = fixture.run(&["serve", "--auto-launched"]);
+    // Five seconds allows process launch and a one-second hello on a loaded
+    // runner, while remaining below the 10 s drain and 40 s release bounds.
+    assert!(started.elapsed() < Duration::from_secs(5), "{stderr}");
     assert_eq!(status, RunStatus::Exited(10), "{stderr}");
     assert!(!stderr.contains("listening"), "{stderr}");
     assert_eq!(explicit.terminate().0.code(), Some(0));
 }
 
-/// **A launched start meeting a held lock with no verified answer exits 11**
+/// Bar 6f: a launched start meeting a held lock with no verified answer exits 11
 /// once the release bound has passed, with the facts it observed and nothing
 /// more.
 #[test]
@@ -360,12 +364,14 @@ fn a_launched_start_over_a_held_lock_with_no_verified_answer_exits_11() {
     let started = std::time::Instant::now();
     let outcome = Run::new(&fixture.sandbox, &fixture.binary)
         .args(["serve", "--auto-launched"])
-        .deadline(Duration::from_secs(120))
+        .deadline(Duration::from_secs(44))
         .wait()
         .expect("running norn");
     let stderr = outcome.stderr_text();
     assert_eq!(outcome.status, RunStatus::Exited(11), "{stderr}");
     assert!(started.elapsed() >= Duration::from_secs(40), "{stderr}");
+    // Four seconds covers the final one-second dial, polling and reaping.
+    assert!(started.elapsed() < Duration::from_secs(44), "{stderr}");
     assert!(
         stderr.contains("the channel lock is held and nothing verified answers"),
         "{stderr}"
@@ -374,6 +380,7 @@ fn a_launched_start_over_a_held_lock_with_no_verified_answer_exits_11() {
         stderr.contains("deleting serve.lock does not stop"),
         "{stderr}"
     );
+    eprintln!("Bar 6f elapsed: {:?}", started.elapsed());
     for unobserved in ["verification", "drain request", "draining"] {
         assert!(!stderr.contains(unobserved), "{unobserved}: {stderr}");
     }
@@ -450,7 +457,7 @@ fn a_deleted_channel_lock_is_taken_again_and_the_host_keeps_serving() {
     );
 }
 
-/// **The start-bound watchdog**: a start that holds the lock and cannot reach
+/// Bar 6i: the start-bound watchdog: a start that holds the lock and cannot reach
 /// listening within the start bound exits 1, and the last thing it logged
 /// names what it was waiting on. The suite holds the token file's lock, so
 /// the mint waits.
@@ -472,12 +479,18 @@ fn a_start_that_passes_its_start_bound_exits_1_naming_its_wait() {
     let (status, stderr) = fixture.run(&["serve", "--port", &free_port().to_string()]);
     assert_eq!(status, RunStatus::Exited(1), "{stderr}");
     assert!(started.elapsed() >= Duration::from_secs(10), "{stderr}");
+    // Two seconds for scheduling and reaping beyond the 10 s watchdog.
+    assert!(started.elapsed() < Duration::from_secs(12), "{stderr}");
     assert_eq!(
         stderr.lines().last(),
         Some("starting: taking the token file's lock to mint or read the token"),
         "{stderr}"
     );
     assert!(!stderr.contains("listening"), "{stderr}");
+    eprintln!("Bar 6i elapsed: {:?}", started.elapsed());
+    drop(lock);
+    let (following, _) = fixture.serve_on(free_port());
+    assert_eq!(following.terminate().0.code(), Some(0));
 }
 
 /// **SIGHUP drains and exits 0** — a closed terminal.
@@ -666,4 +679,107 @@ fn unread_answers(port: u16) -> std::net::TcpStream {
         );
     }
     stream
+}
+
+/// Bar 5c: a bad file port refuses even when a valid flag would override it.
+#[test]
+fn bad_endpoint_ports_in_the_file_refuse_the_start() {
+    for value in ["0", "65536", "\"invalid\""] {
+        let fixture = Fixture::new("serve-bad-port");
+        let path = fixture.write_settings(&format!("[endpoint]\nport = {value}\n"));
+        let (status, stderr) = fixture.run(&["serve", "--port", &free_port().to_string()]);
+        support::assert_refused_start(status, &stderr, &path);
+    }
+}
+
+/// Bar 5e: an unknown serving key warns and is ignored; the known endpoint
+/// and the authenticated hello still work.
+#[test]
+fn an_unknown_setting_warns_and_is_ignored() {
+    let fixture = Fixture::new("serve-unknown-setting");
+    let port = free_port();
+    fixture.write_settings(&format!(
+        "[endpoint]\nport = {port}\n[serve]\nunknown_knob = 1\n"
+    ));
+    let mut served = fixture.start(&["serve"]);
+    assert_eq!(served.listening_port(), port);
+    assert!(
+        served
+            .seen
+            .iter()
+            .any(|line| line.contains("warning:") && line.contains("unknown_knob")),
+        "{:?}",
+        served.seen
+    );
+    assert_eq!(hello(port, "default").status, 200);
+    assert_eq!(served.terminate().0.code(), Some(0));
+}
+
+/// Bar 6j: B observes A's held channel lock while A is blocked on its mint.
+/// A's 10 s watchdog precedes B's 40 s facts deadline, so B cannot report a
+/// still-blocked A. B instead takes the freed lock, then hits its own 10 s
+/// mint watchdog. No verification failure or drain was observed by B, and
+/// none may be reported. A separate silent-holder case proves the 40 s
+/// facts report; extending A with SIGSTOP would suspend the start contract.
+#[test]
+#[cfg(target_os = "linux")]
+fn a_second_start_during_a_blocked_mint_reports_only_its_observations() {
+    let started = std::time::Instant::now();
+    let fixture = Fixture::new("serve-mint-waiter");
+    let held = support::hold_file_lock(&fixture.config_dir().join(".tokens.toml.lock"));
+    let mut a = fixture.start(&["serve", "--port", &free_port().to_string()]);
+    a.line_starting("starting: taking the token");
+    support::wait_for_file_lock(&a);
+    let mut b = fixture.start(&["serve", "--port", &free_port().to_string()]);
+    b.line_starting("the channel lock in");
+    let (status, lines) = a.wait_within(Duration::from_secs(12));
+    assert_eq!(status.code(), Some(1), "{lines:?}");
+    let (status, lines) = b.wait_within(Duration::from_secs(12));
+    assert_eq!(status.code(), Some(1), "{lines:?}");
+    eprintln!("Bar 6j elapsed: {:?}", started.elapsed());
+    let report = lines.join("\n");
+    assert!(
+        report.contains("starting: taking the token file's lock"),
+        "{report}"
+    );
+    for unobserved in ["verification failed", "drain request", "draining"] {
+        assert!(!report.contains(unobserved), "{report}");
+    }
+    drop(held);
+}
+
+/// Bar 7c: accepted hellos defer a launched host's two-second idle exit.
+/// Stop activity after six seconds, then observe the idle drain and exit.
+/// Bar 7d observation limit: an idle host has no in-flight work to hold its
+/// drain open. Neither log line witnesses listener close: draining is logged
+/// before close, stopped after it. A refused connection after exit is stable;
+/// a refusal while the child is alive would race an unbounded scheduler pause.
+#[test]
+fn activity_defers_the_auto_launched_hosts_idle_exit() {
+    let fixture = Fixture::new("serve-idle-activity");
+    let port = free_port();
+    let mut served = auto_launched(&fixture, port, "[serve]\nauto_exit_after = \"2s\"\n");
+    let started = std::time::Instant::now();
+    while started.elapsed() < Duration::from_secs(6) {
+        assert_eq!(hello(port, "default").status, 200);
+        assert!(served.running());
+        // This is the activity cadence, not a wait for an observable state.
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(served.running());
+    let (status, lines) = served.wait_within(Duration::from_secs(8));
+    assert_eq!(status.code(), Some(0), "{lines:?}");
+    let draining = lines
+        .iter()
+        .position(|line| line == "draining: the idle exit")
+        .unwrap();
+    let stopped = lines
+        .iter()
+        .position(|line| line == "stopped: the idle exit")
+        .unwrap();
+    assert!(draining < stopped, "{lines:?}");
+    assert!(
+        std::net::TcpStream::connect(("127.0.0.1", port))
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::ConnectionRefused)
+    );
 }
