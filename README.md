@@ -8,6 +8,7 @@ one vault without drift.
 **Status:** early development; no releases yet.
 
 - [Architecture](docs/architecture.md) — the invariant spine and crate map.
+- [Connecting an MCP client](docs/mcp.md) — the `/mcp` endpoint, its token file and its tools.
 - [Decisions](docs/decisions/README.md) — the ADR index.
 
 ## Development process recovery
