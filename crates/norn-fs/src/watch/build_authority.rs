@@ -272,16 +272,15 @@ impl BuildAuthority {
             state.settle_barriers.push((sentinel.clone(), reached));
             sentinel
         };
-        let answer = std::fs::File::create_new(&sentinel)
-            .map_err(io_error)
-            .and_then(|_| {
-                reaching.recv_timeout(budget).map_err(|error| match error {
-                    mpsc::RecvTimeoutError::Timeout => WatchError::SynchronizationExpired,
-                    mpsc::RecvTimeoutError::Disconnected => {
-                        WatchError::Backend("the build's watch subscription ended".into())
-                    }
-                })
-            });
+        let created = std::fs::File::create_new(&sentinel).map_err(io_error);
+        let answer = created.as_ref().map_err(Clone::clone).and_then(|_| {
+            reaching.recv_timeout(budget).map_err(|error| match error {
+                mpsc::RecvTimeoutError::Timeout => WatchError::SynchronizationExpired,
+                mpsc::RecvTimeoutError::Disconnected => {
+                    WatchError::Backend("the build's watch subscription ended".into())
+                }
+            })
+        });
         // A barrier ingest never reached stays armed; disarm this one only.
         state
             .lock()
@@ -289,9 +288,14 @@ impl BuildAuthority {
             .settle_barriers
             .retain(|(armed, _)| *armed != sentinel);
         drop(state);
-        let cleanup = match std::fs::remove_file(&sentinel) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            other => other.map_err(io_error),
+        // Remove only a sentinel this call created: a path that already
+        // stood belongs to someone else.
+        let cleanup = match created {
+            Err(_) => Ok(()),
+            Ok(_) => match std::fs::remove_file(&sentinel) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                other => other.map_err(io_error),
+            },
         };
         answer.and(cleanup)
     }
