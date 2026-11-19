@@ -1837,10 +1837,10 @@ struct State {
     // is terminal or an unrepresentable revision, and can never become zero.
     #[cfg(any(test, feature = "induced-failure"))]
     observation_revision: Option<u64>,
-    /// The sentinel a settle barrier wrote, and where to say ingest reached it.
-    /// See [`BuildAuthority::settle_changes`].
+    /// The sentinels settle barriers wrote, each with where to say ingest
+    /// reached it. See [`BuildAuthority::settle_changes`].
     #[cfg(any(test, feature = "induced-failure"))]
-    settle_barrier: Option<(PathBuf, mpsc::Sender<()>)>,
+    settle_barriers: Vec<(PathBuf, mpsc::Sender<()>)>,
     terminal: Option<WatchError>,
     healing: bool,
     /// The coalescer has taken the accumulation and is suppressing the batch
@@ -1904,7 +1904,7 @@ impl State {
             #[cfg(any(test, feature = "induced-failure"))]
             observation_revision: Some(0),
             #[cfg(any(test, feature = "induced-failure"))]
-            settle_barrier: None,
+            settle_barriers: Vec::new(),
             terminal: None,
             healing: false,
             closing: false,
@@ -2009,12 +2009,12 @@ fn ingest(shared: &Arc<Mutex<State>>, result: notify::Result<Event>) -> Option<W
             }
             for path in event.paths {
                 #[cfg(any(test, feature = "induced-failure"))]
-                if state
-                    .settle_barrier
-                    .as_ref()
-                    .is_some_and(|(sentinel, _)| *sentinel == path)
-                    && let Some((_, reached)) = state.settle_barrier.take()
+                if let Some(at) = state
+                    .settle_barriers
+                    .iter()
+                    .position(|(sentinel, _)| *sentinel == path)
                 {
+                    let (_, reached) = state.settle_barriers.swap_remove(at);
                     let _ = reached.send(());
                 }
                 let effect = classify_path(&state, event.kind, &path);

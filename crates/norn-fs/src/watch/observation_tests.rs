@@ -717,7 +717,12 @@ fn a_settle_barrier_answers_only_once_ingest_reaches_its_sentinel_and_records_no
     let root = watch.covered_root().to_path_buf();
     let sentinel = root.join(".norn-settled-changes-case");
     let (reached, reaching) = mpsc::channel();
-    watch.state.lock().unwrap().settle_barrier = Some((sentinel.clone(), reached));
+    watch
+        .state
+        .lock()
+        .unwrap()
+        .settle_barriers
+        .push((sentinel.clone(), reached));
     ingest(
         &watch.state,
         Ok(Event::new(EventKind::Modify(ModifyKind::Data(
@@ -736,6 +741,6 @@ fn a_settle_barrier_answers_only_once_ingest_reaches_its_sentinel_and_records_no
     reaching
         .try_recv()
         .expect("ingest reached the sentinel and answered the barrier");
-    assert!(watch.state.lock().unwrap().settle_barrier.is_none());
+    assert!(watch.state.lock().unwrap().settle_barriers.is_empty());
     assert_eq!(proof.sequence(), 1, "the sentinel recorded a root");
 }

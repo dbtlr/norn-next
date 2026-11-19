@@ -243,7 +243,9 @@ impl BuildAuthority {
     /// does not hold, so the watcher records nothing for it. A polling
     /// subscription reports one scan's changes in walk order rather than the
     /// order they were made, so there the barrier proves only that a scan
-    /// after this call has been ingested.
+    /// after this call has been ingested. Concurrent calls each wait for their
+    /// own sentinel. A report another process causes later, such as an indexer
+    /// touching a changed file, is a new report and no barrier holds it back.
     ///
     /// Available only with `induced-failure`. A dropped subscription, an
     /// expired wait or failed sentinel I/O returns an error rather than
@@ -267,7 +269,7 @@ impl BuildAuthority {
                 std::process::id(),
                 SERIAL.fetch_add(1, Ordering::Relaxed)
             ));
-            state.settle_barrier = Some((sentinel.clone(), reached));
+            state.settle_barriers.push((sentinel.clone(), reached));
             sentinel
         };
         let answer = std::fs::File::create_new(&sentinel)
@@ -280,11 +282,12 @@ impl BuildAuthority {
                     }
                 })
             });
-        // A barrier ingest never reached stays armed; disarm it before cleanup.
+        // A barrier ingest never reached stays armed; disarm this one only.
         state
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .settle_barrier = None;
+            .settle_barriers
+            .retain(|(armed, _)| *armed != sentinel);
         drop(state);
         let cleanup = match std::fs::remove_file(&sentinel) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),

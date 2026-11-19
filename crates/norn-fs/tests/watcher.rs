@@ -876,3 +876,71 @@ fn restoring_a_denied_directory_reports_it_and_covers_it_again() {
         }
     });
 }
+
+/// **A settle barrier returns only after every report made before it was
+/// ingested.** Each round writes a document and then passes the barrier; the
+/// build authority must already hold a report at that document when it
+/// returns, which a barrier that did not wait for its sentinel's delivery
+/// would rarely see. The sentinels themselves record nothing and are gone
+/// afterwards, and two barriers in flight at once both pass.
+#[cfg(feature = "induced-failure")]
+#[test]
+fn a_settle_barrier_returns_after_the_reports_of_writes_made_before_it() {
+    let scratch = Scratch::new("settle-barrier");
+    let vault = scratch.vault();
+    let _lease = Lease::hold_exclusive(isolation::REAL_WATCHER, lease_budget());
+    let (subscription, _own_writes) =
+        watch(&vault, &scratch.schema(), &[]).expect("watch coverage is active");
+    subscription
+        .synchronize(SYNCHRONIZATION_DEADLINE)
+        .expect("coverage to become live");
+    let authority = subscription
+        .capture_build_authority(&[])
+        .expect("unchanged coverage");
+    let normalizer = PathNormalizer::detect(&vault).expect("the vault's case behavior");
+    for round in 0..20 {
+        let name = format!("doc{round:02}.md");
+        let root = normalizer
+            .normalize(Path::new(&name))
+            .expect("a vault path");
+        let before = authority.sequence();
+        std::fs::write(vault.join(&name), b"# Changed\n").expect("the write");
+        authority
+            .settle_changes(budget().work())
+            .expect("the barrier's sentinel is delivered");
+        let reported = authority.visit_roots(|_, roots| {
+            Iterator::find(&mut &mut *roots, |(path, ..)| **path == root).map(|(_, at, ..)| at)
+        });
+        assert!(
+            reported.is_some_and(|at| at > before),
+            "round {round}: the barrier returned before the write's report"
+        );
+    }
+    std::thread::scope(|scope| {
+        let first = scope.spawn(|| authority.settle_changes(budget().work()));
+        let second = scope.spawn(|| authority.settle_changes(budget().work()));
+        first.join().unwrap().expect("the first concurrent barrier");
+        second
+            .join()
+            .unwrap()
+            .expect("the second concurrent barrier");
+    });
+    let roots: Vec<String> = authority.visit_roots(|_, roots| {
+        let mut names = Vec::new();
+        for (path, ..) in roots {
+            names.push(path.as_path().to_string_lossy().into_owned());
+        }
+        names
+    });
+    assert!(
+        roots.iter().all(|path| path.starts_with("doc")),
+        "a sentinel recorded a root: {roots:?}"
+    );
+    let leftover: Vec<_> = std::fs::read_dir(&vault)
+        .expect("the vault lists")
+        .flatten()
+        .map(|entry| entry.file_name())
+        .filter(|name| name.to_string_lossy().starts_with(".norn-settled-changes"))
+        .collect();
+    assert!(leftover.is_empty(), "sentinels left behind: {leftover:?}");
+}
