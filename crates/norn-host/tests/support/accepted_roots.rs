@@ -14,6 +14,8 @@ pub struct AcceptedRoots {
     vault: PathBuf,
     normalizer: norn_fs::PathNormalizer,
     authority: Mutex<Option<norn_fs::watch::BuildAuthority>>,
+    /// The roots of the last change and the report sequence its wait ended at.
+    settled: Mutex<Option<(Vec<norn_fs::NormalizedPath>, u64)>>,
 }
 
 impl AcceptedRoots {
@@ -29,6 +31,7 @@ impl AcceptedRoots {
             normalizer,
             vault,
             authority: Mutex::new(None),
+            settled: Mutex::new(None),
         }
     }
 
@@ -83,5 +86,28 @@ impl AcceptedRoots {
             }
         })
         .unwrap();
+        let through = authority.sequence();
+        *self.settled.lock().unwrap() = Some((roots, through));
+    }
+
+    /// The reports the watcher accepted at the last change's roots after its
+    /// wait ended, for a failing assertion to name.
+    #[allow(dead_code)] // Named by early_reads; the lib's own tests do not.
+    pub fn late_reports(&self) -> String {
+        let Some((roots, through)) = self.settled.lock().unwrap().clone() else {
+            return "no change made".to_owned();
+        };
+        let Some(authority) = self.authority.lock().unwrap().clone() else {
+            return "no watcher authority".to_owned();
+        };
+        authority.visit_roots(|sequence, accepted| {
+            let late: Vec<String> = accepted
+                .filter(|&(root, reported, _, _)| reported > through && roots.contains(root))
+                .map(|(root, reported, ..)| format!("{} at {reported}", root.as_path().display()))
+                .collect();
+            format!(
+                "wait ended at report {through}, now {sequence}; late at changed roots: {late:?}"
+            )
+        })
     }
 }
