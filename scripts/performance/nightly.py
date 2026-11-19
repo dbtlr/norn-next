@@ -23,7 +23,10 @@ ENGINES = ("current", "serve", "legacy")
 # size: a fixed allowance plus one for every 1,000 background documents. These
 # are runaway bounds, two to four times what completed hosted runs took per
 # process (docs/ci.md lists them), so an engine that reaches one is stuck, not slow.
-DEADLINES = {"current": (60, 10), "serve": (180, 10), "legacy": (600, 1600)}
+# The two-route serve run took about 125 s per process at 2k and 142 s at 10k
+# on the first hosted record, idle cycle included; 420 s plus 8 s per 1,000
+# documents is about 3.5 times both.
+DEADLINES = {"current": (60, 10), "serve": (420, 8), "legacy": (600, 1600)}
 
 
 def deadline(engine, sizes, processes):

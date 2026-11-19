@@ -2,7 +2,7 @@
 
 Ordinary functional tests remain required on pull requests, including doctests and
 feature-enabled host cases. Stable counts and structure are correctness evidence.
-Clocks and trends belong to the dormant soak tier under
+Clocks and trends use nightly and dispatch-only measurement lanes under
 [ADR 0004](decisions/0004-two-tier-measurement-and-authored-baselines.md).
 
 ## PR and full-regression coverage
@@ -70,7 +70,7 @@ and refuses every other `--config`.
 |---|---|
 | Build and test | Workspace build, default tests and doctests except norn-host, norn-testkit and norn-serve, cheap registry structure and dormancy checks |
 | Build and test (norn-host and norn-testkit) | Default norn-testkit and norn-serve tests and doctests; cargo test builds its selected targets |
-| Lint and document | Format, all six clippy contexts, performance-harness unit tests, the token counter bar and the counters route's unit test under `counters`, denied-warning rustdoc |
+| Lint and document | Format, all six clippy contexts, performance-harness and dogfood-sampler unit tests, token, wire and MCP counter bars and the counters route's unit test under `counters`, denied-warning rustdoc |
 | Host functional (induced-failure) | The only PR run of norn-host's ordinary tests and doctests, feature-enabled, including churn and rolling-heal correctness and work counters |
 | macOS platform | Embedding determinism, filesystem contracts, Obsidian parity, exact case-rename and unreadable-document/subtree cases, folding-root spelling bar |
 | Architecture | Actionlint, the architecture gate and the shard certification |
@@ -83,6 +83,20 @@ Compiled registry-carrier and inventory audits run only in its Linux build job.
 The complete lockdown and process-death recovery targets run in its Linux
 induced-failure and macOS platform jobs. Counter and memory lanes run in full
 regression; the focused PR macOS spelling bar also runs `folding_cost`.
+
+The PR lint job and the full regression build job both run `serve_counters`,
+`serve_wire` and `serve_mcp` with `counters`. This includes MCP's request, byte
+and cycle bars and its one-dispatch, constant-answer and derive-once cases.
+Both jobs run `python3 -m unittest discover -s scripts/dogfood -v` immediately
+after the performance-harness unit tests.
+
+`serve-soak.yml` is a separate `workflow_dispatch`-only real-process evidence
+run. Its recognized lane-script step enables `counters,induced-failure` and
+runs the ignored `serve_soak` target for 3,600 seconds. The 90-minute job guard
+covers compilation and attachment as well as load. Local runs can override
+`NORN_SOAK_DURATION_SECS`. The one-watch `stream=fails` dose and its seam record
+prove recovery occurred; the pinned-candidate certification campaign stays
+separate.
 
 Fault and compiled-audit cases use `fault-lane case:` and `audit-lane case:`
 ignore reasons. Lane tables and the workflow reader require wholesale adoption
@@ -123,7 +137,7 @@ engine still packages its evidence before the job is cancelled:
 | Job | Guard | Completed runs | Recorder deadline |
 |---|---:|---|---|
 | `full nightly performance (current)` | 30 min | 6m47s and 4m43s; each process 25 to 41 s | 60 s + 10 s per 1,000 documents per process: 12 min |
-| `full nightly performance (serve)` | 45 min | 14m08s and 12m02s; each process 86 to 103 s, 60 s of it the idle wait | 180 s + 10 s per 1,000 documents per process: 24 min |
+| `full nightly performance (serve)` | 120 min | Two-route hosted record: about 125 s per process at 2k and 142 s at 10k, including the idle wait | 420 s + 8 s per 1,000 documents per process: 47 min |
 | `legacy-record.yml` part, 2,000 documents | 90 min | 16m57s to 18m07s; the process 14m49s to 15m34s | 600 s + 1,600 s per 1,000 documents: 63 min |
 | `legacy-record.yml` part, 10,000 documents | 300 min | 1h36m12s to 1h57m08s; the process 1h33m42s to 1h54m04s | 600 s + 1,600 s per 1,000 documents: 4 h 37 min |
 

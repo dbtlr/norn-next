@@ -26,8 +26,22 @@ from transport import TIMEOUT, environment, issue_root, stop_process
 OVERHEAD_FIXED_NS = 6_000_000
 OVERHEAD_PER_BYTE_NS = 125
 
+# The MCP delta allowance is 1 ms plus 10 ns per report byte. It is set from
+# the first hosted release record (run 44497618284, 400 samples per
+# route/workload at 2,014 and 10,014 documents, 3 processes each): the largest
+# small-report median delta was 0.034 ms and Get large (51,481 report bytes)
+# added 0.084 ms, about 1.6 ns per byte. The fixed term is about 30 times the
+# small-report reading and the per-byte term about 6 times the large one, so
+# scheduling noise on a hosted runner stays inside it. An added millisecond
+# exceeds the allowance only on a report under about 3.4 KB: past that, the
+# 10 ns per byte the allowance grants outweighs the 0.034 ms baseline.
+MCP_DELTA_FIXED_NS = 1_000_000
+MCP_DELTA_PER_BYTE_NS = 10
+
 
 ADDRESS = {"by": "name", "name": "notes"}
+# The counters route's gauges: readings at an instant, with no delta.
+GAUGES = frozenset({"serve.alive_tasks"})
 
 # The compiled development channel, which the isolated subject runs as.
 CHANNEL = "dev"
@@ -288,6 +302,8 @@ class Serve:
         self.attempts = 0
         self.hellos = 0
         self.connection = None
+        self.route = "wire"
+        self.mcp_initialized = False
         self.channel = CHANNEL
         self.first_use = []
         lines = queue.Queue()
@@ -353,7 +369,7 @@ class Serve:
 
     @staticmethod
     def delta(before, after):
-        return {key: value - before[key] for key, value in after.items()}
+        return {key: value - before[key] for key, value in after.items() if key not in GAUGES}
 
     def close_connection(self):
         if self.connection is not None:
@@ -384,6 +400,7 @@ class Serve:
         except BaseException:
             self.close_connection()
             raise
+        self.mcp_initialized = False
         self.hellos += 1
 
     def exchange(self, method, path, body, *, auth):
@@ -391,6 +408,11 @@ class Serve:
         headers = {"Content-Type": "application/json"}
         if auth:
             headers["Authorization"] = "Bearer " + self.bearer
+        if path == "/mcp":
+            revision = body.get("params", {}).get("_meta", {}).get("io.modelcontextprotocol/protocolVersion", "2025-11-25")
+            headers["MCP-Protocol-Version"] = revision
+            if revision == "2026-07-28":
+                headers["Mcp-Method"] = body["method"]
         encoded = json.dumps(body).encode() if body is not None else b""
         began = time.perf_counter_ns()
         self.connection.request(method, path, encoded, headers)
@@ -423,14 +445,51 @@ class Serve:
 
     def call(self, command):
         op, body = params(command)
+        if self.route == "mcp":
+            self.initialize_mcp()
+            body.pop("mode", None)
+            path = "/mcp"
+            body = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": op, "arguments": body}}
+        else:
+            path = "/v1/wire/" + op
         before = self.counters()
-        answer, elapsed, host_us, size = self.request("POST", "/v1/wire/" + op, body)
+        answer, elapsed, host_us, size = self.request("POST", path, body)
+        if self.route == "mcp":
+            if "error" in answer or answer["result"].get("isError"):
+                raise ValueError(f"MCP call failed: {answer!r}")
+            answer = answer["result"]["structuredContent"]
         if host_us is None:
             raise ValueError("serve subject lacks the counters feature's host-time header")
         after = self.counters()
         return {"answer": answer, "host_ns": int(host_us) * 1000,
-                "counters": self.delta(before, after), "report_bytes": size,
+                "counters": self.delta(before, after), "report_bytes": after["serve.report_bytes"] - before["serve.report_bytes"],
+                "encoded_bytes": size,
                 "serving_overhead_ns": elapsed - int(host_us) * 1000}, elapsed
+
+    def initialize_mcp(self):
+        # request() may have replaced the socket since the previous call.
+        if self.connection is None or self.connection.sock is None:
+            self.close_connection()
+            self.connect()
+        if not self.mcp_initialized:
+            self.request("POST", "/mcp", {"jsonrpc": "2.0", "id": 0, "method": "initialize",
+                "params": {"protocolVersion": "2025-11-25", "capabilities": {},
+                           "clientInfo": {"name": "norn-performance", "version": "1"}}})
+            self.mcp_initialized = True
+
+    def tool_list_lengths(self):
+        self.initialize_mcp()
+        lengths = {}
+        for revision in ("2025-11-25", "2026-07-28"):
+            params = {} if revision == "2025-11-25" else {"_meta": {
+                "io.modelcontextprotocol/protocolVersion": revision,
+                "io.modelcontextprotocol/clientCapabilities": {}}}
+            answer, _, _, size = self.request("POST", "/mcp", {
+                "jsonrpc": "2.0", "id": 0, "method": "tools/list", "params": params})
+            result = answer.get("result")
+            if "error" not in answer and isinstance(result, dict) and isinstance(result.get("tools"), list):
+                lengths[revision] = size
+        return lengths
 
     def wait_state(self, state, seconds):
         deadline = time.monotonic() + seconds

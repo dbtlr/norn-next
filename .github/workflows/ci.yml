@@ -137,6 +137,8 @@ jobs:
         run: cargo clippy --locked -p norn-host --test performance --features induced-failure -- -D warnings
       - name: Test the performance harness
         run: python3 -m unittest discover -s scripts/performance -v
+      - name: Test the dogfood sampler
+        run: python3 -m unittest discover -s scripts/dogfood -v
       # The lint above never sees norn-db's, norn-fs's or norn-store's library
       # with the feature off. norn-fs and norn-store are each their own
       # dev-dependency with `induced-failure` on, and norn-store forwards the
@@ -161,10 +163,10 @@ jobs:
       - name: Lint the drain holds
         run: cargo clippy --locked -p norn --test serve_drain --features induced-failure -- -D warnings
       # The `counters` feature compiles the counters route into norn-serve and
-      # the token counter bar into the `norn` package's tests; with it off,
+      # the token and MCP counter bars into the `norn` package's tests; with it off,
       # both compile to nothing, so neither the lint above nor the build job
-      # reads them. These three steps are the lane that does: the lint, the
-      # bar, the wire route's counter bars and its host-time header, and
+      # reads them. These steps are the lane that does: the lint, the
+      # bars, the wire and MCP counter bars, the wire host-time header, and
       # norn-serve's unit tests of the counters route, named exactly.
       # test-suite.sh rejects a run that executes no case, which is what a
       # missing feature or a renamed test would produce.
@@ -174,8 +176,12 @@ jobs:
         run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn --features counters --test serve_counters
       - name: Counters route
         run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-serve --features counters --lib http::tests::the_counters_route_answers_the_token_counters_behind_the_bearer -- --exact
+      - name: Counters route alive tasks
+        run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-serve --features counters --lib http::tests::the_counters_route_answers_the_runtimes_alive_tasks -- --exact
       - name: Wire counter bars
         run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn --features counters --test serve_wire
+      - name: MCP counter bars
+        run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn --features counters --test serve_mcp
       - name: Wire host time
         run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-serve --features counters --lib http::tests::wire::every_wire_answer_carries_the_host_time_under_the_counters_feature -- --exact
       - name: Serving memory bars

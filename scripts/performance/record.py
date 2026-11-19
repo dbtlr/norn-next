@@ -26,7 +26,7 @@ from fixture import COMMON, tree_digest
 from provenance import sha256, verify_build
 from results import validate_read, validate_first_get_content
 from transport import Current, Legacy, resources
-from serve import Serve, other_servers, OVERHEAD_FIXED_NS, OVERHEAD_PER_BYTE_NS
+from serve import Serve, other_servers, OVERHEAD_FIXED_NS, OVERHEAD_PER_BYTE_NS, MCP_DELTA_FIXED_NS, MCP_DELTA_PER_BYTE_NS
 
 RECORD_VERSION = 1
 LOADING = "operator-prefix-public"
@@ -118,6 +118,12 @@ def overhead_rows(processes):
                             note=f"{within} of {len(readings)} processes within {OVERHEAD_FIXED_NS / 1e6:g} ms + "
                                  f"{OVERHEAD_PER_BYTE_NS} ns per report byte; median residual p95 {milliseconds(residual)} ms"))
             rows.append(row(documents, f"overhead.{name}.bytes", median(reading["max_bytes"] for reading in readings), "bytes"))
+        for name in group[0].get("mcp_delta", {}):
+            readings = [p["mcp_delta"][name] for p in group]
+            rows.append(row(documents, f"mcp_delta.{name}.median", milliseconds(median(r["median_ns"] for r in readings)), "ms",
+                            note=f"{sum(r['within_ceiling'] for r in readings)} of {len(readings)} within delta allowance"))
+        for revision in group[0].get("tool_list_lengths", {}):
+            rows.append(row(documents, f"mcp.tools_list.{revision}.bytes", median(p["tool_list_lengths"][revision] for p in group), "bytes"))
     return rows
 
 
@@ -192,6 +198,17 @@ def measure_legacy(binary, root, manifest, args):
     return {"documents": manifest["document_count"], "cold": cold, "warm": timings, "work": {}, "resources": process_resources}
 
 
+def serve_trials(name, warmups, write_payoff, samples):
+    """Whole alternating ABBA blocks; each route gets equal write parities."""
+    discard = max(warmups, write_payoff) if name in WRITES else warmups
+    discard = (discard + 3) // 4 * 4
+    count = (samples + 3) // 4 * 4
+    for iteration in range(discard + 2 * count):
+        block, offset = divmod(iteration, 4)
+        routes = ("wire", "mcp", "mcp", "wire") if block % 2 == 0 else ("mcp", "wire", "wire", "mcp")
+        yield iteration, routes[offset], iteration >= discard
+
+
 def measure_serve(binary, root, manifest, args):
     worker = Serve(binary, root)
     try:
@@ -199,16 +216,31 @@ def measure_serve(binary, root, manifest, args):
         state = probe_state(manifest)
         timings, overhead, work = {}, {}, {}
         before_resources = resources(worker.process.pid)
+        tool_list_lengths = worker.tool_list_lengths()
+        mcp_delta = {}
         for name, command in READS + [(name, None) for name in WRITES]:
-            calls = [verified_call(worker, "current", root, manifest, state, name, command, iteration)
-                     for iteration in range(args.warmups + args.samples)]
-            timings[name] = measured(name, [call["elapsed_ns"] for call in calls], warmups=args.warmups, write_payoff=args.write_payoff)
-            responses = measured(name, [call["response"] for call in calls], warmups=args.warmups, write_payoff=args.write_payoff)
-            overhead[name] = {"p95_ns": p95([response["serving_overhead_ns"] for response in responses]),
-                              "max_bytes": max(response["report_bytes"] for response in responses),
-                              "samples": [{"round_trip_ns": elapsed, "host_ns": response["host_ns"],
-                                           "overhead_ns": response["serving_overhead_ns"], "report_bytes": response["report_bytes"],
-                                           "counters": response["counters"]} for elapsed, response in zip(timings[name], responses)]}
+            routes = {"wire": [], "mcp": []}
+            for iteration, route, keep in serve_trials(name, args.warmups, args.write_payoff, args.samples):
+                worker.route = route
+                call = verified_call(worker, "current", root, manifest, state, name, command, iteration)
+                if keep:
+                    routes[route].append(call)
+            for route, calls in routes.items():
+                key = name if route == "wire" else "mcp." + name
+                timings[key] = [call["elapsed_ns"] for call in calls]
+                responses = [call["response"] for call in calls]
+                overhead[key] = {"p95_ns": p95([r["serving_overhead_ns"] for r in responses]),
+                    "max_bytes": max(r["report_bytes"] for r in responses),
+                    "samples": [{"round_trip_ns": call["elapsed_ns"], "host_ns": call["response"]["host_ns"],
+                        "overhead_ns": call["response"]["serving_overhead_ns"],
+                        "report_bytes": call["response"]["report_bytes"], "counters": call["response"]["counters"]} for call in calls]}
+            delta = median(timings["mcp." + name]) - median(timings[name])
+            report_bytes = median(c["response"]["report_bytes"] for c in routes["mcp"])
+            mcp_delta[name] = {"median_ns": delta, "report_bytes": report_bytes,
+                "within_ceiling": delta <= MCP_DELTA_FIXED_NS + MCP_DELTA_PER_BYTE_NS * report_bytes,
+                "counters": {route: {key: median(c["response"]["counters"][key] for c in calls)
+                    for key in calls[0]["response"]["counters"]} for route, calls in routes.items()}}
+        worker.route = "wire"
         for reading in overhead.values():
             residual = p95([sample["overhead_ns"] - OVERHEAD_PER_BYTE_NS * sample["report_bytes"] for sample in reading["samples"]])
             reading["residual_p95_ns"] = residual
@@ -228,7 +260,7 @@ def measure_serve(binary, root, manifest, args):
     finally:
         worker.close()
     return {"documents": manifest["document_count"], "cold": cold, "warm": timings,
-            "work": work, "overhead": overhead, "resources_before": before_resources,
+            "work": work, "overhead": overhead, "mcp_delta": mcp_delta, "tool_list_lengths": tool_list_lengths, "resources_before": before_resources,
             "resources": after_resources, "resources_after_idle_cycle": cycle_resources, "boundaries": boundaries}
 
 
@@ -347,6 +379,7 @@ def main():
         metadata["rows"] = summarize(processes)
         if args.engine == "serve":
             metadata["serving_evidence"] = processes
+            metadata["mcp_delta_allowance"] = {"fixed_ns": MCP_DELTA_FIXED_NS, "per_byte_ns": MCP_DELTA_PER_BYTE_NS, "statistic": "difference of route medians"}
             metadata["serving_overhead_allowance"] = {"fixed_ns": OVERHEAD_FIXED_NS, "per_byte_ns": OVERHEAD_PER_BYTE_NS, "statistic": "p95 residual after per-byte allowance"}
             metadata["rows"].extend(overhead_rows(processes))
         metadata["rows"].extend(resource_rows(processes))

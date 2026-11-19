@@ -830,6 +830,16 @@ fn counters(context: &Context) -> Answer {
             "serve.report_bytes",
             wire.report_bytes.load(Ordering::Relaxed),
         ),
+        // A gauge, not a cumulative count: the serving runtime's tasks alive
+        // at this read, this request's own connection task among them. A
+        // cycle bar holds it flat, so a task a request leaves behind shows
+        // here even when it holds no thread and no descriptor.
+        (
+            "serve.alive_tasks",
+            tokio::runtime::Handle::current()
+                .metrics()
+                .num_alive_tasks() as u64,
+        ),
     ] {
         body.insert(name.to_string(), value.into());
     }
@@ -1561,5 +1571,49 @@ mod tests {
             counters["serve.token_lookups"], 1,
             "the unauthorized one presented no bearer"
         );
+    }
+
+    /// `serve.alive_tasks` reads the serving runtime's live tasks at the
+    /// moment of the read: a task spawned and never finished stays in it, and
+    /// one that finished leaves it.
+    #[cfg(feature = "counters")]
+    #[test]
+    fn the_counters_route_answers_the_runtimes_alive_tasks() {
+        let case = case("norn-serve-counters-tasks");
+        let stored = norn_wire::hex::encode(SECRET);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let alive = |runtime: &tokio::runtime::Runtime| {
+            let answer = runtime.block_on(route(
+                request(Method::GET, "/v1/debug/counters", Some(&stored), b""),
+                &case.context,
+                LOCAL.parse().unwrap(),
+                PEER.parse().unwrap(),
+            ));
+            let body = runtime
+                .block_on(answer.into_body().collect())
+                .unwrap()
+                .to_bytes();
+            let counters: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            counters["serve.alive_tasks"].as_u64().unwrap()
+        };
+        assert_eq!(alive(&runtime), 0, "the read itself is not a spawned task");
+        let leaked: Vec<_> = (0..3)
+            .map(|_| runtime.spawn(std::future::pending::<()>()))
+            .collect();
+        let finished = runtime.spawn(async {});
+        runtime.block_on(finished).unwrap();
+        assert_eq!(alive(&runtime), 3, "three pending tasks, one finished");
+        for task in &leaked {
+            task.abort();
+        }
+        runtime.block_on(async {
+            for task in leaked {
+                assert!(task.await.unwrap_err().is_cancelled());
+            }
+        });
+        assert_eq!(alive(&runtime), 0);
     }
 }

@@ -157,17 +157,17 @@ pub const LANE_IGNORE_PREFIXES: &[&str] = &[
     "audit-lane case:",
 ];
 
-/// The one cargo feature a carrier may be compiled behind.
+/// The cargo features a carrier may be compiled behind.
 ///
-/// norn's crash, interruption and fault-seam tests are compiled only with it
-/// on, so a carrier held to the build with no feature at all could never be
-/// one of them. A test cargo lists only with this feature on is a carrier
-/// exactly where a CI step runs its package's tests with the feature on — the
-/// same rule an ignored test meets through the lane step that adopts its
-/// target — and [`Registry::audit`] reads that step out of the workflows. A
-/// test behind any other feature is behind a `cfg` nothing turns on, as far as
-/// a binding is concerned.
-pub const CARRIER_FEATURE: &str = "induced-failure";
+/// norn's crash, interruption and fault-seam tests need `induced-failure`,
+/// and its counter suites need `counters`, so a carrier held to the build
+/// with no feature at all could never be one of them. A test cargo lists only
+/// with one of these features on is a carrier exactly where a CI step runs
+/// its package's tests with that feature on — the same rule an ignored test
+/// meets through the lane step that adopts its target — and [`Registry::audit`]
+/// reads that step out of the workflows. A test behind any other feature is
+/// behind a `cfg` nothing turns on, as far as a binding is concerned.
+pub const CARRIER_FEATURES: &[&str] = &["induced-failure", "counters"];
 
 /// What kind of obligation a case is.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
@@ -574,6 +574,9 @@ pub struct Listing {
     pub ignored: BTreeSet<String>,
 }
 
+/// Cargo listings for one feature selection.
+type TestListings = BTreeMap<(String, Target), Result<Listing, String>>;
+
 /// The tests cargo says are compiled into each cited target.
 ///
 /// This is what makes a binding a claim about the built suite rather than
@@ -585,11 +588,11 @@ pub struct TestIndex {
     /// A target cargo refused to list keeps the refusal, so it reaches the
     /// caller as one more thing wrong with the binding that named it rather
     /// than as a collection step that blew up before the audit ran.
-    listings: BTreeMap<(String, Target), Result<Listing, String>>,
-    /// What the same targets compiled with [`CARRIER_FEATURE`] on, for the
-    /// targets a cited test is missing from without it, and only those: the
-    /// feature build is a second compilation, paid where a carrier needs it.
-    featured: BTreeMap<(String, Target), Result<Listing, String>>,
+    listings: TestListings,
+    /// What the same targets compiled with each of [`CARRIER_FEATURES`] on
+    /// separately, for targets a cited test is missing from without features,
+    /// and only those: extra compilations are paid where a carrier needs them.
+    featured: BTreeMap<&'static str, TestListings>,
 }
 
 impl TestIndex {
@@ -606,13 +609,14 @@ impl TestIndex {
     }
 
     /// The same index, with listings supplied directly for what the targets
-    /// compiled with [`CARRIER_FEATURE`] on.
+    /// compiled with one of [`CARRIER_FEATURES`] on.
     #[cfg(test)]
     pub(crate) fn with_featured_listings(
         mut self,
+        feature: &'static str,
         listings: impl IntoIterator<Item = ((String, Target), Listing)>,
     ) -> Self {
-        self.featured.extend(
+        self.featured.entry(feature).or_default().extend(
             listings
                 .into_iter()
                 .map(|(key, listing)| (key, Ok(listing))),
@@ -639,8 +643,8 @@ impl TestIndex {
     /// report every one of them missing. So a caller whose cases declare a
     /// feature asks under that feature, and a caller whose cases declare none
     /// asks under none. Each listing is one feature set's answer; a caller
-    /// spanning two asks twice, as [`Registry::test_index`] does for the
-    /// carrier feature.
+    /// spanning several asks separately, as [`Registry::test_index`] does
+    /// for each of [`CARRIER_FEATURES`].
     pub fn from_cargo_with_features(
         workspace_root: &Path,
         targets: impl IntoIterator<Item = TargetRef>,
@@ -700,16 +704,18 @@ impl TestIndex {
     }
 
     /// The same question asked of what `target` compiled with
-    /// [`CARRIER_FEATURE`] on, or `None` where that build was not listed.
+    /// one of [`CARRIER_FEATURES`] on, or `None` where that build was not listed.
     pub(crate) fn resolve_featured(
         &self,
+        feature: &str,
         target: &TargetRef,
         function: &str,
         inline_modules: &BTreeSet<String>,
     ) -> Option<Result<bool, String>> {
-        self.featured
+        let listings = self.featured.get(feature)?;
+        listings
             .contains_key(&target.key())
-            .then(|| resolve_in(&self.featured, target, function, inline_modules))
+            .then(|| resolve_in(listings, target, function, inline_modules))
     }
 }
 
@@ -984,10 +990,10 @@ impl Registry {
 
     /// What cargo compiled into every cited target, from `workspace_root`:
     /// the build with no feature, and — for each target a cited test is
-    /// missing from there — the build with [`CARRIER_FEATURE`] on.
+    /// missing from there — separate builds with each of [`CARRIER_FEATURES`] on.
     ///
-    /// The second listing is asked for only where the first leaves a reference
-    /// unresolved, so a registry whose carriers all compile without the feature
+    /// Feature listings are asked for only where the first leaves a reference
+    /// unresolved, so a registry whose carriers all compile without features
     /// costs what it always did. A target cargo refused to list the first time
     /// is not asked again: the refusal is already what the audit reports.
     pub fn test_index(&self, workspace_root: &Path) -> TestIndex {
@@ -1005,9 +1011,17 @@ impl Registry {
             })
             .collect();
         if !missing.is_empty() {
-            index.featured =
-                TestIndex::from_cargo_with_features(workspace_root, missing, &[CARRIER_FEATURE])
-                    .listings;
+            for &feature in CARRIER_FEATURES {
+                index.featured.insert(
+                    feature,
+                    TestIndex::from_cargo_with_features(
+                        workspace_root,
+                        missing.clone(),
+                        &[feature],
+                    )
+                    .listings,
+                );
+            }
         }
         index
     }
@@ -1458,13 +1472,13 @@ impl Registry {
     /// target's own lane guard ([`crate::lanes`]) additionally holds a prefix
     /// to the lane that step runs where the crate has a lane table.
     ///
-    /// **A carrier cargo compiles only with [`CARRIER_FEATURE`] on passes only
+    /// **A carrier cargo compiles only with one of [`CARRIER_FEATURES`] on passes only
     /// where a step builds it that way**, which is the same rule seen through a
     /// build rather than an ignore. A plain one needs a step running `cargo
     /// test` over its package — the whole package or its target — with the
     /// feature named; an ignored one is run by its lane step alone, so that
     /// step's `LANE_FEATURES` has to name the feature. A test compiled under
-    /// neither build is refused as one nothing compiled.
+    /// none of these builds is refused as one nothing compiled.
     fn audit_compiled_carrier(
         &self,
         workspace_root: &Path,
@@ -1477,27 +1491,37 @@ impl Registry {
         let mut problems = Vec::new();
         let inline = inline_modules(text);
 
-        // Whether cargo compiled it ignored, and whether only the feature
-        // build holds it.
-        let (ignored, featured) = match tests.resolve(target, &test.function, &inline) {
-            Ok(ignored) => (ignored, false),
-            Err(problem) => match tests.resolve_featured(target, &test.function, &inline) {
-                Some(Ok(ignored)) => (ignored, true),
-                Some(Err(featured_problem)) => {
-                    problems.push(format!(
-                        "names `{test}`, and {problem}; with `{CARRIER_FEATURE}` on, \
-                         {featured_problem}"
-                    ));
-                    return problems;
+        // Whether cargo compiled it ignored, and which feature build holds it.
+        let (ignored, feature) = match tests.resolve(target, &test.function, &inline) {
+            Ok(ignored) => (ignored, None),
+            Err(problem) => {
+                let mut failures = Vec::new();
+                let found = CARRIER_FEATURES.iter().find_map(|&feature| {
+                    match tests.resolve_featured(feature, target, &test.function, &inline) {
+                        Some(Ok(ignored)) => Some((ignored, Some(feature))),
+                        Some(Err(problem)) => {
+                            failures.push(format!("with `{feature}` on, {problem}"));
+                            None
+                        }
+                        None => None,
+                    }
+                });
+                match found {
+                    Some(found) => found,
+                    None => {
+                        let detail = if failures.is_empty() {
+                            String::new()
+                        } else {
+                            format!("; {}", failures.join("; "))
+                        };
+                        problems.push(format!("names `{test}`, and {problem}{detail}"));
+                        return problems;
+                    }
                 }
-                None => {
-                    problems.push(format!("names `{test}`, and {problem}"));
-                    return problems;
-                }
-            },
+            }
         };
         let plain_ignore = ignore_attribute(text, &test.function).is_some();
-        if !featured && (!ignored || plain_ignore) {
+        if feature.is_none() && (!ignored || plain_ignore) {
             return problems;
         }
 
@@ -1527,8 +1551,9 @@ impl Registry {
                 let kind = if ignored {
                     "cargo compiled as ignored, and the lane steps that would run it".to_string()
                 } else {
+                    let feature = feature.expect("a plain carrier needs a feature build");
                     format!(
-                        "cargo compiles only with `{CARRIER_FEATURE}` on, and the steps that \
+                        "cargo compiles only with `{feature}` on, and the steps that \
                          would run it"
                     )
                 };
@@ -1542,11 +1567,12 @@ impl Registry {
         let selected = &target.target;
 
         if !ignored {
-            if !read.runs_with_feature(package, selected, CARRIER_FEATURE) {
+            let feature = feature.expect("a plain carrier needs a feature build");
+            if !read.runs_with_feature(package, selected, feature) {
                 problems.push(format!(
                     "names `{test}`, which cargo compiles into `{package} {selected}` only with \
-                     `{CARRIER_FEATURE}` on, and no CI step runs `cargo test -p {package} \
-                     --features {CARRIER_FEATURE}` over that target. A carrier behind the feature \
+                     `{feature}` on, and no CI step runs `cargo test -p {package} \
+                     --features {feature}` over that target. A carrier behind the feature \
                      runs only where a step builds its package's tests with the feature on"
                 ));
             }
@@ -1563,11 +1589,12 @@ impl Registry {
                  cases of `{package} {selected}` wholesale. An ignored carrier runs only where a \
                  lane step adopts its target, whole and unconditionally"
             )),
-            Some(features) if featured && !features.contains(CARRIER_FEATURE) => {
+            Some(features) if feature.is_some_and(|feature| !features.contains(feature)) => {
+                let feature = feature.expect("the lane is missing the carrier feature");
                 problems.push(format!(
-                    "names `{test}`, which cargo compiles only with `{CARRIER_FEATURE}` on and \
+                    "names `{test}`, which cargo compiles only with `{feature}` on and \
                      as ignored, and no lane step adopting `{package} {selected}` names \
-                     `{CARRIER_FEATURE}` in its `LANE_FEATURES`. An ignored carrier behind the \
+                     `{feature}` in its `LANE_FEATURES`. An ignored carrier behind the \
                      feature runs only where the lane step that adopts it builds with it"
                 ));
             }
@@ -2550,10 +2577,10 @@ fn read(path: &Path) -> Result<String, RegistryError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Binding, BindingStatus, CARRIER_FEATURE, Case, Ground, Kind, LANE_IGNORE_PREFIXES,
-        LAYER_LANDING, Listing, MANDATORY_CASES, Registry, Target, TargetRef, TestIndex, TestRef,
-        VENUE_NAMES, Venue, declares_module_inside, declares_symbol, declares_test, ignore_reason,
-        inline_modules, is_identifier, is_kebab_case, matches_function, opens_fn,
+        Binding, BindingStatus, Case, Ground, Kind, LANE_IGNORE_PREFIXES, LAYER_LANDING, Listing,
+        MANDATORY_CASES, Registry, Target, TargetRef, TestIndex, TestRef, VENUE_NAMES, Venue,
+        declares_module_inside, declares_symbol, declares_test, ignore_reason, inline_modules,
+        is_identifier, is_kebab_case, matches_function, opens_fn,
     };
     use crate::scratch::Scratch;
     use std::collections::BTreeSet;
@@ -3147,34 +3174,37 @@ fn a_carrier() {}
     }
 
     /// What cargo would say the scratch workspace's one target compiled with
-    /// [`CARRIER_FEATURE`] on: everything [`index`] holds, and the two carriers
-    /// behind the feature.
+    /// the `induced-failure` entry in [`super::CARRIER_FEATURES`] on:
+    /// everything [`index`] holds, and the carriers behind the feature.
     fn featured_index() -> TestIndex {
-        index().with_featured_listings([(
-            ("demo".to_string(), Target::Integration("suite".to_string())),
-            Listing {
-                all: [
-                    "a_carrier",
-                    "a_featured_carrier",
-                    "an_adopted_carrier",
-                    "an_adopted_featured_carrier",
-                    "an_orphan_carrier",
-                    "an_orphan_featured_carrier",
-                ]
-                .into_iter()
-                .map(String::from)
-                .collect(),
-                ignored: [
-                    "an_adopted_carrier",
-                    "an_adopted_featured_carrier",
-                    "an_orphan_carrier",
-                    "an_orphan_featured_carrier",
-                ]
-                .into_iter()
-                .map(String::from)
-                .collect(),
-            },
-        )])
+        index().with_featured_listings(
+            "induced-failure",
+            [(
+                ("demo".to_string(), Target::Integration("suite".to_string())),
+                Listing {
+                    all: [
+                        "a_carrier",
+                        "a_featured_carrier",
+                        "an_adopted_carrier",
+                        "an_adopted_featured_carrier",
+                        "an_orphan_carrier",
+                        "an_orphan_featured_carrier",
+                    ]
+                    .into_iter()
+                    .map(String::from)
+                    .collect(),
+                    ignored: [
+                        "an_adopted_carrier",
+                        "an_adopted_featured_carrier",
+                        "an_orphan_carrier",
+                        "an_orphan_featured_carrier",
+                    ]
+                    .into_iter()
+                    .map(String::from)
+                    .collect(),
+                },
+            )],
+        )
     }
 
     /// Write the scratch workspace's test workflow: one step running each
@@ -4523,7 +4553,7 @@ fn a_carrier() {}
             assert!(
                 found.iter().any(|problem| {
                     problem.contains("crates/demo/tests/suite.rs::a_featured_carrier")
-                        && problem.contains(&format!("only with `{CARRIER_FEATURE}` on"))
+                        && problem.contains("only with `induced-failure` on")
                         && problem.contains(
                             "no CI step runs `cargo test -p demo --features induced-failure`",
                         )
@@ -4544,9 +4574,9 @@ fn a_carrier() {}
         );
         let found = featured_audit(&root, "a_carrier_nothing_compiles");
         assert!(
-            found.iter().any(|problem| problem.contains(&format!(
-                "with `{CARRIER_FEATURE}` on, cargo compiled no test `a_carrier_nothing_compiles`"
-            ))),
+            found.iter().any(|problem| problem.contains(
+                "with `induced-failure` on, cargo compiled no test `a_carrier_nothing_compiles`"
+            )),
             "{found:#?}"
         );
     }
@@ -4609,10 +4639,10 @@ fn a_carrier() {}
         assert!(
             found.iter().any(|problem| {
                 problem.contains("crates/demo/tests/suite.rs::an_adopted_featured_carrier")
-                    && problem.contains(&format!(
-                        "no lane step adopting `demo --test suite` names `{CARRIER_FEATURE}` in \
-                         its `LANE_FEATURES`"
-                    ))
+                    && problem.contains(
+                        "no lane step adopting `demo --test suite` names `induced-failure` in \
+                         its `LANE_FEATURES`",
+                    )
             }),
             "{found:#?}"
         );
@@ -4648,10 +4678,82 @@ fn a_carrier() {}
         let featured = cargo_registry("crates/demo/tests/suite/inner.rs::a_featured_carrier");
         let listed = featured.test_index(root.root());
         assert_eq!(
-            listed.featured.keys().collect::<Vec<_>>(),
+            listed.featured["induced-failure"]
+                .keys()
+                .collect::<Vec<_>>(),
             vec![&("demo".to_string(), Target::Integration("suite".to_string()))],
         );
         assert_eq!(featured.audit(root.root(), &listed), Vec::<String>::new());
+    }
+
+    /// The second carrier feature is discovered from its own package build,
+    /// and only a matching CI step or ignored lane can vouch for it.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Writes the cargo workspace's carriers and workflow.
+    fn counters_carriers_need_their_own_build_and_lane_feature() {
+        let root = cargo_workspace();
+        let manifest = root.join("crates/demo/Cargo.toml");
+        let text = std::fs::read_to_string(&manifest).unwrap();
+        std::fs::write(&manifest, format!("{text}counters = []\n")).unwrap();
+        std::fs::write(
+            root.join("crates/demo/tests/suite/inner.rs"),
+            "#[test]\n#[cfg(feature = \"counters\")]\nfn a_counter_carrier() {}\n\n\
+             #[test]\n#[cfg(feature = \"counters\")]\n\
+             #[ignore = \"counter-lane case: nightly work\"]\nfn an_ignored_counter_carrier() {}\n\
+             #[test]\n#[cfg(any())]\nfn a_missing_carrier() {}\n",
+        )
+        .unwrap();
+        let registry = cargo_registry("crates/demo/tests/suite/inner.rs::a_counter_carrier");
+        let listed = registry.test_index(root.root());
+        for command in [
+            "cargo test -p demo --features counters",
+            "cargo test -p demo --features counters --test suite",
+        ] {
+            run_steps(&root, &[command]);
+            assert_eq!(registry.audit(root.root(), &listed), Vec::<String>::new());
+        }
+        for command in [
+            "cargo test -p demo --features induced-failure",
+            "cargo test -p elsewhere --features counters",
+            "cargo test -p demo --features counters --test other",
+            "cargo clippy -p demo --features counters",
+            "echo cargo test -p demo --features counters",
+        ] {
+            run_steps(&root, &[command]);
+            let found = registry.audit(root.root(), &listed);
+            assert!(found.iter().any(|p| p.contains(
+                "no CI step runs `cargo test -p demo --features counters`"
+            )), "{command}: {found:#?}");
+        }
+        let ignored =
+            cargo_registry("crates/demo/tests/suite/inner.rs::an_ignored_counter_carrier");
+        for (feature, passes) in [("counters", true), ("induced-failure", false)] {
+            write_workflow(
+                &root,
+                "lanes.yml",
+                &format!(
+                    "jobs:\n  lanes:\n    steps:\n      - run: .github/scripts/lane-suite.sh demo suite\n        env:\n          LANE_FEATURES: {feature}\n"
+                ),
+            );
+            let found = ignored.audit(root.root(), &listed);
+            if passes {
+                assert_eq!(found, Vec::<String>::new());
+            } else {
+                assert!(
+                    found
+                        .iter()
+                        .any(|p| p.contains("names `counters` in its `LANE_FEATURES`")),
+                    "{found:#?}"
+                );
+            }
+        }
+        let missing = cargo_registry("crates/demo/tests/suite/inner.rs::a_missing_carrier");
+        let found = missing.audit(root.root(), &listed);
+        assert!(
+            found.iter().any(|p| p
+                .contains("with `counters` on, cargo compiled no test `inner::a_missing_carrier`")),
+            "{found:#?}"
+        );
     }
 
     /// The command a step runs to build the scratch package's tests with the
