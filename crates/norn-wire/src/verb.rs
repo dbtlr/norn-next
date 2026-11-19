@@ -251,7 +251,150 @@ pub enum Verb {
     DoctorRegistry,
 }
 
+/// What applying a verb changes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VerbEffect {
+    /// Observes state without changing it.
+    Reads,
+    /// Changes vault documents.
+    Writes { destructive: bool },
+    /// Changes registration or control state.
+    Administers { destructive: bool },
+}
+
 impl Verb {
+    /// The effect of applying this verb, independent of its execution pool.
+    pub const fn effect(&self) -> VerbEffect {
+        match self {
+            Self::Find => VerbEffect::Reads,
+            Self::Search => VerbEffect::Reads,
+            Self::Get => VerbEffect::Reads,
+            Self::Count => VerbEffect::Reads,
+            Self::Validate => VerbEffect::Reads,
+            Self::Describe => VerbEffect::Reads,
+            Self::Apply => VerbEffect::Writes { destructive: true },
+            Self::Set => VerbEffect::Writes { destructive: true },
+            Self::Edit => VerbEffect::Writes { destructive: true },
+            Self::New => VerbEffect::Writes { destructive: false },
+            Self::Move => VerbEffect::Writes { destructive: true },
+            Self::Delete => VerbEffect::Writes { destructive: true },
+            Self::RewriteWikilink => VerbEffect::Writes { destructive: true },
+            Self::Repair => VerbEffect::Writes { destructive: true },
+            Self::Init => VerbEffect::Administers { destructive: false },
+            Self::VaultRegister => VerbEffect::Administers { destructive: false },
+            Self::VaultUnregister => VerbEffect::Administers { destructive: true },
+            Self::VaultList => VerbEffect::Reads,
+            Self::VaultSet => VerbEffect::Administers { destructive: true },
+            Self::VaultResolve => VerbEffect::Reads,
+            Self::VaultStatus => VerbEffect::Reads,
+            Self::VaultReload => VerbEffect::Administers { destructive: false },
+            Self::VaultMigrate => VerbEffect::Administers { destructive: true },
+            Self::DoctorRegistry => VerbEffect::Reads,
+        }
+    }
+
+    /// Whether the params require an apply or preview mode.
+    pub const fn takes_mode(&self) -> bool {
+        match self {
+            Self::Find => false,
+            Self::Search => false,
+            Self::Get => false,
+            Self::Count => false,
+            Self::Validate => false,
+            Self::Describe => false,
+            Self::Apply => true,
+            Self::Set => true,
+            Self::Edit => true,
+            Self::New => true,
+            Self::Move => true,
+            Self::Delete => true,
+            Self::RewriteWikilink => true,
+            Self::Repair => true,
+            Self::Init => true,
+            Self::VaultRegister => false,
+            Self::VaultUnregister => false,
+            Self::VaultList => false,
+            Self::VaultSet => false,
+            Self::VaultResolve => false,
+            Self::VaultStatus => false,
+            Self::VaultReload => false,
+            Self::VaultMigrate => true,
+            Self::DoctorRegistry => false,
+        }
+    }
+
+    /// One sentence describing the request.
+    pub const fn summary(&self) -> &'static str {
+        match self {
+            Self::Find => "Documents matching a conjunction of predicates, in a stated order.",
+            Self::Search => "Ranked hits for a query, answered from the vault's search ladder.",
+            Self::Get => "One document, addressed by a resolution target.",
+            Self::Count => "How many documents match, grouped by a key where one is asked for.",
+            Self::Validate => "The findings standing over a vault.",
+            Self::Describe => "What a vault declares about itself and what its documents carry.",
+            Self::Apply => "Preview or apply a plan: operations, or a resolved plan.",
+            Self::Set => {
+                "Change the frontmatter of one document, or of every document a predicate list matches."
+            }
+            Self::Edit => "Change the text of one document.",
+            Self::New => "Create one document at a path.",
+            Self::Move => {
+                "Move one document, or every document a folder holds, rewriting the links naming what moves so they name it where it lands, and saying of each link left as written why."
+            }
+            Self::Delete => "Remove one document, saying what becomes of the links naming it.",
+            Self::RewriteWikilink => {
+                "Respell every wikilink naming one document — or every broken one naming one place no document stands at — to name another, each in its own form, and saying of each wikilink left as written why."
+            }
+            Self::Repair => {
+                "Plan the fixes a batch of a vault's findings calls for, previewed or applied as one plan."
+            }
+            Self::Init => "Write a starter schema for a registered vault that declares none.",
+            Self::VaultRegister => "Register a vault under a name.",
+            Self::VaultUnregister => "Stop serving a registered name and remove its registration.",
+            Self::VaultList => "Every registration this installation holds.",
+            Self::VaultSet => "Change a field of one registration.",
+            Self::VaultResolve => "Which registered vault contains a directory.",
+            Self::VaultStatus => {
+                "Where one vault's entry stands and what it is serving from, or, naming no vault, where every entry this installation serves stands."
+            }
+            Self::VaultReload => "Re-read one vault's control files and apply what changed.",
+            Self::VaultMigrate => {
+                "Bring one vault's control files up to the versions this build reads."
+            }
+            Self::DoctorRegistry => "The findings standing over the registry itself.",
+        }
+    }
+
+    /// The schema of the params parsed by the native wire route.
+    pub fn params_schema(&self) -> schemars::Schema {
+        match self {
+            Self::Find => schemars::schema_for!(crate::FindParams),
+            Self::Search => schemars::schema_for!(crate::SearchParams),
+            Self::Get => schemars::schema_for!(crate::GetParams),
+            Self::Count => schemars::schema_for!(crate::CountParams),
+            Self::Validate => schemars::schema_for!(crate::ValidateParams),
+            Self::Describe => schemars::schema_for!(crate::DescribeParams),
+            Self::Apply => schemars::schema_for!(crate::ApplyParams),
+            Self::Set => schemars::schema_for!(crate::SetParams),
+            Self::Edit => schemars::schema_for!(crate::EditParams),
+            Self::New => schemars::schema_for!(crate::NewParams),
+            Self::Move => schemars::schema_for!(crate::MoveParams),
+            Self::Delete => schemars::schema_for!(crate::DeleteParams),
+            Self::RewriteWikilink => schemars::schema_for!(crate::RewriteWikilinkParams),
+            Self::Repair => schemars::schema_for!(crate::RepairParams),
+            Self::Init => schemars::schema_for!(crate::InitParams),
+            Self::VaultRegister => schemars::schema_for!(crate::RegisterParams),
+            Self::VaultUnregister => schemars::schema_for!(crate::UnregisterParams),
+            Self::VaultList => schemars::schema_for!(crate::ListParams),
+            Self::VaultSet => schemars::schema_for!(crate::VaultSetParams),
+            Self::VaultResolve => schemars::schema_for!(crate::ResolveParams),
+            Self::VaultStatus => schemars::schema_for!(crate::StatusParams),
+            Self::VaultReload => schemars::schema_for!(crate::ReloadParams),
+            Self::VaultMigrate => schemars::schema_for!(crate::MigrateParams),
+            Self::DoctorRegistry => schemars::schema_for!(crate::DoctorRegistryParams),
+        }
+    }
+
     /// Every verb the registry holds, in declaration order.
     ///
     /// Reading a verb back and enumerating the registry both walk this list,

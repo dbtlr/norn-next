@@ -1,0 +1,19 @@
+[package]
+name = "norn-mcp"
+description = "Pure MCP translation over the wire vocabulary"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+norn-wire = { path = "../norn-wire" }
+# Serialize tool definitions and their annotations without transport types.
+serde = { workspace = true }
+# Compose schemas and prepared protocol result bodies as JSON.
+serde_json = { workspace = true }
+
+[dev-dependencies]
+# Validate emitted shapes against the vendored official schemas; never ships.
+jsonschema = { version = "0.46", default-features = false }

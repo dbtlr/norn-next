@@ -310,6 +310,14 @@ async fn serve_on_runtime(
             .map_err(|error| Refusal::new(format!("constructing the host failed: {error}")))??
     };
 
+    let mcp_tools = norn_mcp::ToolList::derive(
+        norn_wire::Verb::ALL
+            .into_iter()
+            .filter(|verb| !wire::NOT_SERVED.contains(verb)),
+    )
+    .map_err(|error| Refusal::new(format!("preparing MCP tools failed: {error}")))?
+    .prepare(build.as_str());
+
     // Step 5.3: a process holding the port, unless it is a verified host of
     // this channel whose lock file was removed.
     entering(format_args!("checking port {}", endpoint.port()));
@@ -362,6 +370,7 @@ async fn serve_on_runtime(
     })?;
     let context = Arc::new(http::Context {
         credentials: Mutex::new(credentials::Credentials::new(&dirs, watched)),
+        mcp_tools,
         channel,
         build,
         launch: serve.launch.into(),

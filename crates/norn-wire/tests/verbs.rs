@@ -20,13 +20,9 @@
 //! says where its vault sits, and the checks read that place.
 
 use norn_wire::{
-    Addressing, ApplyParams, ApplyReport, CountParams, CountReport, DeleteParams, DescribeParams,
-    DescribeReport, DoctorRegistryParams, DoctorRegistryReport, EditParams, FindParams, FindReport,
-    GetParams, GetReport, InitParams, InitReport, ListParams, ListReport, MigrateParams,
-    MigrateReport, MoveParams, NewParams, RegisterParams, RegisterReport, ReloadParams,
-    ReloadReport, RepairParams, ResolveParams, ResolveReport, RewriteWikilinkParams, SearchParams,
-    SearchReport, SetParams, StatusParams, StatusReport, UnregisterParams, UnregisterReport,
-    ValidateParams, ValidateReport, VaultSetParams, VaultSetReport, Verb,
+    Addressing, ApplyReport, CountReport, DescribeReport, DoctorRegistryReport, FindReport,
+    GetReport, InitReport, ListReport, MigrateReport, RegisterReport, ReloadReport, ResolveReport,
+    SearchReport, StatusReport, UnregisterReport, ValidateReport, VaultSetReport, Verb,
 };
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -80,7 +76,7 @@ fn verb_table() -> Vec<Spelling> {
             params_type: "FindParams",
             report_type: "FindReport",
             report_rows: None,
-            params: schema_of::<FindParams>(),
+            params: serde_json::to_value(Verb::Find.params_schema()).unwrap(),
             report: schema_of::<FindReport>(),
         },
         Spelling {
@@ -89,7 +85,7 @@ fn verb_table() -> Vec<Spelling> {
             params_type: "SearchParams",
             report_type: "SearchReport",
             report_rows: None,
-            params: schema_of::<SearchParams>(),
+            params: serde_json::to_value(Verb::Search.params_schema()).unwrap(),
             report: schema_of::<SearchReport>(),
         },
         Spelling {
@@ -98,7 +94,7 @@ fn verb_table() -> Vec<Spelling> {
             params_type: "GetParams",
             report_type: "GetReport",
             report_rows: None,
-            params: schema_of::<GetParams>(),
+            params: serde_json::to_value(Verb::Get.params_schema()).unwrap(),
             report: schema_of::<GetReport>(),
         },
         Spelling {
@@ -107,7 +103,7 @@ fn verb_table() -> Vec<Spelling> {
             params_type: "CountParams",
             report_type: "CountReport",
             report_rows: Some("Tally"),
-            params: schema_of::<CountParams>(),
+            params: serde_json::to_value(Verb::Count.params_schema()).unwrap(),
             report: schema_of::<CountReport>(),
         },
         Spelling {
@@ -116,7 +112,7 @@ fn verb_table() -> Vec<Spelling> {
             params_type: "ValidateParams",
             report_type: "ValidateReport",
             report_rows: None,
-            params: schema_of::<ValidateParams>(),
+            params: serde_json::to_value(Verb::Validate.params_schema()).unwrap(),
             report: schema_of::<ValidateReport>(),
         },
         Spelling {
@@ -125,7 +121,7 @@ fn verb_table() -> Vec<Spelling> {
             params_type: "DescribeParams",
             report_type: "Page",
             report_rows: Some("Facet"),
-            params: schema_of::<DescribeParams>(),
+            params: serde_json::to_value(Verb::Describe.params_schema()).unwrap(),
             report: schema_of::<DescribeReport>(),
         },
         Spelling {
@@ -134,7 +130,7 @@ fn verb_table() -> Vec<Spelling> {
             params_type: "ApplyParams",
             report_type: "ApplyReport",
             report_rows: None,
-            params: schema_of::<ApplyParams>(),
+            params: serde_json::to_value(Verb::Apply.params_schema()).unwrap(),
             report: schema_of::<ApplyReport>(),
         },
         Spelling {
@@ -143,7 +139,7 @@ fn verb_table() -> Vec<Spelling> {
             params_type: "SetParams",
             report_type: "ApplyReport",
             report_rows: None,
-            params: schema_of::<SetParams>(),
+            params: serde_json::to_value(Verb::Set.params_schema()).unwrap(),
             report: schema_of::<ApplyReport>(),
         },
         Spelling {
@@ -152,7 +148,7 @@ fn verb_table() -> Vec<Spelling> {
             params_type: "EditParams",
             report_type: "ApplyReport",
             report_rows: None,
-            params: schema_of::<EditParams>(),
+            params: serde_json::to_value(Verb::Edit.params_schema()).unwrap(),
             report: schema_of::<ApplyReport>(),
         },
         Spelling {
@@ -161,7 +157,7 @@ fn verb_table() -> Vec<Spelling> {
             params_type: "NewParams",
             report_type: "ApplyReport",
             report_rows: None,
-            params: schema_of::<NewParams>(),
+            params: serde_json::to_value(Verb::New.params_schema()).unwrap(),
             report: schema_of::<ApplyReport>(),
         },
         Spelling {
@@ -170,7 +166,7 @@ fn verb_table() -> Vec<Spelling> {
             params_type: "MoveParams",
             report_type: "ApplyReport",
             report_rows: None,
-            params: schema_of::<MoveParams>(),
+            params: serde_json::to_value(Verb::Move.params_schema()).unwrap(),
             report: schema_of::<ApplyReport>(),
         },
         Spelling {
@@ -179,7 +175,7 @@ fn verb_table() -> Vec<Spelling> {
             params_type: "DeleteParams",
             report_type: "ApplyReport",
             report_rows: None,
-            params: schema_of::<DeleteParams>(),
+            params: serde_json::to_value(Verb::Delete.params_schema()).unwrap(),
             report: schema_of::<ApplyReport>(),
         },
         Spelling {
@@ -188,7 +184,7 @@ fn verb_table() -> Vec<Spelling> {
             params_type: "RewriteWikilinkParams",
             report_type: "ApplyReport",
             report_rows: None,
-            params: schema_of::<RewriteWikilinkParams>(),
+            params: serde_json::to_value(Verb::RewriteWikilink.params_schema()).unwrap(),
             report: schema_of::<ApplyReport>(),
         },
         Spelling {
@@ -197,7 +193,7 @@ fn verb_table() -> Vec<Spelling> {
             params_type: "RepairParams",
             report_type: "ApplyReport",
             report_rows: None,
-            params: schema_of::<RepairParams>(),
+            params: serde_json::to_value(Verb::Repair.params_schema()).unwrap(),
             report: schema_of::<ApplyReport>(),
         },
         Spelling {
@@ -206,7 +202,7 @@ fn verb_table() -> Vec<Spelling> {
             params_type: "InitParams",
             report_type: "InitReport",
             report_rows: None,
-            params: schema_of::<InitParams>(),
+            params: serde_json::to_value(Verb::Init.params_schema()).unwrap(),
             report: schema_of::<InitReport>(),
         },
         Spelling {
@@ -215,7 +211,7 @@ fn verb_table() -> Vec<Spelling> {
             params_type: "RegisterParams",
             report_type: "RegisterReport",
             report_rows: None,
-            params: schema_of::<RegisterParams>(),
+            params: serde_json::to_value(Verb::VaultRegister.params_schema()).unwrap(),
             report: schema_of::<RegisterReport>(),
         },
         Spelling {
@@ -224,7 +220,7 @@ fn verb_table() -> Vec<Spelling> {
             params_type: "UnregisterParams",
             report_type: "UnregisterReport",
             report_rows: None,
-            params: schema_of::<UnregisterParams>(),
+            params: serde_json::to_value(Verb::VaultUnregister.params_schema()).unwrap(),
             report: schema_of::<UnregisterReport>(),
         },
         Spelling {
@@ -233,7 +229,7 @@ fn verb_table() -> Vec<Spelling> {
             params_type: "ListParams",
             report_type: "ListReport",
             report_rows: None,
-            params: schema_of::<ListParams>(),
+            params: serde_json::to_value(Verb::VaultList.params_schema()).unwrap(),
             report: schema_of::<ListReport>(),
         },
         Spelling {
@@ -242,7 +238,7 @@ fn verb_table() -> Vec<Spelling> {
             params_type: "VaultSetParams",
             report_type: "VaultSetReport",
             report_rows: None,
-            params: schema_of::<VaultSetParams>(),
+            params: serde_json::to_value(Verb::VaultSet.params_schema()).unwrap(),
             report: schema_of::<VaultSetReport>(),
         },
         Spelling {
@@ -251,7 +247,7 @@ fn verb_table() -> Vec<Spelling> {
             params_type: "ResolveParams",
             report_type: "ResolveReport",
             report_rows: None,
-            params: schema_of::<ResolveParams>(),
+            params: serde_json::to_value(Verb::VaultResolve.params_schema()).unwrap(),
             report: schema_of::<ResolveReport>(),
         },
         Spelling {
@@ -260,7 +256,7 @@ fn verb_table() -> Vec<Spelling> {
             params_type: "StatusParams",
             report_type: "StatusReport",
             report_rows: None,
-            params: schema_of::<StatusParams>(),
+            params: serde_json::to_value(Verb::VaultStatus.params_schema()).unwrap(),
             report: schema_of::<StatusReport>(),
         },
         Spelling {
@@ -269,7 +265,7 @@ fn verb_table() -> Vec<Spelling> {
             params_type: "ReloadParams",
             report_type: "ReloadReport",
             report_rows: None,
-            params: schema_of::<ReloadParams>(),
+            params: serde_json::to_value(Verb::VaultReload.params_schema()).unwrap(),
             report: schema_of::<ReloadReport>(),
         },
         Spelling {
@@ -278,7 +274,7 @@ fn verb_table() -> Vec<Spelling> {
             params_type: "MigrateParams",
             report_type: "MigrateReport",
             report_rows: None,
-            params: schema_of::<MigrateParams>(),
+            params: serde_json::to_value(Verb::VaultMigrate.params_schema()).unwrap(),
             report: schema_of::<MigrateReport>(),
         },
         Spelling {
@@ -287,7 +283,7 @@ fn verb_table() -> Vec<Spelling> {
             params_type: "DoctorRegistryParams",
             report_type: "DoctorRegistryReport",
             report_rows: None,
-            params: schema_of::<DoctorRegistryParams>(),
+            params: serde_json::to_value(Verb::DoctorRegistry.params_schema()).unwrap(),
             report: schema_of::<DoctorRegistryReport>(),
         },
     ]
@@ -526,5 +522,14 @@ fn every_verb_that_carries_a_vault_names_it_by_the_one_vault_address() {
                 spelling.verb
             );
         }
+    }
+}
+
+#[test]
+fn mode_metadata_matches_required_schema_property() {
+    for verb in Verb::ALL {
+        let schema = serde_json::to_value(verb.params_schema()).unwrap();
+        assert_eq!(verb.takes_mode(), required_names(&schema).contains("mode"));
+        assert!(!verb.summary().is_empty());
     }
 }

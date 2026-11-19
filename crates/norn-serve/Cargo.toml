@@ -67,6 +67,8 @@ serde_json = { workspace = true }
 serde = { workspace = true }
 norn-config = { path = "../norn-config" }
 norn-host = { path = "../norn-host" }
+# Pure tool-list preparation before listening; the server retains encoded bytes.
+norn-mcp = { path = "../norn-mcp" }
 norn-wire = { path = "../norn-wire" }
 
 [dev-dependencies]
@@ -88,3 +90,8 @@ norn-store = { path = "../norn-store", features = ["induced-failure"] }
 # keep a token file in. A development edge: the allowlist does not describe
 # it, and the architecture gate reads and discards it.
 norn-testkit = { path = "../norn-testkit" }
+# `norn-mcp`'s schema validator. A whole-workspace run builds it through that
+# crate's dev-dependency, which switches features on in `hashbrown`,
+# `regex-automata` and `syn`; this package's shard links those crates and must
+# build them with the same set (`norn-testkit --test shards`). It never ships.
+jsonschema = { version = "0.46", default-features = false }
