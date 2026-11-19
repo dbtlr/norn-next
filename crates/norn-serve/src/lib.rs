@@ -72,6 +72,7 @@ mod http;
 mod lifecycle;
 mod lock_watch;
 mod log;
+mod mcp;
 mod mint;
 mod policy;
 mod pool;
@@ -310,13 +311,15 @@ async fn serve_on_runtime(
             .map_err(|error| Refusal::new(format!("constructing the host failed: {error}")))??
     };
 
-    let mcp_tools = norn_mcp::ToolList::derive(
+    let mcp_counters = mcp::McpCounters::default();
+    let mcp_tools = mcp::prepare_tools(
+        &mcp_counters,
         norn_wire::Verb::ALL
             .into_iter()
             .filter(|verb| !wire::NOT_SERVED.contains(verb)),
+        build.as_str(),
     )
-    .map_err(|error| Refusal::new(format!("preparing MCP tools failed: {error}")))?
-    .prepare(build.as_str());
+    .map_err(|error| Refusal::new(format!("preparing MCP tools failed: {error}")))?;
 
     // Step 5.3: a process holding the port, unless it is a verified host of
     // this channel whose lock file was removed.
@@ -371,6 +374,7 @@ async fn serve_on_runtime(
     let context = Arc::new(http::Context {
         credentials: Mutex::new(credentials::Credentials::new(&dirs, watched)),
         mcp_tools,
+        mcp_counters,
         channel,
         build,
         launch: serve.launch.into(),

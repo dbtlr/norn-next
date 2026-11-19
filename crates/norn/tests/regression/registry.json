@@ -225,9 +225,9 @@
       "sources": ["NRN-a59"],
       "binding": {
         "status": "dormant",
-        "reason": "The native wire evidence remains in force. The MCP obligation waits for symbol-absent crates/norn-serve/src/http.rs::mcp_request. The CLI remains absent crates/norn-console. Retained evidence: crates/norn-serve/src/wire.rs.",
+        "reason": "MCP is enrolled: every served tool is held to the round-trip test, the failure-channel test and a served call by symbol-present crates/norn/tests/serve_mcp.rs::every_served_mcp_tool_is_enrolled. The CLI is the next request surface, and it remains absent crates/norn-console, so its enrollment fails this case when it lands. Retained evidence: crates/norn-serve/src/wire.rs.",
         "grounds": [
-          { "symbol-absent": "crates/norn-serve/src/http.rs::mcp_request" },
+          { "symbol-present": "crates/norn/tests/serve_mcp.rs::every_served_mcp_tool_is_enrolled" },
           { "present": "crates/norn-serve/src/wire.rs" },
           { "absent": "crates/norn-console" }
         ]
@@ -1661,11 +1661,10 @@
       "property": "A forecast is labelled a forecast in every format a surface renders it in, human and machine alike, so a preview is never read as a plan that applied.",
       "sources": ["NRN-s20", "NRN-161", "NRN-468", "NRN-499", "NRN-484", "NRN-430"],
       "binding": {
-        "status": "dormant",
-        "reason": "The native wire evidence remains in force. The MCP obligation waits for symbol-absent crates/norn-serve/src/http.rs::mcp_request. The CLI remains absent crates/norn-console. Retained evidence: crates/norn-serve/src/wire.rs.",
-        "grounds": [
-          { "symbol-absent": "crates/norn-serve/src/http.rs::mcp_request" },
-          { "absent": "crates/norn-console" }
+        "status": "bound",
+        "tests": [
+          "crates/norn/tests/serve_mcp.rs::every_preview_labels_its_forecast_in_both_channels",
+          "crates/norn-mcp/tests/messages.rs::a_report_is_composed_into_both_channels_from_its_bytes"
         ]
       }
     },
@@ -2022,7 +2021,7 @@
       "sources": ["NRN-s14", "NRN-367", "NRN-374", "NRN-428", "NRN-427", "NRN-44", "NRN-392", "NRN-452", "NRN-399", "norn-legacy annoyances log"],
       "binding": {
         "status": "dormant",
-        "reason": "The wire carries the unsatisfiable-request diagnostic whole. MCP will carry it in structuredContent once the route is served. The CLI renders nothing yet: absent crates/norn-console. The retained native evidence is crates/norn-wire/src/product.rs::VaultAnswer. Retained evidence: crates/norn-serve/src/wire.rs.",
+        "reason": "The wire carries the unsatisfiable-request diagnostic whole, and MCP carries the same report in structuredContent and in the text block of a tools/call result. The CLI renders nothing yet: absent crates/norn-console. The retained native evidence is crates/norn-wire/src/product.rs::VaultAnswer. Retained evidence: crates/norn-serve/src/wire.rs.",
         "grounds": [
           { "symbol-present": "crates/norn-wire/src/product.rs::VaultAnswer" },
           { "absent": "crates/norn-console" },
@@ -2037,12 +2036,10 @@
       "property": "One warnings vocabulary, one empty policy and one truncation policy across every verb, and every warning and skip is reachable from every surface with its reason and its subject named — including which link was left stale and which element of a collection was bad. Each warning names the actual mismatch, and no message duplicates the prefix its parser already emitted.",
       "sources": ["NRN-446", "NRN-500", "NRN-503", "NRN-476", "NRN-37", "norn-legacy annoyances log"],
       "binding": {
-        "status": "dormant",
-        "reason": "The native wire evidence remains in force. The MCP obligation waits for symbol-absent crates/norn-serve/src/http.rs::mcp_request. The CLI remains absent crates/norn-console. Retained evidence: crates/norn-serve/src/wire.rs.",
-        "grounds": [
-          { "symbol-absent": "crates/norn-serve/src/http.rs::mcp_request" },
-          { "absent": "crates/norn-console" },
-          { "present": "crates/norn-serve/src/wire.rs" }
+        "status": "bound",
+        "tests": [
+          "crates/norn/tests/serve_mcp.rs::every_warning_reaches_both_channels_of_a_result",
+          "crates/norn-mcp/tests/messages.rs::a_report_is_composed_into_both_channels_from_its_bytes"
         ]
       }
     },
@@ -2074,7 +2071,9 @@
           "crates/norn-wire/src/fault.rs::every_code_reaches_the_class_the_table_states",
           "crates/norn-wire/src/fault.rs::an_untrusted_entry_takes_its_reasons_class",
           "crates/norn-wire/src/fault.rs::a_failed_read_takes_its_failures_class",
-          "crates/norn-wire/src/fault.rs::an_apply_not_run_takes_its_causes_class"
+          "crates/norn-wire/src/fault.rs::an_apply_not_run_takes_its_causes_class",
+          "crates/norn-serve/src/http/tests/mcp.rs::every_code_reaches_an_is_error_result_carrying_its_class",
+          "crates/norn-mcp/tests/messages.rs::every_fault_class_reaches_an_is_error_result_carrying_it"
         ]
       }
     },

@@ -72,7 +72,12 @@ sha2 = "0.11"
 # cursor carries a relevance score a continuation compares exactly, and the
 # cursor is read back only where its re-encoding is the bytes it arrived as, so
 # a score parsed one unit in the last place away is a cursor refused.
-serde_json = { version = "1", features = ["float_roundtrip"] }
+#
+# `raw_value` lets `norn-mcp` hold a JSON-RPC message's `params`, a tool call's
+# `arguments` and its `id` as the bytes they arrived as: `/mcp` reads the
+# envelope without building a tree of a call's arguments, and hands the
+# arguments to the wire route unparsed.
+serde_json = { version = "1", features = ["float_roundtrip", "raw_value"] }
 serde_yaml = "0.9"
 # Canonical composition for `|slug`, so text that is canonically equal slugs to
 # one spelling, and the combining-mark property a slug keeps marks in words by.

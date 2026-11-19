@@ -67,7 +67,9 @@ serde_json = { workspace = true }
 serde = { workspace = true }
 norn-config = { path = "../norn-config" }
 norn-host = { path = "../norn-host" }
-# Pure tool-list preparation before listening; the server retains encoded bytes.
+# MCP semantics as pure functions: the tool list prepared once before listening,
+# message handling and revision classification, the mode splice into a call's
+# raw arguments, and result composition. This crate only routes the bytes.
 norn-mcp = { path = "../norn-mcp" }
 norn-wire = { path = "../norn-wire" }
 
@@ -86,12 +88,17 @@ norn-config = { path = "../norn-config", features = ["test-support"] }
 # this crate's suites arms a fault.
 norn-fs = { path = "../norn-fs", features = ["test-support", "induced-failure"] }
 norn-store = { path = "../norn-store", features = ["induced-failure"] }
+# A whole-workspace run builds `jsonschema`, `norn-mcp`'s and `norn`'s
+# schema validator, which turns on features of `hashbrown`, `regex-automata`
+# and `syn`. This package's shard builds without those suites, so this entry
+# keeps that same feature set for it (`norn-testkit --test shards`). Nothing
+# in this crate's suites validates a schema.
+jsonschema = { version = "0.46", default-features = false }
+# The report schemas the route table's test holds to an object root, the
+# shape `/mcp` carries as `structuredContent`. The workspace's own entry, which
+# `norn-wire` already builds; nothing outside the tests reads it.
+schemars = { workspace = true }
 # The scratch directories the mint's and the credential state's unit suites
 # keep a token file in. A development edge: the allowlist does not describe
 # it, and the architecture gate reads and discards it.
 norn-testkit = { path = "../norn-testkit" }
-# `norn-mcp`'s schema validator. A whole-workspace run builds it through that
-# crate's dev-dependency, which switches features on in `hashbrown`,
-# `regex-automata` and `syn`; this package's shard links those crates and must
-# build them with the same set (`norn-testkit --test shards`). It never ships.
-jsonschema = { version = "0.46", default-features = false }

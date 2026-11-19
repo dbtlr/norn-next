@@ -11,7 +11,9 @@ publish.workspace = true
 norn-wire = { path = "../norn-wire" }
 # Serialize tool definitions and their annotations without transport types.
 serde = { workspace = true }
-# Compose schemas and prepared protocol result bodies as JSON.
+# Compose schemas and prepared protocol result bodies as JSON, and read message
+# envelopes and call arguments as raw values (the workspace `raw_value` feature)
+# so a call's arguments reach the wire parser byte for byte.
 serde_json = { workspace = true }
 
 [dev-dependencies]
