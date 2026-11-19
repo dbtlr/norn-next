@@ -366,6 +366,19 @@ pub fn exchange_within(
     body: &[u8],
     within: Duration,
 ) -> Reply {
+    exchange_with(port, method, path, bearer, &[], body, within)
+}
+
+/// [`exchange_within`], with `headers` written after the bearer.
+pub fn exchange_with(
+    port: u16,
+    method: &str,
+    path: &str,
+    bearer: Option<&str>,
+    headers: &[(&str, &str)],
+    body: &[u8],
+    within: Duration,
+) -> Reply {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connecting to norn serve");
     stream.set_read_timeout(Some(within)).unwrap();
     let mut request = format!(
@@ -374,6 +387,9 @@ pub fn exchange_within(
     );
     if let Some(bearer) = bearer {
         request.push_str(&format!("Authorization: Bearer {bearer}\r\n"));
+    }
+    for (name, value) in headers {
+        request.push_str(&format!("{name}: {value}\r\n"));
     }
     request.push_str("\r\n");
     stream.write_all(request.as_bytes()).unwrap();

@@ -87,7 +87,7 @@ const CASE_TOTAL: usize = 119;
 /// the constant, which is the moment the edit becomes a thing a reviewer
 /// looked at. This is the fixture generator's contract digest applied to a
 /// registry.
-const CONTRACT_DIGEST: &str = "7db61c31f6f97d7fb4eb74edb2f844ffef432430df4e9971e405be2d1affd560";
+const CONTRACT_DIGEST: &str = "daf265fa5757d96d32f79c2e0e505cb3dc29c7ad82e50bfc74d673bbae6ee83b";
 
 /// The cases carried by tests today, by name.
 ///
@@ -99,6 +99,7 @@ const CONTRACT_DIGEST: &str = "7db61c31f6f97d7fb4eb74edb2f844ffef432430df4e9971e
 /// business.
 const BOUND_CASES: &[&str] = &[
     "a-configured-repair-never-writes-what-the-validator-flags",
+    "a-forecast-is-labelled-a-forecast-in-every-format",
     "a-limit-bounds-hydration-through-one-paging-seam",
     "a-measurement-lane-proves-it-measured",
     "a-measurement-step-asserts-a-nonzero-pass-count",
@@ -120,6 +121,7 @@ const BOUND_CASES: &[&str] = &[
     "encoding-prefix-transparency",
     "error-variant-matches-the-operation-reported",
     "every-filesystem-effect-is-planned-and-forecast",
+    "every-warning-reaches-every-surface",
     "existence-probes-and-per-request-allocation-are-bounded",
     "failure-is-carried-in-the-protocols-native-channel",
     "finding-candidates-are-capped-with-a-total",

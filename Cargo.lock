@@ -903,6 +903,7 @@ version = "0.0.0"
 dependencies = [
  "http-body-util",
  "hyper",
+ "jsonschema",
  "libc",
  "norn-client",
  "norn-config",
@@ -1040,6 +1041,7 @@ dependencies = [
  "norn-store",
  "norn-testkit",
  "norn-wire",
+ "schemars",
  "serde",
  "serde_json",
  "sha2",

@@ -1,8 +1,18 @@
-//! Pure tool definitions derived from the native wire vocabulary.
+//! Pure MCP translation over the native wire vocabulary: the tool
+//! definitions derived from it ([`ToolList`]), and every message `/mcp`
+//! reads and answers ([`message`]). No transport, no async and no I/O.
 use norn_wire::{ApplyMode, Verb, VerbEffect};
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::fmt;
+use std::sync::Arc;
+
+pub mod message;
+
+pub use message::{
+    Answer, Call, Headers, LEGACY_VERSION, MODERN_VERSION, Message, ModeGiven, Reply, Revision,
+    ToolRoute, handle, wire_body,
+};
 
 /// A params schema has assertions that cannot safely be removed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,15 +55,19 @@ pub struct Tool {
 #[derive(Debug)]
 pub struct ToolList {
     pub tools: Vec<Tool>,
-    pub derivations: u64,
 }
 
-/// Encoded results retained by the serving process for Layer 6.2 routing.
+/// What the serving process keeps from one derivation: the two encoded
+/// `tools/list` results, the name and native operation of each tool a call is
+/// resolved by, and the server identity every 2026-07-28 result carries.
 #[derive(Debug)]
 pub struct PreparedToolLists {
     pub legacy_body: Vec<u8>,
     pub modern_body: Vec<u8>,
-    pub derivations: u64,
+    /// Each served tool's name and what it runs, in list order.
+    pub tools: Vec<ToolRoute>,
+    /// The server identity, `{"name":"norn","version":<build>}`, as JSON.
+    pub server_info: Arc<str>,
 }
 
 impl ToolList {
@@ -112,10 +126,7 @@ impl ToolList {
                 });
             }
         }
-        Ok(Self {
-            tools,
-            derivations: 1,
-        })
+        Ok(Self { tools })
     }
 
     /// Encode the revision-specific results using the hello's build identity.
@@ -136,20 +147,30 @@ impl ToolList {
             #[serde(rename = "_meta")]
             meta: Value,
         }
+        let server_info = json!({"name": "norn", "version": build});
         let legacy_body =
             serde_json::to_vec(&LegacyResult { tools: &self.tools }).expect("tools serialize");
         let modern_body = serde_json::to_vec(&ModernResult {
             tools: &self.tools,
             result_type: "complete",
-            ttl_ms: 300_000,
+            ttl_ms: message::TTL_MS,
             cache_scope: "public",
-            meta: json!({"io.modelcontextprotocol/serverInfo": {"name": "norn", "version": build}}),
+            meta: json!({"io.modelcontextprotocol/serverInfo": server_info}),
         })
         .expect("tools serialize");
         PreparedToolLists {
             legacy_body,
             modern_body,
-            derivations: self.derivations,
+            tools: self
+                .tools
+                .iter()
+                .map(|tool| ToolRoute {
+                    name: tool.name.clone(),
+                    verb: tool.verb,
+                    mode: tool.mode,
+                })
+                .collect(),
+            server_info: server_info.to_string().into(),
         }
     }
 }
@@ -215,22 +236,20 @@ fn presence(value: &Value, properties: &Value) -> bool {
 }
 
 impl Tool {
-    /// Reconstruct native params without interpreting any verb-specific fields.
-    /// The tool name owns mode; a caller cannot override it.
-    pub fn wire_body(&self, arguments: &Value) -> Result<Vec<u8>, &'static str> {
-        let mut object = arguments
-            .as_object()
-            .ok_or("arguments must be an object")?
-            .clone();
-        if let Some(mode) = self.mode {
-            if object.contains_key("mode") {
-                return Err("mode is fixed by the tool name");
-            }
-            object.insert(
-                "mode".into(),
-                serde_json::to_value(mode).expect("mode serializes"),
-            );
+    /// The native params body for `arguments`, the raw JSON object a caller
+    /// sent: the bytes as they arrived, with the tool's mode spliced in for a
+    /// mode tool through [`wire_body`]. The arguments are never parsed and
+    /// re-serialized, so key order and a duplicate key reach the wire
+    /// parser exactly as sent. The tool name owns mode; a caller cannot
+    /// override it.
+    pub fn wire_body(&self, arguments: &[u8]) -> Result<Vec<u8>, &'static str> {
+        let object = serde_json::from_slice::<&serde_json::value::RawValue>(arguments)
+            .map_err(|_| "arguments must be JSON")?;
+        if !object.get().starts_with('{') {
+            return Err("arguments must be an object");
         }
-        serde_json::to_vec(&object).map_err(|_| "arguments cannot be encoded")
+        wire_body(arguments, self.mode)
+            .map(std::borrow::Cow::into_owned)
+            .map_err(|ModeGiven| "mode is fixed by the tool name")
     }
 }

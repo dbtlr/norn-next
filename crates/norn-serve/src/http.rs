@@ -3,9 +3,11 @@
 //!
 //! `POST /v1/hello` is the one exchange answered without a bearer. Every
 //! other request passes the bearer middleware first. Behind it stand the wire
-//! route, `POST /v1/wire/{verb}` (`wire.rs`, run by `request.rs`), the drain
-//! request, `POST /v1/control/drain`, and under the `counters` feature
-//! `GET /v1/debug/counters`; any other path is 404 `serve/unknown-verb`.
+//! route, `POST /v1/wire/{verb}` (`wire.rs`, run by `request.rs`), MCP over
+//! Streamable HTTP, `POST /mcp` ([`mcp_request`], translated by `norn-mcp`),
+//! the drain request, `POST /v1/control/drain`, and under the `counters`
+//! feature `GET /v1/debug/counters`; any other path is 404
+//! `serve/unknown-verb`.
 //!
 //! **The drain request, v1.** An auto-launched host sets `draining`, closes
 //! its listener, and only then answers 202 `{"version": 1, "draining": true}`
@@ -38,7 +40,10 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use http_body_util::{BodyExt, Full, LengthLimitError, Limited};
 use hyper::body::{Body, Bytes};
-use hyper::header::{AUTHORIZATION, CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, HeaderValue};
+use hyper::header::{
+    ALLOW, AUTHORIZATION, CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, HeaderMap, HeaderValue, ORIGIN,
+    RETRY_AFTER,
+};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
@@ -54,7 +59,8 @@ use crate::connection::{Bounds, Closes, Paced};
 use crate::credentials::{Admission, Credentials, Keyed};
 use crate::lifecycle::{Began, Lifecycle, Stage, StopReason};
 use crate::log::log;
-use crate::request::{Dispatched, Ended, Lane, Wire};
+use crate::mcp::{McpCall, McpCounters};
+use crate::request::{Composed, Dispatched, Ended, Lane, Wire};
 use crate::start::DRAIN_PATH;
 use crate::stop::Stopper;
 use crate::wire;
@@ -64,6 +70,9 @@ const HELLO_PATH: &str = "/v1/hello";
 
 /// The wire route's path, before the verb's name.
 const WIRE_PREFIX: &str = "/v1/wire/";
+
+/// MCP's path.
+pub(crate) const MCP_PATH: &str = "/mcp";
 
 /// The largest wire request body admitted: a declared limit set well above
 /// any realistic plan, since plans carry document content. The largest plan
@@ -76,12 +85,19 @@ pub(crate) const WIRE_BODY_BYTES: usize = 256 * 1024 * 1024;
 #[cfg(feature = "counters")]
 pub(crate) const HOST_TIME_HEADER: &str = "x-norn-host-time-us";
 
+/// The header that carries, under the `counters` feature, the microseconds a
+/// `/mcp` call's wrapper spent splicing its mode and composing its result:
+/// the part of its host time that is translation.
+#[cfg(feature = "counters")]
+pub(crate) const TRANSLATE_HEADER: &str = "x-norn-mcp-translate-us";
+
 /// What every connection of one host answers from.
 pub(crate) struct Context {
-    /// Dormant carrier for the Layer 6.2 MCP route: prepared before listening,
-    /// consumed when that route lands; no request derives a tool schema.
-    #[allow(dead_code)]
+    /// The tool list `/mcp` serves, derived once before listening: its two
+    /// prepared `tools/list` bodies and the routes a call resolves by. No
+    /// request derives a tool schema.
     pub(crate) mcp_tools: norn_mcp::PreparedToolLists,
+    pub(crate) mcp_counters: McpCounters,
     pub(crate) credentials: Mutex<Credentials>,
     pub(crate) channel: HelloChannel,
     pub(crate) build: BuildIdentity,
@@ -208,18 +224,29 @@ where
     let route = route_label(&request);
     let started = std::time::Instant::now();
     let answer = dispatch_authenticated(request, context).await;
+    // A `/mcp` call's tool is known only once its body is read; the label
+    // is spelled from the resolved verb, never from the peer's string.
+    let tool = answer
+        .extensions()
+        .get::<McpTool>()
+        .map(|tool| format!("mcp/{}", tool.0.as_str()));
     log(format_args!(
         "{}",
-        request_line(route, &answer, started.elapsed())
+        request_line(tool.as_deref().unwrap_or(route), &answer, started.elapsed())
     ));
     answer
 }
 
 /// The name the request log gives the route `request` matches, by the same
 /// tests `dispatch_authenticated` routes by: a verb the route table serves,
-/// the drain request, the counters route where compiled in, or `unrouted`.
+/// `mcp`, the drain request, the counters route where compiled in, or
+/// `unrouted`. A `/mcp` call is relabelled `mcp/<verb>` once its body names
+/// its tool.
 fn route_label<B>(request: &Request<B>) -> &'static str {
     let path = request.uri().path();
+    if path == MCP_PATH {
+        return "mcp";
+    }
     #[cfg(feature = "counters")]
     if request.method() == Method::GET && path == "/v1/debug/counters" {
         return "debug/counters";
@@ -257,6 +284,11 @@ fn request_line(route: &str, answer: &Answer, elapsed: std::time::Duration) -> S
 #[derive(Clone)]
 struct ReasonLabel(String);
 
+/// The verb a `/mcp` call's tool resolved to, carried on its answer for the
+/// request log.
+#[derive(Clone, Copy)]
+struct McpTool(Verb);
+
 async fn dispatch_authenticated<B>(request: Request<B>, context: &Context) -> Answer
 where
     B: Body<Data = Bytes>,
@@ -268,6 +300,14 @@ where
     }
     if request.method() == Method::POST && request.uri().path() == DRAIN_PATH {
         return drain_request(request, context).await;
+    }
+    if request.uri().path() == MCP_PATH {
+        let answer = mcp_request(request, context).await;
+        context.wire.counters.body_bytes_encoded.fetch_add(
+            answer.body().size_hint().exact().unwrap_or(0),
+            Ordering::Relaxed,
+        );
+        return answer;
     }
     if request.method() == Method::POST
         && let Some(name) = request.uri().path().strip_prefix(WIRE_PREFIX)
@@ -337,42 +377,306 @@ where
     let at_bound = wire::at_bound(verb, &body);
     // The body crosses to the pool as it arrived, uncopied; the slot goes
     // with it, held until the request's last job lets go.
-    let run = wire_state.serve(verb, lane, at_bound, body, slot).await;
+    let run = wire_state
+        .serve(
+            verb,
+            lane,
+            at_bound,
+            body,
+            slot,
+            Arc::clone(&wire_state.dispatcher),
+        )
+        .await;
     #[cfg(feature = "counters")]
     let host_time = run.dispatched_at.elapsed();
-    let answer = match run.ended {
-        Ended::Dispatched(Dispatched::Report(report)) => {
+    let answer = match settle(verb, run.ended, context) {
+        Settled::Report(report) => {
             wire_state
                 .counters
                 .report_bytes
                 .fetch_add(report.len() as u64, Ordering::Relaxed);
             json(StatusCode::OK, report)
         }
-        Ended::Dispatched(Dispatched::Refused(envelope)) | Ended::StillWarming(envelope) => {
-            envelope_answer(&envelope)
-        }
-        Ended::Dispatched(Dispatched::BadRequest(error)) => unparsed(verb, &error),
-        Ended::Dispatched(Dispatched::HostStopped(detail)) => {
-            context.stopper.worker_stopped(&detail);
-            outcome_unknown()
-        }
-        Ended::Draining => draining(),
-        Ended::Busy => refusal(
-            "this request waited past its deadline to be taken up, and nothing ran; send it again",
-            ErrorDetail::busy(),
-        ),
-        Ended::Lost => outcome_unknown(),
-        Ended::StillRunningAtBound => refusal(still_running(verb), ErrorDetail::outcome_unknown()),
+        // The route table composes nothing; a body that is already whole is
+        // answered as it stands.
+        Settled::Composed(composed) => json(StatusCode::OK, composed.body),
+        Settled::Refused(envelope) => envelope_answer(&envelope),
     };
     #[cfg(feature = "counters")]
     let answer = {
         let mut answer = answer;
-        answer.headers_mut().insert(
-            HOST_TIME_HEADER,
-            HeaderValue::from(u64::try_from(host_time.as_micros()).unwrap_or(u64::MAX)),
-        );
+        answer
+            .headers_mut()
+            .insert(HOST_TIME_HEADER, micros_header(host_time));
         answer
     };
+    answer
+}
+
+#[cfg(feature = "counters")]
+fn micros_header(elapsed: std::time::Duration) -> HeaderValue {
+    HeaderValue::from(u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX))
+}
+
+/// How a run ended, as the parts of its answer: the verb's report, a body the
+/// request's own dispatcher composed, or the envelope it was refused with.
+/// The wire route and `/mcp` answer the same run by the same refusals.
+enum Settled {
+    Report(Vec<u8>),
+    Composed(Composed),
+    Refused(ErrorEnvelope),
+}
+
+/// Settle `ended`, `verb`'s run. A stopped worker triggers the process stop
+/// here, whichever route met it.
+fn settle(verb: Verb, ended: Ended, context: &Context) -> Settled {
+    match ended {
+        Ended::Dispatched(Dispatched::Report(report)) => Settled::Report(report),
+        Ended::Dispatched(Dispatched::Composed(composed)) => Settled::Composed(composed),
+        Ended::Dispatched(Dispatched::Refused(envelope)) | Ended::StillWarming(envelope) => {
+            Settled::Refused(envelope)
+        }
+        Ended::Dispatched(Dispatched::BadRequest(error)) => {
+            Settled::Refused(unparsed_envelope(verb, &error))
+        }
+        Ended::Dispatched(Dispatched::HostStopped(detail)) => {
+            context.stopper.worker_stopped(&detail);
+            Settled::Refused(outcome_unknown_envelope())
+        }
+        Ended::Draining => Settled::Refused(draining_envelope()),
+        Ended::Busy => Settled::Refused(ErrorEnvelope::new(
+            "this request waited past its deadline to be taken up, and nothing ran; send it again",
+            ErrorDetail::busy(),
+        )),
+        Ended::Lost => Settled::Refused(outcome_unknown_envelope()),
+        Ended::StillRunningAtBound => Settled::Refused(ErrorEnvelope::new(
+            still_running(verb),
+            ErrorDetail::outcome_unknown(),
+        )),
+    }
+}
+
+/// `/mcp`: MCP over Streamable HTTP, 2025-11-25 and 2026-07-28, with no
+/// session. Behind the bearer like every route.
+///
+/// **Before the body**: any method but `POST` is 405 with `Allow: POST`, a
+/// request carrying `Origin` is 403 (no browser client is served), and then,
+/// as on the wire route, the drain refusal, the declared-length refusal and
+/// admission — the in-flight slot is taken before the body is read. `/mcp`'s
+/// 503s carry `Retry-After: 1`.
+///
+/// **After it**, `norn-mcp` reads the message. One it answers from constants
+/// and the prepared tool lists gives its slot back at once, and is written
+/// as `norn-mcp` composed it. A `tools/call` keeps its slot: its lane and
+/// drain-bound class are read off its raw arguments with the tool's mode
+/// standing in for `mode`, and it enters the wire route's own run through a
+/// per-request wrapper ([`McpCall`]), so the claim, the pools, the vault's
+/// turn and the readiness retry are the wire route's. Every tool outcome,
+/// success or failure, is status 200.
+async fn mcp_request<B>(request: Request<B>, context: &Context) -> Answer
+where
+    B: Body<Data = Bytes>,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    if request.method() != Method::POST {
+        let mut answer = empty(StatusCode::METHOD_NOT_ALLOWED);
+        answer
+            .headers_mut()
+            .insert(ALLOW, HeaderValue::from_static("POST"));
+        return answer;
+    }
+    if request.headers().contains_key(ORIGIN) {
+        return empty(StatusCode::FORBIDDEN);
+    }
+    let wire_state = &context.wire;
+    if wire_state.admission.draining() {
+        return retry_after(closing(draining()));
+    }
+    if declared_length(&request).is_some_and(|length| length > WIRE_BODY_BYTES as u64) {
+        return closing(too_large("the request's body is over 256 MiB"));
+    }
+    let Some(slot) = wire_state.admission.enter() else {
+        return retry_after(closing(refusal(
+            "this host has as many requests in flight as it admits; send the request again",
+            ErrorDetail::busy(),
+        )));
+    };
+    let headers = McpHeaders::of(request.headers());
+    let arriving = arriving_body(request, WIRE_BODY_BYTES, context.bounds);
+    let body = match tokio::select! {
+        biased;
+        body = arriving => body,
+        () = context.lifecycle.drain.begun() => return retry_after(closing(draining())),
+    } {
+        Ok(body) => body,
+        Err(Unread::TooLarge) => return closing(too_large("the request's body is over 256 MiB")),
+        Err(Unread::Late) => return closing(late_body()),
+        Err(Unread::Failed) => {
+            return closing(bad_request("the request's body did not arrive whole"));
+        }
+    };
+    context
+        .mcp_counters
+        .messages
+        .fetch_add(1, Ordering::Relaxed);
+    let call = match norn_mcp::handle(&context.mcp_tools, headers.read(), &body) {
+        norn_mcp::Message::Answered(answer) => {
+            // Answered from constants: nothing of it runs any more.
+            drop(slot);
+            return mcp_answer(answer);
+        }
+        norn_mcp::Message::Call(call) => call,
+    };
+    context.mcp_counters.calls.fetch_add(1, Ordering::Relaxed);
+    let verb = call.verb;
+    let (lane, at_bound) = match crate::mcp::pre_dispatch(verb, call.mode, call.arguments) {
+        Ok(read) => read,
+        Err(error) => {
+            drop(slot);
+            let body = call.reply.bad_request(&format!(
+                "the arguments are not `{verb}`'s params: {error}; nothing was dispatched"
+            ));
+            let mut answer = json(StatusCode::OK, body);
+            answer
+                .extensions_mut()
+                .insert(ReasonLabel("serve/bad-request".into()));
+            answer.extensions_mut().insert(McpTool(verb));
+            return answer;
+        }
+    };
+    let arguments = within(&body, call.arguments);
+    let wrapper = Arc::new(McpCall::new(
+        Arc::clone(&wire_state.dispatcher),
+        call.mode,
+        call.reply.clone(),
+    ));
+    let run = wire_state
+        .serve(
+            verb,
+            lane,
+            at_bound,
+            arguments,
+            slot,
+            Arc::clone(&wrapper) as Arc<dyn crate::request::Dispatch>,
+        )
+        .await;
+    #[cfg(feature = "counters")]
+    let host_time = run.dispatched_at.elapsed();
+    let mut answer = match settle(verb, run.ended, context) {
+        Settled::Composed(composed) => {
+            if let Some(report) = composed.report_bytes {
+                wire_state
+                    .counters
+                    .report_bytes
+                    .fetch_add(report as u64, Ordering::Relaxed);
+            }
+            let mut answer = json(StatusCode::OK, composed.body);
+            if let Some(code) = composed.refused {
+                answer.extensions_mut().insert(ReasonLabel(code));
+            }
+            answer
+        }
+        // The wrapper composes every report it meets; one reaching here is
+        // composed the same way.
+        Settled::Report(report) => {
+            wire_state
+                .counters
+                .report_bytes
+                .fetch_add(report.len() as u64, Ordering::Relaxed);
+            json(StatusCode::OK, call.reply.report(&report))
+        }
+        Settled::Refused(envelope) => {
+            let mut answer = json(StatusCode::OK, call.reply.failure(&envelope));
+            if let Ok(serde_json::Value::String(code)) = serde_json::to_value(envelope.code()) {
+                answer.extensions_mut().insert(ReasonLabel(code));
+            }
+            answer
+        }
+    };
+    answer.extensions_mut().insert(McpTool(verb));
+    #[cfg(feature = "counters")]
+    {
+        let translate_ns = wrapper.translate_ns();
+        context
+            .mcp_counters
+            .translate_ns
+            .fetch_add(translate_ns, Ordering::Relaxed);
+        let headers = answer.headers_mut();
+        headers.insert(HOST_TIME_HEADER, micros_header(host_time));
+        headers.insert(
+            TRANSLATE_HEADER,
+            micros_header(std::time::Duration::from_nanos(translate_ns)),
+        );
+    }
+    answer
+}
+
+/// The headers `norn-mcp` classifies a message by, held past the body's read.
+struct McpHeaders {
+    protocol_version: Option<HeaderValue>,
+    method: Option<HeaderValue>,
+    name: Option<HeaderValue>,
+}
+
+impl McpHeaders {
+    fn of(headers: &HeaderMap) -> Self {
+        McpHeaders {
+            protocol_version: headers.get("mcp-protocol-version").cloned(),
+            method: headers.get("mcp-method").cloned(),
+            name: headers.get("mcp-name").cloned(),
+        }
+    }
+
+    fn read(&self) -> norn_mcp::Headers<'_> {
+        norn_mcp::Headers {
+            protocol_version: self.protocol_version.as_ref().map(HeaderValue::as_bytes),
+            method: self.method.as_ref().map(HeaderValue::as_bytes),
+            name: self.name.as_ref().map(HeaderValue::as_bytes),
+        }
+    }
+}
+
+/// `part` of `body`, uncopied where it lies within it; a part from elsewhere
+/// (the `{}` an absent `arguments` reads as) is copied.
+fn within(body: &Bytes, part: &[u8]) -> Bytes {
+    let start = body.as_ptr() as usize;
+    let at = part.as_ptr() as usize;
+    if at >= start && at + part.len() <= start + body.len() {
+        body.slice_ref(part)
+    } else {
+        Bytes::copy_from_slice(part)
+    }
+}
+
+/// An answer `norn-mcp` composed, written as it composed it: its status, and
+/// its body, which is JSON unless it is a notification's empty 202.
+fn mcp_answer(answer: norn_mcp::Answer) -> Answer {
+    let status = StatusCode::from_u16(answer.status).expect("norn-mcp answers a valid status");
+    let mut response = if answer.body.is_empty() {
+        empty(status)
+    } else {
+        json(status, answer.body)
+    };
+    if let Some(code) = answer.error_code {
+        response
+            .extensions_mut()
+            .insert(ReasonLabel(format!("jsonrpc/{code}")));
+    }
+    response
+}
+
+/// An answer with no body and no content type.
+fn empty(status: StatusCode) -> Answer {
+    let mut response = Response::new(Full::new(Bytes::new()));
+    *response.status_mut() = status;
+    response
+}
+
+/// `/mcp`'s 503s say when to ask again.
+fn retry_after(mut answer: Answer) -> Answer {
+    answer
+        .headers_mut()
+        .insert(RETRY_AFTER, HeaderValue::from_static("1"));
     answer
 }
 
@@ -393,9 +697,16 @@ pub(crate) fn status_of(class: FaultClass) -> StatusCode {
 
 /// A body that did not parse as `verb`'s params.
 fn unparsed(verb: Verb, error: &str) -> Answer {
-    bad_request(&format!(
-        "the request's body is not JSON of `{verb}`'s params: {error}; nothing was dispatched"
-    ))
+    envelope_answer(&unparsed_envelope(verb, error))
+}
+
+fn unparsed_envelope(verb: Verb, error: &str) -> ErrorEnvelope {
+    ErrorEnvelope::new(
+        format!(
+            "the request's body is not JSON of `{verb}`'s params: {error}; nothing was dispatched"
+        ),
+        ErrorDetail::bad_request(),
+    )
 }
 
 fn bad_request(message: &str) -> Answer {
@@ -411,15 +722,19 @@ fn too_large(message: &str) -> Answer {
 }
 
 fn draining() -> Answer {
-    refusal(
+    envelope_answer(&draining_envelope())
+}
+
+fn draining_envelope() -> ErrorEnvelope {
+    ErrorEnvelope::new(
         "this host is stopping and refused the request before running it; send it again once a \
          host serves",
         ErrorDetail::draining(),
     )
 }
 
-fn outcome_unknown() -> Answer {
-    refusal(
+fn outcome_unknown_envelope() -> ErrorEnvelope {
+    ErrorEnvelope::new(
         "the host could no longer answer this request while it was running, so whether it took \
          effect is not known; read the state back, or send the request again",
         ErrorDetail::outcome_unknown(),
@@ -514,6 +829,21 @@ fn counters(context: &Context) -> Answer {
         (
             "serve.report_bytes",
             wire.report_bytes.load(Ordering::Relaxed),
+        ),
+    ] {
+        body.insert(name.to_string(), value.into());
+    }
+    let mcp = &context.mcp_counters;
+    for (name, value) in [
+        (
+            "mcp.tool_list_derivations",
+            mcp.tool_list_derivations.load(Ordering::Relaxed),
+        ),
+        ("mcp.messages", mcp.messages.load(Ordering::Relaxed)),
+        ("mcp.calls", mcp.calls.load(Ordering::Relaxed)),
+        (
+            "mcp.translate_us",
+            mcp.translate_ns.load(Ordering::Relaxed) / 1_000,
         ),
     ] {
         body.insert(name.to_string(), value.into());
@@ -740,6 +1070,7 @@ pub(crate) fn context_for_tests(
         mcp_tools: norn_mcp::ToolList::derive([])
             .unwrap()
             .prepare("0.0.0+test"),
+        mcp_counters: McpCounters::default(),
         credentials: Mutex::new(Credentials::new(
             dirs,
             norn_config::machine::tokens::WatchedTokens::read(dirs),
@@ -785,6 +1116,10 @@ mod tests {
     /// a connection.
     mod drain;
 
+    /// `/mcp`: its HTTP rows, its constant answers, and a call through the
+    /// wire route's run.
+    mod mcp;
+
     const SECRET: &[u8] = b"a stored secret";
 
     struct Case {
@@ -816,6 +1151,7 @@ mod tests {
             mcp_tools: norn_mcp::ToolList::derive([])
                 .unwrap()
                 .prepare("0.0.0+test"),
+            mcp_counters: McpCounters::default(),
             credentials: Mutex::new(Credentials::new(&dirs, settled(&dirs))),
             channel: HelloChannel::Dev,
             build: BuildIdentity::new("0.0.0+test"),
@@ -850,6 +1186,8 @@ mod tests {
     #[derive(Default)]
     struct Answers {
         next: Mutex<std::collections::VecDeque<Dispatched>>,
+        /// Every dispatch made, and the body it was made with.
+        seen: Mutex<Vec<(Verb, Vec<u8>)>>,
     }
 
     impl Answers {
@@ -859,7 +1197,8 @@ mod tests {
     }
 
     impl crate::request::Dispatch for Answers {
-        fn dispatch(&self, _: Verb, _: &[u8]) -> Dispatched {
+        fn dispatch(&self, verb: Verb, body: &[u8]) -> Dispatched {
+            self.seen.lock().unwrap().push((verb, body.to_vec()));
             self.next
                 .lock()
                 .unwrap()

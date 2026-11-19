@@ -1,23 +1,9 @@
+mod fixtures;
+
+use fixtures::{official, validator};
 use norn_mcp::{ToolList, input_schema};
 use norn_wire::*;
 use serde_json::{Value, json};
-
-fn validator(schema: &Value) -> jsonschema::Validator {
-    jsonschema::options()
-        .with_draft(jsonschema::Draft::Draft202012)
-        .build(schema)
-        .unwrap()
-}
-
-fn official(revision: &str, definition: &str) -> jsonschema::Validator {
-    let mut schema: Value = serde_json::from_str(match revision {
-        "2025-11-25" => include_str!("fixtures/2025-11-25.json"),
-        _ => include_str!("fixtures/2026-07-28.json"),
-    })
-    .unwrap();
-    schema["$ref"] = json!(format!("#/$defs/{definition}"));
-    validator(&schema)
-}
 
 #[test]
 fn every_schema_preserves_root_fields_and_validates_against_both_revisions() {
@@ -90,12 +76,13 @@ fn schema_guard_refuses_alternative_shapes_or_unknown_properties() {
     assert!(input_schema(Verb::Set, schema).unwrap().1);
 }
 
+/// Preparing the bodies reads the derived list; it derives nothing again.
+/// The served count of derivations is `norn-serve`'s, around its one call.
 #[test]
 fn prepared_lists_reuse_one_derivation() {
     let list = ToolList::derive(Verb::ALL).unwrap();
     let prepared = list.prepare("test");
     for _ in 0..100 {
-        assert_eq!(prepared.derivations, 1);
         assert_eq!(
             serde_json::from_slice::<Value>(&prepared.legacy_body).unwrap()["tools"]
                 .as_array()
@@ -325,11 +312,32 @@ fn canonical_params(verb: Verb, params: Value) -> Value {
 
 fn parse_equal<T: serde::de::DeserializeOwned + serde::Serialize + PartialEq + std::fmt::Debug>(
     body: &[u8],
-    native: Value,
+    native: &[u8],
 ) {
     let parsed: T = serde_json::from_slice(body).unwrap();
-    let expected: T = serde_json::from_value(native).unwrap();
+    let expected: T = serde_json::from_slice(native).unwrap();
     assert_eq!(parsed, expected);
+}
+
+/// The body the wire route parses for the same call: the caller's own
+/// argument bytes with `mode` written in by hand, at the end, as a wire
+/// caller would spell it. Independent of the splice under test, which writes
+/// it at the front.
+fn native_bytes(arguments: &str, mode: Option<ApplyMode>) -> Vec<u8> {
+    let Some(mode) = mode else {
+        return arguments.as_bytes().to_vec();
+    };
+    let mode = serde_json::to_string(&mode).unwrap();
+    let inner = arguments
+        .trim()
+        .strip_prefix('{')
+        .and_then(|rest| rest.strip_suffix('}'))
+        .unwrap();
+    if inner.trim().is_empty() {
+        format!(r#"{{"mode":{mode}}}"#).into_bytes()
+    } else {
+        format!(r#"{{{inner},"mode":{mode}}}"#).into_bytes()
+    }
 }
 
 #[test]
@@ -339,11 +347,11 @@ fn every_tool_round_trips_to_the_native_params_type() {
         validator(&tool.input_schema)
             .validate(&arguments)
             .unwrap_or_else(|e| panic!("{}: {e}", tool.name));
-        let body = tool.wire_body(&arguments).unwrap();
-        let mut native = arguments.clone();
-        if let Some(mode) = tool.mode {
-            native["mode"] = serde_json::to_value(mode).unwrap();
-        }
+        // The arguments as a caller's bytes; the tool reads those bytes, never
+        // a value parsed from them.
+        let text = serde_json::to_string(&arguments).unwrap();
+        let body = tool.wire_body(text.as_bytes()).unwrap();
+        let native = &native_bytes(&text, tool.mode);
         match tool.verb {
             Verb::Find => parse_equal::<FindParams>(&body, native),
             Verb::Search => parse_equal::<SearchParams>(&body, native),
@@ -450,7 +458,7 @@ fn all_new_set_delete_presence_combinations_keep_wire_refusals() {
             // Removed presence constraints remain enforced by the native reader,
             // while every combination still has the advertised property types.
             assert!(schema.is_valid(&arguments), "{} {arguments}", tool.name);
-            let body = tool.wire_body(&arguments).unwrap();
+            let body = tool.wire_body(arguments.to_string().as_bytes()).unwrap();
             let parsed: Value = serde_json::from_slice(&body).unwrap();
             assert_eq!(
                 original.is_valid(&parsed),
@@ -476,13 +484,11 @@ fn derivation_cost_and_prepared_sizes() {
     let prepared = list.prepare("0.0.0+measurement");
     let elapsed = start.elapsed();
     eprintln!(
-        "startup tool preparation: {elapsed:?}; derivations={}; tools={}; legacy_bytes={}; modern_bytes={}",
-        prepared.derivations,
+        "startup tool preparation: {elapsed:?}; tools={}; legacy_bytes={}; modern_bytes={}",
         list.tools.len(),
         prepared.legacy_body.len(),
         prepared.modern_body.len()
     );
-    assert_eq!(prepared.derivations, 1);
     assert_eq!(list.tools.len(), 34);
 }
 
@@ -528,7 +534,9 @@ fn tool_names_fix_mode_and_other_arguments_are_preserved() {
             continue;
         }
         let arguments = representative(tool.verb);
-        let body: Value = serde_json::from_slice(&tool.wire_body(&arguments).unwrap()).unwrap();
+        let body: Value =
+            serde_json::from_slice(&tool.wire_body(arguments.to_string().as_bytes()).unwrap())
+                .unwrap();
         assert_eq!(
             body["mode"],
             if tool.name.ends_with("_preview") {
@@ -543,7 +551,57 @@ fn tool_names_fix_mode_and_other_arguments_are_preserved() {
         for supplied in [json!("apply"), json!("preview"), Value::Null, json!(false)] {
             let mut override_attempt = arguments.clone();
             override_attempt["mode"] = supplied;
-            assert!(tool.wire_body(&override_attempt).is_err());
+            assert!(
+                tool.wire_body(override_attempt.to_string().as_bytes())
+                    .is_err()
+            );
         }
+        // A key spelled with an escape is the key it spells.
+        assert!(tool.wire_body(br#"{"mod\u0065":"apply"}"#).is_err());
+        // A key nested deeper is not the tool's mode.
+        assert!(tool.wire_body(br#"{"nested":{"mode":"apply"}}"#).is_ok());
+        for not_an_object in [b"[]".as_slice(), b"null", b"\"mode\""] {
+            assert!(tool.wire_body(not_an_object).is_err());
+        }
+    }
+}
+
+/// **The arguments reach the wire as the caller wrote them.** A `fields` map
+/// keeps the caller's key order, which is not alphabetical here, and a
+/// duplicate key is refused by the wire parser rather than collapsed: the
+/// tool's body parses exactly as the same body sent to the wire route does.
+#[test]
+fn a_fields_map_keeps_its_order_and_a_duplicate_key_is_refused_as_on_the_wire() {
+    let list = ToolList::derive(Verb::ALL).unwrap();
+    for name in ["new", "new_preview"] {
+        let tool = list.tools.iter().find(|tool| tool.name == name).unwrap();
+        let ordered = r#"{"vault":{"by":"name","name":"notes"},"fields":{"title":"T","status":"draft","aardvark":1},"body":"x"}"#;
+        let body = tool.wire_body(ordered.as_bytes()).unwrap();
+        let native = native_bytes(ordered, tool.mode);
+        let parsed: NewParams = serde_json::from_slice(&body).unwrap();
+        let expected: NewParams = serde_json::from_slice(&native).unwrap();
+        assert_eq!(parsed, expected, "{name}");
+        let written = serde_json::to_string(&parsed).unwrap();
+        let at = |key: &str| written.find(&format!("\"{key}\"")).unwrap();
+        assert!(
+            at("title") < at("status") && at("status") < at("aardvark"),
+            "{name}: the caller's order is kept: {written}"
+        );
+
+        let duplicate = r#"{"vault":{"by":"name","name":"notes"},"fields":{"title":"a","title":"b"},"body":"x"}"#;
+        let body = tool.wire_body(duplicate.as_bytes()).unwrap();
+        let native = native_bytes(duplicate, tool.mode);
+        // Positions differ by the splice; the reason does not.
+        let reason = |error: serde_json::Error| {
+            let text = error.to_string();
+            text[..text.find(" at line").unwrap_or(text.len())].to_string()
+        };
+        let tool_error = reason(serde_json::from_slice::<NewParams>(&body).unwrap_err());
+        let wire_error = reason(serde_json::from_slice::<NewParams>(&native).unwrap_err());
+        assert_eq!(
+            tool_error, wire_error,
+            "{name}: refused for the same reason"
+        );
+        assert!(tool_error.contains("title"), "{name}: {tool_error}");
     }
 }

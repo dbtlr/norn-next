@@ -41,7 +41,7 @@ fn plan() -> ResolvedPlan {
 /// for each variant of the detail enums a class depends on, beside the
 /// status the fault-class table puts it at. Written out here rather than
 /// derived through `fault_class`, so the table is checked, not echoed.
-fn representatives() -> Vec<(ErrorDetail, StatusCode)> {
+pub(super) fn representatives() -> Vec<(ErrorDetail, StatusCode)> {
     use StatusCode as S;
     let not_run = |cause: ErrorDetail| {
         ErrorDetail::apply_not_run(ErrorEnvelope::new("cause", cause), Some(plan()))

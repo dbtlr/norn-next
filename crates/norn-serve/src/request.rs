@@ -55,6 +55,20 @@ pub(crate) enum Dispatched {
     /// The host can no longer serve: its worker stopped. Whether the call
     /// took effect is not known.
     HostStopped(String),
+    /// An answer a per-request dispatcher already composed for its own
+    /// protocol: `/mcp`'s result body. The wire route's dispatcher never
+    /// answers it.
+    Composed(Composed),
+}
+
+/// A body composed on the pool thread, and the length of the verb report it
+/// carries, where it carries one: what `serve.report_bytes` adds.
+#[derive(Debug)]
+pub(crate) struct Composed {
+    pub(crate) body: Vec<u8>,
+    pub(crate) report_bytes: Option<usize>,
+    /// The reason code of a failure composed in band, for the request log.
+    pub(crate) refused: Option<String>,
 }
 
 /// What answers a dispatch: the route table over a host in production, a
@@ -131,6 +145,8 @@ pub(crate) struct Wire {
     pub(crate) semaphores: Arc<Semaphores>,
     pub(crate) reads: Pool,
     pub(crate) mutations: Pool,
+    /// The route table over this process's host: what the wire route
+    /// dispatches through, and what `/mcp`'s per-request wrapper calls.
     pub(crate) dispatcher: Arc<dyn Dispatch>,
     pub(crate) ready_wait: Duration,
     pub(crate) counters: Arc<WireCounters>,
@@ -161,6 +177,7 @@ pub(crate) struct Run {
 struct Held {
     verb: Verb,
     body: Bytes,
+    dispatcher: Arc<dyn Dispatch>,
     admitted: Admitted,
     _slot: InFlight,
     _turn: Option<Turn>,
@@ -195,7 +212,9 @@ impl Drop for Unanswered {
 impl Wire {
     /// Serve one request whose body has arrived whole, under the in-flight
     /// `slot` it was admitted with; `at_bound` says how the drain answers it
-    /// if it is still running at the drain's bound.
+    /// if it is still running at the drain's bound. Each of its dispatches is
+    /// made through `dispatcher`: the route table itself for the wire route,
+    /// or a wrapper around it that `/mcp` composes per request.
     pub(crate) async fn serve(
         &self,
         verb: Verb,
@@ -203,16 +222,20 @@ impl Wire {
         at_bound: AtBound,
         body: Bytes,
         slot: InFlight,
+        dispatcher: Arc<dyn Dispatch>,
     ) -> Run {
         let dispatched_at = Instant::now();
         let deadline = dispatched_at + self.ready_wait;
-        let ended = self.run(verb, lane, at_bound, body, slot, deadline).await;
+        let ended = self
+            .run(verb, lane, at_bound, body, slot, dispatcher, deadline)
+            .await;
         Run {
             ended,
             dispatched_at,
         }
     }
 
+    #[allow(clippy::too_many_arguments)] // One request's parts, each its own.
     async fn run(
         &self,
         verb: Verb,
@@ -220,6 +243,7 @@ impl Wire {
         at_bound: AtBound,
         body: Bytes,
         slot: InFlight,
+        dispatcher: Arc<dyn Dispatch>,
         deadline: Instant,
     ) -> Ended {
         let admitted = self.admission.admit();
@@ -257,6 +281,7 @@ impl Wire {
         let held = Arc::new(Held {
             verb,
             body,
+            dispatcher,
             admitted,
             _slot: slot,
             _turn: turn,
@@ -358,7 +383,6 @@ impl Wire {
         let (answer, answered) = oneshot::channel();
         {
             let held = Arc::clone(held);
-            let dispatcher = Arc::clone(&self.dispatcher);
             let counters = Arc::clone(&self.counters);
             let deadline = deadline.into_std();
             pool.submit(Box::new(move || {
@@ -389,7 +413,7 @@ impl Wire {
                 if retry {
                     counters.ready_retries.fetch_add(1, Ordering::Relaxed);
                 }
-                let dispatched = dispatcher.dispatch(held.verb, &held.body);
+                let dispatched = held.dispatcher.dispatch(held.verb, &held.body);
                 // The host call has returned: this job's share goes before
                 // the answer, so a request that has its answer holds the
                 // only share left.
@@ -601,7 +625,15 @@ mod tests {
     /// at the drain's bound.
     async fn ask_at(wire: &Wire, verb: Verb, lane: Lane, at_bound: AtBound) -> Run {
         let slot = wire.admission.enter().expect("a slot under the bound");
-        wire.serve(verb, lane, at_bound, body(), slot).await
+        wire.serve(
+            verb,
+            lane,
+            at_bound,
+            body(),
+            slot,
+            Arc::clone(&wire.dispatcher),
+        )
+        .await
     }
 
     fn counts(wire: &Wire) -> (u64, u64) {

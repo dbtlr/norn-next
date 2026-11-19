@@ -116,6 +116,15 @@ pub(crate) fn lane(verb: Verb) -> Option<Runs> {
 /// dry-run reload and a `init` or `vault migrate` preview change nothing, so
 /// each is cut off as a read is.
 pub(crate) fn at_bound(verb: Verb, body: &[u8]) -> AtBound {
+    at_bound_as(verb, body, None)
+}
+
+/// [`at_bound`] for a body that carries no `mode` of its own, with `mode`
+/// standing in for it: an MCP tool's arguments, whose tool name fixes the
+/// mode. With `None` the body's own `mode` is read, as on the wire route.
+/// Everything else — `vault reload`'s `dry_run` included — is read from the
+/// body either way.
+pub(crate) fn at_bound_as(verb: Verb, body: &[u8], mode: Option<ApplyMode>) -> AtBound {
     #[derive(Deserialize)]
     struct DryRun {
         #[serde(default)]
@@ -125,13 +134,16 @@ pub(crate) fn at_bound(verb: Verb, body: &[u8]) -> AtBound {
     struct Mode {
         mode: Option<ApplyMode>,
     }
+    let previews = || match mode {
+        Some(mode) => mode == ApplyMode::Preview,
+        None => serde_json::from_slice::<Mode>(body)
+            .is_ok_and(|params| params.mode == Some(ApplyMode::Preview)),
+    };
     match lane(verb) {
         Some(Runs::Read) | None => AtBound::CloseWithProcess,
         Some(Runs::Mutation) => match verb {
             Verb::Init | Verb::VaultMigrate => {
-                if serde_json::from_slice::<Mode>(body)
-                    .is_ok_and(|params| params.mode == Some(ApplyMode::Preview))
-                {
+                if previews() {
                     AtBound::CloseWithProcess
                 } else {
                     AtBound::OutcomeUnknown
@@ -525,6 +537,150 @@ mod effect_tests {
                 super::lane(verb) == Some(super::Runs::Read),
                 "{verb}"
             );
+        }
+    }
+}
+
+/// Every served verb's report is a JSON object: `/mcp` carries it verbatim as
+/// `structuredContent`, which both MCP revisions require to be an object. A
+/// report is a struct, whose schema's root is `"type": "object"`, or an
+/// internally tagged enum, whose root is a `oneOf` of such objects.
+///
+/// Each report type is read off the signature of the `norn-host` method
+/// [`dispatch`] calls for the verb, not restated: a read encodes its
+/// [`Answered`](norn_host::Answered)'s `answer`, a write the answer
+/// [`within_the_drain`] waits for, and the rest their method's own report. So
+/// a method whose report changes moves this test with it.
+#[cfg(test)]
+mod report_tests {
+    use norn_host::{Answered, Host, HostError, PendingApply, ProductionEntryOps};
+    use norn_wire::{ErrorEnvelope, VaultAnswer, Verb};
+    use schemars::{JsonSchema, Schema, schema_for};
+    use serde_json::{Value, json};
+
+    use super::{NOT_SERVED, within_the_drain};
+
+    type ServedHost = Host<ProductionEntryOps>;
+
+    /// A read's report: the `answer` its `Answered` carries.
+    fn read<P, R: JsonSchema, W>(
+        _: impl Fn(&ServedHost, &P) -> Result<Answered<R, W>, ErrorEnvelope>,
+    ) -> Schema {
+        schema_for!(VaultAnswer<R>)
+    }
+
+    /// A write's report: what its pending apply is answered with.
+    fn write<P>(_: impl Fn(&ServedHost, P) -> Result<PendingApply, ErrorEnvelope>) -> Schema {
+        fn answered<R: JsonSchema>(
+            _: impl Fn(PendingApply, &super::Drain) -> Result<R, ErrorEnvelope>,
+        ) -> Schema {
+            schema_for!(R)
+        }
+        answered(within_the_drain)
+    }
+
+    /// A report the method answers or refuses.
+    fn encoded<P, R: JsonSchema>(
+        _: impl Fn(&ServedHost, &P) -> Result<R, ErrorEnvelope>,
+    ) -> Schema {
+        schema_for!(R)
+    }
+
+    /// A report the method always answers.
+    fn infallible<P, R: JsonSchema>(_: impl Fn(&ServedHost, &P) -> R) -> Schema {
+        schema_for!(R)
+    }
+
+    /// A report behind a host-death error.
+    fn behind_host_death<P, R: JsonSchema>(
+        _: impl Fn(&ServedHost, &P) -> Result<Result<R, ErrorEnvelope>, HostError>,
+    ) -> Schema {
+        schema_for!(R)
+    }
+
+    /// The schema of the report `verb`'s wire answer encodes, as
+    /// [`dispatch`](super::dispatch) answers it. `Verb` is
+    /// `#[non_exhaustive]` to this crate, so the match needs a wildcard: a
+    /// served verb minted without a row here fails this test instead.
+    fn report_schema(verb: Verb) -> Schema {
+        match verb {
+            Verb::Find => read(ServedHost::find),
+            Verb::Search => read(ServedHost::search),
+            Verb::Get => read(ServedHost::get),
+            Verb::Count => read(ServedHost::count),
+            Verb::Validate => read(ServedHost::validate),
+            Verb::Describe => read(ServedHost::describe),
+            Verb::Apply => write(ServedHost::apply),
+            Verb::Set => write(ServedHost::set),
+            Verb::Edit => write(ServedHost::edit),
+            Verb::New => write(ServedHost::new_document),
+            Verb::Move => write(ServedHost::move_path),
+            Verb::Delete => write(ServedHost::delete),
+            Verb::RewriteWikilink => write(ServedHost::rewrite_wikilink),
+            Verb::Repair => write(ServedHost::repair),
+            Verb::Init => encoded(ServedHost::init),
+            Verb::VaultRegister => encoded(ServedHost::vault_register),
+            Verb::VaultUnregister => encoded(ServedHost::vault_unregister),
+            Verb::VaultList => infallible(ServedHost::vault_list),
+            Verb::VaultSet => encoded(ServedHost::vault_set),
+            Verb::VaultResolve => encoded(ServedHost::vault_resolve),
+            Verb::VaultStatus => encoded(ServedHost::vault_status),
+            Verb::VaultReload => behind_host_death(ServedHost::vault_reload),
+            Verb::VaultMigrate => encoded(ServedHost::vault_migrate),
+            Verb::DoctorRegistry => infallible(ServedHost::doctor_registry),
+            _ => panic!("`{verb}` is served, and its report is not listed here"),
+        }
+    }
+
+    /// Whether `schema` admits only JSON objects: a struct's `"type":
+    /// "object"`, or an internally tagged enum's `oneOf` (or `anyOf`) whose
+    /// every branch does, each branch inline or a `$ref` into `defs`.
+    fn is_object(schema: &Value, defs: Option<&Value>) -> bool {
+        if let Some(target) = schema.get("$ref").and_then(Value::as_str) {
+            let resolved = target
+                .strip_prefix("#/$defs/")
+                .and_then(|name| defs?.get(name));
+            return resolved.is_some_and(|resolved| is_object(resolved, defs));
+        }
+        if schema.get("type") == Some(&json!("object")) {
+            return true;
+        }
+        ["oneOf", "anyOf"].into_iter().any(|key| {
+            schema
+                .get(key)
+                .and_then(Value::as_array)
+                .is_some_and(|branches| {
+                    !branches.is_empty() && branches.iter().all(|branch| is_object(branch, defs))
+                })
+        })
+    }
+
+    #[test]
+    fn every_served_verbs_report_has_an_object_root() {
+        let not_objects: Vec<Verb> = Verb::ALL
+            .into_iter()
+            .filter(|verb| !NOT_SERVED.contains(verb))
+            .filter(|verb| {
+                let schema = report_schema(*verb).to_value();
+                !is_object(&schema, schema.get("$defs"))
+            })
+            .collect();
+        assert!(
+            not_objects.is_empty(),
+            "reports not an object at their root: {not_objects:?}"
+        );
+    }
+
+    /// The check refuses a root that admits anything but an object.
+    #[test]
+    fn the_object_check_refuses_what_is_not_an_object() {
+        for schema in [
+            schema_for!(String),
+            schema_for!(Vec<norn_wire::ListReport>),
+            schema_for!(Option<norn_wire::ListReport>),
+        ] {
+            let schema = schema.to_value();
+            assert!(!is_object(&schema, schema.get("$defs")), "{schema}");
         }
     }
 }

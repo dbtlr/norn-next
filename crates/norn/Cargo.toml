@@ -40,6 +40,9 @@ norn-wire = { path = "../norn-wire" }
 # body the suite spelled wrong fails as that rather than as a host refusal.
 serde = { workspace = true }
 serde_json = { workspace = true }
+# The MCP suite validates every answer `/mcp` gives against the vendored
+# official schemas `norn-mcp`'s suites read. Tests only.
+jsonschema = { version = "0.46", default-features = false }
 
 # The serving bar compares request work with the same production host in
 # process. Its `evidence` readings come through `counters` (norn-serve's
