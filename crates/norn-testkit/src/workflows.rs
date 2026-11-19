@@ -55,7 +55,8 @@
 //! to, and the template decides what runs — `true {0}` runs nothing. The
 //! arguments are then held to a grammar: optionally the flake tripwire in
 //! front, then either the lane script with a package, a target and harness
-//! arguments that select nothing, or `cargo test` with the flags that name a
+//! arguments that select nothing, or `cargo test` (optionally through the
+//! test-suite wrapper) with the flags that name a
 //! package, a feature and the targets it selects and the few that change
 //! nothing about which tests run. One more is read, only as the exact pair
 //! `--config profile.dev.package.libsqlite3-sys.opt-level=3`: it changes how
@@ -100,6 +101,10 @@ const LANE_SCRIPT_FILE: &str = "lane-suite.sh";
 /// The wrapper a step may run its command through, which runs the command it
 /// is given and changes nothing about it.
 const FLAKE_TRIPWIRE: &str = ".github/scripts/flake-tripwire.sh";
+
+/// The suite wrapper runs the supplied command unchanged and rejects an empty
+/// successful run; it cannot turn a failed command into passing evidence.
+const TEST_SUITE: &str = ".github/scripts/test-suite.sh";
 
 /// The one cargo flag, and its one value, that compiles the bundled SQLite at
 /// opt-level 3 for a PR functional `cargo test` step. It changes how one C
@@ -587,7 +592,9 @@ fn invocation(run: &str) -> Option<Invocation> {
                 target: (*target).to_string(),
             })
         }
-        ["cargo", "test", arguments @ ..] => featured_runs_of(arguments).map(Invocation::Test),
+        ["cargo", "test", arguments @ ..] | [TEST_SUITE, "cargo", "test", arguments @ ..] => {
+            featured_runs_of(arguments).map(Invocation::Test)
+        }
         _ => None,
     }
 }
@@ -904,6 +911,64 @@ mod tests {
             "echo .github/scripts/lane-suite.sh norn-host memory",
         ] {
             assert_eq!(invocation(command), None, "`{command}` was read");
+        }
+    }
+
+    /// The suite wrapper preserves the exact package, feature and target,
+    /// including when CI puts the flake tripwire in front of it.
+    #[test]
+    fn wrapped_feature_tests_vouch_only_for_their_selected_build() {
+        let target = Target::Integration("serve_counters".to_string());
+        for wrapper in [
+            ".github/scripts/test-suite.sh",
+            ".github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh",
+        ] {
+            let mut read = super::CiSteps::default();
+            read.read(&format!(
+                "jobs:\n  tests:\n    steps:\n      - run: {wrapper} cargo test --locked -p norn --features counters --test serve_counters\n"
+            )).unwrap();
+            assert!(
+                read.runs_with_feature("norn", &target, "counters"),
+                "{wrapper}"
+            );
+            assert!(!read.runs_with_feature("norn-serve", &target, "counters"));
+            assert!(!read.runs_with_feature("norn", &target, "induced-failure"));
+            assert!(!read.runs_with_feature(
+                "norn",
+                &Target::Integration("serve_mcp".to_string()),
+                "counters"
+            ));
+            assert!(!read.runs_with_feature("norn", &Target::Lib, "counters"));
+        }
+    }
+
+    /// Wrapping a filtered, conditional or otherwise unread command cannot
+    /// make it evidence for a whole target's feature build.
+    #[test]
+    fn suite_wrappers_do_not_relax_command_or_step_exactness() {
+        let target = Target::Integration("serve_counters".to_string());
+        for wrapper in [
+            ".github/scripts/test-suite.sh",
+            ".github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh",
+        ] {
+            let command =
+                format!("{wrapper} cargo test -p norn --features counters --test serve_counters");
+            for step in [
+                format!("      - run: {command} a_filter\n"),
+                format!("      - run: {command} -- --skip a_case\n"),
+                format!("      - run: {command} || true\n"),
+                format!("      - run: echo {command}\n"),
+                format!("      - if: false\n        run: {command}\n"),
+                format!("      - continue-on-error: true\n        run: {command}\n"),
+            ] {
+                let mut read = super::CiSteps::default();
+                read.read(&format!("jobs:\n  tests:\n    steps:\n{step}"))
+                    .unwrap();
+                assert!(
+                    !read.runs_with_feature("norn", &target, "counters"),
+                    "{step}"
+                );
+            }
         }
     }
 

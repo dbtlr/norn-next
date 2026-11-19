@@ -8,6 +8,11 @@ from serve import Serve, hello_mac, hello_mac_input, launch_command, other_serve
 
 
 class ServingEngine(unittest.TestCase):
+    def test_a_counter_delta_leaves_out_the_gauge(self):
+        before = {"serve.dispatches": 4, "serve.alive_tasks": 3}
+        after = {"serve.dispatches": 5, "serve.alive_tasks": 1}
+        self.assertEqual(Serve.delta(before, after), {"serve.dispatches": 1})
+
     def test_quiet_host_includes_resident_real_servers_only(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -40,17 +45,19 @@ class ServingEngine(unittest.TestCase):
 
     def test_header_is_the_host_term_and_counter_snapshots_surround_the_call(self):
         subject = Serve.__new__(Serve)
-        with patch.object(subject, "counters", side_effect=[{"calls": 10}, {"calls": 11}]), \
+        subject.route = "wire"
+        with patch.object(subject, "counters", side_effect=[{"calls": 10, "serve.report_bytes": 0}, {"calls": 11, "serve.report_bytes": 128}]), \
              patch.object(subject, "request", return_value=({"report": {}}, 9000, "5", 128)):
             response, elapsed = subject.call({"op": "get", "target": "x.md"})
         self.assertEqual(elapsed, 9000)
         self.assertEqual(response["host_ns"], 5000)
         self.assertEqual(response["serving_overhead_ns"], 4000)
-        self.assertEqual(response["counters"], {"calls": 1})
+        self.assertEqual(response["counters"], {"calls": 1, "serve.report_bytes": 128})
         self.assertEqual(response["report_bytes"], 128)
 
     def test_a_shipped_build_without_the_timing_instrument_is_refused(self):
         subject = Serve.__new__(Serve)
+        subject.route = "wire"
         with patch.object(subject, "counters", return_value={}), \
              patch.object(subject, "request", return_value=({}, 9000, None, 2)):
             with self.assertRaisesRegex(ValueError, "lacks the counters feature"):
@@ -94,6 +101,7 @@ class ServingEngine(unittest.TestCase):
     def test_a_fresh_connection_times_hello_and_get_together(self):
         from unittest.mock import Mock
         subject = Serve.__new__(Serve)
+        subject.route = "wire"
         subject.connection = Mock()
         subject.attempts = 1
         subject.hellos = 1
@@ -207,6 +215,7 @@ class FakeHost:
 
     def subject(self):
         subject = Serve.__new__(Serve)
+        subject.route = "wire"
         subject.port, subject.secret, subject.channel = self.port, SECRET, "dev"
         subject.bearer, subject.attempts, subject.hellos, subject.connection = "bearer-text", 0, 0, None
         return subject
@@ -284,3 +293,46 @@ class VerifiedHello(unittest.TestCase):
                 self.assertEqual(host.bearers, [])
                 self.assertIsNone(subject.connection)
                 self.assertEqual(subject.hellos, 0)
+
+class McpCalls(unittest.TestCase):
+    def test_mcp_uses_native_params_without_mode_and_preserves_report_byte_counter(self):
+        subject = Serve.__new__(Serve)
+        subject.route = "mcp"
+        report = {"report": {"outcome": "applied"}}
+        with patch.object(subject, "initialize_mcp") as initialize, \
+             patch.object(subject, "counters", side_effect=[{"serve.report_bytes": 10}, {"serve.report_bytes": 40}]), \
+             patch.object(subject, "request", return_value=({"result": {"structuredContent": report}}, 9000, "5", 128)) as request:
+            response, elapsed = subject.call({"op": "set", "value": "fresh"})
+        initialize.assert_called_once()
+        method, path, envelope = request.call_args.args
+        self.assertEqual((method, path), ("POST", "/mcp"))
+        self.assertEqual(envelope["params"]["name"], "set")
+        expected = params({"op": "set", "value": "fresh"})[1]
+        expected.pop("mode")
+        self.assertEqual(envelope["params"]["arguments"], expected)
+        self.assertEqual(response["answer"], report)
+        self.assertEqual(response["report_bytes"], 30)
+        self.assertEqual(response["encoded_bytes"], 128)
+        self.assertEqual(elapsed, 9000)
+
+    def test_tool_list_lengths_records_only_successful_tools_arrays(self):
+        subject = Serve.__new__(Serve)
+        for invalid in ({"error": {"code": -32600}}, {"result": {}},
+                        {"result": {"tools": {}}}):
+            with self.subTest(answer=invalid), \
+                 patch.object(subject, "initialize_mcp"), \
+                 patch.object(subject, "request", side_effect=[
+                     (invalid, 0, None, 50),
+                     ({"result": {"tools": []}}, 0, None, 100)]):
+                self.assertEqual(subject.tool_list_lengths(), {"2026-07-28": 100})
+
+    def test_initialize_is_once_per_connection(self):
+        from types import SimpleNamespace
+        subject = Serve.__new__(Serve)
+        subject.connection = SimpleNamespace(sock=object())
+        subject.mcp_initialized = False
+        with patch.object(subject, "request") as request:
+            subject.initialize_mcp()
+            subject.initialize_mcp()
+            request.assert_called_once()
+            self.assertEqual(request.call_args.args[2]["method"], "initialize")

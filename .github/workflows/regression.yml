@@ -67,6 +67,9 @@ jobs:
       - name: Test the performance harness
         if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
         run: python3 -m unittest discover -s scripts/performance -v
+      - name: Test the dogfood sampler
+        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
+        run: python3 -m unittest discover -s scripts/dogfood -v
       - name: Lint the shipped libraries
         if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
         run: cargo clippy --locked -p norn-db -p norn-fs -p norn-store --lib -- -D warnings
@@ -77,7 +80,7 @@ jobs:
         if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
         run: cargo clippy --locked -p norn --test serve_drain --features induced-failure -- -D warnings
       # The counters build: the counters route, its unit tests, the token
-      # counter bar and the wire counter bars compile only with the feature
+      # counter bar and the wire and MCP counter bars compile only with the feature
       # on, as ci.yml's lint job explains.
       - name: Lint the counters build
         if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
@@ -88,9 +91,15 @@ jobs:
       - name: Counters route
         if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
         run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked --no-fail-fast -p norn-serve --features counters --lib http::tests::the_counters_route_answers_the_token_counters_behind_the_bearer -- --exact
+      - name: Counters route alive tasks
+        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
+        run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked --no-fail-fast -p norn-serve --features counters --lib http::tests::the_counters_route_answers_the_runtimes_alive_tasks -- --exact
       - name: Wire counter bars
         if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
         run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked --no-fail-fast -p norn --features counters --test serve_wire
+      - name: MCP counter bars
+        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
+        run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked --no-fail-fast -p norn --features counters --test serve_mcp
       - name: Wire host time
         if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
         run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked --no-fail-fast -p norn-serve --features counters --lib http::tests::wire::every_wire_answer_carries_the_host_time_under_the_counters_feature -- --exact
@@ -160,7 +169,7 @@ jobs:
   performance-serve:
     name: full nightly performance (serve)
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v7
         with:

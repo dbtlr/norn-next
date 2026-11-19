@@ -87,7 +87,7 @@ const CASE_TOTAL: usize = 119;
 /// the constant, which is the moment the edit becomes a thing a reviewer
 /// looked at. This is the fixture generator's contract digest applied to a
 /// registry.
-const CONTRACT_DIGEST: &str = "daf265fa5757d96d32f79c2e0e505cb3dc29c7ad82e50bfc74d673bbae6ee83b";
+const CONTRACT_DIGEST: &str = "50d699911636ad7881d2bade2f1f93e531a808774d1ce07e12882a46465c8eae";
 
 /// The cases carried by tests today, by name.
 ///
@@ -107,6 +107,7 @@ const BOUND_CASES: &[&str] = &[
     "a-page-continues-at-the-successor-of-its-last-row",
     "a-repair-fixes-a-list-by-its-elements",
     "a-sidecar-is-keyed-by-its-own-model-and-scoped-by-the-store-epoch",
+    "amortized-periodic-work-stays-amortized",
     "barriers-fail-closed",
     "cache-identity-is-total",
     "cache-is-authoritative-for-content",
@@ -125,10 +126,12 @@ const BOUND_CASES: &[&str] = &[
     "existence-probes-and-per-request-allocation-are-bounded",
     "failure-is-carried-in-the-protocols-native-channel",
     "finding-candidates-are-capped-with-a-total",
+    "finding-payload-is-bounded",
     "fixtures-carry-real-content-volume",
     "forecast-and-apply-are-one-classifier",
     "format-never-implies-consent",
     "frontmatter-roundtrip-or-refuse",
+    "freshness-proof-is-off-the-request-path",
     "guard-binds-executed-sql",
     "harness-condition-waits-have-deadlines",
     "harness-processes-are-bounded-and-exec-safe",
@@ -136,6 +139,7 @@ const BOUND_CASES: &[&str] = &[
     "harness-waits-have-deadlines",
     "link-repair-targets-unresolvable-text",
     "mutation-honors-its-planned-flags",
+    "no-cost-term-multiplies-two-request-varying-quantities",
     "narrowing-arguments-narrow-work",
     "no-in-memory-query-layer",
     "one-field-edit-is-a-one-field-diff",
@@ -150,12 +154,15 @@ const BOUND_CASES: &[&str] = &[
     "reads-are-not-blocked-by-writes",
     "repair-evaluates-only-the-paths-it-is-asked-for",
     "resolved-path-gates-resolved-path-reports",
+    "scoping-wins-are-visible-in-counters",
     "set-valued-answers-are-pushed-down",
     "steps-report-their-own-outcome",
+    "targeted-lookups-are-indexed",
     "text-search-is-indexed",
     "unknown-sort-or-projection-keys-never-silently-no-op",
     "unsatisfiable-config-is-rejected-at-load",
     "vault-root-containment",
+    "warm-requests-derive-nothing",
     "whole-vault-work-is-declared-and-triggered-deliberately",
     "write-through-the-composed-post-state",
     "write-verification-gate-covers-the-whole-contract",
@@ -166,7 +173,7 @@ const BOUND_CASES: &[&str] = &[
 ///
 /// A reason waiting on a name inside a file the tree already holds states that
 /// name as a `symbol-absent` ground and leaves this list. What is left is the
-/// residue no subject reaches, and it is three classes rather than a bag:
+/// residue no subject reaches, and it is four classes rather than a bag:
 ///
 /// - **A `compile_fail` doctest.** One clause is held by a type and pinned by a
 ///   doctest that must not compile, and a doctest is not a `#[test]` function a
@@ -174,7 +181,12 @@ const BOUND_CASES: &[&str] = &[
 ///   integration target, which the grammar cites, so binding the case on those
 ///   alone would name carriers for a clause none of them asserts.
 /// - **A guard with no settled home.** The scan or lint the case waits on has
-///   no file decided on to hold it, and a symbol ground names a file.
+///   no file decided on to hold it, and a symbol ground names a file. A counter
+///   member no task has named is this class too: the vocabulary's file exists,
+///   but pre-committing a member nobody owns would invent a carrier.
+/// - **A venue outside the Rust tree.** A clock belongs to the nightly, not to
+///   the pull request counters suite (ADR 0004), and the nightly's harness and
+///   self-checks are Python, which the symbol grammar does not read.
 /// - **An unwired surface.** The binary is empty and the corpus activation list
 ///   is data; what is absent is an invocation, which is a state of that data
 ///   rather than a name any declaration carries.
@@ -193,10 +205,15 @@ const BOUND_CASES: &[&str] = &[
 /// the edit is in the diff.
 const UNFALSIFIABLE_DORMANCY: &[&str] = &[
     "a-create-never-takes-a-name-somebody-else-holds",
+    "budget-is-a-read-budget-not-a-recompute-budget",
     "comment-claims-are-test-bound",
+    "compiled-work-happens-once-per-generation",
+    "declared-capability-is-exercised",
     "harness-assertions-observe-stable-facts",
+    "harness-self-check-is-not-immune-to-contamination",
     "instrumentation-exists-and-is-consumed",
     "output-parity-cannot-certify-structure",
+    "recovery-is-never-billed-to-the-next-caller",
     "substrate-capabilities-are-probed-before-they-are-relied-on",
     "vault-wide-work-is-a-declared-roster",
 ];

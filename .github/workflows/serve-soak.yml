@@ -1,0 +1,17 @@
+name: serve soak
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  serve-soak:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Show repository toolchain
+        run: rustc --version
+      - name: MCP real process soak
+        env:
+          LANE_FEATURES: counters,induced-failure
+        run: .github/scripts/lane-suite.sh norn serve_soak --nocapture

@@ -63,10 +63,12 @@
       "sources": ["NRN-a59", "NRN-a61", "NRN-a58", "NRN-a60"],
       "binding": {
         "status": "dormant",
-        "reason": "Native wire request work is held in logical counters by the serving growth bar. The whole property also requires a refusal-stub round-trip ratio and reconciliation of the frontmatter soak ceiling. MCP request budgeting has no adapter yet. The MCP obligation waits for symbol-absent crates/norn/tests/serve_counters.rs::mcp_counters_hold_the_native_bars, which will measure or re-ground this property on the served surface. The retained native evidence is crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault.",
+        "reason": "the counter half is carried: crates/norn-host/tests/counter_gate.rs holds a request's cost in counts in process, and crates/norn/tests/serve_counters.rs::mcp_counters_hold_the_native_bars holds served MCP and wire requests to the same counts at every scale. The clock half has no subject in this suite and must not: ADR 0004 keeps clocks out of the pull request counters suite, so a ratio of verb cost to a refusal-stub round-trip floor belongs to the nightly serve engine, scripts/performance/serve.py, which times both routes but times no refusal stub. One clock is still a ceiling, in the soak lane: crates/norn-text/tests/frontmatter_cost.rs::a_block_at_the_bound_reads_inside_its_ceiling holds a parse under a wall-clock sanity ceiling, which a binding reconciles with the property rather than cites past; the soak lane's future is Layer 6.4's soak decision. Neither the nightly's stub nor that reconciliation has a Rust name a symbol ground can pre-commit, so the case is pinned as unfalsifiable until one of those venues names it.",
         "grounds": [
-          { "symbol-present": "crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault" },
-          { "symbol-absent": "crates/norn/tests/serve_counters.rs::mcp_counters_hold_the_native_bars" }
+          { "present": "crates/norn-host/tests/counter_gate.rs" },
+          { "symbol-present": "crates/norn/tests/serve_counters.rs::mcp_counters_hold_the_native_bars" },
+          { "present": "scripts/performance/serve.py" },
+          { "symbol-present": "crates/norn-text/tests/frontmatter_cost.rs::a_block_at_the_bound_reads_inside_its_ceiling" }
         ]
       }
     },
@@ -179,10 +181,14 @@
       "sources": ["NRN-480", "NRN-522", "NRN-29"],
       "binding": {
         "status": "dormant",
-        "reason": "Native serving tests isolate their hosts by port and directories. They do not inject contaminated MCP comparison output and prove the self-check rejects it. The MCP comparison surface does not exist yet. The MCP obligation waits for symbol-absent crates/norn/tests/serve_counters.rs::mcp_counters_hold_the_native_bars, which will measure or re-ground this property on the served surface. The retained native evidence is crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault.",
+        "reason": "isolation is by construction on both harnesses: every process crates/norn-testkit/src/process.rs starts runs in a sandbox of its own, and the nightly serve engine, scripts/performance/serve.py, runs its subject on an isolated channel with a token file of its own and detects a resident norn serve, a detector scripts/performance/test_serve.py holds; the recorder, scripts/performance/record.py, and the nightly driver, scripts/performance/nightly.py, refuse to run beside one. crates/norn-testkit/src/equivalence.rs compares two derived stores field by field. What has no subject is the other half: nothing contaminates a comparison's output on purpose and requires the self-check to reject the run. Its venue is the nightly harness, whose self-checks are Python, so no Rust name exists for a symbol ground to pre-commit, and the case is pinned as unfalsifiable until the nightly names that check.",
         "grounds": [
-          { "symbol-present": "crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault" },
-          { "symbol-absent": "crates/norn/tests/serve_counters.rs::mcp_counters_hold_the_native_bars" }
+          { "present": "crates/norn-testkit/src/process.rs" },
+          { "present": "scripts/performance/serve.py" },
+          { "present": "scripts/performance/test_serve.py" },
+          { "present": "scripts/performance/record.py" },
+          { "present": "scripts/performance/nightly.py" },
+          { "present": "crates/norn-testkit/src/equivalence.rs" }
         ]
       }
     },
@@ -286,11 +292,9 @@
       "property": "A change that narrows the work an operation does is accompanied by a counter that moves. A scoping win masked by surrounding whole-vault work — 1522 documents down to 1, invisible in cost — is not accepted as complete.",
       "sources": ["NRN-a61", "NRN-a63", "NRN-457"],
       "binding": {
-        "status": "dormant",
-        "reason": "The native serving growth bar compares request work at independent scales and repeats requests as a positive control. It does not establish that a narrowed MCP request is visible through translation overhead. The MCP adapter is the next surface. The MCP obligation waits for symbol-absent crates/norn/tests/serve_counters.rs::mcp_counters_hold_the_native_bars, which will measure or re-ground this property on the served surface. The retained native evidence is crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault.",
-        "grounds": [
-          { "symbol-present": "crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault" },
-          { "symbol-absent": "crates/norn/tests/serve_counters.rs::mcp_counters_hold_the_native_bars" }
+        "status": "bound",
+        "tests": [
+          "crates/norn/tests/serve_counters.rs::mcp_counters_hold_the_native_bars"
         ]
       }
     },
@@ -348,11 +352,9 @@
       "property": "Periodic maintenance fires at most once per period and costs a request nothing: the retention sweep runs once a day and adds zero to the request path. Held as a positive control — the shape the rest of the maintenance surface is measured against.",
       "sources": ["NRN-a62"],
       "binding": {
-        "status": "dormant",
-        "reason": "The native serving bar holds warm request work flat. It does not observe a daily retention sweep firing exactly once per period through the MCP surface; that surface is absent. The MCP obligation waits for symbol-absent crates/norn/tests/serve_counters.rs::mcp_counters_hold_the_native_bars, which will measure or re-ground this property on the served surface. The retained native evidence is crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault.",
-        "grounds": [
-          { "symbol-present": "crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault" },
-          { "symbol-absent": "crates/norn/tests/serve_counters.rs::mcp_counters_hold_the_native_bars" }
+        "status": "bound",
+        "tests": [
+          "crates/norn-host/src/production.rs::the_death_prune_comes_due_at_most_once_a_period_and_a_read_drives_none_of_it"
         ]
       }
     },
@@ -422,10 +424,12 @@
       "sources": ["NRN-a61", "NRN-a62", "NRN-a60", "NRN-a58"],
       "binding": {
         "status": "dormant",
-        "reason": "Native serving request statements and filesystem work are measured. These counts do not count compilation, parsing or telemetry opens per MCP request generation. The MCP adapter that owns that generation is absent. The MCP obligation waits for symbol-absent crates/norn/tests/serve_counters.rs::mcp_counters_hold_the_native_bars, which will measure or re-ground this property on the served surface. The retained native evidence is crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault.",
+        "reason": "the lifetimes exist and one owner-lifetime derivation is held: crates/norn-store/src/increment.rs stamps one generation across a changeset, crates/norn-store/src/read/glob.rs compiles a path glob once per statement, and crates/norn-serve/src/mcp.rs::prepare_tools derives the served tool list once, which every reading of crates/norn/tests/serve_counters.rs holds at exactly one for the life of the process. What has no subject is the counters the property reads: crates/norn-store/src/counters.rs counts derivation and statements, not a matcher compile, a config parse or a telemetry open, and the served counter vocabulary carries no such member either. Its venue is that store vocabulary, at Layer 1; no task has named the members, so there is nothing a symbol ground can pre-commit, and the case is pinned as unfalsifiable until one does.",
         "grounds": [
-          { "symbol-present": "crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault" },
-          { "symbol-absent": "crates/norn/tests/serve_counters.rs::mcp_counters_hold_the_native_bars" }
+          { "present": "crates/norn-store/src/increment.rs" },
+          { "present": "crates/norn-store/src/read/glob.rs" },
+          { "symbol-present": "crates/norn-serve/src/mcp.rs::prepare_tools" },
+          { "present": "crates/norn-store/src/counters.rs" }
         ]
       }
     },
@@ -479,10 +483,12 @@
       "sources": ["NRN-a59", "NRN-a60", "NRN-a63"],
       "binding": {
         "status": "dormant",
-        "reason": "The native route serves the wire vocabulary. A complete reconciliation of declared readers and indexes with production MCP plans still needs the MCP adapter and its captured plan roster, which are absent. The MCP obligation waits for symbol-absent crates/norn/tests/serve_counters.rs::mcp_counters_hold_the_native_bars, which will measure or re-ground this property on the served surface. The retained native evidence is crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault.",
+        "reason": "the schema declares its indexes and some plans are proven over emitted SQL: crates/norn-store/src/ddl/mod.rs designs the schema whole, and crates/norn-store/tests/store/pillars.rs asserts the findings-maintenance statements search the index their parameters bound. The production callers now exist — crates/norn-serve/src/wire.rs dispatches every served verb, and /mcp runs through the same table — but nothing captures the statements production emits and reconciles every declared index, and every reader crates/norn-store/src/request/mod.rs offers, against them by EXPLAIN. That roster is store work, at Layer 1, with no file settled to hold its guard, so there is no name a symbol ground can pre-commit, and the case is pinned as unfalsifiable until one is. A reader with a named future consumer stays a dormant carrier; the roster lists it rather than removing it.",
         "grounds": [
-          { "symbol-present": "crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault" },
-          { "symbol-absent": "crates/norn/tests/serve_counters.rs::mcp_counters_hold_the_native_bars" }
+          { "present": "crates/norn-store/src/ddl/mod.rs" },
+          { "present": "crates/norn-store/tests/store/pillars.rs" },
+          { "present": "crates/norn-serve/src/wire.rs" },
+          { "present": "crates/norn-store/src/request/mod.rs" }
         ]
       }
     },
@@ -546,11 +552,9 @@
       "property": "A warm read performs zero filesystem stat operations and loads zero freshness-baseline rows: the freshness counter is zero warm. Trust is asserted by the substrate rather than re-proven per request, where a 1593-row select plus a recursive metadata walk cost ~9.0 ms — 78% of a filtered find and 52% of a warm count. What the mechanism does cost is independent of entries the vault model does not own.",
       "sources": ["NRN-a60", "NRN-a62"],
       "binding": {
-        "status": "dormant",
-        "reason": "Native warm work is measured through the serving growth bar. This does not observe every freshness proof or generation invalidation on the MCP request path, whose adapter is absent. The MCP obligation waits for symbol-absent crates/norn/tests/serve_counters.rs::mcp_counters_hold_the_native_bars, which will measure or re-ground this property on the served surface. The retained native evidence is crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault.",
-        "grounds": [
-          { "symbol-present": "crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault" },
-          { "symbol-absent": "crates/norn/tests/serve_counters.rs::mcp_counters_hold_the_native_bars" }
+        "status": "bound",
+        "tests": [
+          "crates/norn/tests/serve_counters.rs::mcp_warm_requests_derive_nothing"
         ]
       }
     },
@@ -656,11 +660,9 @@
       "property": "No path costs result size times corpus size. Statements per request are O(1) in result-set size — set-valued reads rather than a query per row — a lookup inside an iteration is O(1), and link-impact for N moved documents is N indexed queries rather than a scan of every link. A per-row query loop and a nested scan are failing structural assertions, not slow code.",
       "sources": ["NRN-a60", "NRN-a63", "NRN-a61", "NRN-a58"],
       "binding": {
-        "status": "dormant",
-        "reason": "The native growth bar varies unrelated vault dimensions for one bounded get. It does not vary every pair of request parameters, or prove served MCP move work follows its link neighborhood. The MCP adapter is the next absent surface. The MCP obligation waits for symbol-absent crates/norn/tests/serve_counters.rs::mcp_counters_hold_the_native_bars, which will measure or re-ground this property on the served surface. The retained native evidence is crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault.",
-        "grounds": [
-          { "symbol-present": "crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault" },
-          { "symbol-absent": "crates/norn/tests/serve_counters.rs::mcp_counters_hold_the_native_bars" }
+        "status": "bound",
+        "tests": [
+          "crates/norn/tests/serve_counters.rs::mcp_request_cost_follows_one_quantity_at_a_time"
         ]
       }
     },
@@ -838,10 +840,12 @@
       "sources": ["NRN-a60", "NRN-a61", "NRN-a62"],
       "binding": {
         "status": "dormant",
-        "reason": "The native growth bar holds a fixed get report flat across document counts. It does not measure body-less MCP projections over independently growing body bytes and real-process RSS. The MCP projection surface is absent. The MCP obligation waits for symbol-absent crates/norn/tests/serve_counters.rs::mcp_counters_hold_the_native_bars, which will measure or re-ground this property on the served surface. The retained native evidence is crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault.",
+        "reason": "the wire-bytes half is carried over MCP: crates/norn/tests/serve_counters.rs::mcp_bodyless_answers_ignore_body_bytes holds a body-less find and a count to the same report and encoded bytes at a one-line body and at 32 KiB of body per document, with the body column as the growing control, and crates/norn-store/src/find/hydrate.rs reads a projection only where a column names it. The resident-set half has no subject: peak RSS for a body-less verb under growing body bytes needs a real-process pair that varies body bytes with the document count held, and the memory lane on the real process, crates/norn/tests/serve_memory.rs, measures pairs that move documents and bytes together. The pair it waits on is the one the scale-assertion case already pre-commits, symbol-absent crates/norn-testkit/src/scale.rs::AxisIsolatedPair; the memory lane binds this half when that pair lands.",
         "grounds": [
-          { "symbol-present": "crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault" },
-          { "symbol-absent": "crates/norn/tests/serve_counters.rs::mcp_counters_hold_the_native_bars" }
+          { "symbol-present": "crates/norn/tests/serve_counters.rs::mcp_bodyless_answers_ignore_body_bytes" },
+          { "present": "crates/norn-store/src/find/hydrate.rs" },
+          { "present": "crates/norn/tests/serve_memory.rs" },
+          { "symbol-absent": "crates/norn-testkit/src/scale.rs::AxisIsolatedPair" }
         ]
       }
     },
@@ -853,10 +857,12 @@
       "sources": ["NRN-a59", "NRN-a62"],
       "binding": {
         "status": "dormant",
-        "reason": "Native idle re-attach is observed by serve_wire, and fixed request work by the serving growth bar. Neither proves every out-of-band recovery latency ratio or MCP connection-open count. The MCP request surface is absent. The MCP obligation waits for symbol-absent crates/norn/tests/serve_counters.rs::mcp_counters_hold_the_native_bars, which will measure or re-ground this property on the served surface. The retained native evidence is crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault.",
+        "reason": "recovery runs off every caller's thread: crates/norn-host/src/lifecycle.rs answers a recovery demand on the lifecycle worker pool, and crates/norn-host/tests/kill_recovery.rs converges after a process died mid-increment. The two readings the property is stated over have no subject. Request latency after an out-of-band change against warm is a clock, which ADR 0004 keeps out of the pull request counters suite; its venue is the nightly serve engine, scripts/performance/serve.py, which times warm workloads and no read after an out-of-band change. A request's connection-open count is not in crates/norn-store/src/counters.rs, whose vocabulary counts derivation and statements, and no task has named that member. Neither venue has a Rust name a symbol ground can pre-commit, so the case is pinned as unfalsifiable until one does.",
         "grounds": [
-          { "symbol-present": "crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault" },
-          { "symbol-absent": "crates/norn/tests/serve_counters.rs::mcp_counters_hold_the_native_bars" }
+          { "present": "crates/norn-host/src/lifecycle.rs" },
+          { "present": "crates/norn-host/tests/kill_recovery.rs" },
+          { "present": "scripts/performance/serve.py" },
+          { "present": "crates/norn-store/src/counters.rs" }
         ]
       }
     },
@@ -930,11 +936,10 @@
       "property": "A question about one identifier is one indexed statement, and statements executed are O(1) and independent of vault size. This binds every re-entry point: resolving one string to one path, asking which documents link here, checking membership for k paths as k probes rather than a materialized map, and every advisory uniqueness or collision check — an advisory never introduces a whole-vault term.",
       "sources": ["NRN-a60", "NRN-a63", "NRN-a59"],
       "binding": {
-        "status": "dormant",
-        "reason": "The native growth bar covers one bounded get at independent scales. It does not establish every MCP membership probe and advisory collision check is indexed. The MCP adapter that composes these requests is absent. The MCP obligation waits for symbol-absent crates/norn/tests/serve_counters.rs::mcp_counters_hold_the_native_bars, which will measure or re-ground this property on the served surface. The retained native evidence is crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault.",
-        "grounds": [
-          { "symbol-present": "crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault" },
-          { "symbol-absent": "crates/norn/tests/serve_counters.rs::mcp_counters_hold_the_native_bars" }
+        "status": "bound",
+        "tests": [
+          "crates/norn/tests/serve_counters.rs::mcp_counters_hold_the_native_bars",
+          "crates/norn/tests/serve_counters.rs::mcp_targeted_lookups_stay_flat_with_the_vault"
         ]
       }
     },
@@ -1105,12 +1110,9 @@
       "property": "Finding payload grows at most linearly with vault size at fixed defect density. No ambiguity class yields payload quadratic in its own size: 55 KB becoming 8.4 MB across three times the documents is the shape this forbids.",
       "sources": ["NRN-a61"],
       "binding": {
-        "status": "dormant",
-        "reason": "A finding is produced and stored today: crates/norn-host/src/derivation.rs plans one for every document it could not read whole, and the wire route, crates/norn-serve/src/wire.rs, hands it to a caller whole. What has no subject yet is the payload this property is stated over: what a caller is handed and how it grows with the vault at a fixed defect density. The surface it is measured on first is MCP, a validate on /mcp at two vault sizes and a fixed defect density, and that measurement waits for symbol-absent crates/norn/tests/serve_counters.rs::mcp_counters_hold_the_native_bars, the served MCP counter test that also settles each ambiguity class's own payload.",
-        "grounds": [
-          { "present": "crates/norn-host/src/derivation.rs" },
-          { "symbol-absent": "crates/norn/tests/serve_counters.rs::mcp_counters_hold_the_native_bars" },
-          { "present": "crates/norn-serve/src/wire.rs" }
+        "status": "bound",
+        "tests": [
+          "crates/norn/tests/serve_counters.rs::finding_payload_is_bounded_over_mcp"
         ]
       }
     },
@@ -1311,11 +1313,9 @@
       "property": "A warm request derives nothing: every derivation counter reads zero. Counters are zero for every substrate input the handler does not read, so a verb that reads no vault state costs the round-trip floor and nothing more — a whole-tree stat sweep billed to a verb whose closure ignores the vault is ~9.0 ms of pure tax.",
       "sources": ["NORN-a1", "NRN-a59", "NRN-a62"],
       "binding": {
-        "status": "dormant",
-        "reason": "Native warm get work is held flat by the serving growth bar and idle re-attach derives zero in serve_wire. The full property also enumerates unread inputs and the round-trip floor of a no-state MCP handler. That MCP surface is absent. The MCP obligation waits for symbol-absent crates/norn/tests/serve_counters.rs::mcp_counters_hold_the_native_bars, which will measure or re-ground this property on the served surface. The retained native evidence is crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault.",
-        "grounds": [
-          { "symbol-present": "crates/norn/tests/serve_counters.rs::served_counters_do_not_grow_with_the_vault" },
-          { "symbol-absent": "crates/norn/tests/serve_counters.rs::mcp_counters_hold_the_native_bars" }
+        "status": "bound",
+        "tests": [
+          "crates/norn/tests/serve_counters.rs::mcp_warm_requests_derive_nothing"
         ]
       }
     },

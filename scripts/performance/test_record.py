@@ -142,6 +142,20 @@ class FixtureTests(unittest.TestCase):
                 fixture(Path("worker"), fixtures, 2000)
             self.assertEqual(list(fixtures.iterdir()), [])
 
+class ServeOrderTests(unittest.TestCase):
+    def test_whole_blocks_balance_routes_and_write_directions_after_discard(self):
+        from record import serve_trials
+        for name in ("get_small", "rename", "set_field"):
+            calls = list(serve_trials(name, 3, 9, 5))
+            kept = [(i, r) for i, r, keep in calls if keep]
+            self.assertEqual(kept[0][0], 4 if name == "get_small" else 12)
+            self.assertEqual(len(kept), 16)
+            for route in ("wire", "mcp"):
+                self.assertEqual(sum(r == route for i, r in kept), 8)
+                self.assertEqual(sum(r == route and i % 2 == 0 for i, r in kept), 4)
+            self.assertEqual([r for i, r, k in calls[:8]],
+                             ["wire", "mcp", "mcp", "wire", "mcp", "wire", "wire", "mcp"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -7284,6 +7284,100 @@ mod tests {
     /// tells the engine and a status, and what a pass costs.
     mod death_prune_cases {
         include!("production/death_prune_tests.rs");
+
+        // The running-host period case is declared here rather than in the
+        // included file, so the regression registry can cite it by this
+        // file's path.
+
+        /// Wait until `host` has finished `passes` death-prune passes, answering the
+        /// reading that shows it.
+        ///
+        /// Every probe wakes the scheduler, as any site that left work owed would, so
+        /// the clock is asked about far more often than once a period and nothing but
+        /// the clock keeps two passes apart. The wake is needed as well as wanted: a
+        /// reconcile that records a death sends its own wake while it still holds the
+        /// coverage, and the ask that wake starts reads the clock as it stood before
+        /// the death, so on a host where no engine stands for the vault the pass
+        /// would otherwise wait for the next unrelated wake.
+        fn wait_for_passes(
+            host: &crate::Host<ProductionEntryOps>,
+            passes: u64,
+        ) -> crate::DeathPruneReading {
+            wait_until("the death prune's passes", lifecycle_budget(), || {
+                let reading = host.ops().death_prune_reading();
+                if reading.passes_finished >= passes {
+                    Observed::Met(reading)
+                } else {
+                    host.wake_background();
+                    Observed::Pending(format!("{reading:?}"))
+                }
+            })
+            .unwrap_or_else(|failure| panic!("{failure}"))
+        }
+
+        /// **On a running host the death prune comes due at most once a period, on
+        /// the background lane, and a read drives none of it.** The clock runs at a
+        /// short period. The first period owes a pass, and each of three deaths owes
+        /// one more, so exactly four passes run, each a whole period after the one
+        /// before it began: the clock reads the store's marks no more often than the
+        /// elapsed periods allow, however often the scheduler asks. Reads served
+        /// across four more periods, with the clock past due and nothing new owed,
+        /// run no due check, no pass and no maintenance leg, so a request pays
+        /// nothing for the periodic work.
+        #[test]
+        fn the_death_prune_comes_due_at_most_once_a_period_and_a_read_drives_none_of_it() {
+            let period = Duration::from_millis(150);
+            let f = Fixture::new("death-prune-period");
+            for index in 0..4 {
+                write(
+                    &f,
+                    &[(&format!("docs/d{index}.md"), &format!("note {index}\n"))],
+                );
+            }
+            let (_engines, ops) = engines_and_ops(&f, Some(period));
+            // Read before the attach, so the elapsed periods counted from here are
+            // never fewer than the clock has really had since it started.
+            let started = Instant::now();
+            let (host, name, _lease) = host_over(&f, ops);
+
+            wait_for_passes(&host, 1);
+            for index in 0..3 {
+                remove(&f, &[&format!("docs/d{index}.md")]);
+                wait_for_passes(&host, index + 2);
+            }
+            let settled = host.ops().death_prune_reading();
+            assert_eq!(settled.passes_begun, 4, "{settled:?}");
+            assert_eq!(settled.work.deaths_removed, 3, "{settled:?}");
+            let periods = u64::try_from(started.elapsed().as_nanos() / period.as_nanos()).unwrap();
+            assert!(
+                settled.due_checks <= periods,
+                "{} due checks in {periods} periods",
+                settled.due_checks
+            );
+
+            let legs = host.maintenance_reading().legs;
+            let quiet = Instant::now();
+            let mut reads = 0_u32;
+            while quiet.elapsed() < period * 4 {
+                host.get(&norn_wire::GetParams::new(
+                    norn_wire::VaultAddress::name(name.clone()),
+                    norn_wire::ResolutionTarget::new("d3").unwrap(),
+                ))
+                .expect("a read over a ready vault");
+                reads += 1;
+            }
+            assert!(reads > 0);
+            assert_eq!(
+                host.ops().death_prune_reading(),
+                settled,
+                "{reads} reads across four periods drove the death prune"
+            );
+            assert_eq!(
+                host.maintenance_reading().legs,
+                legs,
+                "{reads} reads ran a maintenance leg"
+            );
+        }
     }
 
     /// The store's periodic verification as one background unit of the lane:

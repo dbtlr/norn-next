@@ -1745,16 +1745,19 @@ fn assert_complete_active_matrix(workflow: &str, full: bool) {
             ]
         }
     );
-    // The counters build's one suite: a test step the PR gate runs in its
+    // The counters build's serving suites: test steps the PR gate runs in its
     // lint job, beside the lint of the same feature build.
     const TOKEN_COUNTER_BAR: &str = ".github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn --features counters --test serve_counters";
-    // And norn-serve's one unit test behind the same feature, named exactly
-    // so a rename is a run of no case, which test-suite.sh rejects.
+    // And norn-serve's unit tests of the counters route behind the same
+    // feature, named exactly so a rename is a run of no case, which
+    // test-suite.sh rejects.
     const COUNTERS_ROUTE: &str = ".github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-serve --features counters --lib http::tests::the_counters_route_answers_the_token_counters_behind_the_bearer -- --exact";
-    // The wire route's counter bars over a real host, and its host-time
+    const COUNTERS_ROUTE_TASKS: &str = ".github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-serve --features counters --lib http::tests::the_counters_route_answers_the_runtimes_alive_tasks -- --exact";
+    // The wire and MCP counter bars over a real host, and the wire host-time
     // header's unit test, named exactly for the same reason. The PR lint job
     // and the full regression job both run them, after the counters route.
     const WIRE_COUNTER_BARS: &str = ".github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn --features counters --test serve_wire";
+    const MCP_COUNTER_BARS: &str = ".github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn --features counters --test serve_mcp";
     const WIRE_HOST_TIME: &str = ".github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-serve --features counters --lib http::tests::wire::every_wire_answer_carries_the_host_time_under_the_counters_feature -- --exact";
     const PR_MEMORY: &str = ".github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn serve_memory --nocapture --test-threads=1";
     // The host process's port probe, pinned on macOS in the PR platform job and
@@ -1781,13 +1784,16 @@ fn assert_complete_active_matrix(workflow: &str, full: bool) {
                 "cargo clippy --locked -p norn-host --test performance -- -D warnings",
                 "cargo clippy --locked -p norn-host --test performance --features induced-failure -- -D warnings",
                 "python3 -m unittest discover -s scripts/performance -v",
+                "python3 -m unittest discover -s scripts/dogfood -v",
                 "cargo clippy --locked -p norn-db -p norn-fs -p norn-store --lib -- -D warnings",
                 "cargo clippy --locked -p norn-host --all-targets --features induced-failure -- -D warnings",
                 "cargo clippy --locked -p norn --test serve_drain --features induced-failure -- -D warnings",
                 "cargo clippy --locked --workspace --all-targets --features norn/counters -- -D warnings",
                 TOKEN_COUNTER_BAR,
                 COUNTERS_ROUTE,
+                COUNTERS_ROUTE_TASKS,
                 WIRE_COUNTER_BARS,
+                MCP_COUNTER_BARS,
                 WIRE_HOST_TIME,
                 PR_MEMORY,
                 "cargo doc --locked --workspace --no-deps --document-private-items",
@@ -1907,7 +1913,9 @@ fn assert_complete_active_matrix(workflow: &str, full: bool) {
                         || command.starts_with("python3")
                         || *command == TOKEN_COUNTER_BAR
                         || *command == COUNTERS_ROUTE
+                        || *command == COUNTERS_ROUTE_TASKS
                         || *command == WIRE_COUNTER_BARS
+                        || *command == MCP_COUNTER_BARS
                         || *command == WIRE_HOST_TIME
                         || *command == PR_MEMORY
                 })
@@ -1962,7 +1970,7 @@ fn assert_complete_active_matrix(workflow: &str, full: bool) {
         };
         assert_ci_lines(&lines, &[&format!("name: {name}")]);
         let timeout = match key {
-            "performance-serve" => 45,
+            "performance-serve" => 120,
             "memory" => 20,
             "architecture" => 10,
             _ => 30,

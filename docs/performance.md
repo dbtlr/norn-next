@@ -421,7 +421,7 @@ to the current and legacy comparison.
 The serving engine uses its own port below the ephemeral range and private
 configuration and data directories. The quiet-host check includes resident
 `norn serve` processes. Warm calls retain one HTTP connection. Each call reads
-the counters route before and after its wire request. Instrumentation requests
+the counters route before and after its wire or MCP request. Instrumentation requests
 stand outside the round-trip clock. Serving overhead is the round trip minus
 `x-norn-host-time-us`, which includes readiness retries and admission and pool
 waits. Raw evidence retains the report size and the request counters beside
@@ -433,6 +433,44 @@ measured a largest small-report p95 of 4.765 ms; the Get size pair added
 30.2 and 100.7 ns per added byte at those scales. Records retain the residual
 p95 and say whether it fits the allowance. An excess remains a measured result
 in the timing record and job summary.
+
+The same process and build also serve `/mcp`. The MCP client initializes once
+per connection, then sends `MCP-Protocol-Version: 2025-11-25` on subsequent
+requests. Each `tools/call` uses the wire workload's parameters with `mode`
+removed; the `set`, `new` and `move` tools apply their writes.
+
+Routes run in alternating whole ABBA blocks: wire, MCP, MCP, wire, then MCP,
+wire, wire, MCP. The combined-call discard is rounded up to a block boundary;
+for writes it is the larger of warmups and write payoff. Each route's retained
+sample count is rounded up to a multiple of four. Fresh create names and field
+values follow the combined iteration number. Both routes see both rename
+directions equally, without restoring state or repeating an absorbed write.
+
+| Record metric | Meaning |
+|---|---|
+| `warm.mcp.<workload>.median`, `.p95` | MCP round trip, beside the existing wire metrics. |
+| `overhead.mcp.<workload>.p95` | MCP round trip minus the host-time header, beside wire overhead. |
+| `mcp_delta.<workload>.median` | Median MCP round trip minus median wire round trip, on the same process. |
+| `mcp.tools_list.<revision>.bytes` | Encoded `tools/list` body length for each supported revision; reported without a ceiling. |
+
+Raw overhead samples carry dispatch, statement and byte counters. The delta
+record also retains median counters for each route and the median report size.
+Report bytes count the inner wire answer once; encoded MCP bytes include its
+structured and text representations. The delta allowance is 1 ms plus 10 ns
+per report byte. A record preserves the observed delta and whether it fits.
+The allowance is calibrated from the first hosted record, at 2,014 and 10,014
+documents with three processes each: the largest small-report median delta was
+0.034 ms, and Get large, at 51,481 report bytes, added 0.084 ms, about 1.6 ns
+per byte. The fixed term is about 30 times the small-report reading and the
+per-byte term about 6 times the large one. An earlier local release calibration
+on a loaded host read up to 2.425 ms, which is why hosted records set the number.
+The recorder deadline is 420 seconds plus 8 seconds per 1,000 background
+documents per process, about 3.5 times what each process took on the first
+hosted record (about 125 seconds at 2k and 142 at 10k, idle cycle included);
+six processes total 47 minutes at the nightly scales, inside the job's
+120-minute guard.
+MCP overhead and deltas are timing evidence, separate from the PR counter bars.
+The current and legacy engines retain their existing comparisons.
 
 Each process starts with one configured registration and no derived directory.
 The subject starts as the CLI launches a host, `norn serve --auto-launched`, with

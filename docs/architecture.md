@@ -2799,8 +2799,9 @@ whole), `serve/token-file-unreadable` (500: the fail-closed state), `serve/unkno
 **The counters route exists only under `norn-serve`'s `counters` feature**, which the `norn`
 package forwards as its own `counters` so a test build of the binary carries it; a shipped
 build does not. `GET /v1/debug/counters`, behind the bearer, answers one JSON object of
-counter name to integer, cumulative over the host's life. A bar reads it before and after its
-workload and asserts on the delta, counting the second read's own fingerprint and lookup.
+counter name to integer, cumulative over the host's life except for the one gauge,
+`serve.alive_tasks`. A bar reads it before and after its workload and asserts on the delta,
+counting the second read's own fingerprint and lookup.
 
 | Counter | Counts |
 |---|---|
@@ -2810,6 +2811,7 @@ workload and asserts on the delta, counting the second read's own fingerprint an
 | `serve.connections_visited` | Entries of a connection list a request walked; the route keeps none, so it stays zero |
 | `serve.body_bytes_encoded` | Bytes of every wire and `/mcp` answer body, reports, results and refusals alike |
 | `serve.report_bytes` | Bytes of the verb reports among them; for a `/mcp` call, the report's own bytes, not the result's |
+| `serve.alive_tasks` | A gauge: the serving runtime's tasks alive at the read, the read's own connection task among them (tokio's `num_alive_tasks`) |
 | `mcp.tool_list_derivations` | Tool-list derivations this process made: 1 for its life |
 | `mcp.messages`, `mcp.calls` | `/mcp` messages read, and of those the `tools/call`s that resolved to a served tool, counted before the pre-dispatch reads, so a call refused at those reads (a missing `vault`) or by the wait before dispatch (busy, draining) is counted though nothing was dispatched |
 | `mcp.translate_us` | Microseconds `/mcp` call wrappers spent splicing modes and composing results |
@@ -2839,7 +2841,9 @@ repeats requests as a growing control, and compares read and apply request talli
 same fixture through an in-process host composed from the production constants.
 Its cycle bar waits for idle detach and Ready re-attach, opens and closes
 connections and edits the token file, then compares the child's descriptor and
-thread counts at the same unattached phase with one cycle's. Both serving pools spawn eagerly and never
+thread counts at the same unattached phase with one cycle's; the MCP cycle bar compares
+`serve.alive_tasks` beside them, so a task a request leaves behind fails it even when it
+holds no thread and no descriptor. Both serving pools spawn eagerly and never
 retire, so there is no keep-alive to wait out. The wire suite retains the
 readiness-retry, no-walk, transport and unchanged re-attach evidence.
 `serve_memory` measures attach, read and plan peaks through the measuring
