@@ -78,6 +78,10 @@ pub(crate) const HOST_TIME_HEADER: &str = "x-norn-host-time-us";
 
 /// What every connection of one host answers from.
 pub(crate) struct Context {
+    /// Dormant carrier for the Layer 6.2 MCP route: prepared before listening,
+    /// consumed when that route lands; no request derives a tool schema.
+    #[allow(dead_code)]
+    pub(crate) mcp_tools: norn_mcp::PreparedToolLists,
     pub(crate) credentials: Mutex<Credentials>,
     pub(crate) channel: HelloChannel,
     pub(crate) build: BuildIdentity,
@@ -730,7 +734,12 @@ pub(crate) fn context_for_tests(
             Dispatched::Report(b"{}".to_vec())
         }
     }
+    // These native-route fixtures serve no MCP tools. Avoid schema work inside
+    // the short handshake deadlines their mock listeners exercise.
     Context {
+        mcp_tools: norn_mcp::ToolList::derive([])
+            .unwrap()
+            .prepare("0.0.0+test"),
         credentials: Mutex::new(Credentials::new(
             dirs,
             norn_config::machine::tokens::WatchedTokens::read(dirs),
@@ -804,6 +813,9 @@ mod tests {
         let drain = Arc::new(crate::drain::Drain::new(std::time::Duration::from_secs(2)));
         let admission = Arc::new(crate::admission::Admission::default());
         let context = Context {
+            mcp_tools: norn_mcp::ToolList::derive([])
+                .unwrap()
+                .prepare("0.0.0+test"),
             credentials: Mutex::new(Credentials::new(&dirs, settled(&dirs))),
             channel: HelloChannel::Dev,
             build: BuildIdentity::new("0.0.0+test"),

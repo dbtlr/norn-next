@@ -511,3 +511,20 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod effect_tests {
+    #[test]
+    fn read_effect_matches_the_read_lane() {
+        for verb in norn_wire::Verb::ALL {
+            if super::NOT_SERVED.contains(&verb) {
+                continue;
+            }
+            assert_eq!(
+                verb.effect() == norn_wire::VerbEffect::Reads,
+                super::lane(verb) == Some(super::Runs::Read),
+                "{verb}"
+            );
+        }
+    }
+}
