@@ -709,3 +709,33 @@ fn deriving_a_taken_directory_satisfies_its_absorbed_child_reports() {
         assert!(Iterator::all(&mut roots, |(_, _, owed, _)| owed.is_none()));
     });
 }
+
+#[test]
+fn a_settle_barrier_answers_only_once_ingest_reaches_its_sentinel_and_records_nothing_for_it() {
+    let (_lease, _scratch, watch) = fixture();
+    let proof = watch.capture_build_authority(&[]).unwrap();
+    let root = watch.covered_root().to_path_buf();
+    let sentinel = root.join(".norn-settled-changes-case");
+    let (reached, reaching) = mpsc::channel();
+    watch.state.lock().unwrap().settle_barrier = Some((sentinel.clone(), reached));
+    ingest(
+        &watch.state,
+        Ok(Event::new(EventKind::Modify(ModifyKind::Data(
+            notify::event::DataChange::Any,
+        )))
+        .add_path(root.join("changed.md"))),
+    );
+    assert!(
+        reaching.try_recv().is_err(),
+        "a report ahead of the sentinel answered the barrier"
+    );
+    ingest(
+        &watch.state,
+        Ok(Event::new(EventKind::Create(CreateKind::File)).add_path(sentinel)),
+    );
+    reaching
+        .try_recv()
+        .expect("ingest reached the sentinel and answered the barrier");
+    assert!(watch.state.lock().unwrap().settle_barrier.is_none());
+    assert_eq!(proof.sequence(), 1, "the sentinel recorded a root");
+}

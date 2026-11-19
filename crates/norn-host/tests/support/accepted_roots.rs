@@ -9,7 +9,9 @@ use std::{collections::BTreeSet, path::PathBuf, sync::Mutex, time::Duration};
 /// deliveries, the later one after the build reached Ready, where no
 /// requeue takes it (NORN-507). The build's own watcher authority names
 /// each root it accepted and when, so the wait asks for a report at each
-/// changed root made after the change began.
+/// changed root made after the change began. A first report is not the
+/// last, so the wait then passes the watcher's ordered settle barrier
+/// (NORN-578): every report the change made is accepted before it returns.
 pub struct AcceptedRoots {
     vault: PathBuf,
     normalizer: norn_fs::PathNormalizer,
@@ -40,7 +42,8 @@ impl AcceptedRoots {
     }
 
     /// Make `change`, then wait until the watcher has accepted a report
-    /// made since at each of `paths`, which are vault-relative or absolute paths under the vault.
+    /// made since at each of `paths`, which are vault-relative or absolute paths under the vault,
+    /// and has ingested every other report the change made.
     pub fn change(&self, paths: &[PathBuf], change: impl FnOnce()) {
         let authority = self
             .authority
@@ -86,6 +89,11 @@ impl AcceptedRoots {
             }
         })
         .unwrap();
+        // One change can report more than once, and the rest can trail the
+        // first report at a root by long enough to land as a fresh fact after
+        // the build took the change in. Wait until ingest has passed every
+        // report made before now.
+        authority.settle_changes(budget.work()).unwrap();
         let through = authority.sequence();
         *self.settled.lock().unwrap() = Some((roots, through));
     }

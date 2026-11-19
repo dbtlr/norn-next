@@ -229,6 +229,70 @@ impl BuildAuthority {
         self.visit_roots(|sequence, _| sequence)
     }
 
+    /// Wait until the watcher has ingested every report its backend makes for
+    /// the vault changes written before this call.
+    ///
+    /// One change can report more than once: inotify reports a rewrite's
+    /// truncation and its data apart, and FSEvents can repeat a write. A wait
+    /// for one report at a changed root can therefore end before the rest,
+    /// and a busy machine can hold the rest back long enough for them to land
+    /// as fresh facts. A backend delivers one subscription's reports in the
+    /// order they were made and ingest takes them in that order, so a
+    /// sentinel written now is ingested only after every report made before
+    /// it. The sentinel is a dot-led file at the vault root, which the vault
+    /// does not hold, so the watcher records nothing for it. A polling
+    /// subscription reports one scan's changes in walk order rather than the
+    /// order they were made, so there the barrier proves only that a scan
+    /// after this call has been ingested.
+    ///
+    /// Available only with `induced-failure`. A dropped subscription, an
+    /// expired wait or failed sentinel I/O returns an error rather than
+    /// assuming settlement.
+    #[cfg(any(test, feature = "induced-failure"))]
+    #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // Test-support sentinel in the watched vault root.
+    pub fn settle_changes(&self, budget: Duration) -> Result<(), WatchError> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static SERIAL: AtomicU64 = AtomicU64::new(0);
+        let io_error = |error: std::io::Error| WatchError::Backend(error.to_string());
+        let state = self
+            .state
+            .upgrade()
+            .ok_or_else(|| WatchError::Backend("the build's watch subscription ended".into()))?;
+        let (reached, reaching) = mpsc::channel();
+        let sentinel = {
+            let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
+            let sentinel = state.root.join(format!(
+                ".norn-settled-changes-{}-{}",
+                std::process::id(),
+                SERIAL.fetch_add(1, Ordering::Relaxed)
+            ));
+            state.settle_barrier = Some((sentinel.clone(), reached));
+            sentinel
+        };
+        let answer = std::fs::File::create_new(&sentinel)
+            .map_err(io_error)
+            .and_then(|_| {
+                reaching.recv_timeout(budget).map_err(|error| match error {
+                    mpsc::RecvTimeoutError::Timeout => WatchError::SynchronizationExpired,
+                    mpsc::RecvTimeoutError::Disconnected => {
+                        WatchError::Backend("the build's watch subscription ended".into())
+                    }
+                })
+            });
+        // A barrier ingest never reached stays armed; disarm it before cleanup.
+        state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .settle_barrier = None;
+        drop(state);
+        let cleanup = match std::fs::remove_file(&sentinel) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            other => other.map_err(io_error),
+        };
+        answer.and(cleanup)
+    }
+
     /// Record any known source contradiction permanently, for all derived sources.
     pub fn invalidate(&self) {
         self.proof.invalidate();
