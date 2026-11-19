@@ -744,3 +744,31 @@ fn a_settle_barrier_answers_only_once_ingest_reaches_its_sentinel_and_records_no
     assert!(watch.state.lock().unwrap().settle_barriers.is_empty());
     assert_eq!(proof.sequence(), 1, "the sentinel recorded a root");
 }
+
+#[test]
+fn an_expired_settle_barrier_disarms_itself_and_removes_its_sentinel() {
+    let (_lease, _scratch, watch) = fixture();
+    let proof = watch.capture_build_authority(&[]).unwrap();
+    let root = watch.covered_root().to_path_buf();
+    let mut expired = 0;
+    for _ in 0..50 {
+        match proof.settle_changes(Duration::ZERO) {
+            Err(WatchError::SynchronizationExpired) => expired += 1,
+            // A poll scan can reach the sentinel inside a zero budget.
+            Ok(()) => {}
+            Err(other) => panic!("an unexpected barrier error: {other:?}"),
+        }
+        assert!(
+            watch.state.lock().unwrap().settle_barriers.is_empty(),
+            "a barrier stayed armed"
+        );
+    }
+    assert!(expired > 0, "no barrier expired, so nothing was disarmed");
+    let leftover: Vec<_> = std::fs::read_dir(&root)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.file_name())
+        .filter(|name| name.to_string_lossy().starts_with(".norn-settled-changes"))
+        .collect();
+    assert!(leftover.is_empty(), "sentinels left behind: {leftover:?}");
+}

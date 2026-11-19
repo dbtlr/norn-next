@@ -878,7 +878,8 @@ fn restoring_a_denied_directory_reports_it_and_covers_it_again() {
 }
 
 /// **A settle barrier returns only after every report made before it was
-/// ingested.** Each round writes a document and then passes the barrier; the
+/// ingested.** Each of a hundred rounds writes a document and then passes the
+/// barrier; the
 /// build authority must already hold a report at that document when it
 /// returns, which a barrier that did not wait for its sentinel's delivery
 /// would rarely see. The sentinels themselves record nothing and are gone
@@ -898,8 +899,8 @@ fn a_settle_barrier_returns_after_the_reports_of_writes_made_before_it() {
         .capture_build_authority(&[])
         .expect("unchanged coverage");
     let normalizer = PathNormalizer::detect(&vault).expect("the vault's case behavior");
-    for round in 0..20 {
-        let name = format!("doc{round:02}.md");
+    for round in 0..100 {
+        let name = format!("doc{round:03}.md");
         let root = normalizer
             .normalize(Path::new(&name))
             .expect("a vault path");
