@@ -16,6 +16,10 @@ _Avoid_: Note, file (when the distinction matters)
 A file in a vault that is not a vault document, whose name carries an extension and none of whose path segments leads with a dot, known to Norn by its path and name alone, never by its content.
 _Avoid_: Attachment (which names the vault attachment lifecycle), asset
 
+**Dot-led path**:
+A path one of whose segments begins with a dot. It names nothing in the vault: Norn neither reads nor writes beneath it, as Obsidian ignores it, except for the vault's own control files.
+_Avoid_: Hidden file, dotfile (which name only the last segment)
+
 **Vault schema**:
 A user-authored declaration of the valid structure and values of vault documents: field types and shapes, the tag facet, schema rules, path rules, creation rules and the inbox.
 _Avoid_: Doctrine, schema (unqualified)
@@ -141,6 +145,26 @@ A request that acts on the norn installation itself: it names no vault, carries 
 _Avoid_: Local command, offline verb
 
 ## Engineering language
+
+**Channel**:
+The installation a build belongs to, released or development, which keeps each installation's machine-local state, port and host apart on one machine.
+_Avoid_: Environment, profile
+
+**Explicit host**:
+A host process a person or a service manager started. It runs until it is stopped, and no other start displaces it.
+_Avoid_: Daemon, server (unqualified)
+
+**Auto-launched host**:
+A host process a client started because no host answered. It stops after an idle timeout, and an explicit start may take its place.
+_Avoid_: Background host, temporary host
+
+**Takeover**:
+An explicit start replacing its channel's auto-launched host: it asks that host to drain and takes the channel once the host has gone.
+_Avoid_: Restart, handoff
+
+**Hello**:
+The exchange in which a client proves that a listener is its own channel's host, holding the same token, before it sends that token on the connection.
+_Avoid_: Handshake, ping
 
 **Store schema**:
 The internal structure and version of Norn's rebuildable derived state.
