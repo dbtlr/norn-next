@@ -1837,6 +1837,10 @@ struct State {
     // is terminal or an unrepresentable revision, and can never become zero.
     #[cfg(any(test, feature = "induced-failure"))]
     observation_revision: Option<u64>,
+    /// The sentinels settle barriers wrote, each with where to say ingest
+    /// reached it. See [`BuildAuthority::settle_changes`].
+    #[cfg(any(test, feature = "induced-failure"))]
+    settle_barriers: Vec<(PathBuf, mpsc::Sender<()>)>,
     terminal: Option<WatchError>,
     healing: bool,
     /// The coalescer has taken the accumulation and is suppressing the batch
@@ -1899,6 +1903,8 @@ impl State {
             build_authority: Arc::new(BuildProof::new()),
             #[cfg(any(test, feature = "induced-failure"))]
             observation_revision: Some(0),
+            #[cfg(any(test, feature = "induced-failure"))]
+            settle_barriers: Vec::new(),
             terminal: None,
             healing: false,
             closing: false,
@@ -2002,6 +2008,15 @@ fn ingest(shared: &Arc<Mutex<State>>, result: notify::Result<Event>) -> Option<W
                 return state.terminal.clone();
             }
             for path in event.paths {
+                #[cfg(any(test, feature = "induced-failure"))]
+                if let Some(at) = state
+                    .settle_barriers
+                    .iter()
+                    .position(|(sentinel, _)| *sentinel == path)
+                {
+                    let (_, reached) = state.settle_barriers.swap_remove(at);
+                    let _ = reached.send(());
+                }
                 let effect = classify_path(&state, event.kind, &path);
                 let root_error = if effect.root_recheck {
                     let anchor = RootAnchor {

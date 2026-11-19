@@ -320,6 +320,16 @@ fn waits(host: &Host<ProductionEntryOps>, at_least: u64) {
     })
     .unwrap();
 }
+/// Assert that an early read answered, naming its refusal and any watcher
+/// report that reached a changed root after the probe's change settled.
+fn assert_answered<T>(answer: Result<T, norn_wire::ErrorEnvelope>, probe: &Probe) {
+    if let Err(refusal) = answer {
+        panic!(
+            "the early read refused: {refusal:?}; {}",
+            probe.accepted.late_reports()
+        );
+    }
+}
 fn spawn_get<'scope>(
     scope: &'scope std::thread::Scope<'scope, '_>,
     host: &'scope Host<ProductionEntryOps>,
@@ -1033,7 +1043,7 @@ fn a_fact_holds_vault_wide_capabilities_until_it_is_derived() {
         waits(&host, start + 1);
         assert!(waiting.try_recv().is_err());
         probe.release();
-        assert!(waiting.recv_timeout(BUDGET.work()).unwrap().is_ok());
+        assert_answered(waiting.recv_timeout(BUDGET.work()).unwrap(), &probe);
     });
     ready(&host);
     drop(host);
@@ -2989,7 +2999,7 @@ fn untouched_gets_at(steps: &[Step]) {
             #[cfg(target_os = "linux")]
             assert!(host.get(&get("first")).is_ok());
             probe.release();
-            assert!(waiting.recv_timeout(BUDGET.work()).unwrap().is_ok());
+            assert_answered(waiting.recv_timeout(BUDGET.work()).unwrap(), &probe);
         });
         ready(&host);
     }
@@ -3013,7 +3023,7 @@ fn a_get_whose_target_a_fact_touches_waits() {
         waits(&host, start + 1);
         assert!(waiting.try_recv().is_err());
         probe.release();
-        assert!(waiting.recv_timeout(BUDGET.work()).unwrap().is_ok());
+        assert_answered(waiting.recv_timeout(BUDGET.work()).unwrap(), &probe);
     });
     ready(&host);
 }
@@ -3039,7 +3049,7 @@ fn untouched_gets_answer_through_the_pre_ready_reconcile() {
         assert!(host.get(&get("/first")).is_ok());
         assert!(waiting.try_recv().is_err());
         probe.release();
-        assert!(waiting.recv_timeout(BUDGET.work()).unwrap().is_ok());
+        assert_answered(waiting.recv_timeout(BUDGET.work()).unwrap(), &probe);
     });
     ready(&host);
 }
@@ -3320,11 +3330,9 @@ fn a_get_answers_a_target_fact_derived_after_its_meeting() {
         });
         probe.release();
         probe.wait(LoadingBoundary::StepComplete(Step::Content));
-        assert!(
-            getting
-                .recv_timeout(Duration::from_secs(2))
-                .unwrap()
-                .is_ok()
+        assert_answered(
+            getting.recv_timeout(Duration::from_secs(2)).unwrap(),
+            &probe,
         );
         probe.release();
     });
@@ -3358,7 +3366,12 @@ fn a_requeued_edit_answers_its_new_bytes_before_ready() {
         "the build must derive the accepted fact before Ready"
     );
     assert!(host.get(&get("doc05")).is_ok());
-    assert_eq!(account.read().requeued_documents, 1);
+    assert_eq!(
+        account.read().requeued_documents,
+        1,
+        "{}",
+        probe.accepted.late_reports()
+    );
     probe.release();
     ready(&host);
     assert_eq!(account.read().documents_read_by_build, DOCUMENTS + 1);
@@ -4019,7 +4032,9 @@ fn assert_step_four_rejudges_its_reach(change: &str) {
         "{change} must requeue before Relations: requeued_roots = {n}"
     );
     let shape = ValidateParams::new(address());
-    let early = host.validate(&shape).unwrap();
+    let early = host.validate(&shape);
+    assert_answered(early.as_ref().map(|_| ()).map_err(Clone::clone), &probe);
+    let early = early.unwrap();
     probe.release();
     ready(&host);
     assert_eq!(
@@ -4064,7 +4079,9 @@ fn a_directory_relisted_during_step_four_rejudges_the_links_beneath_it() {
     );
     assert!(account.read().requeue_links_rejudged > 0);
     let shape = ValidateParams::new(address());
-    let early = host.validate(&shape).unwrap();
+    let early = host.validate(&shape);
+    assert_answered(early.as_ref().map(|_| ()).map_err(Clone::clone), &probe);
+    let early = early.unwrap();
     probe.release();
     ready(&host);
     assert_eq!(
