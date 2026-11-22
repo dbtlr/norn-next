@@ -1,0 +1,5 @@
+# Hugi runs this macOS job of ci.yml in a virtual machine on its own host and posts a commit status
+# for it. A declared job may not have needs. See dbtlr/hugi, ADR-0004.
+lanes:
+  - workflow: ci.yml
+    jobs: [platform]
