@@ -7090,6 +7090,15 @@ impl<O: EntryOps> Host<O> {
         self.shared.scheduler.wake();
     }
 
+    /// Run `hook` once on the scheduler's thread, as its next ask ends: a
+    /// hook that blocks holds the scheduler, so no ask runs and no
+    /// maintenance leg is scheduled until it returns. Wakes sent meanwhile
+    /// are kept and answered once it does.
+    #[cfg(test)]
+    pub(crate) fn run_before_the_next_scheduler_sleep(&self, hook: impl FnOnce() + Send + 'static) {
+        self.shared.scheduler.run_before_next_sleep(hook);
+    }
+
     /// Record the similarity reads made on a repair's planning hold.
     pub(crate) fn count_similar_stems(&self, cost: crate::evidence::SimilarStemsCost) {
         self.shared.reads.count_similar_stems(cost);

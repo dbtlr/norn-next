@@ -7307,20 +7307,47 @@ mod tests {
             .unwrap_or_else(|failure| panic!("{failure}"))
         }
 
+        /// Serve reads of `d3` over `name` for `span`, answering how many were
+        /// served.
+        fn read_for(
+            host: &crate::Host<ProductionEntryOps>,
+            name: &VaultName,
+            span: Duration,
+        ) -> u32 {
+            let began = Instant::now();
+            let mut reads = 0_u32;
+            while began.elapsed() < span {
+                host.get(&norn_wire::GetParams::new(
+                    norn_wire::VaultAddress::name(name.clone()),
+                    norn_wire::ResolutionTarget::new("d3").unwrap(),
+                ))
+                .expect("a read over a ready vault");
+                reads += 1;
+            }
+            assert!(reads > 0);
+            reads
+        }
+
         /// **On a running host the death prune comes due at most once a period, on
         /// the background lane, and a read drives none of it.** The clock runs at a
         /// short period. The first period owes a pass, and each of three deaths owes
         /// one more, so exactly four passes run, each a whole period after the one
         /// before it began: the clock reads the store's marks no more often than the
-        /// elapsed periods allow, however often the scheduler asks. Reads served
-        /// across four more periods, with the clock past due and nothing new owed,
-        /// run no due check, no pass and no maintenance leg, so a request pays
-        /// nothing for the periodic work.
+        /// elapsed periods allow. Nothing but the host wakes the scheduler, so each
+        /// pass a death owes begins from the wake the reconcile that recorded it
+        /// leaves for its release, where no engine stands for the vault.
+        ///
+        /// Reads then run while a fifth pass is owed and not yet begun: the
+        /// scheduler is held, a death is recorded, and the clock passes due. They
+        /// run no due check, no pass and no maintenance leg; released, the
+        /// scheduler begins that pass. Reads served across four more periods, with
+        /// nothing owed, run nothing either, so a request pays nothing for the
+        /// periodic work, due or not.
         #[test]
         fn the_death_prune_comes_due_at_most_once_a_period_and_a_read_drives_none_of_it() {
-            let period = Duration::from_millis(150);
+            let period = Duration::from_millis(300);
             let f = Fixture::new("death-prune-period");
-            for index in 0..4 {
+            for index in 0..5 {
                 write(
                     &f,
                     &[(&format!("docs/d{index}.md"), &format!("note {index}\n"))],
@@ -7337,6 +7364,9 @@ mod tests {
                 remove(&f, &[&format!("docs/d{index}.md")]);
                 wait_for_passes(&host, index + 2);
             }
+            // The fourth pass began before this instant, so the clock comes due
+            // again no later than a period from here.
+            let fourth = Instant::now();
             let settled = host.ops().death_prune_reading();
             assert_eq!(settled.passes_begun, 4, "{settled:?}");
             assert_eq!(settled.work.deaths_removed, 3, "{settled:?}");
@@ -7347,21 +7377,63 @@ mod tests {
                 settled.due_checks
             );
 
-            let legs = host.maintenance_reading().legs;
-            let quiet = Instant::now();
-            let mut reads = 0_u32;
-            while quiet.elapsed() < period * 4 {
-                host.get(&norn_wire::GetParams::new(
+            // Hold the scheduler at the end of the ask a wake starts, so nothing
+            // begins the pass the next death owes.
+            let (held, holding) = std::sync::mpsc::channel();
+            let (release, released) = std::sync::mpsc::channel::<()>();
+            host.run_before_the_next_scheduler_sleep(move || {
+                held.send(()).unwrap();
+                let _ = released.recv_timeout(Duration::from_secs(60));
+            });
+            host.wake_background();
+            holding
+                .recv_timeout(lifecycle_budget().work())
+                .expect("the scheduler to be held");
+            remove(&f, &["docs/d4.md"]);
+            wait_until(
+                "the death to be recorded",
+                lifecycle_budget(),
+                || match host.get(&norn_wire::GetParams::new(
                     norn_wire::VaultAddress::name(name.clone()),
-                    norn_wire::ResolutionTarget::new("d3").unwrap(),
-                ))
-                .expect("a read over a ready vault");
-                reads += 1;
+                    norn_wire::ResolutionTarget::new("d4").unwrap(),
+                )) {
+                    Err(_) => Observed::Met(()),
+                    Ok(_) => Observed::Pending("d4 still resolves".into()),
+                },
+            )
+            .unwrap_or_else(|failure| panic!("{failure}"));
+            let past_due = fourth + period;
+            while Instant::now() < past_due {
+                std::thread::sleep(past_due - Instant::now());
             }
-            assert!(reads > 0);
+            let owed = host.ops().death_prune_reading();
+            assert_eq!(
+                owed, settled,
+                "the pass the death owes began before the reads, so they did not run \
+                 while it was owed: the death was recorded after the clock came due"
+            );
+            let legs = host.maintenance_reading().legs;
+            let reads = read_for(&host, &name, period * 2);
             assert_eq!(
                 host.ops().death_prune_reading(),
-                settled,
+                owed,
+                "{reads} reads with a pass owed and due drove the death prune"
+            );
+            assert_eq!(
+                host.maintenance_reading().legs,
+                legs,
+                "{reads} reads with a pass owed and due ran a maintenance leg"
+            );
+            release.send(()).unwrap();
+            let fifth = wait_for_passes(&host, 5);
+            assert_eq!(fifth.passes_begun, 5, "{fifth:?}");
+            assert_eq!(fifth.work.deaths_removed, 4, "{fifth:?}");
+
+            let legs = host.maintenance_reading().legs;
+            let reads = read_for(&host, &name, period * 4);
+            assert_eq!(
+                host.ops().death_prune_reading(),
+                fifth,
                 "{reads} reads across four periods drove the death prune"
             );
             assert_eq!(
