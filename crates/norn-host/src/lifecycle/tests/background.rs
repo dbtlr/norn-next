@@ -746,3 +746,52 @@ fn an_ask_with_nothing_due_clears_the_mark_and_the_entry_contributes_its_deadlin
     );
     drop((lease, host));
 }
+
+/// **A clock a leg brings earlier while it holds the coverage is read at the
+/// leg's release.** A reconcile turn brings the maintenance clock in from
+/// none to a moment ahead and announces it with a wake, as a production leg
+/// that records a death announces the death prune's deadline. The ask that
+/// wake starts runs while the turn still holds the coverage, so it reads the
+/// entry's reading from before the turn; the turn's release must wake the
+/// scheduler again, whose ask reads the clock off the returned coverage, and
+/// the maintenance starts at that deadline with no other wake.
+#[test]
+fn a_clock_a_leg_brings_earlier_while_it_holds_the_coverage_is_read_at_its_release() {
+    let ops = Arc::new(FakeOps::default());
+    let (host, _name, lease) = a_ready_vault(&ops);
+    // Each maintenance leg restarts the clock an hour on, so one leg runs.
+    *ops.maintenance_period.lock().unwrap() = Some(Duration::from_secs(3600));
+    let due = Instant::now() + Duration::from_secs(1);
+    *ops.clock_on_next_reconcile.lock().unwrap() = Some(due);
+    ops.block_reconcile.store(true, Ordering::SeqCst);
+    ops.facts_on_next_polls.store(1, Ordering::SeqCst);
+    poll_watchers(&host.shared);
+    wait_for_flag("reconcile_started", &ops.reconcile_started);
+    let scheduler = &host.shared.scheduler;
+    wait_until(
+        "the turn's wake to be answered",
+        lifecycle_wait_budget(),
+        || {
+            if scheduler.has_answered_every_wake() {
+                Observed::Met(())
+            } else {
+                Observed::pending("the scheduler has a wake to answer")
+            }
+        },
+    )
+    .unwrap_or_else(|failure| panic!("{failure}"));
+    let deadlines = host.scheduler_reading().deadlines;
+
+    ops.block_reconcile.store(false, Ordering::SeqCst);
+    ops.reconcile_release.store(true, Ordering::SeqCst);
+    assert!(
+        Instant::now() < due,
+        "the turn was released past the clock, so its own end could start the maintenance"
+    );
+    wait_for_maintenances(&ops, 1);
+    assert!(
+        host.scheduler_reading().deadlines > deadlines,
+        "the maintenance started without the clock's deadline being reached"
+    );
+    drop((lease, host));
+}

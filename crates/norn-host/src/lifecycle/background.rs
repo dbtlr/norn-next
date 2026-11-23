@@ -248,8 +248,11 @@ fn ask<O: EntryOps>(shared: &Arc<Shared<O>>) -> Option<Instant> {
 ///
 /// - An entry accounting for no coverage has no clocks running: it is
 ///   unmarked and contributes nothing.
-/// - Where no slice is due the entry is unmarked and contributes its next
-///   deadline.
+/// - Where no slice is due the entry contributes its next deadline, and is
+///   unmarked where the ask read its clocks off coverage in hand. Over
+///   coverage out with a leg the ask reads only the reading from before that
+///   leg, so a mark the leg set when it brought a clock earlier stands, and
+///   the leg's release wakes the scheduler to read the clock it moved.
 /// - Where a slice is due the entry is marked and contributes no deadline,
 ///   so a clock past due cannot wake the scheduler again and again for as
 ///   long as the claim stays held. The leg is scheduled under the claim's
@@ -287,13 +290,21 @@ fn ask_entry<O: EntryOps>(
         .ops
         .background_deadline(entry.name())
         .filter(|at| *at > now);
-    if let Some(attachment) = state.coverage.held() {
+    let read_the_clocks = if let Some(attachment) = state.coverage.held() {
         state.background_due = shared.ops.maintenance_deadline(attachment);
-    }
+        true
+    } else {
+        false
+    };
     let due = shared.ops.maintenance_owed(entry.name())
         || state.background_due.is_some_and(|at| at <= Instant::now());
     if !due {
-        state.claim.clear_maintenance_mark();
+        // A mark stands while a leg holds the coverage: this ask read the
+        // entry's reading from before that leg, and a leg that brought a
+        // clock earlier marked the entry so its release asks again.
+        if read_the_clocks {
+            state.claim.clear_maintenance_mark();
+        }
         return (earlier(state.background_due, lane_deadline), false);
     }
     state.claim.mark_owing_maintenance();

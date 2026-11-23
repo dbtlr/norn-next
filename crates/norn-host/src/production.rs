@@ -7290,15 +7290,8 @@ mod tests {
         // file's path.
 
         /// Wait until `host` has finished `passes` death-prune passes, answering the
-        /// reading that shows it.
-        ///
-        /// Every probe wakes the scheduler, as any site that left work owed would, so
-        /// the clock is asked about far more often than once a period and nothing but
-        /// the clock keeps two passes apart. The wake is needed as well as wanted: a
-        /// reconcile that records a death sends its own wake while it still holds the
-        /// coverage, and the ask that wake starts reads the clock as it stood before
-        /// the death, so on a host where no engine stands for the vault the pass
-        /// would otherwise wait for the next unrelated wake.
+        /// reading that shows it. The wait sends no wake of its own, so a pass owed
+        /// begins only from the wakes and deadlines the host itself sends.
         fn wait_for_passes(
             host: &crate::Host<ProductionEntryOps>,
             passes: u64,
@@ -7308,7 +7301,6 @@ mod tests {
                 if reading.passes_finished >= passes {
                     Observed::Met(reading)
                 } else {
-                    host.wake_background();
                     Observed::Pending(format!("{reading:?}"))
                 }
             })
