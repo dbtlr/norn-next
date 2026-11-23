@@ -70,25 +70,39 @@ impl AcceptedRoots {
         // this wait at a 31.6 ms first look (NORN-509). So the look is
         // bounded as every lifecycle state look here is.
         let budget = Budget::new(Duration::from_secs(20), Duration::from_millis(250));
-        wait_until("a report at each changed root", budget, || {
-            let missing: Vec<PathBuf> = authority.visit_roots(|_, accepted| {
-                let fresh: BTreeSet<norn_fs::NormalizedPath> = accepted
-                    .filter(|&(_, reported, _, _)| reported > since)
-                    .map(|(root, ..)| root.clone())
-                    .collect();
-                roots
-                    .iter()
-                    .filter(|root| !fresh.contains(*root))
-                    .map(|root| root.as_path().to_path_buf())
-                    .collect()
-            });
+        let reported = wait_until("a report at each changed root", budget, || {
+            let (missing, sequence): (Vec<PathBuf>, u64) =
+                authority.visit_roots(|sequence, accepted| {
+                    let fresh: BTreeSet<norn_fs::NormalizedPath> = accepted
+                        .filter(|&(_, reported, _, _)| reported > since)
+                        .map(|(root, ..)| root.clone())
+                        .collect();
+                    let missing = roots
+                        .iter()
+                        .filter(|root| !fresh.contains(*root))
+                        .map(|root| root.as_path().to_path_buf())
+                        .collect();
+                    (missing, sequence)
+                });
             if missing.is_empty() {
                 Observed::Met(())
             } else {
-                Observed::pending(format!("no report yet at {missing:?}"))
+                let authority = if authority.held_is_current() {
+                    "current"
+                } else {
+                    "withdrawn"
+                };
+                Observed::pending(format!(
+                    "no report yet at {missing:?}; {} reports accepted since the change, \
+                     whose wait began at report {since}; the build's watcher authority is \
+                     {authority}",
+                    sequence - since
+                ))
             }
-        })
-        .unwrap();
+        });
+        if let Err(failure) = reported {
+            panic!("{failure}; {}", Self::silence(&authority));
+        }
         // One change can report more than once, and the rest can trail the
         // first report at a root by long enough to land as a fresh fact after
         // the build took the change in. Wait until ingest has passed every
@@ -96,6 +110,39 @@ impl AcceptedRoots {
         authority.settle_changes(budget.work()).unwrap();
         let through = authority.sequence();
         *self.settled.lock().unwrap() = Some((roots, through));
+    }
+
+    /// Which silence left a change unreported, for the failing wait to name.
+    ///
+    /// The wait for a report at each changed root reads only the authority's
+    /// accepted roots, so a backend that answered the change with a rescan,
+    /// one that went quiet, and one that made no report for this one change
+    /// all look alike there (NORN-586). A withdrawn authority names the first.
+    /// The ordered settle barrier tells the other two apart: a backend
+    /// delivers one subscription's reports in the order they were made, so a
+    /// sentinel written now and ingested proves the subscription live and
+    /// every report made before it ingested, and one never ingested proves the
+    /// subscription delivered nothing more.
+    fn silence(authority: &norn_fs::watch::BuildAuthority) -> String {
+        let withdrawn = !authority.held_is_current();
+        let live = authority.settle_changes(Duration::from_secs(5));
+        let delivery = match live {
+            Ok(()) => "a settle sentinel written after the wait was ingested, so the \
+                       subscription is live and its backend made no report at those roots"
+                .to_owned(),
+            Err(error) => format!(
+                "a settle sentinel written after the wait was not ingested within 5s \
+                 ({error:?}), so the subscription delivered nothing more"
+            ),
+        };
+        if withdrawn {
+            format!(
+                "the build's watcher authority was withdrawn, by a rescan, lost coverage, a \
+                 control-file root or the root cap; {delivery}"
+            )
+        } else {
+            delivery
+        }
     }
 
     /// The reports the watcher accepted at the last change's roots after its
