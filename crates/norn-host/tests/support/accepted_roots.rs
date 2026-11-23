@@ -140,8 +140,9 @@ impl AcceptedRoots {
                        elsewhere drops the demand"
                 .to_owned(),
             Err(error) => format!(
-                "a settle sentinel written after the wait was not ingested within 5s \
-                 ({error:?}), so the subscription delivered nothing more"
+                "a settle sentinel written after the wait was not ingested ({error:?}): \
+                 the subscription delivered nothing more, or ended, or the sentinel \
+                 could not be written"
             ),
         };
         if withdrawn {
