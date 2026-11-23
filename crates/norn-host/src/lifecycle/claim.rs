@@ -63,8 +63,12 @@
 //! opens the gate — [`Claim::open`], [`Claim::release`] and
 //! [`Claim::drop_marker`] — calls, so no release site outside the carrier can
 //! omit the wake. The scheduler marks an entry where a claim-bound slice is
-//! due, whether it scheduled the leg or found the claim held, and a marked
-//! entry contributes no deadline until this wake asks it again. Pinned by
+//! due, whether it scheduled the leg or found the claim held, and a leg that
+//! brings a clock earlier marks it too
+//! (`ProgressReporter::owe_background_work`). An ask clears the mark only
+//! where it read the clocks over parked coverage, or the entry accounts for no
+//! coverage; a mark kept while a leg holds the coverage still contributes the
+//! entry's deadline, and this wake, at the leg's release, asks again. Pinned by
 //! `a_due_slice_over_a_held_claim_starts_at_the_claims_release`,
 //! `the_second_deadline_after_attach_starts_a_maintenance_leg_as_the_first_did`
 //! and, for the marker a stale arrival drops,
@@ -793,9 +797,14 @@ pub(super) struct Claim {
     /// is about to send itself.
     leg: Option<Leg>,
     slot: Slot,
-    /// Whether the background scheduler found a claim-bound slice due over
-    /// this entry at its last ask, and so contributes no deadline for it
-    /// until it asks again. Set and cleared by the scheduler alone.
+    /// Whether the entry owes the background scheduler an ask: it found a
+    /// claim-bound slice due over this entry at its last ask, or a leg that
+    /// brought a clock earlier (`ProgressReporter::owe_background_work`)
+    /// marked it. An entry whose slice is due contributes no deadline until
+    /// the scheduler asks again. An ask clears the mark only where it read the
+    /// clocks over parked coverage, or the entry accounts for none; a mark
+    /// kept while a leg holds the coverage still contributes the entry's
+    /// deadline, and the leg's release wakes the scheduler for it.
     owes_maintenance: bool,
     /// Where the release of a marked entry sends its wake.
     wake: BackgroundWake,
@@ -828,8 +837,8 @@ impl Claim {
 
     /// Mark the entry as owing maintenance: the background scheduler found a
     /// claim-bound slice due over it, and either scheduled the leg or could
-    /// not. The next move that opens the gate wakes the scheduler, which asks
-    /// again.
+    /// not, or a leg brought a clock earlier. The next move that opens the
+    /// gate wakes the scheduler, which asks again.
     pub(super) fn mark_owing_maintenance(&mut self) {
         self.owes_maintenance = true;
     }

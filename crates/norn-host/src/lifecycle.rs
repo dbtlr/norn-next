@@ -1488,10 +1488,10 @@ struct EntryState<A: SnapshotSource> {
     /// the attachment is out with a leg exactly when the claim is held, and
     /// the scheduler still has to know whether a slice came due behind that
     /// claim. A reading taken before a leg moved a clock later is early, never
-    /// late: a leg moves a clock only by running the unit it times, which sets
-    /// it later, as [`EntryOps::maintenance_deadline`] obliges, so an early
-    /// reading costs one ask that finds nothing due. A leg that brings a clock
-    /// earlier leaves this reading late, so it marks the entry
+    /// late: a leg normally moves a clock only by running the unit it times,
+    /// which sets it later, as [`EntryOps::maintenance_deadline`] obliges, so
+    /// an early reading costs one ask that finds nothing due. The exception is
+    /// a leg that brings a clock earlier: it leaves this reading late, so it marks the entry
     /// ([`ProgressReporter::owe_background_work`]) and its release has the
     /// scheduler read the clock again.
     /// The clocks run while the entry accounts for coverage, and the release
