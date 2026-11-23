@@ -123,12 +123,21 @@ impl AcceptedRoots {
     /// sentinel written now and ingested proves the subscription live and
     /// every report made before it ingested, and one never ingested proves the
     /// subscription delivered nothing more.
+    ///
+    /// An ingested sentinel does not prove the backend made no report, though.
+    /// Ingest matches a sentinel before it records anything, and a retired
+    /// construction stays current while it records nothing: a test thread that
+    /// failed first and dropped its demand retires the build under a probe still
+    /// waiting here, and its report lands unrecorded. That is how NORN-586's
+    /// Ready timeout read as a lost FSEvents report, so the wording names both.
     fn silence(authority: &norn_fs::watch::BuildAuthority) -> String {
         let withdrawn = !authority.held_is_current();
         let live = authority.settle_changes(Duration::from_secs(5));
         let delivery = match live {
             Ok(()) => "a settle sentinel written after the wait was ingested, so the \
-                       subscription is live and its backend made no report at those roots"
+                       subscription is live: either its backend made no report at those \
+                       roots, or the build stopped recording, as it does once a failure \
+                       elsewhere drops the demand"
                 .to_owned(),
             Err(error) => format!(
                 "a settle sentinel written after the wait was not ingested within 5s \

@@ -16,7 +16,7 @@ use norn_store::Step;
 use norn_testkit::{
     isolation::{self, Lease},
     scratch::Scratch,
-    wait::{Budget, Observed, wait_until},
+    wait::{Budget, Convergence, Observed, wait_until},
 };
 use norn_wire::{
     ApplyMode, AuthoredValue, Column, CountParams, DescribeParams, DocumentPath, FieldChange,
@@ -303,7 +303,10 @@ fn target(text: &str) -> ResolutionTarget {
     ResolutionTarget::new(text).unwrap()
 }
 fn ready(host: &Host<ProductionEntryOps>) {
-    wait_until("canonical Ready", BUDGET, || match host.state(&name()) {
+    ready_within(host, BUDGET);
+}
+fn ready_within(host: &Host<ProductionEntryOps>, budget: Budget) {
+    wait_until("canonical Ready", budget, || match host.state(&name()) {
         Ok(TrustState::Ready) => Observed::Met(()),
         reading => Observed::pending(format!("{reading:?}")),
     })
@@ -4150,6 +4153,16 @@ impl LoadingProbe for RequeueCount {
 /// Each rewrite waits for the watcher to accept it. Writing inside takes stops
 /// after `cap` takes, so a build that takes again within one requeue ends and
 /// fails its assertions instead of running forever.
+///
+/// Those waits are the build's own time: the writer runs on the build thread,
+/// and each rewrite is a report and a settle sentinel through the backend.
+/// inotify answers both in well under a millisecond; FSEvents on a hosted
+/// macOS runner took about 45 ms per rewrite once the runner had been busy for
+/// a few minutes, so the writer's 484 rewrites alone outlasted the 20 s Ready
+/// bound and the build was dropped mid-rewrite (NORN-586). Ready's bound
+/// therefore grows by [`REWRITE_ALLOWANCE`] per rewrite the writer makes, while
+/// each rewrite keeps its own 20 s wait, so a lost report still fails on the
+/// rewrite that lost it.
 struct HotWriter {
     hot: PathBuf,
     late: PathBuf,
@@ -4160,7 +4173,19 @@ struct HotWriter {
     count: RequeueCount,
 }
 
+/// Ready's bound for a build holding a [`HotWriter`]: the ordinary bound, plus
+/// a little over twice the measured macOS cost of each rewrite.
+const REWRITE_ALLOWANCE: Convergence =
+    Convergence::new(BUDGET.work(), Duration::from_millis(100), BUDGET.probe());
+
 impl HotWriter {
+    /// The rewrites a build making `calls` requeue calls receives: a burst at
+    /// the canonical page and at each call's start, one after each call, and
+    /// one at each of Structure's and Relations' publication.
+    fn rewrites_for(&self, calls: u64) -> usize {
+        let rewrites = self.per_take + calls * (self.per_take + 1) + 2;
+        usize::try_from(rewrites).unwrap_or(usize::MAX)
+    }
     fn rewrite(&self, path: &Path, times: u64) {
         use std::sync::atomic::Ordering;
         for _ in 0..times {
@@ -4250,7 +4275,12 @@ fn a_writer_inside_every_take_never_outnumbers_the_requeue_calls() {
     let host = fixture.host_over(ops, norn_host::READ_SETTLE_BOUND);
     {
         let _demand = host.demand(&name()).unwrap();
-        ready(&host);
+        // Sized for as many calls as the quiet build made. A build that calls
+        // more often fails here or at the `calls <= quiet` assertion below.
+        ready_within(
+            &host,
+            REWRITE_ALLOWANCE.budget_for(writer.rewrites_for(quiet)),
+        );
     }
     let spent = account.read();
     let (calls, takes) = writer.count.read();
