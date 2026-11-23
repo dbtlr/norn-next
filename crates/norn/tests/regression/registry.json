@@ -349,7 +349,7 @@
       "name": "amortized-periodic-work-stays-amortized",
       "kind": "positive-control",
       "venue": 1,
-      "property": "Periodic maintenance fires at most once per period and costs a request nothing: the retention sweep runs once a day and adds zero to the request path. Held as a positive control — the shape the rest of the maintenance surface is measured against.",
+      "property": "Periodic maintenance fires at most once per period and costs a request nothing: the death prune comes due at most once a period, 10 minutes, on a maintenance leg, off the request path, and a read begins no pass and adds zero to the request path, even while a pass is owed and due. Held as a positive control — the shape the rest of the maintenance surface is measured against.",
       "sources": ["NRN-a62"],
       "binding": {
         "status": "bound",

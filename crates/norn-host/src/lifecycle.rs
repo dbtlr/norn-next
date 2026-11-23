@@ -663,10 +663,15 @@ pub trait EntryOps: Send + Sync + 'static {
     /// **A leg normally moves a clock later.** The entry keeps the last
     /// reading while a leg holds the coverage, and most legs park it back
     /// without reading again; that reading is safe because it can be early
-    /// and never late. A leg that brings a clock earlier must send a wake, or
-    /// leave a deadline no ask sees until the next wake. The one such case is
-    /// the death-prune deadline's first appearance, which the leg that brings
-    /// it announces.
+    /// and never late. A leg that brings a clock earlier must announce it
+    /// through [`ProgressReporter::owe_background_work`], or leave a deadline
+    /// no ask sees until the next wake. The announcement marks the entry as
+    /// well as waking the scheduler, because the ask that wake starts runs
+    /// while the leg still holds the coverage and reads the reading from
+    /// before the leg: the mark makes the leg's release wake the scheduler
+    /// again, and that ask reads the moved clock. The one such case is the
+    /// death-prune deadline's first appearance, which the leg that brings it
+    /// announces.
     ///
     /// The default keeps no clock.
     fn maintenance_deadline(&self, _: &Self::Attachment) -> Option<Instant> {
@@ -885,19 +890,23 @@ impl<A: SnapshotSource> ProgressReporter<A> {
         }
     }
 
-    /// Say that this leg left claim-bound background work owed: a commit
-    /// that leaves the vault's engine owing a slice sends this, so the
-    /// background scheduler asks the entry again rather than waiting for a
-    /// deadline. The scheduler marks an entry whose claim this leg still
-    /// holds, and the leg's release wakes it again.
+    /// Say that this leg left background work owed or brought a claim-bound
+    /// clock earlier: a commit that leaves the vault's engine owing a slice
+    /// sends this, and so does a leg that brings the death prune's deadline
+    /// into being, so the background scheduler asks the entry again rather
+    /// than waiting for a deadline.
+    ///
+    /// The wake's ask reads lane work at once, but it cannot read a clock off
+    /// coverage this leg still holds: it sees the entry's reading from before
+    /// the leg. So this also marks the entry, the ask leaves a mark standing
+    /// while the coverage is out with a leg, and the move that next opens the
+    /// gate — this leg's release among them — wakes the scheduler again to
+    /// read the clocks off the coverage handed back.
     pub fn owe_background_work(&self) {
         if let Some(entry) = self.entry.upgrade() {
-            entry
-                .gate
-                .lock()
-                .expect("entry gate poisoned")
-                .claim
-                .wake_background();
+            let mut state = entry.gate.lock().expect("entry gate poisoned");
+            state.claim.mark_owing_maintenance();
+            state.claim.wake_background();
         }
     }
 
@@ -1479,9 +1488,12 @@ struct EntryState<A: SnapshotSource> {
     /// the attachment is out with a leg exactly when the claim is held, and
     /// the scheduler still has to know whether a slice came due behind that
     /// claim. A reading taken before a leg moved a clock later is early, never
-    /// late: a leg moves a clock only by running the unit it times, which sets
-    /// it later, as [`EntryOps::maintenance_deadline`] obliges, so an early
-    /// reading costs one ask that finds nothing due.
+    /// late: a leg normally moves a clock only by running the unit it times,
+    /// which sets it later, as [`EntryOps::maintenance_deadline`] obliges, so
+    /// an early reading costs one ask that finds nothing due. The exception is
+    /// a leg that brings a clock earlier: it leaves this reading late, so it
+    /// marks the entry ([`ProgressReporter::owe_background_work`]) and its
+    /// release has the scheduler read the clock again.
     /// The clocks run while the entry accounts for coverage, and the release
     /// that leaves it accounting for none ends them.
     background_due: Option<Instant>,
@@ -7078,6 +7090,15 @@ impl<O: EntryOps> Host<O> {
         self.shared.scheduler.wake();
     }
 
+    /// Run `hook` once on the scheduler's thread, as its next ask ends: a
+    /// hook that blocks holds the scheduler, so no ask runs and no
+    /// maintenance leg is scheduled until it returns. Wakes sent meanwhile
+    /// are kept and answered once it does.
+    #[cfg(test)]
+    pub(crate) fn run_before_the_next_scheduler_sleep(&self, hook: impl FnOnce() + Send + 'static) {
+        self.shared.scheduler.run_before_next_sleep(hook);
+    }
+
     /// Record the similarity reads made on a repair's planning hold.
     pub(crate) fn count_similar_stems(&self, cost: crate::evidence::SimilarStemsCost) {
         self.shared.reads.count_similar_stems(cost);
@@ -10824,6 +10845,11 @@ mod tests {
         /// attach and each maintenance leg; `None` for no clock.
         maintenance_clock: Mutex<Option<Instant>>,
         maintenance_period: Mutex<Option<Duration>>,
+        /// The clock the next reconcile brings `maintenance_clock` in to while
+        /// it holds the coverage, announcing it through the reporter as a
+        /// production leg that records a death announces the death prune's
+        /// deadline; `None` for a reconcile that moves no clock.
+        clock_on_next_reconcile: Mutex<Option<Instant>>,
         /// Units each maintenance leg may run past its first, one per unit,
         /// each taking `maintenance_unit_cost`.
         maintenance_units_owed: AtomicUsize,
@@ -11269,9 +11295,13 @@ mod tests {
             name: &VaultName,
             _: &mut FakeCoverage,
             work: ReconcileWork,
-            _: &ProgressReporter<FakeCoverage>,
+            progress: &ProgressReporter<FakeCoverage>,
         ) -> Result<(), JobFailure> {
             ON_JOB_THREAD.with(|flag| flag.set(true));
+            if let Some(at) = self.clock_on_next_reconcile.lock().unwrap().take() {
+                *self.maintenance_clock.lock().unwrap() = Some(at);
+                progress.owe_background_work();
+            }
             self.reconciled_batches
                 .lock()
                 .expect("reconciled batches poisoned")
