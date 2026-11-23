@@ -7400,7 +7400,14 @@ mod tests {
                     norn_wire::VaultAddress::name(name.clone()),
                     norn_wire::ResolutionTarget::new("d4").unwrap(),
                 )) {
-                    Err(_) => Observed::Met(()),
+                    // Only an unknown target proves the death is recorded; a
+                    // refusal for any other reason keeps waiting.
+                    Err(refusal)
+                        if *refusal.code() == norn_wire::ReasonCode::VaultUnknownTarget =>
+                    {
+                        Observed::Met(())
+                    }
+                    Err(refusal) => Observed::Pending(format!("d4 was refused: {refusal:?}")),
                     Ok(_) => Observed::Pending("d4 still resolves".into()),
                 },
             )
