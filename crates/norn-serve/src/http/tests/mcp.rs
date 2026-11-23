@@ -633,8 +633,10 @@ fn every_tool_takes_its_wire_calls_drain_bound_class() {
 }
 
 /// Under the counters feature a call's answer carries the wire route's host
-/// time and the translation inside it, and the counters route serves the
-/// MCP counters.
+/// time and its translation time, and the counters route serves the MCP
+/// counters. A mode tool's translation also counts its mode check, which runs
+/// before the host-time window opens, so only a tool without a mode keeps its
+/// translation inside the host time; `find` has none.
 #[cfg(feature = "counters")]
 #[test]
 fn a_call_carries_its_host_and_translation_time_and_the_counters_serve_mcp() {
