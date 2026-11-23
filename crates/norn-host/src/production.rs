@@ -7329,8 +7329,11 @@ mod tests {
         }
 
         /// **On a running host the death prune comes due at most once a period, on
-        /// the background lane, and a read drives none of it.** The clock runs at a
-        /// short period. The first period owes a pass, and each of three deaths owes
+        /// a maintenance leg, off the request path, and a read drives none of it.**
+        /// The clock runs at a period of two seconds, so the death a fifth pass is
+        /// owed for is recorded well inside the period after the fourth pass began
+        /// even where a platform watcher delivers slowly; the case runs about
+        /// sixteen seconds. The first period owes a pass, and each of three deaths owes
         /// one more, so exactly four passes run, each a whole period after the one
         /// before it began: the clock reads the store's marks no more often than the
         /// elapsed periods allow. Nothing but the host wakes the scheduler, so each
@@ -7340,12 +7343,12 @@ mod tests {
         /// Reads then run while a fifth pass is owed and not yet begun: the
         /// scheduler is held, a death is recorded, and the clock passes due. They
         /// run no due check, no pass and no maintenance leg; released, the
-        /// scheduler begins that pass. Reads served across four more periods, with
+        /// scheduler begins that pass. Reads served across two more periods, with
         /// nothing owed, run nothing either, so a request pays nothing for the
         /// periodic work, due or not.
         #[test]
         fn the_death_prune_comes_due_at_most_once_a_period_and_a_read_drives_none_of_it() {
-            let period = Duration::from_millis(300);
+            let period = Duration::from_secs(2);
             let f = Fixture::new("death-prune-period");
             for index in 0..5 {
                 write(
@@ -7413,7 +7416,7 @@ mod tests {
                  while it was owed: the death was recorded after the clock came due"
             );
             let legs = host.maintenance_reading().legs;
-            let reads = read_for(&host, &name, period * 2);
+            let reads = read_for(&host, &name, period);
             assert_eq!(
                 host.ops().death_prune_reading(),
                 owed,
@@ -7430,11 +7433,11 @@ mod tests {
             assert_eq!(fifth.work.deaths_removed, 4, "{fifth:?}");
 
             let legs = host.maintenance_reading().legs;
-            let reads = read_for(&host, &name, period * 4);
+            let reads = read_for(&host, &name, period * 2);
             assert_eq!(
                 host.ops().death_prune_reading(),
                 fifth,
-                "{reads} reads across four periods drove the death prune"
+                "{reads} reads across two periods drove the death prune"
             );
             assert_eq!(
                 host.maintenance_reading().legs,
