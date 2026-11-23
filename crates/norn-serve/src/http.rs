@@ -60,7 +60,7 @@ use crate::credentials::{Admission, Credentials, Keyed};
 use crate::lifecycle::{Began, Lifecycle, Stage, StopReason};
 use crate::log::log;
 use crate::mcp::{McpCall, McpCounters};
-use crate::request::{Composed, Dispatched, Ended, Lane, Wire};
+use crate::request::{Composed, Dispatched, Ended, Wire};
 use crate::start::DRAIN_PATH;
 use crate::stop::Stopper;
 use crate::wire;
@@ -312,9 +312,9 @@ where
     if request.method() == Method::POST
         && let Some(name) = request.uri().path().strip_prefix(WIRE_PREFIX)
         && let Ok(verb) = Verb::try_from(name)
-        && wire::lane(verb).is_some()
+        && let Some(runs) = wire::lane(verb)
     {
-        let answer = wire_request(verb, request, context).await;
+        let answer = wire_request(verb, runs, request, context).await;
         context.wire.counters.body_bytes_encoded.fetch_add(
             answer.body().size_hint().exact().unwrap_or(0),
             Ordering::Relaxed,
@@ -324,15 +324,16 @@ where
     // The connection stays open: a request that carried no body, the common
     // case, leaves nothing unread, and hyper does not reuse one whose body
     // went unread.
-    refusal(
-        "this host serves no such path: the wire route is POST /v1/wire/{verb}, for a verb \
-         this host serves",
-        ErrorDetail::unknown_verb(),
-    )
+    envelope_answer(&unknown_verb_envelope())
 }
 
 /// `POST /v1/wire/{verb}` for a verb this host serves.
-async fn wire_request<B>(verb: Verb, request: Request<B>, context: &Context) -> Answer
+async fn wire_request<B>(
+    verb: Verb,
+    runs: wire::Runs,
+    request: Request<B>,
+    context: &Context,
+) -> Answer
 where
     B: Body<Data = Bytes>,
     B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
@@ -367,12 +368,9 @@ where
             return closing(bad_request("the request's body did not arrive whole"));
         }
     };
-    let lane = match wire::lane(verb) {
-        Some(wire::Runs::Mutation) => match wire::mutation_vault(verb, &body) {
-            Ok(vault) => Lane::Mutation(vault),
-            Err(error) => return unparsed(verb, &error),
-        },
-        _ => Lane::Read,
+    let lane = match runs.request_lane(verb, &body) {
+        Ok(lane) => lane,
+        Err(error) => return unparsed(verb, &error),
     };
     let at_bound = wire::at_bound(verb, &body);
     // The body crosses to the pool as it arrived, uncopied; the slot goes
@@ -397,9 +395,8 @@ where
                 .fetch_add(report.len() as u64, Ordering::Relaxed);
             json(StatusCode::OK, report)
         }
-        // The route table composes nothing; a body that is already whole is
-        // answered as it stands.
-        Settled::Composed(composed) => json(StatusCode::OK, composed.body),
+        // A composed answer already carries its status and body.
+        Settled::Composed(composed) => mcp_answer(composed.answer),
         Settled::Refused(envelope) => envelope_answer(&envelope),
     };
     #[cfg(feature = "counters")]
@@ -467,12 +464,10 @@ fn settle(verb: Verb, ended: Ended, context: &Context) -> Settled {
 ///
 /// **After it**, `norn-mcp` reads the message. One it answers from constants
 /// and the prepared tool lists gives its slot back at once, and is written
-/// as `norn-mcp` composed it. A `tools/call` keeps its slot: its lane and
-/// drain-bound class are read off its raw arguments with the tool's mode
-/// standing in for `mode`, and it enters the wire route's own run through a
-/// per-request wrapper ([`McpCall`]), so the claim, the pools, the vault's
-/// turn and the readiness retry are the wire route's. Every tool outcome,
-/// success or failure, is status 200.
+/// as `norn-mcp` composed it. For a resolved call, `norn-mcp` checks the mode
+/// before the route reads the lane and drain-bound class. An admitted call
+/// keeps its slot through the wire route's run, with [`McpCall`] adapting
+/// its arguments and outcome on the pool.
 async fn mcp_request<B>(request: Request<B>, context: &Context) -> Answer
 where
     B: Body<Data = Bytes>,
@@ -529,25 +524,28 @@ where
     };
     context.mcp_counters.calls.fetch_add(1, Ordering::Relaxed);
     let verb = call.verb;
-    let (lane, at_bound) = match crate::mcp::pre_dispatch(verb, call.mode, call.arguments) {
+    let Some(runs) = wire::lane(verb) else {
+        drop(slot);
+        return mcp_tool_answer(verb, call.reply.failure(&unknown_verb_envelope()));
+    };
+    let splice = match call.mode_splice() {
+        Ok(splice) => splice,
+        Err(answer) => {
+            drop(slot);
+            return mcp_tool_answer(verb, answer);
+        }
+    };
+    let (lane, at_bound) = match crate::mcp::pre_dispatch(verb, runs, call.mode, call.arguments) {
         Ok(read) => read,
         Err(error) => {
             drop(slot);
-            let body = call.reply.bad_request(&format!(
-                "the arguments are not `{verb}`'s params: {error}; nothing was dispatched"
-            ));
-            let mut answer = json(StatusCode::OK, body);
-            answer
-                .extensions_mut()
-                .insert(ReasonLabel("serve/bad-request".into()));
-            answer.extensions_mut().insert(McpTool(verb));
-            return answer;
+            return mcp_tool_answer(verb, call.reply.bad_arguments(verb, &error));
         }
     };
     let arguments = within(&body, call.arguments);
     let wrapper = Arc::new(McpCall::new(
         Arc::clone(&wire_state.dispatcher),
-        call.mode,
+        splice,
         call.reply.clone(),
     ));
     let run = wire_state
@@ -562,7 +560,7 @@ where
         .await;
     #[cfg(feature = "counters")]
     let host_time = run.dispatched_at.elapsed();
-    let mut answer = match settle(verb, run.ended, context) {
+    let answer = match settle(verb, run.ended, context) {
         Settled::Composed(composed) => {
             if let Some(report) = composed.report_bytes {
                 wire_state
@@ -570,11 +568,7 @@ where
                     .report_bytes
                     .fetch_add(report as u64, Ordering::Relaxed);
             }
-            let mut answer = json(StatusCode::OK, composed.body);
-            if let Some(code) = composed.refused {
-                answer.extensions_mut().insert(ReasonLabel(code));
-            }
-            answer
+            composed.answer
         }
         // The wrapper composes every report it meets; one reaching here is
         // composed the same way.
@@ -583,19 +577,14 @@ where
                 .counters
                 .report_bytes
                 .fetch_add(report.len() as u64, Ordering::Relaxed);
-            json(StatusCode::OK, call.reply.report(&report))
+            call.reply.report(&report)
         }
-        Settled::Refused(envelope) => {
-            let mut answer = json(StatusCode::OK, call.reply.failure(&envelope));
-            if let Ok(serde_json::Value::String(code)) = serde_json::to_value(envelope.code()) {
-                answer.extensions_mut().insert(ReasonLabel(code));
-            }
-            answer
-        }
+        Settled::Refused(envelope) => call.reply.failure(&envelope),
     };
-    answer.extensions_mut().insert(McpTool(verb));
+    let answer = mcp_tool_answer(verb, answer);
     #[cfg(feature = "counters")]
-    {
+    let answer = {
+        let mut answer = answer;
         let translate_ns = wrapper.translate_ns();
         context
             .mcp_counters
@@ -607,7 +596,8 @@ where
             TRANSLATE_HEADER,
             micros_header(std::time::Duration::from_nanos(translate_ns)),
         );
-    }
+        answer
+    };
     answer
 }
 
@@ -661,8 +651,18 @@ fn mcp_answer(answer: norn_mcp::Answer) -> Answer {
         response
             .extensions_mut()
             .insert(ReasonLabel(format!("jsonrpc/{code}")));
+    } else if let Some(code) = answer.wire_error
+        && let Ok(serde_json::Value::String(code)) = serde_json::to_value(code)
+    {
+        response.extensions_mut().insert(ReasonLabel(code));
     }
     response
+}
+
+fn mcp_tool_answer(verb: Verb, answer: norn_mcp::Answer) -> Answer {
+    let mut answer = mcp_answer(answer);
+    answer.extensions_mut().insert(McpTool(verb));
+    answer
 }
 
 /// An answer with no body and no content type.
@@ -693,6 +693,14 @@ pub(crate) fn status_of(class: FaultClass) -> StatusCode {
         FaultClass::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
         FaultClass::Operator | FaultClass::Defect => StatusCode::INTERNAL_SERVER_ERROR,
     }
+}
+
+fn unknown_verb_envelope() -> ErrorEnvelope {
+    ErrorEnvelope::new(
+        "this host serves no such path: the wire route is POST /v1/wire/{verb}, for a verb \
+         this host serves",
+        ErrorDetail::unknown_verb(),
+    )
 }
 
 /// A body that did not parse as `verb`'s params.

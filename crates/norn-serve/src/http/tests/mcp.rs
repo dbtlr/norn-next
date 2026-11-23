@@ -323,6 +323,45 @@ fn a_meta_naming_a_field_twice_is_refused_never_served_as_2025_era() {
 
 // § Calls.
 
+#[test]
+fn both_routes_dispatch_only_verbs_with_wire_lanes() {
+    // The fixture prepares tools from the whole vocabulary, including any
+    // verbs the wire table excludes.
+    let case = mcp_case("norn-serve-mcp-route-parity");
+    let arguments = json!({
+        "vault": vault(),
+        "plan": {"vault": vault()},
+        "registration": {"name": "notes"},
+        "name": "notes",
+    });
+    for tool in &case.context.mcp_tools.tools {
+        let before = dispatches(&case);
+        let (native, _, body) = answer_of(
+            &case,
+            request(
+                Method::POST,
+                &format!("/v1/wire/{}", tool.verb),
+                Some(&bearer()),
+                arguments.to_string().as_bytes(),
+            ),
+        );
+        let result = tool_result(&case, legacy_call(&tool.name, arguments.clone()));
+        if native == StatusCode::NOT_FOUND {
+            assert_eq!(code(&body), "serve/unknown-verb");
+            assert_eq!(result["isError"], true, "{}", tool.name);
+            assert_eq!(
+                result["structuredContent"]["error"]["detail"]["code"],
+                code(&body)
+            );
+            assert_eq!(dispatches(&case), before, "{}", tool.name);
+        } else {
+            assert_eq!(native, StatusCode::OK, "{}", tool.name);
+            assert_eq!(result["structuredContent"], json!({}), "{}", tool.name);
+            assert_eq!(dispatches(&case), before + 2, "{}", tool.name);
+        }
+    }
+}
+
 /// A call that meets a ready entry is exactly one dispatch, its report
 /// composed into both channels; a warming entry is asked again by the
 /// readiness retry, as on the wire route.
@@ -521,6 +560,7 @@ fn a_caller_supplied_mode_is_refused_for_every_mode_tool() {
             }
             arguments
         };
+        let before = dispatches(&case);
         for supplied in ["apply", "preview"] {
             let result = tool_result(&case, legacy_call(&tool.name, arguments(Some(supplied))));
             assert_eq!(result["isError"], true, "{} {supplied}", tool.name);
@@ -529,6 +569,7 @@ fn a_caller_supplied_mode_is_refused_for_every_mode_tool() {
                 "serve/bad-request"
             );
         }
+        assert_eq!(dispatches(&case), before, "{}: no dispatch", tool.name);
         assert!(
             case.answers.seen.lock().unwrap().is_empty(),
             "{}: a refused mode reaches no host",
@@ -560,8 +601,9 @@ fn every_tool_takes_its_wire_calls_drain_bound_class() {
             Verb::VaultUnregister | Verb::VaultSet => r#"{"name":"notes"}"#.into(),
             _ => format!(r#"{{"vault":{address}}}"#),
         };
+        let runs = crate::wire::lane(tool.verb).unwrap();
         let (_, at_bound) =
-            crate::mcp::pre_dispatch(tool.verb, tool.mode, arguments.as_bytes()).unwrap();
+            crate::mcp::pre_dispatch(tool.verb, runs, tool.mode, arguments.as_bytes()).unwrap();
         let wire_body = norn_mcp::wire_body(arguments.as_bytes(), tool.mode).unwrap();
         assert_eq!(
             at_bound,
@@ -583,8 +625,9 @@ fn every_tool_takes_its_wire_calls_drain_bound_class() {
         ("false", AtBound::OutcomeUnknown),
     ] {
         let arguments = format!(r#"{{"vault":{address},"dry_run":{dry_run}}}"#);
+        let runs = crate::wire::lane(Verb::VaultReload).unwrap();
         let (_, at_bound) =
-            crate::mcp::pre_dispatch(Verb::VaultReload, None, arguments.as_bytes()).unwrap();
+            crate::mcp::pre_dispatch(Verb::VaultReload, runs, None, arguments.as_bytes()).unwrap();
         assert_eq!(at_bound, expected, "dry_run {dry_run}");
     }
 }

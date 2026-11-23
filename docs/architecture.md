@@ -2404,27 +2404,29 @@ the server identity in `_meta`. An unknown tool, non-object `arguments` and a `c
 are `-32602` at 200; an unknown method is `-32601`, 200 under 2025-11-25 and 404 under
 2026-07-28, where `initialize` and `ping` are unknown.
 
-**A `tools/call`** resolves its tool's verb and mode from the name table, then does what
-the wire route does before dispatch, from the raw arguments: the mutation vault, and the
-drain-bound class with the tool's mode standing in for `mode`, so `init_preview` and
-`vault_migrate_preview` close with the process at the drain bound and `vault_reload`
-reads its own `dry_run`. Arguments these reads cannot use are an `isError`
-`serve/bad-request` result. The call then enters the wire route's own run — the claim,
-the pools, the vault's turn, the readiness retry and the one `ready_wait` deadline —
-through a per-request dispatcher wrapping the route table. On the pool thread the
-wrapper splices the tool's mode into the argument bytes, refusing a caller-supplied
-`mode` in band, and composes the outcome: a report becomes `structuredContent`, verbatim,
-beside the same bytes escaped once as the one text block, and `serve.report_bytes` adds
-the report's own length; a wire failure becomes an `isError` result whose
+**A `tools/call`** resolves its tool's verb and mode from the name table. The wire
+route's lane table governs both routes. The host prepares tools only for verbs with
+a lane, and dispatch requires that lane. For a mode tool, `norn-mcp` checks the raw
+arguments for a caller-supplied `mode` and composes the refusal before the request
+takes a claim. The route reads the mutation vault and the drain-bound class with the
+tool's mode standing in for `mode`. At the drain bound, `init_preview` and
+`vault_migrate_preview` close with the process and `vault_reload` follows its own
+`dry_run`. Arguments the route cannot read produce an `isError` `serve/bad-request`
+result composed by `norn-mcp`. The call enters the wire route's claim, pools, vault
+turn and readiness retry with the same `ready_wait` deadline. On the pool thread a
+per-request dispatcher splices the checked tool mode into the argument bytes and
+composes the outcome through `norn-mcp`. A report becomes `structuredContent` verbatim,
+with the same bytes escaped once as a text block. The report's length adds to
+`serve.report_bytes`. A wire failure becomes an `isError` result whose
 `structuredContent` is `{"error": <envelope>, "class": <fault class>}`. A `Warming`
 refusal, a stopped worker and a body the route table could not parse pass through
 uncomposed, so the readiness retry and the stop trigger see them as on the wire route.
-Every tool outcome is status 200; a JSON-RPC error never carries a wire code. Under the
-`counters` feature a call's answer carries `x-norn-host-time-us`, measured over the wire
-route's interval, and `x-norn-mcp-translate-us`, the splice and composition inside it,
-which `mcp.translate_us` accumulates; `mcp.messages` counts messages read and
-`mcp.calls` the calls that resolved to a served tool, counted before the pre-dispatch
-reads, so a call refused there is counted though nothing was dispatched.
+`norn-mcp` gives each tool outcome status 200. Wire codes appear in tool results.
+Under the `counters` feature, a call that enters the wire run carries
+`x-norn-host-time-us` over the wire route's interval and `x-norn-mcp-translate-us`
+for the splice and composition inside it. `mcp.translate_us` accumulates the latter.
+`mcp.messages` counts messages read, and `mcp.calls` counts calls that resolved to a
+served tool. A refusal before the claim still counts toward `mcp.calls`.
 
 ### Topology
 

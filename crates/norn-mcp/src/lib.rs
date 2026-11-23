@@ -10,8 +10,8 @@ use std::sync::Arc;
 pub mod message;
 
 pub use message::{
-    Answer, Call, Headers, LEGACY_VERSION, MODERN_VERSION, Message, ModeGiven, Reply, Revision,
-    ToolRoute, handle, wire_body,
+    Answer, Call, Headers, LEGACY_VERSION, MODERN_VERSION, Message, ModeGiven, ModeSplice, Reply,
+    Revision, ToolRoute, handle, wire_body,
 };
 
 /// A params schema has assertions that cannot safely be removed.
@@ -108,7 +108,7 @@ impl ToolList {
                     description.push_str(" Previews only: writes nothing, and answers with the plan and its forecast.");
                 }
                 tools.push(Tool {
-                    name: format!("{}{}", verb.as_str(), if preview { "_preview" } else { "" }),
+                    name: tool_name(verb, preview),
                     description,
                     input_schema: input_schema.clone(),
                     annotations: Annotations {
@@ -173,6 +173,10 @@ impl ToolList {
             server_info: server_info.to_string().into(),
         }
     }
+}
+
+fn tool_name(verb: Verb, preview: bool) -> String {
+    format!("{}{}", verb.as_str(), if preview { "_preview" } else { "" })
 }
 
 /// Remove only presence/constant assertions over properties already at the root.

@@ -630,11 +630,8 @@ fn a_report_is_composed_into_both_channels_from_its_bytes() {
     let report = br#"{"reading":{"trust":{"state":"ready"}},"unsatisfied":[{"unsatisfied":"unknown_sort_key","key":"t\u00e9","did_you_mean":["\"q\"\\"]}],"advisories":[],"report":{"outcome":"previewed","forecast":{"folders_made":[]}}}"#;
     for revision in [Revision::Legacy, Revision::Modern] {
         let reply = call_reply(revision);
-        let answer = Answer {
-            status: 200,
-            body: reply.report(report),
-            error_code: None,
-        };
+        let answer = reply.report(report);
+        assert_eq!(answer.status, 200);
         let result = assert_result(&answer, revision_name(revision), "CallToolResult");
         let expected: Value = serde_json::from_slice(report).unwrap();
         assert_eq!(result["structuredContent"], expected);
@@ -690,11 +687,8 @@ fn every_fault_class_reaches_an_is_error_result_carrying_it() {
     for revision in [Revision::Legacy, Revision::Modern] {
         let reply = call_reply(revision);
         for (class, envelope) in one_envelope_per_class() {
-            let answer = Answer {
-                status: 200,
-                body: reply.failure(&envelope),
-                error_code: None,
-            };
+            let answer = reply.failure(&envelope);
+            assert_eq!(answer.status, 200);
             let result = assert_result(&answer, revision_name(revision), "CallToolResult");
             assert_eq!(result["isError"], true);
             let structured = &result["structuredContent"];
@@ -708,21 +702,32 @@ fn every_fault_class_reaches_an_is_error_result_carrying_it() {
             assert_eq!(&text, structured);
             assert!(body(&answer).get("error").is_none(), "not a JSON-RPC error");
         }
-        let result = assert_result(
-            &Answer {
-                status: 200,
-                body: reply.bad_request("no vault"),
-                error_code: None,
-            },
-            revision_name(revision),
-            "CallToolResult",
-        );
-        assert_eq!(result["isError"], true);
-        assert_eq!(result["structuredContent"]["class"], "request");
-        assert_eq!(
-            result["structuredContent"]["error"]["detail"]["code"],
-            "serve/bad-request"
-        );
+    }
+}
+
+#[test]
+fn tool_argument_refusals_carry_their_status_and_guidance() {
+    for revision in [Revision::Legacy, Revision::Modern] {
+        let reply = call_reply(revision);
+        for (answer, message) in [
+            (
+                reply.mode_given(Verb::Set),
+                "`mode` is set by the tool's name: call `set` to apply or `set_preview` to preview, without a `mode` argument; nothing was dispatched",
+            ),
+            (
+                reply.bad_arguments(Verb::Set, "no vault"),
+                "the arguments are not `set`'s params: no vault; nothing was dispatched",
+            ),
+        ] {
+            assert_eq!(answer.status, 200);
+            assert_eq!(answer.error_code, None);
+            let result = assert_result(&answer, revision_name(revision), "CallToolResult");
+            assert_eq!(result["isError"], true);
+            let structured = &result["structuredContent"];
+            assert_eq!(structured["class"], "request");
+            assert_eq!(structured["error"]["detail"]["code"], "serve/bad-request");
+            assert_eq!(structured["error"]["message"], message);
+        }
     }
 }
 

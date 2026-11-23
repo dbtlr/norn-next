@@ -17,11 +17,11 @@
 use std::borrow::Cow;
 use std::sync::Arc;
 
-use norn_wire::{ApplyMode, ErrorDetail, ErrorEnvelope, FaultClass, Verb};
+use norn_wire::{ApplyMode, ErrorDetail, ErrorEnvelope, FaultClass, ReasonCode, Verb};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::value::RawValue;
 
-use crate::PreparedToolLists;
+use crate::{PreparedToolLists, tool_name};
 
 /// The revision every 2025-era message is served as.
 pub const LEGACY_VERSION: &str = "2025-11-25";
@@ -77,6 +77,8 @@ pub struct Answer {
     pub body: Vec<u8>,
     /// The JSON-RPC error code this answer carries, if it is an error.
     pub error_code: Option<i32>,
+    /// The wire reason code carried in band by a tool failure.
+    pub wire_error: Option<ReasonCode>,
 }
 
 /// What a message comes to.
@@ -103,6 +105,15 @@ pub struct Call<'a> {
     pub reply: Reply,
 }
 
+impl Call<'_> {
+    /// Check the caller's mode before dispatch. The splice can then run on
+    /// the pool without scanning the arguments for the key again.
+    pub fn mode_splice(&self) -> Result<ModeSplice, Answer> {
+        ModeSplice::check(self.arguments, self.mode)
+            .map_err(|ModeGiven| self.reply.mode_given(self.verb))
+    }
+}
+
 /// Who a call's outcome is addressed to: its request id and its revision.
 /// Owned, so it crosses to the thread that composes the outcome.
 #[derive(Clone, Debug)]
@@ -126,6 +137,10 @@ pub struct ToolRoute {
 /// A caller named `mode` in a mode tool's arguments: the tool's name fixes it.
 #[derive(Debug, Eq, PartialEq)]
 pub struct ModeGiven;
+
+/// A mode splice checked against a call's original argument bytes.
+#[derive(Clone, Copy, Debug)]
+pub struct ModeSplice(Option<(ApplyMode, usize)>);
 
 /// Read one message and answer it, or resolve it to a call.
 pub fn handle<'a>(
@@ -153,6 +168,7 @@ pub fn handle<'a>(
             status: 202,
             body: Vec::new(),
             error_code: None,
+            wire_error: None,
         });
     };
     let request = Request {
@@ -587,6 +603,7 @@ fn error(status: u16, id: Option<&str>, code: i32, message: &str, data: Option<&
         status,
         body,
         error_code: Some(code),
+        wire_error: None,
     }
 }
 
@@ -602,6 +619,7 @@ fn response(id: &str, result: &[u8]) -> Answer {
         status: 200,
         body,
         error_code: None,
+        wire_error: None,
     }
 }
 
@@ -668,27 +686,41 @@ impl Reply {
     /// A report's result: the report verbatim as `structuredContent`, and the
     /// same bytes escaped once as the text block. Every report is a JSON
     /// object.
-    pub fn report(&self, report: &[u8]) -> Vec<u8> {
-        self.tool_result(report, false)
+    pub fn report(&self, report: &[u8]) -> Answer {
+        self.tool_result(report, None)
     }
 
     /// A wire failure's `isError` result: the envelope and its fault class.
-    pub fn failure(&self, envelope: &ErrorEnvelope) -> Vec<u8> {
+    pub fn failure(&self, envelope: &ErrorEnvelope) -> Answer {
         let structured = serde_json::to_vec(&Failure {
             error: envelope,
             class: envelope.fault_class(),
         })
         .expect("a failure serializes");
-        self.tool_result(&structured, true)
+        self.tool_result(&structured, Some(envelope.code().clone()))
     }
 
-    /// A `serve/bad-request` `isError` result: arguments the route could not
-    /// use, and nothing was dispatched.
-    pub fn bad_request(&self, message: &str) -> Vec<u8> {
+    /// A caller supplied a mode the tool name already fixes.
+    pub fn mode_given(&self, verb: Verb) -> Answer {
+        let preview = tool_name(verb, true);
+        self.bad_request(format!(
+            "`mode` is set by the tool's name: call `{verb}` to apply or \
+             `{preview}` to preview, without a `mode` argument; nothing was dispatched"
+        ))
+    }
+
+    /// The route could not read the arguments it needs before dispatch.
+    pub fn bad_arguments(&self, verb: Verb, error: &str) -> Answer {
+        self.bad_request(format!(
+            "the arguments are not `{verb}`'s params: {error}; nothing was dispatched"
+        ))
+    }
+
+    fn bad_request(&self, message: String) -> Answer {
         self.failure(&ErrorEnvelope::new(message, ErrorDetail::bad_request()))
     }
 
-    fn tool_result(&self, structured: &[u8], is_error: bool) -> Vec<u8> {
+    fn tool_result(&self, structured: &[u8], wire_error: Option<ReasonCode>) -> Answer {
         debug_assert!(structured.first() == Some(&b'{'), "a report is an object");
         // A report is the JSON serde wrote, so its bytes are UTF-8; the lossy
         // reading is never taken.
@@ -700,7 +732,7 @@ impl Reply {
         serde_json::to_writer(&mut body, text.as_ref()).expect("a string serializes");
         body.extend_from_slice(br#"}],"structuredContent":"#);
         body.extend_from_slice(structured);
-        if is_error {
+        if wire_error.is_some() {
             body.extend_from_slice(br#","isError":true"#);
         }
         if self.revision == Revision::Modern {
@@ -708,7 +740,12 @@ impl Reply {
             modern_fields(&mut body, &self.server_info);
         }
         body.extend_from_slice(b"}}");
-        body
+        Answer {
+            status: 200,
+            body,
+            error_code: None,
+            wire_error,
+        }
     }
 }
 
@@ -716,42 +753,55 @@ impl Reply {
 /// mode tool. A `mode` key the caller gave is refused, never overridden, in
 /// either direction.
 pub fn wire_body(arguments: &[u8], mode: Option<ApplyMode>) -> Result<Cow<'_, [u8]>, ModeGiven> {
-    let Some(mode) = mode else {
-        return Ok(Cow::Borrowed(arguments));
-    };
-    #[derive(Deserialize)]
-    struct ModeKey<'a> {
-        #[serde(default, borrow, deserialize_with = "present")]
-        mode: Option<&'a RawValue>,
+    Ok(ModeSplice::check(arguments, mode)?.apply(arguments))
+}
+
+impl ModeSplice {
+    fn check(arguments: &[u8], mode: Option<ApplyMode>) -> Result<Self, ModeGiven> {
+        let Some(mode) = mode else {
+            return Ok(Self(None));
+        };
+        #[derive(Deserialize)]
+        struct ModeKey<'a> {
+            #[serde(default, borrow, deserialize_with = "present")]
+            mode: Option<&'a RawValue>,
+        }
+        // Only the one key is read. Escaped spellings of `mode` also match,
+        // and a duplicate `mode` also refuses the call.
+        match serde_json::from_slice::<ModeKey<'_>>(arguments) {
+            Ok(ModeKey { mode: None }) => {}
+            _ => return Err(ModeGiven),
+        }
+        let open = arguments
+            .iter()
+            .position(|byte| *byte == b'{')
+            .ok_or(ModeGiven)?;
+        Ok(Self(Some((mode, open))))
     }
-    // Only the one key is read; every other value is skipped unparsed. A key
-    // spelled with escapes reads as the key it spells, and two `mode` keys
-    // refuse to read.
-    match serde_json::from_slice::<ModeKey<'_>>(arguments) {
-        Ok(ModeKey { mode: None }) => {}
-        _ => return Err(ModeGiven),
+
+    /// Splice the mode into the same argument bytes that were checked.
+    pub fn apply(self, arguments: &[u8]) -> Cow<'_, [u8]> {
+        let Some((mode, open)) = self.0 else {
+            return Cow::Borrowed(arguments);
+        };
+        let rest = &arguments[open + 1..];
+        let empty = rest
+            .iter()
+            .find(|byte| !byte.is_ascii_whitespace())
+            .is_some_and(|byte| *byte == b'}');
+        let spelled: &[u8] = match mode {
+            ApplyMode::Apply => br#""mode":"apply""#,
+            ApplyMode::Preview => br#""mode":"preview""#,
+        };
+        let mut body = Vec::with_capacity(arguments.len() + spelled.len() + 1);
+        body.push(b'{');
+        body.extend_from_slice(spelled);
+        if !empty {
+            body.push(b',');
+        }
+        body.extend_from_slice(rest);
+        Cow::Owned(body)
     }
-    let open = arguments
-        .iter()
-        .position(|byte| *byte == b'{')
-        .ok_or(ModeGiven)?;
-    let rest = &arguments[open + 1..];
-    let empty = rest
-        .iter()
-        .find(|byte| !byte.is_ascii_whitespace())
-        .is_some_and(|byte| *byte == b'}');
-    let spelled: &[u8] = match mode {
-        ApplyMode::Apply => br#""mode":"apply""#,
-        ApplyMode::Preview => br#""mode":"preview""#,
-    };
-    let mut body = Vec::with_capacity(arguments.len() + spelled.len() + 1);
-    body.push(b'{');
-    body.extend_from_slice(spelled);
-    if !empty {
-        body.push(b',');
-    }
-    body.extend_from_slice(rest);
-    Ok(Cow::Owned(body))
 }
 
 #[cfg(test)]

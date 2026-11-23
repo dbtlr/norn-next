@@ -316,7 +316,7 @@ async fn serve_on_runtime(
         &mcp_counters,
         norn_wire::Verb::ALL
             .into_iter()
-            .filter(|verb| !wire::NOT_SERVED.contains(verb)),
+            .filter(|verb| wire::lane(*verb).is_some()),
         build.as_str(),
     )
     .map_err(|error| Refusal::new(format!("preparing MCP tools failed: {error}")))?;

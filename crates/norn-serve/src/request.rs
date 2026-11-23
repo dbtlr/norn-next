@@ -56,19 +56,17 @@ pub(crate) enum Dispatched {
     /// took effect is not known.
     HostStopped(String),
     /// An answer a per-request dispatcher already composed for its own
-    /// protocol: `/mcp`'s result body. The wire route's dispatcher never
+    /// protocol. The wire route's dispatcher never
     /// answers it.
     Composed(Composed),
 }
 
-/// A body composed on the pool thread, and the length of the verb report it
+/// An answer composed on the pool thread, and the length of the verb report it
 /// carries, where it carries one: what `serve.report_bytes` adds.
 #[derive(Debug)]
 pub(crate) struct Composed {
-    pub(crate) body: Vec<u8>,
+    pub(crate) answer: norn_mcp::Answer,
     pub(crate) report_bytes: Option<usize>,
-    /// The reason code of a failure composed in band, for the request log.
-    pub(crate) refused: Option<String>,
 }
 
 /// What answers a dispatch: the route table over a host in production, a
