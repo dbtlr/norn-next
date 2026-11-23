@@ -665,30 +665,44 @@ fn a_call_carries_its_host_and_translation_time_and_the_counters_serve_mcp() {
 fn the_request_log_labels_mcp_and_its_calls() {
     let mut case = mcp_case("norn-serve-mcp-log");
     case.context.request_log = true;
-    let line = |request| {
+    let line = |case: &Case, request| {
         let ((), lines) = crate::log::capture::lines_of(|| {
-            answer_of(&case, request);
+            answer_of(case, request);
         });
         assert_eq!(lines.len(), 1, "{lines:?}");
         lines[0].clone()
     };
-    let logged = line(legacy("tools/list"));
+    let logged = line(&case, legacy("tools/list"));
     assert!(logged.starts_with("request: mcp 200 ok "), "{logged}");
-    let logged = line(mcp_post(&[], b"{nope"));
+    let logged = line(&case, mcp_post(&[], b"{nope"));
     assert!(
         logged.starts_with("request: mcp 400 jsonrpc/-32700 "),
         "{logged}"
     );
-    let logged = line(legacy_call("find", json!({"vault": vault()})));
+    let logged = line(&case, legacy_call("find", json!({"vault": vault()})));
     assert!(logged.starts_with("request: mcp/find 200 ok "), "{logged}");
-    let logged = line(legacy_call(
-        "set_preview",
-        json!({"vault": vault(), "mode": "x"}),
-    ));
+    let logged = line(
+        &case,
+        legacy_call("set_preview", json!({"vault": vault(), "mode": "x"})),
+    );
     assert!(
         logged.starts_with("request: mcp/set 200 serve/bad-request "),
         "{logged}"
     );
-    let logged = line(request(Method::GET, MCP_PATH, Some(&bearer()), b""));
+    let logged = line(&case, legacy_call("set_preview", json!({"vault": 5})));
+    assert!(
+        logged.starts_with("request: mcp/set 200 serve/bad-request "),
+        "{logged}"
+    );
+    case.answers.push(Dispatched::Refused(ErrorEnvelope::new(
+        "unknown",
+        ErrorDetail::unknown_vault(norn_wire::VaultName::new("notes").unwrap()),
+    )));
+    let logged = line(&case, legacy_call("find", json!({"vault": vault()})));
+    assert!(
+        logged.starts_with("request: mcp/find 200 host/unknown-vault "),
+        "{logged}"
+    );
+    let logged = line(&case, request(Method::GET, MCP_PATH, Some(&bearer()), b""));
     assert!(logged.starts_with("request: mcp 405 ok "), "{logged}");
 }
