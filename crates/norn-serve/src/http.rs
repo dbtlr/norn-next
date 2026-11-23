@@ -538,6 +538,10 @@ where
             return mcp_tool_answer(verb, answer);
         }
     };
+    // Only the mode check counts as translation; the lane and drain-bound
+    // reads below are routing.
+    #[cfg(feature = "counters")]
+    let mode_check = mode_check_started.elapsed();
     let (lane, at_bound) = match crate::mcp::pre_dispatch(verb, runs, call.mode, call.arguments) {
         Ok(read) => read,
         Err(error) => {
@@ -554,7 +558,7 @@ where
     // The mode check runs before the wrapper exists; its time still counts
     // as translation.
     #[cfg(feature = "counters")]
-    wrapper.translated(mode_check_started);
+    wrapper.add_translation(mode_check);
     let run = wire_state
         .serve(
             verb,

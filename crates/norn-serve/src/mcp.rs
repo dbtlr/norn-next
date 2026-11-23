@@ -96,9 +96,15 @@ impl McpCall {
     }
 
     #[cfg(feature = "counters")]
-    pub(crate) fn translated(&self, since: std::time::Instant) {
+    fn translated(&self, since: std::time::Instant) {
+        self.add_translation(since.elapsed());
+    }
+
+    /// Count translation time spent before this call's wrapper existed.
+    #[cfg(feature = "counters")]
+    pub(crate) fn add_translation(&self, spent: std::time::Duration) {
         self.translate_ns.fetch_add(
-            u64::try_from(since.elapsed().as_nanos()).unwrap_or(u64::MAX),
+            u64::try_from(spent.as_nanos()).unwrap_or(u64::MAX),
             std::sync::atomic::Ordering::Relaxed,
         );
     }
