@@ -3,7 +3,7 @@
 //! arguments, and the per-request wrapper the call's dispatches pass through.
 //!
 //! **Translation only.** Every MCP decision is `norn-mcp`'s: the wrapper
-//! splices the tool's mode through [`norn_mcp::wire_body`] and composes the
+//! splices the tool's checked mode through [`ModeSplice`] and composes the
 //! outcome through the call's [`Reply`]. It returns a [`Dispatched`], so the
 //! readiness retry and the stop trigger see what they see on the wire route:
 //! a `Warming` refusal, a stopped worker and a body that did not parse pass
@@ -12,7 +12,7 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
-use norn_mcp::{ModeGiven, Reply};
+use norn_mcp::{ModeSplice, Reply};
 use norn_wire::{ApplyMode, Verb};
 
 use crate::request::{AtBound, Composed, Dispatch, Dispatched, Lane, is_warming};
@@ -56,33 +56,33 @@ pub(crate) fn prepare_tools(
 /// the reason it cannot be read.
 pub(crate) fn pre_dispatch(
     verb: Verb,
+    runs: wire::Runs,
     mode: Option<ApplyMode>,
     arguments: &[u8],
 ) -> Result<(Lane, AtBound), String> {
-    let lane = match wire::lane(verb) {
-        Some(wire::Runs::Mutation) => Lane::Mutation(wire::mutation_vault(verb, arguments)?),
-        _ => Lane::Read,
-    };
-    Ok((lane, wire::at_bound_as(verb, arguments, mode)))
+    Ok((
+        runs.request_lane(verb, arguments)?,
+        wire::at_bound_as(verb, arguments, mode),
+    ))
 }
 
 /// One call's dispatcher: the route table, wrapped by the call's mode and
 /// reply.
 pub(crate) struct McpCall {
     inner: Arc<dyn Dispatch>,
-    mode: Option<ApplyMode>,
+    splice: ModeSplice,
     reply: Reply,
-    /// Nanoseconds this call's splices and compositions took, across its
+    /// Nanoseconds this call's mode check, splices and compositions took, across its
     /// attempts.
     #[cfg(feature = "counters")]
     translate_ns: AtomicU64,
 }
 
 impl McpCall {
-    pub(crate) fn new(inner: Arc<dyn Dispatch>, mode: Option<ApplyMode>, reply: Reply) -> Self {
+    pub(crate) fn new(inner: Arc<dyn Dispatch>, splice: ModeSplice, reply: Reply) -> Self {
         McpCall {
             inner,
-            mode,
+            splice,
             reply,
             #[cfg(feature = "counters")]
             translate_ns: AtomicU64::new(0),
@@ -97,8 +97,14 @@ impl McpCall {
 
     #[cfg(feature = "counters")]
     fn translated(&self, since: std::time::Instant) {
+        self.add_translation(since.elapsed());
+    }
+
+    /// Count translation time spent before this call's wrapper existed.
+    #[cfg(feature = "counters")]
+    pub(crate) fn add_translation(&self, spent: std::time::Duration) {
         self.translate_ns.fetch_add(
-            u64::try_from(since.elapsed().as_nanos()).unwrap_or(u64::MAX),
+            u64::try_from(spent.as_nanos()).unwrap_or(u64::MAX),
             std::sync::atomic::Ordering::Relaxed,
         );
     }
@@ -108,23 +114,7 @@ impl Dispatch for McpCall {
     fn dispatch(&self, verb: Verb, arguments: &[u8]) -> Dispatched {
         #[cfg(feature = "counters")]
         let started = std::time::Instant::now();
-        let body = match norn_mcp::wire_body(arguments, self.mode) {
-            Ok(body) => body,
-            Err(ModeGiven) => {
-                let body = self.reply.bad_request(&format!(
-                    "`mode` is set by the tool's name: call `{verb}` to apply or \
-                     `{verb}_preview` to preview, without a `mode` argument; nothing was \
-                     dispatched"
-                ));
-                #[cfg(feature = "counters")]
-                self.translated(started);
-                return Dispatched::Composed(Composed {
-                    body,
-                    report_bytes: None,
-                    refused: Some("serve/bad-request".into()),
-                });
-            }
-        };
+        let body = self.splice.apply(arguments);
         #[cfg(feature = "counters")]
         self.translated(started);
         let answer = self.inner.dispatch(verb, &body);
@@ -133,17 +123,13 @@ impl Dispatch for McpCall {
         let started = std::time::Instant::now();
         let composed = match answer {
             Dispatched::Report(report) => Dispatched::Composed(Composed {
-                body: self.reply.report(&report),
+                answer: self.reply.report(&report),
                 report_bytes: Some(report.len()),
-                refused: None,
             }),
             Dispatched::Refused(envelope) if !is_warming(&envelope) => {
                 Dispatched::Composed(Composed {
-                    body: self.reply.failure(&envelope),
+                    answer: self.reply.failure(&envelope),
                     report_bytes: None,
-                    refused: serde_json::to_value(envelope.code())
-                        .ok()
-                        .and_then(|code| code.as_str().map(str::to_string)),
                 })
             }
             // A warming refusal goes back to the readiness retry, a stopped

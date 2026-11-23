@@ -323,6 +323,45 @@ fn a_meta_naming_a_field_twice_is_refused_never_served_as_2025_era() {
 
 // § Calls.
 
+#[test]
+fn both_routes_dispatch_only_verbs_with_wire_lanes() {
+    // The fixture prepares tools from the whole vocabulary, including any
+    // verbs the wire table excludes.
+    let case = mcp_case("norn-serve-mcp-route-parity");
+    let arguments = json!({
+        "vault": vault(),
+        "plan": {"vault": vault()},
+        "registration": {"name": "notes"},
+        "name": "notes",
+    });
+    for tool in &case.context.mcp_tools.tools {
+        let before = dispatches(&case);
+        let (native, _, body) = answer_of(
+            &case,
+            request(
+                Method::POST,
+                &format!("/v1/wire/{}", tool.verb),
+                Some(&bearer()),
+                arguments.to_string().as_bytes(),
+            ),
+        );
+        let result = tool_result(&case, legacy_call(&tool.name, arguments.clone()));
+        if native == StatusCode::NOT_FOUND {
+            assert_eq!(code(&body), "serve/unknown-verb");
+            assert_eq!(result["isError"], true, "{}", tool.name);
+            assert_eq!(
+                result["structuredContent"]["error"]["detail"]["code"],
+                code(&body)
+            );
+            assert_eq!(dispatches(&case), before, "{}", tool.name);
+        } else {
+            assert_eq!(native, StatusCode::OK, "{}", tool.name);
+            assert_eq!(result["structuredContent"], json!({}), "{}", tool.name);
+            assert_eq!(dispatches(&case), before + 2, "{}", tool.name);
+        }
+    }
+}
+
 /// A call that meets a ready entry is exactly one dispatch, its report
 /// composed into both channels; a warming entry is asked again by the
 /// readiness retry, as on the wire route.
@@ -521,6 +560,7 @@ fn a_caller_supplied_mode_is_refused_for_every_mode_tool() {
             }
             arguments
         };
+        let before = dispatches(&case);
         for supplied in ["apply", "preview"] {
             let result = tool_result(&case, legacy_call(&tool.name, arguments(Some(supplied))));
             assert_eq!(result["isError"], true, "{} {supplied}", tool.name);
@@ -529,6 +569,7 @@ fn a_caller_supplied_mode_is_refused_for_every_mode_tool() {
                 "serve/bad-request"
             );
         }
+        assert_eq!(dispatches(&case), before, "{}: no dispatch", tool.name);
         assert!(
             case.answers.seen.lock().unwrap().is_empty(),
             "{}: a refused mode reaches no host",
@@ -560,8 +601,9 @@ fn every_tool_takes_its_wire_calls_drain_bound_class() {
             Verb::VaultUnregister | Verb::VaultSet => r#"{"name":"notes"}"#.into(),
             _ => format!(r#"{{"vault":{address}}}"#),
         };
+        let runs = crate::wire::lane(tool.verb).unwrap();
         let (_, at_bound) =
-            crate::mcp::pre_dispatch(tool.verb, tool.mode, arguments.as_bytes()).unwrap();
+            crate::mcp::pre_dispatch(tool.verb, runs, tool.mode, arguments.as_bytes()).unwrap();
         let wire_body = norn_mcp::wire_body(arguments.as_bytes(), tool.mode).unwrap();
         assert_eq!(
             at_bound,
@@ -583,15 +625,18 @@ fn every_tool_takes_its_wire_calls_drain_bound_class() {
         ("false", AtBound::OutcomeUnknown),
     ] {
         let arguments = format!(r#"{{"vault":{address},"dry_run":{dry_run}}}"#);
+        let runs = crate::wire::lane(Verb::VaultReload).unwrap();
         let (_, at_bound) =
-            crate::mcp::pre_dispatch(Verb::VaultReload, None, arguments.as_bytes()).unwrap();
+            crate::mcp::pre_dispatch(Verb::VaultReload, runs, None, arguments.as_bytes()).unwrap();
         assert_eq!(at_bound, expected, "dry_run {dry_run}");
     }
 }
 
 /// Under the counters feature a call's answer carries the wire route's host
-/// time and the translation inside it, and the counters route serves the
-/// MCP counters.
+/// time and its translation time, and the counters route serves the MCP
+/// counters. A mode tool's translation also counts its mode check, which runs
+/// before the host-time window opens, so only a tool without a mode keeps its
+/// translation inside the host time; `find` has none.
 #[cfg(feature = "counters")]
 #[test]
 fn a_call_carries_its_host_and_translation_time_and_the_counters_serve_mcp() {
@@ -616,36 +661,77 @@ fn a_call_carries_its_host_and_translation_time_and_the_counters_serve_mcp() {
     assert!(counters["mcp.translate_us"].is_u64());
 }
 
+/// A call refused before the wire run still counts its translation: the mode
+/// check and the refusal it composes. Its answer carries no timing header,
+/// since it never entered the run.
+#[cfg(feature = "counters")]
+#[test]
+fn a_call_refused_before_the_run_counts_its_translation() {
+    let case = mcp_case("norn-serve-mcp-early-translation");
+    let translated = || {
+        case.context
+            .mcp_counters
+            .translate_ns
+            .load(Ordering::SeqCst)
+    };
+    for arguments in [
+        json!({"vault": vault(), "mode": "apply"}),
+        json!({"vault": 5}),
+    ] {
+        let before = translated();
+        let (_, headers, _) = answer_of(&case, legacy_call("set_preview", arguments.clone()));
+        assert!(!headers.contains_key(TRANSLATE_HEADER), "{arguments}");
+        assert!(
+            translated() > before,
+            "{arguments}: translation was counted"
+        );
+    }
+}
+
 /// The request log names `mcp` for an answer from constants and
 /// `mcp/<verb>` for a call, spelled from the resolved verb.
 #[test]
 fn the_request_log_labels_mcp_and_its_calls() {
     let mut case = mcp_case("norn-serve-mcp-log");
     case.context.request_log = true;
-    let line = |request| {
+    let line = |case: &Case, request| {
         let ((), lines) = crate::log::capture::lines_of(|| {
-            answer_of(&case, request);
+            answer_of(case, request);
         });
         assert_eq!(lines.len(), 1, "{lines:?}");
         lines[0].clone()
     };
-    let logged = line(legacy("tools/list"));
+    let logged = line(&case, legacy("tools/list"));
     assert!(logged.starts_with("request: mcp 200 ok "), "{logged}");
-    let logged = line(mcp_post(&[], b"{nope"));
+    let logged = line(&case, mcp_post(&[], b"{nope"));
     assert!(
         logged.starts_with("request: mcp 400 jsonrpc/-32700 "),
         "{logged}"
     );
-    let logged = line(legacy_call("find", json!({"vault": vault()})));
+    let logged = line(&case, legacy_call("find", json!({"vault": vault()})));
     assert!(logged.starts_with("request: mcp/find 200 ok "), "{logged}");
-    let logged = line(legacy_call(
-        "set_preview",
-        json!({"vault": vault(), "mode": "x"}),
-    ));
+    let logged = line(
+        &case,
+        legacy_call("set_preview", json!({"vault": vault(), "mode": "x"})),
+    );
     assert!(
         logged.starts_with("request: mcp/set 200 serve/bad-request "),
         "{logged}"
     );
-    let logged = line(request(Method::GET, MCP_PATH, Some(&bearer()), b""));
+    let logged = line(&case, legacy_call("set_preview", json!({"vault": 5})));
+    assert!(
+        logged.starts_with("request: mcp/set 200 serve/bad-request "),
+        "{logged}"
+    );
+    case.answers.push(Dispatched::Refused(ErrorEnvelope::new(
+        "unknown",
+        ErrorDetail::unknown_vault(norn_wire::VaultName::new("notes").unwrap()),
+    )));
+    let logged = line(&case, legacy_call("find", json!({"vault": vault()})));
+    assert!(
+        logged.starts_with("request: mcp/find 200 host/unknown-vault "),
+        "{logged}"
+    );
+    let logged = line(&case, request(Method::GET, MCP_PATH, Some(&bearer()), b""));
     assert!(logged.starts_with("request: mcp 405 ok "), "{logged}");
 }

@@ -57,7 +57,7 @@ use serde::de::DeserializeOwned;
 
 use crate::bounds::APPLY_WAIT_SLICE;
 use crate::drain::Drain;
-use crate::request::{AtBound, Dispatch, Dispatched};
+use crate::request::{AtBound, Dispatch, Dispatched, Lane};
 
 /// The verbs the wire route does not serve in this phase: the
 /// installation-scoped verbs (the token commands, `service`, `self-update`,
@@ -71,6 +71,15 @@ pub(crate) const NOT_SERVED: &[Verb] = &[];
 pub(crate) enum Runs {
     Read,
     Mutation,
+}
+
+impl Runs {
+    pub(crate) fn request_lane(self, verb: Verb, body: &[u8]) -> Result<Lane, String> {
+        match self {
+            Runs::Read => Ok(Lane::Read),
+            Runs::Mutation => mutation_vault(verb, body).map(Lane::Mutation),
+        }
+    }
 }
 
 /// The pool `verb` runs on, or nothing for a verb this route does not serve.

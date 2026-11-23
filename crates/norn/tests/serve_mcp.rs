@@ -594,6 +594,28 @@ mod counters {
         after[name] - before[name]
     }
 
+    #[test]
+    fn a_mode_refusal_is_counted_without_dispatching() {
+        let (_fixture, served, port, bearer) = host("serve-mcp-mode-counter");
+        let mut legacy = Client::legacy(port, &bearer);
+        let mut modern = Client::modern(port, &bearer);
+        for client in [&mut legacy, &mut modern] {
+            let before = counters(port, &bearer);
+            let result = client.call("set_preview", json!({"vault": notes(), "mode": "apply"}));
+            assert_eq!(result["isError"], true, "{result}");
+            assert_eq!(
+                result["structuredContent"]["error"]["detail"]["code"],
+                "serve/bad-request"
+            );
+            let after = counters(port, &bearer);
+            assert_eq!(moved(&before, &after, "serve.dispatches"), 0);
+            assert_eq!(moved(&before, &after, "host.request.requests"), 0);
+            assert_eq!(moved(&before, &after, "mcp.calls"), 1);
+            assert_eq!(moved(&before, &after, "mcp.messages"), 1);
+        }
+        assert_eq!(served.terminate().0.code(), Some(0));
+    }
+
     /// Attach the vault by a first read, which the readiness retry answers
     /// once it serves, then wait for its state to read ready.
     fn wait_for_ready(client: &mut Client) {
