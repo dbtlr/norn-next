@@ -535,6 +535,9 @@ where
         Ok(splice) => splice,
         Err(answer) => {
             drop(slot);
+            // The check and the refusal it composed are translation.
+            #[cfg(feature = "counters")]
+            count_translation(context, mode_check_started.elapsed());
             return mcp_tool_answer(verb, answer);
         }
     };
@@ -546,7 +549,14 @@ where
         Ok(read) => read,
         Err(error) => {
             drop(slot);
-            return mcp_tool_answer(verb, call.reply.bad_arguments(verb, &error));
+            #[cfg(feature = "counters")]
+            let composing = std::time::Instant::now();
+            let refusal = call.reply.bad_arguments(verb, &error);
+            // The mode check and the refusal's composition are translation;
+            // the failed lane and drain-bound reads between them are not.
+            #[cfg(feature = "counters")]
+            count_translation(context, mode_check + composing.elapsed());
+            return mcp_tool_answer(verb, refusal);
         }
     };
     let arguments = within(&body, call.arguments);
@@ -668,6 +678,16 @@ fn mcp_answer(answer: norn_mcp::Answer) -> Answer {
         response.extensions_mut().insert(ReasonLabel(code));
     }
     response
+}
+
+/// Add translation time spent by a call that never entered the wire run, so
+/// never reached its wrapper, to `mcp.translate_us`.
+#[cfg(feature = "counters")]
+fn count_translation(context: &Context, spent: std::time::Duration) {
+    context.mcp_counters.translate_ns.fetch_add(
+        u64::try_from(spent.as_nanos()).unwrap_or(u64::MAX),
+        Ordering::Relaxed,
+    );
 }
 
 fn mcp_tool_answer(verb: Verb, answer: norn_mcp::Answer) -> Answer {

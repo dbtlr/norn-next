@@ -661,6 +661,33 @@ fn a_call_carries_its_host_and_translation_time_and_the_counters_serve_mcp() {
     assert!(counters["mcp.translate_us"].is_u64());
 }
 
+/// A call refused before the wire run still counts its translation: the mode
+/// check and the refusal it composes. Its answer carries no timing header,
+/// since it never entered the run.
+#[cfg(feature = "counters")]
+#[test]
+fn a_call_refused_before_the_run_counts_its_translation() {
+    let case = mcp_case("norn-serve-mcp-early-translation");
+    let translated = || {
+        case.context
+            .mcp_counters
+            .translate_ns
+            .load(Ordering::SeqCst)
+    };
+    for arguments in [
+        json!({"vault": vault(), "mode": "apply"}),
+        json!({"vault": 5}),
+    ] {
+        let before = translated();
+        let (_, headers, _) = answer_of(&case, legacy_call("set_preview", arguments.clone()));
+        assert!(!headers.contains_key(TRANSLATE_HEADER), "{arguments}");
+        assert!(
+            translated() > before,
+            "{arguments}: translation was counted"
+        );
+    }
+}
+
 /// The request log names `mcp` for an answer from constants and
 /// `mcp/<verb>` for a call, spelled from the resolved verb.
 #[test]
