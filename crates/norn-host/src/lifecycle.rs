@@ -1491,9 +1491,9 @@ struct EntryState<A: SnapshotSource> {
     /// late: a leg normally moves a clock only by running the unit it times,
     /// which sets it later, as [`EntryOps::maintenance_deadline`] obliges, so
     /// an early reading costs one ask that finds nothing due. The exception is
-    /// a leg that brings a clock earlier: it leaves this reading late, so it marks the entry
-    /// ([`ProgressReporter::owe_background_work`]) and its release has the
-    /// scheduler read the clock again.
+    /// a leg that brings a clock earlier: it leaves this reading late, so it
+    /// marks the entry ([`ProgressReporter::owe_background_work`]) and its
+    /// release has the scheduler read the clock again.
     /// The clocks run while the entry accounts for coverage, and the release
     /// that leaves it accounting for none ends them.
     background_due: Option<Instant>,
