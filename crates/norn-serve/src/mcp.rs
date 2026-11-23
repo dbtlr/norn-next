@@ -72,7 +72,7 @@ pub(crate) struct McpCall {
     inner: Arc<dyn Dispatch>,
     splice: ModeSplice,
     reply: Reply,
-    /// Nanoseconds this call's splices and compositions took, across its
+    /// Nanoseconds this call's mode check, splices and compositions took, across its
     /// attempts.
     #[cfg(feature = "counters")]
     translate_ns: AtomicU64,
@@ -96,7 +96,7 @@ impl McpCall {
     }
 
     #[cfg(feature = "counters")]
-    fn translated(&self, since: std::time::Instant) {
+    pub(crate) fn translated(&self, since: std::time::Instant) {
         self.translate_ns.fetch_add(
             u64::try_from(since.elapsed().as_nanos()).unwrap_or(u64::MAX),
             std::sync::atomic::Ordering::Relaxed,

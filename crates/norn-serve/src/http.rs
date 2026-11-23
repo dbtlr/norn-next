@@ -395,7 +395,8 @@ where
                 .fetch_add(report.len() as u64, Ordering::Relaxed);
             json(StatusCode::OK, report)
         }
-        // A composed answer already carries its status and body.
+        // Only the MCP wrapper (`McpCall`) composes an answer, so the wire
+        // route never reaches this arm.
         Settled::Composed(composed) => mcp_answer(composed.answer),
         Settled::Refused(envelope) => envelope_answer(&envelope),
     };
@@ -528,6 +529,8 @@ where
         drop(slot);
         return mcp_tool_answer(verb, call.reply.failure(&unknown_verb_envelope()));
     };
+    #[cfg(feature = "counters")]
+    let mode_check_started = std::time::Instant::now();
     let splice = match call.mode_splice() {
         Ok(splice) => splice,
         Err(answer) => {
@@ -548,6 +551,10 @@ where
         splice,
         call.reply.clone(),
     ));
+    // The mode check runs before the wrapper exists; its time still counts
+    // as translation.
+    #[cfg(feature = "counters")]
+    wrapper.translated(mode_check_started);
     let run = wire_state
         .serve(
             verb,
