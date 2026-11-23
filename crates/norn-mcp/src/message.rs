@@ -140,7 +140,7 @@ pub struct ModeGiven;
 
 /// A mode splice checked against a call's original argument bytes.
 #[derive(Clone, Copy, Debug)]
-pub struct ModeSplice(Option<(ApplyMode, usize)>);
+pub struct ModeSplice(Option<ApplyMode>);
 
 /// Read one message and answer it, or resolve it to a call.
 pub fn handle<'a>(
@@ -772,16 +772,20 @@ impl ModeSplice {
             Ok(ModeKey { mode: None }) => {}
             _ => return Err(ModeGiven),
         }
-        let open = arguments
-            .iter()
-            .position(|byte| *byte == b'{')
-            .ok_or(ModeGiven)?;
-        Ok(Self(Some((mode, open))))
+        // A mode tool's arguments must be an object: its opening brace is
+        // what `apply` finds.
+        if !arguments.contains(&b'{') {
+            return Err(ModeGiven);
+        }
+        Ok(Self(Some(mode)))
     }
 
     /// Splice the mode into the same argument bytes that were checked.
     pub fn apply(self, arguments: &[u8]) -> Cow<'_, [u8]> {
-        let Some((mode, open)) = self.0 else {
+        let Some(mode) = self.0 else {
+            return Cow::Borrowed(arguments);
+        };
+        let Some(open) = arguments.iter().position(|byte| *byte == b'{') else {
             return Cow::Borrowed(arguments);
         };
         let rest = &arguments[open + 1..];
